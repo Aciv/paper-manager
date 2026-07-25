@@ -1,0 +1,49 @@
+syntax = "proto3";
+package papers.v1;
+option go_package = "paperMaster/gen/papers/v1;papersv1";
+
+// Python parses one source and returns normalized Markdown. The Go application
+// owns document status, database writes, and durable output storage.
+service DocumentParser {
+  rpc Recognize(RecognitionRequest) returns (RecognitionResult);
+}
+message RecognitionRequest {
+  string document_id = 1;
+  string filename = 2;
+  string content_type = 3;
+  oneof source {
+    bytes content = 4;
+    string file_path = 5;
+    string source_url = 6;
+  }
+}
+
+message RecognitionResult {
+  bytes markdown = 1;
+  string markdown_filename = 2;
+  string content_type = 3;
+  int64 size_bytes = 4;
+  string sha256 = 5;
+  string language = 6;
+  int32 page_count = 7;
+  string parser_name = 8;
+  string parser_version = 9;
+  repeated RecognitionBlock blocks = 10;
+}
+
+// A block maps a semantic Markdown fragment to one rectangular PDF region.
+// Coordinates use the PyMuPDF top-left page coordinate system in PDF points.
+message RecognitionBlock {
+  int32 ordinal = 1;
+  string type = 2;
+  string text = 3;
+  int32 page_number = 4;
+  double page_width = 5;
+  double page_height = 6;
+  double bbox_x0 = 7;
+  double bbox_y0 = 8;
+  double bbox_x1 = 9;
+  double bbox_y1 = 10;
+  int32 markdown_codepoint_start = 11;
+  int32 markdown_codepoint_end = 12;
+}

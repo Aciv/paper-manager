@@ -1,0 +1,13 @@
+# Local environment settings can contain database passwords and must not be committed.
+.env
+.venv
+.vscode
+.example
+.cc_task
+AGENTS.md
+server
+
+# Runtime files
+Logs/
+data/uploads/
+

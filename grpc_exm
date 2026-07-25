@@ -1,0 +1,155 @@
+• 从零开始，关键是先定义一份双方都能理解的 .proto 合同，再分别生成 Go 客户端和 Python 服务端代码。
+
+  目录示例：
+
+  grpc-demo/
+    proto/greeter.proto
+    gen/example/v1/          # Go 自动生成
+    python/                  # Python 自动生成与服务端
+    cmd/client/main.go       # Go 客户端
+
+  ## 1. 定义共享协议
+
+  proto/greeter.proto：
+
+  syntax = "proto3";
+
+  package example.v1;
+
+  option go_package = "example/gen/example/v1;examplev1";
+
+  service Greeter {
+    rpc SayHello(HelloRequest) returns (HelloResponse);
+  }
+
+  message HelloRequest {
+    string name = 1;
+  }
+
+  message HelloResponse {
+    string message = 1;
+  }
+
+  含义是：Python 提供一个 Greeter.SayHello 方法；Go 能传入 HelloRequest，获得 HelloResponse。
+
+  ## 2. 根据 proto 生成两端代码
+
+  Go 安装生成器：
+
+  go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+  go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+
+  Python 安装依赖：
+
+  python -m pip install grpcio grpcio-tools
+
+  生成 Go 文件：
+
+  PATH="$HOME/go/bin:$PATH" protoc -I . \
+    --go_out=. --go_opt=module=example \
+    --go-grpc_out=. --go-grpc_opt=module=example \
+    proto/greeter.proto
+
+  生成 Python 文件：
+
+  python -m grpc_tools.protoc -I proto \
+    --python_out=python \
+    --grpc_python_out=python \
+    proto/greeter.proto
+
+  不要手改生成的 *.pb.go、*_pb2.py 文件。
+
+  ## 3. Python 实现服务端
+
+  python/server.py：
+
+  from concurrent import futures
+  import grpc
+
+  import greeter_pb2
+  import greeter_pb2_grpc
+
+
+  class Greeter(greeter_pb2_grpc.GreeterServicer):
+      def SayHello(self, request, context):
+          return greeter_pb2.HelloResponse(
+              message=f"Hello, {request.name}!"
+          )
+
+
+  server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
+  greeter_pb2_grpc.add_GreeterServicer_to_server(Greeter(), server)
+
+  server.add_insecure_port("127.0.0.1:50051")
+  server.start()
+  print("Python gRPC server listening on :50051")
+  server.wait_for_termination()
+
+  启动：
+
+  cd python
+  python server.py
+
+  ## 4. Go 调用 Python 服务
+
+  cmd/client/main.go：
+
+  package main
+
+  import (
+        "context"
+        "fmt"
+        "log"
+        "time"
+
+        examplev1 "example/gen/example/v1"
+
+        "google.golang.org/grpc"
+        "google.golang.org/grpc/credentials/insecure"
+  )
+
+  func main() {
+        conn, err := grpc.NewClient(
+                "127.0.0.1:50051",
+                grpc.WithTransportCredentials(insecure.NewCredentials()),
+        )
+        if err != nil {
+                log.Fatal(err)
+        }
+        defer conn.Close()
+
+        client := examplev1.NewGreeterClient(conn)
+
+        ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+        defer cancel()
+
+        result, err := client.SayHello(ctx, &examplev1.HelloRequest{
+                Name: "Go",
+        })
+        if err != nil {
+                log.Fatal(err)
+        }
+
+        fmt.Println(result.Message)
+  }
+
+  运行：
+
+  go run ./cmd/client
+
+  输出：
+
+  Hello, Go!
+
+  调用链是：
+
+  Go client.SayHello(...)
+    → protobuf 编码
+    → HTTP/2 gRPC 网络传输
+    → Python Greeter.SayHello(...)
+    → Python 返回 HelloResponse
+    → protobuf 解码
+    → Go 得到 result.Message
+
+  你项目中的 DocumentParser.Recognize 本质上就是把这个 HelloRequest/HelloResponse 换成了 PDF 来源与
+  Markdown 结果。

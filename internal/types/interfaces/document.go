@@ -1,0 +1,89 @@
+package interfaces
+
+import (
+	"context"
+	"io"
+	"mime/multipart"
+
+	"paperMaster/internal/types"
+
+	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
+)
+
+// DocumentRepository defines persistence operations for documents.
+type DocumentRepository interface {
+	// Create inserts one source-document record and returns it.
+	Create(ctx context.Context, document types.Document) (types.Document, error)
+	// Get retrieves one document by UUID.
+	Get(ctx context.Context, id uuid.UUID) (types.Document, error)
+	// Search returns a paginated document result using ID or DOI filters.
+	Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
+	// GetMarkdown returns the current parsed Markdown source for a document.
+	// It returns sql.ErrNoRows when the document has not been parsed yet.
+	GetMarkdown(ctx context.Context, documentID uuid.UUID) (types.DocumentMarkdown, error)
+	// ReplaceParsedOutput atomically replaces a document's current Markdown
+	// manifest and source-map Blocks, then marks a processing document ready.
+	// It returns types.ErrDocumentNotProcessing if cancellation/deletion won
+	// the status race before the result could be committed.
+	ReplaceParsedOutput(ctx context.Context, markdown types.DocumentMarkdown, blocks []types.Block) error
+	// ListBlocks returns a document's persisted source-map blocks. pageNumber
+	// of zero returns all pages; a positive value returns one PDF page.
+	ListBlocks(ctx context.Context, documentID uuid.UUID, pageNumber int) ([]types.Block, error)
+	// Delete removes a document. Database rows with document foreign keys are
+	// removed by ON DELETE CASCADE; non-relational diagnostics are handled by
+	// the repository transaction.
+	Delete(ctx context.Context, id uuid.UUID) error
+	// UpdateStatus changes the persisted lifecycle status and error message.
+	UpdateStatus(ctx context.Context, id uuid.UUID, status types.DocumentStatus, message *string) error
+	// UpdateStatusIfCurrent changes status only when its current value is one
+	// of expectedStatuses. It returns false without an error when no row matches.
+	UpdateStatusIfCurrent(ctx context.Context, id uuid.UUID, status types.DocumentStatus, message *string, expectedStatuses []types.DocumentStatus) (bool, error)
+	// UpdateDocumentInfo changes original-file metadata. Nil fields keep their
+	// stored values; paper metadata is owned by PaperMetadataRepository.
+	UpdateDocumentInfo(ctx context.Context, id uuid.UUID, originalFilename, doi *string) (types.Document, error)
+}
+
+// DocumentService contains document lifecycle and storage orchestration.
+type DocumentService interface {
+	// GetRepository exposes the document repository for infrastructure-level
+	// integrations that must perform a repository query through the service.
+	GetRepository() DocumentRepository
+	// CreateDocumentFromFile stores an upload and creates its source record.
+	CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error)
+	// GetDocumentByID parses and retrieves a document by its textual UUID.
+	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
+	// GetDocumentStatus returns the current lifecycle status for a document.
+	GetDocumentStatus(ctx context.Context, id string) (types.DocumentStatus, error)
+	// SetDocumentStatus updates a document lifecycle status and optional error message.
+	SetDocumentStatus(ctx context.Context, id string, status types.DocumentStatus, message *string) error
+	// UpdateDocumentInfo updates original-file and DOI fields. Nil fields keep
+	// their stored value unchanged.
+	UpdateDocumentInfo(ctx context.Context, id string, originalFilename, doi *string) (*types.Document, error)
+	// FailDocumentIfProcessing marks a queued or processing document as failed.
+	// It does not overwrite a newer ready, failed, or deleting state.
+	FailDocumentIfProcessing(ctx context.Context, id string, message string) (bool, error)
+	// CancelDocumentParse cancels a queued or active document parse. It is
+	// idempotent for already-cancelled documents and best-effort dequeues work.
+	CancelDocumentParse(ctx context.Context, id string) (*types.Document, error)
+	// SearchDocument performs paginated ID and DOI searches.
+	SearchDocument(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
+	// GetPaperMetadata retrieves bibliographic data associated with a document.
+	GetPaperMetadata(ctx context.Context, documentID string) (*types.PaperMetadata, error)
+	// UpdatePaperMetadata applies a partial bibliographic update for a document.
+	UpdatePaperMetadata(ctx context.Context, documentID string, update types.PaperMetadataUpdate) (*types.PaperMetadata, error)
+	// SearchPaperMetadata searches formal title, author, and discipline tags.
+	SearchPaperMetadata(ctx context.Context, search types.PaperSearch) (types.PaperMetadataPage, error)
+	// GetDocumentFile opens the stored object and returns its original filename.
+	GetDocumentFile(ctx context.Context, id string) (reader io.ReadCloser, filename string, err error)
+	// GetDocumentBlocks returns selectable source-map blocks, optionally scoped
+	// to one one-based PDF page (zero returns every page).
+	GetDocumentBlocks(ctx context.Context, id string, pageNumber int) ([]types.Block, error)
+	// DeleteDocument removes the stored object and metadata for one document.
+	DeleteDocument(ctx context.Context, id string) error
+	// DeleteDocumentList removes multiple documents sequentially.
+	DeleteDocumentList(ctx context.Context, ids []string) error
+
+	// ProcessDocument handles an asynchronous document-processing task.
+	ProcessDocument(ctx context.Context, task *asynq.Task) error
+}
