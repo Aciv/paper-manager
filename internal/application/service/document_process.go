@@ -2,16 +2,21 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
+	"paperMaster/internal/utils"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -83,29 +88,51 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		InputMode:        types.RecognitionInputBytes,
 		Content:          content,
 	})
+
 	if err != nil {
+		if errors.Is(err, types.ErrUnsupportedRecognitionContentType) {
+			return s.failUnsupportedDocumentRecognition(ctx, document.ID, err)
+		}
 		return fmt.Errorf("recognize document: %w", err)
 	}
-	if result == nil || result.OutputMode != types.RecognitionOutputMarkdownBytes || len(result.Markdown) == 0 {
-		return errors.New("recognizer returned no Markdown bytes")
+	// Recognition can take minutes. Re-read the durable state before doing any
+	// output work: a concurrent cancel or delete must discard this result rather
+	// than creating a new stored Markdown object after the user ended the job.
+	// ReplaceParsedOutput retains its processing-only condition as a second,
+	// atomic guard for a status change that races this read.
+	current, err := s.repo.Get(ctx, document.ID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			logger.Info(ctx, "discard recognized output after document deletion", "document_id", document.ID)
+			return nil
+		}
+		return fmt.Errorf("reload document after recognition: %w", err)
+	}
+	if current.Status != types.DocumentStatusProcessing {
+		logger.Info(ctx, "discard recognized output after status change", "document_id", document.ID, "status", current.Status)
+		return nil
+	}
+	markdownBytes, metadata, err := s.readRecognitionMarkdown(result)
+	if err != nil {
+		return fmt.Errorf("read recognizer Markdown output: %w", err)
 	}
 
 	previous, err := s.repo.GetMarkdown(ctx, document.ID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("load previous Markdown: %w", err)
 	}
-	storedMarkdown, err := s.storage.SaveBytes(ctx, result.Metadata.MarkdownFilename, result.Markdown)
+	storedMarkdown, err := s.storage.SaveBytes(ctx, metadata.MarkdownFilename, markdownBytes)
 	if err != nil {
 		return fmt.Errorf("store recognized Markdown: %w", err)
 	}
 	markdown := types.DocumentMarkdown{
 		DocumentID: document.ID, StorageKey: storedMarkdown.Key, Filename: storedMarkdown.Filename,
-		ContentType: "text/markdown", SizeBytes: storedMarkdown.Size, SHA256: result.Metadata.SHA256,
-		ParserName: result.Metadata.ParserName, ParserVersion: result.Metadata.ParserVersion,
-		InputMode: string(types.RecognitionInputBytes), Language: result.Metadata.Language,
-		PageCount: result.Metadata.PageCount, Metadata: types.JSON(`{}`),
+		ContentType: metadata.ContentType, SizeBytes: storedMarkdown.Size, SHA256: metadata.SHA256,
+		ParserName: metadata.ParserName, ParserVersion: metadata.ParserVersion,
+		InputMode: string(types.RecognitionInputBytes), Language: metadata.Language,
+		PageCount: metadata.PageCount, Metadata: types.JSON(`{}`),
 	}
-	blocks := persistedBlocks(document.ID, result.Metadata.SHA256, result.Blocks)
+	blocks := persistedBlocks(document.ID, metadata.SHA256, result.Blocks)
 	if err := s.repo.ReplaceParsedOutput(ctx, markdown, blocks); err != nil {
 		if deleteErr := s.storage.Delete(context.WithoutCancel(ctx), storedMarkdown.Key); deleteErr != nil {
 			logger.Warn(ctx, "remove uncommitted Markdown failed", "document_id", document.ID, "storage_key", storedMarkdown.Key, "error", deleteErr)
@@ -123,6 +150,168 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	}
 	logger.Info(ctx, "document recognition completed", "document_id", document.ID, "block_count", len(blocks), "markdown_storage_key", storedMarkdown.Key)
 	return nil
+}
+
+// readRecognitionMarkdown validates and obtains Markdown from either output
+// transport. A directory recognizer is allowed to write to its own package on
+// a shared volume, but it never chooses the application's durable storage key:
+// after this function returns, the service copies the verified bytes through
+// FileStorage.SaveBytes.
+func (s *documentService) readRecognitionMarkdown(result *types.RecognitionResult) ([]byte, types.RecognitionMetadata, error) {
+	if result == nil {
+		return nil, types.RecognitionMetadata{}, errors.New("recognizer returned no result")
+	}
+	metadata := result.Metadata
+	filename, err := utils.SafeFileName(metadata.MarkdownFilename)
+	if err != nil {
+		return nil, metadata, fmt.Errorf("invalid Markdown filename: %w", err)
+	}
+	if ext := strings.ToLower(filepath.Ext(filename)); ext != ".md" && ext != ".markdown" {
+		return nil, metadata, fmt.Errorf("Markdown filename must use .md or .markdown extension")
+	}
+	metadata.MarkdownFilename = filename
+	if metadata.ContentType == "" {
+		metadata.ContentType = "text/markdown"
+	}
+	if !strings.EqualFold(metadata.ContentType, "text/markdown") {
+		return nil, metadata, fmt.Errorf("invalid Markdown content type %q", metadata.ContentType)
+	}
+
+	var markdown []byte
+	switch result.OutputMode {
+	case types.RecognitionOutputMarkdownBytes:
+		markdown = result.Markdown
+	case types.RecognitionOutputDirectory:
+		markdown, err = s.readRecognitionMarkdownPackage(result.PackagePath, filename)
+		if err != nil {
+			return nil, metadata, err
+		}
+	default:
+		return nil, metadata, fmt.Errorf("unsupported recognition output mode %q", result.OutputMode)
+	}
+	if len(markdown) == 0 {
+		return nil, metadata, errors.New("recognizer returned empty Markdown")
+	}
+	if limit := s.recognitionOutputLimit(); int64(len(markdown)) > limit {
+		return nil, metadata, fmt.Errorf("recognizer Markdown exceeds size limit of %d bytes", limit)
+	}
+	if metadata.SizeBytes > 0 && metadata.SizeBytes != int64(len(markdown)) {
+		return nil, metadata, fmt.Errorf("recognizer Markdown size does not match metadata")
+	}
+	metadata.SizeBytes = int64(len(markdown))
+	sum := sha256.Sum256(markdown)
+	actualSHA256 := hex.EncodeToString(sum[:])
+	if metadata.SHA256 != "" && !strings.EqualFold(metadata.SHA256, actualSHA256) {
+		return nil, metadata, fmt.Errorf("recognizer Markdown checksum does not match metadata")
+	}
+	metadata.SHA256 = actualSHA256
+	return markdown, metadata, nil
+}
+
+// readRecognitionMarkdownPackage reads one regular Markdown file from a
+// configured shared output root. Both lexical and symlink-resolved checks are
+// required: Clean alone does not stop a package directory containing a
+// symlink that points outside the trusted root.
+func (s *documentService) readRecognitionMarkdownPackage(packagePath, filename string) ([]byte, error) {
+	if strings.TrimSpace(s.recognitionOutputDir) == "" {
+		return nil, errors.New("directory-mode recognition requires RECOGNITION_OUTPUT_DIR")
+	}
+	root, err := filepath.Abs(filepath.Clean(s.recognitionOutputDir))
+	if err != nil {
+		return nil, fmt.Errorf("resolve recognition output root: %w", err)
+	}
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve recognition output root symlinks: %w", err)
+	}
+	candidate := strings.TrimSpace(packagePath)
+	if candidate == "" {
+		return nil, errors.New("directory-mode recognition result has no package path")
+	}
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(root, candidate)
+	}
+	packageDir, err := utils.SafePathUnderBase(root, candidate)
+	if err != nil {
+		return nil, fmt.Errorf("validate recognition package path: %w", err)
+	}
+	packageDir, err = filepath.EvalSymlinks(packageDir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve recognition package symlinks: %w", err)
+	}
+	if _, err := utils.SafePathUnderBase(root, packageDir); err != nil {
+		return nil, fmt.Errorf("validate resolved recognition package path: %w", err)
+	}
+	info, err := os.Stat(packageDir)
+	if err != nil {
+		return nil, fmt.Errorf("stat recognition package: %w", err)
+	}
+	if !info.IsDir() {
+		return nil, errors.New("recognition package path is not a directory")
+	}
+
+	markdownPath, err := utils.SafePathUnderBase(packageDir, filepath.Join(packageDir, filename))
+	if err != nil {
+		return nil, fmt.Errorf("validate recognition Markdown path: %w", err)
+	}
+	markdownPath, err = filepath.EvalSymlinks(markdownPath)
+	if err != nil {
+		return nil, fmt.Errorf("resolve recognition Markdown symlinks: %w", err)
+	}
+	if _, err := utils.SafePathUnderBase(packageDir, markdownPath); err != nil {
+		return nil, fmt.Errorf("validate resolved recognition Markdown path: %w", err)
+	}
+	fileInfo, err := os.Stat(markdownPath)
+	if err != nil {
+		return nil, fmt.Errorf("stat recognition Markdown: %w", err)
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return nil, errors.New("recognition Markdown is not a regular file")
+	}
+	limit := s.recognitionOutputLimit()
+	if fileInfo.Size() > limit {
+		return nil, fmt.Errorf("recognizer Markdown exceeds size limit of %d bytes", limit)
+	}
+	file, err := os.Open(markdownPath)
+	if err != nil {
+		return nil, fmt.Errorf("open recognition Markdown: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("read recognition Markdown: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("recognizer Markdown exceeds size limit of %d bytes", limit)
+	}
+	return data, nil
+}
+
+func (s *documentService) recognitionOutputLimit() int64 {
+	if s.maxRecognitionOutputSize > 0 {
+		return s.maxRecognitionOutputSize
+	}
+	return 100 << 20
+}
+
+// failUnsupportedDocumentRecognition handles an immutable configuration or
+// capability mismatch. Retrying a PDF through the default text recognizer
+// cannot succeed, so persist a user-visible failure and return SkipRetry.
+// A database failure remains retryable because recording the status is more
+// important than archiving an otherwise invisible failure.
+func (s *documentService) failUnsupportedDocumentRecognition(ctx context.Context, documentID uuid.UUID, cause error) error {
+	message := "document recognition is not supported for this content type"
+	updated, err := s.repo.UpdateStatusIfCurrent(ctx, documentID, types.DocumentStatusFailed, &message,
+		[]types.DocumentStatus{types.DocumentStatusProcessing})
+	if err != nil {
+		return fmt.Errorf("mark unsupported document recognition failed: %w", err)
+	}
+	if !updated {
+		logger.Info(ctx, "unsupported document recognition status already changed", "document_id", documentID)
+		return nil
+	}
+	logger.Warn(ctx, "document recognition rejected as unsupported", "document_id", documentID, "error", cause)
+	return fmt.Errorf("unsupported document recognition: %w", asynq.SkipRetry)
 }
 
 func persistedBlocks(documentID uuid.UUID, markdownSHA256 string, recognized []types.RecognitionBlock) []types.Block {

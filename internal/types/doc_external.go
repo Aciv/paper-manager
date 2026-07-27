@@ -8,6 +8,11 @@ import (
 	"github.com/google/uuid"
 )
 
+// ErrUnsupportedRecognitionContentType marks a deterministic recognizer
+// capability mismatch (for example PDF sent to the local text recognizer).
+// The document task treats it as terminal rather than wasting retry attempts.
+var ErrUnsupportedRecognitionContentType = errors.New("document recognizer does not support content type")
+
 // RecognitionInputMode describes how a worker supplies a source document to
 // an external recognition service. Bytes are passed directly in-process;
 // file-path and URL modes let the service fetch the source by reference.

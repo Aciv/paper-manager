@@ -18,7 +18,7 @@ import (
 	"paperMaster/internal/types/interfaces"
 )
 
-var ErrUnsupportedContentType = errors.New("document recognizer does not support content type")
+var ErrUnsupportedContentType = types.ErrUnsupportedRecognitionContentType
 
 // DefaultRecognizer converts text-native formats in-process. It never opens a
 // caller-provided path or URL, so the local adapter accepts bytes only.

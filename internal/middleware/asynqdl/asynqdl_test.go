@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -116,6 +117,18 @@ func TestMiddleware_FailureWithoutAsynqCtx_RecordsRow(t *testing.T) {
 	}
 	if row.FailedAt.IsZero() {
 		t.Error("failed_at: expected non-zero timestamp")
+	}
+}
+
+func TestMiddleware_SkipRetryIsFinalAttempt(t *testing.T) {
+	repo := &fakeRepo{}
+	err := runMiddleware(repo, "document:process", []byte(`{"document_id":"doc-1"}`),
+		fmt.Errorf("unsupported document: %w", asynq.SkipRetry))
+	if !errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("SkipRetry error was not preserved: %v", err)
+	}
+	if repo.rowCount() != 1 {
+		t.Fatalf("SkipRetry must create a dead-letter record immediately, got %d rows", repo.rowCount())
 	}
 }
 

@@ -5,6 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"testing"
 
 	fileservice "paperMaster/internal/application/service/file"
@@ -203,9 +206,13 @@ func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 type recognitionStub struct {
 	result *types.RecognitionResult
 	err    error
+	onRead func()
 }
 
 func (s *recognitionStub) Read(context.Context, *types.RecognitionRequest) (*types.RecognitionResult, error) {
+	if s.onRead != nil {
+		s.onRead()
+	}
 	return s.result, s.err
 }
 
@@ -230,7 +237,7 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 		Markdown:   []byte("# Parsed paper\n"),
 		Metadata: types.RecognitionMetadata{
 			MarkdownFilename: "paper.md", ContentType: "text/markdown", SizeBytes: 15,
-			SHA256: "abc", PageCount: 1, ParserName: "test",
+			PageCount: 1, ParserName: "test",
 		},
 		Blocks: []types.RecognitionBlock{{
 			Ordinal: 0, Type: "title", Text: "Parsed paper",
@@ -259,5 +266,138 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	}
 	if _, err := storage.Open(context.Background(), repo.markdown.StorageKey); err != nil {
 		t.Fatalf("stored markdown is missing: %v", err)
+	}
+}
+
+func TestProcessDocumentCopiesDirectoryRecognizerMarkdown(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	source, err := storage.SaveBytes(context.Background(), "paper.pdf", []byte("%PDF-1.7\nsource"))
+	if err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	outputRoot := t.TempDir()
+	packageDir := filepath.Join(outputRoot, "job-1")
+	if err := os.Mkdir(packageDir, 0o750); err != nil {
+		t.Fatalf("create recognizer package: %v", err)
+	}
+	markdown := []byte("# Saved by recognizer\n")
+	if err := os.WriteFile(filepath.Join(packageDir, "paper.md"), markdown, 0o640); err != nil {
+		t.Fatalf("write recognizer Markdown: %v", err)
+	}
+
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+	}}
+	svc := &documentService{
+		repo: repo, storage: storage, recognitionOutputDir: outputRoot, maxRecognitionOutputSize: 1024,
+		recognizer: &recognitionStub{result: &types.RecognitionResult{
+			OutputMode: types.RecognitionOutputDirectory, PackagePath: "job-1",
+			Metadata: types.RecognitionMetadata{MarkdownFilename: "paper.md", ContentType: "text/markdown", SizeBytes: int64(len(markdown)), ParserName: "external"},
+		}},
+	}
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
+		t.Fatalf("ProcessDocument() error = %v", err)
+	}
+	if repo.document.Status != types.DocumentStatusReady {
+		t.Fatalf("document status = %q, want ready", repo.document.Status)
+	}
+	stored, err := storage.Open(context.Background(), repo.markdown.StorageKey)
+	if err != nil {
+		t.Fatalf("open copied Markdown: %v", err)
+	}
+	defer stored.Close()
+	got, err := os.ReadFile(filepath.Join(outputRoot, "job-1", "paper.md"))
+	if err != nil {
+		t.Fatalf("read original recognizer Markdown: %v", err)
+	}
+	if string(got) != string(markdown) {
+		t.Fatalf("original Markdown = %q, want %q", got, markdown)
+	}
+	storedBytes, err := io.ReadAll(stored)
+	if err != nil {
+		t.Fatalf("read copied Markdown: %v", err)
+	}
+	if string(storedBytes) != string(markdown) {
+		t.Fatalf("copied Markdown = %q, want %q", storedBytes, markdown)
+	}
+}
+
+func TestProcessDocumentDiscardsOutputCancelledDuringRecognition(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	source, err := storage.SaveBytes(context.Background(), "paper.pdf", []byte("%PDF-1.7\nsource"))
+	if err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+	}}
+	svc := &documentService{
+		repo: repo, storage: storage,
+		recognizer: &recognitionStub{
+			result: &types.RecognitionResult{
+				OutputMode: types.RecognitionOutputMarkdownBytes,
+				Markdown:   []byte("# Late result\n"),
+				Metadata:   types.RecognitionMetadata{MarkdownFilename: "late.md", ContentType: "text/markdown"},
+			},
+			onRead: func() { repo.document.Status = types.DocumentStatusCancelled },
+		},
+	}
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
+		t.Fatalf("ProcessDocument() error = %v", err)
+	}
+	if repo.document.Status != types.DocumentStatusCancelled {
+		t.Fatalf("document status = %q, want cancelled", repo.document.Status)
+	}
+	if repo.markdown.StorageKey != "" {
+		t.Fatalf("Markdown was stored after cancellation: %+v", repo.markdown)
+	}
+}
+
+func TestProcessDocumentMarksUnsupportedRecognitionFailedWithoutRetry(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	source, err := storage.SaveBytes(context.Background(), "paper.pdf", []byte("%PDF-1.7\nsource"))
+	if err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+	}}
+	svc := &documentService{
+		repo: repo, storage: storage,
+		recognizer: &recognitionStub{err: types.ErrUnsupportedRecognitionContentType},
+	}
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	err = svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload))
+	if !errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("ProcessDocument() error = %v, want SkipRetry", err)
+	}
+	if repo.document.Status != types.DocumentStatusFailed {
+		t.Fatalf("document status = %q, want failed", repo.document.Status)
 	}
 }

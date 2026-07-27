@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	fileservice "paperMaster/internal/application/service/file"
+	"paperMaster/internal/config"
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
@@ -26,6 +27,11 @@ type documentService struct {
 	taskInspector interfaces.TaskInspector
 	taskEnqueuer  interfaces.DocumentTaskEnqueuer
 	recognizer    interfaces.DocumentRecognizer
+	// recognitionOutputDir is the trusted shared-volume root for directory
+	// recognizers. It is deliberately separate from upload storage: recognizer
+	// output is untrusted until ProcessDocument validates and copies it.
+	recognitionOutputDir     string
+	maxRecognitionOutputSize int64
 }
 
 // ErrDuplicateDOI indicates that a document with the same DOI already exists.
@@ -59,6 +65,7 @@ func NewDocumentServiceWithTaskInspector(
 // injects the separate bibliographic repository while keeping one document
 // domain service as the handler-facing orchestration boundary.
 func NewDocumentServiceWithPaperMetadata(
+	cfg config.Config,
 	repo interfaces.DocumentRepository,
 	papers interfaces.PaperMetadataRepository,
 	storage interfaces.FileStorage,
@@ -68,6 +75,7 @@ func NewDocumentServiceWithPaperMetadata(
 ) interfaces.DocumentService {
 	return &documentService{
 		repo: repo, papers: papers, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer, recognizer: recognizer,
+		recognitionOutputDir: cfg.RecognitionOutputDirectory, maxRecognitionOutputSize: cfg.MaxUploadSize,
 	}
 }
 

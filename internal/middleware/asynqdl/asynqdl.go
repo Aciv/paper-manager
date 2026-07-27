@@ -16,6 +16,7 @@ package asynqdl
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 
 	"paperMaster/internal/logger"
@@ -72,7 +73,7 @@ func MiddlewareWithCallback(repo interfaces.TaskDeadLetterRepository, cb OnDeadL
 			if err == nil {
 				return nil
 			}
-			if !isFinalAttempt(ctx) {
+			if !isFinalAttempt(ctx, err) {
 				return err
 			}
 			attempts := 0
@@ -130,7 +131,13 @@ func Middleware(repo interfaces.TaskDeadLetterRepository) asynq.MiddlewareFunc {
 // 0, false) when the middleware runs outside an asynq worker context;
 // in that case we conservatively report "final" so test setups that
 // invoke the middleware directly still exercise the insert path.
-func isFinalAttempt(ctx context.Context) bool {
+func isFinalAttempt(ctx context.Context, taskErr error) bool {
+	// Asynq archives SkipRetry errors after the current invocation even when
+	// retry_count is still zero. Treat them as final here as well so the
+	// dead-letter row and document-status callback are not skipped.
+	if errors.Is(taskErr, asynq.SkipRetry) {
+		return true
+	}
 	retried, retriedOK := asynq.GetRetryCount(ctx)
 	maxRetry, maxOK := asynq.GetMaxRetry(ctx)
 	if !retriedOK || !maxOK {

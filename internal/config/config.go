@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -18,12 +19,16 @@ const (
 
 // Config contains the infrastructure options selected at process startup.
 type Config struct {
-	HTTPAddress                  string
-	DatabaseDriver               string
-	DatabaseURL                  string
-	CORSOrigin                   string
-	FileStorageDriver            string
-	UploadDirectory              string
+	HTTPAddress       string
+	DatabaseDriver    string
+	DatabaseURL       string
+	CORSOrigin        string
+	FileStorageDriver string
+	UploadDirectory   string
+	// RecognitionOutputDirectory is the shared, trusted root where a
+	// directory-mode recognizer may create an output package. The API copies
+	// only the Markdown file from this directory into durable FileStorage.
+	RecognitionOutputDirectory   string
 	MaxUploadSize                int64
 	AutoMigrate                  bool
 	DocumentHousekeepingEnabled  bool
@@ -35,6 +40,7 @@ type Config struct {
 }
 
 func Load() (Config, error) {
+	uploadDirectory := env("UPLOAD_DIR", "./data/uploads")
 	maxUploadSize := DefaultMaxUploadSize
 	if value := strings.TrimSpace(os.Getenv("FILE_MAX_UPLOAD_SIZE")); value != "" {
 		parsed, err := strconv.ParseInt(value, 10, 64)
@@ -68,7 +74,8 @@ func Load() (Config, error) {
 		DatabaseURL:                  env("DATABASE_URL", "postgres://papers:papers@localhost:5432/papers?sslmode=disable"),
 		CORSOrigin:                   env("CORS_ORIGIN", "http://localhost:5173"),
 		FileStorageDriver:            strings.ToLower(env("FILE_STORAGE_DRIVER", "local")),
-		UploadDirectory:              env("UPLOAD_DIR", "./data/uploads"),
+		UploadDirectory:              uploadDirectory,
+		RecognitionOutputDirectory:   env("RECOGNITION_OUTPUT_DIR", filepath.Join(uploadDirectory, "recognition-output")),
 		MaxUploadSize:                maxUploadSize,
 		AutoMigrate:                  !strings.EqualFold(env("AUTO_MIGRATE", "true"), "false"),
 		DocumentHousekeepingEnabled:  !strings.EqualFold(env("DOCUMENT_HOUSEKEEPING_ENABLED", "true"), "false"),

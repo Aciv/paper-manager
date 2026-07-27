@@ -5,9 +5,10 @@ services:
   upload-permissions:
     image: alpine:3.20
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /data/uploads && chown -R 10001:10001 /data/uploads && chmod 0750 /data/uploads"]
+    command: ["sh", "-c", "mkdir -p /data/uploads /data/recognition-output && chown -R 10001:10001 /data/uploads /data/recognition-output && chmod 0750 /data/uploads /data/recognition-output"]
     volumes:
       - ./data/uploads:/data/uploads
+      - ./data/recognition-output:/data/recognition-output
 
   postgres:
     image: postgres:17-alpine
@@ -27,6 +28,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
@@ -42,11 +45,13 @@ services:
       dockerfile: python/Dockerfile
     environment:
       UPLOAD_DIR: /data/uploads
+      RECOGNITION_OUTPUT_DIR: /data/recognition-output
       PARSER_GRPC_ADDR: 0.0.0.0:50051
       PARSER_MAX_FILE_SIZE: 104857600
       PARSER_GRPC_MAX_MESSAGE_SIZE: 105906176
     volumes:
       - ./data/uploads:/data/uploads:ro
+      - ./data/recognition-output:/data/recognition-output
     read_only: true
     tmpfs:
       - /tmp:size=64m,noexec,nosuid,nodev
@@ -70,6 +75,8 @@ services:
     environment:
       DATABASE_URL: postgres://papers:papers@postgres:5432/papers?sslmode=disable
       UPLOAD_DIR: /data/uploads
+
+      RECOGNITION_OUTPUT_DIR: /data/recognition-output
       HTTP_ADDR: :8080
       PARSER_GRPC_ADDR: parser:50051
 
@@ -78,6 +85,7 @@ services:
       CORS_ORIGIN: http://localhost:5173
     volumes:
       - ./data/uploads:/data/uploads
+      - ./data/recognition-output:/data/recognition-output
     depends_on:
       postgres:
         condition: service_healthy

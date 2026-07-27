@@ -30,17 +30,18 @@ type DocumentProcessPayload struct {
 	DocumentID string `json:"document_id"`
 	// DocumentBaseID optionally groups documents under one document base for
 	// dead-letter scope queries.
-	DocumentBaseID           string   `json:"document_base_id,omitempty"`
-	FilePath                 string   `json:"file_path,omitempty"` // 文件路径（文件导入时使用）
-	FileName                 string   `json:"file_name,omitempty"` // 文件名（文件导入时使用）
-	FileType                 string   `json:"file_type,omitempty"` // 文件类型（文件导入时使用）
-	URL                      string   `json:"url,omitempty"`       // URL（URL导入时使用）
-	FileURL                  string   `json:"file_url,omitempty"`  // 文件资源链接（file_url导入时使用）
-	Passages                 []string `json:"passages,omitempty"`  // 文本段落（文本导入时使用）
-	EnableMultimodel         bool     `json:"enable_multimodel"`
-	EnableQuestionGeneration bool     `json:"enable_question_generation"` // 是否启用问题生成
-	QuestionCount            int      `json:"question_count,omitempty"`   // 每个chunk生成的问题数量
-	Language                 string   `json:"language,omitempty"`         // Request locale for {{language}} in prompt templates
+	DocumentBaseID   string   `json:"document_base_id,omitempty"`
+	FilePath         string   `json:"file_path,omitempty"` // 文件路径（文件导入时使用）
+	FileName         string   `json:"file_name,omitempty"` // 文件名（文件导入时使用）
+	FileType         string   `json:"file_type,omitempty"` // 文件类型（文件导入时使用）
+	URL              string   `json:"url,omitempty"`       // URL（URL导入时使用）
+	FileURL          string   `json:"file_url,omitempty"`  // 文件资源链接（file_url导入时使用）
+	Passages         []string `json:"passages,omitempty"`  // 文本段落（文本导入时使用）
+	EnableMultimodel bool     `json:"enable_multimodel"`
+
+	//EnableQuestionGeneration bool   `json:"enable_question_generation"` // 是否启用问题生成
+	//QuestionCount            int    `json:"question_count,omitempty"`   // 每个chunk生成的问题数量
+	//Language                 string `json:"language,omitempty"`         // Request locale for {{language}} in prompt templates
 	// Attempt is the per-document attempt number this task belongs to.
 	// Set on enqueue (initial parse → attempt 1; reparse → max+1) so
 	// every span recorded by this task lands on the right attempt
