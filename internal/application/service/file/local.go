@@ -36,6 +36,7 @@ var supportedTypes = map[string]string{
 	".markdown": "text/markdown",
 	".json":     "application/json",
 	".csv":      "text/csv",
+	".png":      "image/png",
 	".pdf":      "application/pdf",
 	".doc":      "application/msword",
 	".docx":     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -109,6 +110,11 @@ func (s *LocalStorage) Save(ctx context.Context, upload interfaces.FileUpload) (
 		logger.Error(ctx, "uploaded file type is unsupported", "filename", filename, "extension", extension)
 		return interfaces.StoredFile{}, fmt.Errorf("%w: %s", ErrUnsupportedFileType, extension)
 	}
+	directory, err := s.directoryForCategory(upload.Category)
+	if err != nil {
+		logger.Error(ctx, "resolve storage category failed", "category", upload.Category, "error", err)
+		return interfaces.StoredFile{}, err
+	}
 
 	// for check, but stream can not back, so multi Reader
 	sample, err := io.ReadAll(io.LimitReader(upload.Content, 512))
@@ -167,8 +173,15 @@ func (s *LocalStorage) Save(ctx context.Context, upload interfaces.FileUpload) (
 		return interfaces.StoredFile{}, err
 	}
 
-	key := uuid.NewString() + extension
-	destination := filepath.Join(s.baseDir, key)
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		logger.Error(ctx, "create storage category directory failed", "category", upload.Category, "error", err)
+		return interfaces.StoredFile{}, fmt.Errorf("create storage category directory: %w", err)
+	}
+	key := filepath.ToSlash(filepath.Join(string(upload.Category), uuid.NewString()+extension))
+	if upload.Category == "" {
+		key = uuid.NewString() + extension
+	}
+	destination := filepath.Join(s.baseDir, filepath.FromSlash(key))
 	if err := os.Rename(temporaryPath, destination); err != nil {
 		logger.Error(ctx, "finalize uploaded file failed", "filename", filename, "error", err)
 		return interfaces.StoredFile{}, fmt.Errorf("finalize upload: %w", err)
@@ -205,10 +218,15 @@ func SaveMultipart(ctx context.Context, storage interfaces.FileStorage, file *mu
 		return interfaces.StoredFile{}, fmt.Errorf("open uploaded file: %w", err)
 	}
 	defer input.Close()
+	category := interfaces.StorageCategory("")
+	if strings.EqualFold(filepath.Ext(file.Filename), ".pdf") {
+		category = interfaces.StorageCategoryPDF
+	}
 	return storage.Save(ctx, interfaces.FileUpload{
 		Filename:    file.Filename,
 		ContentType: file.Header.Get("Content-Type"),
 		Content:     input,
+		Category:    category,
 	})
 }
 
@@ -277,11 +295,43 @@ func (s *LocalStorage) Delete(ctx context.Context, key string) error {
 }
 
 func (s *LocalStorage) pathForKey(key string) (string, error) {
-	safeKey, err := utils.SafeFileName(key)
-	if err != nil || safeKey != key {
+	key = filepath.ToSlash(strings.TrimSpace(key))
+	if key == "" || strings.HasPrefix(key, "/") || strings.Contains(key, "\\") {
 		return "", fmt.Errorf("invalid storage key")
 	}
-	return utils.SafePathUnderBase(s.baseDir, filepath.Join(s.baseDir, safeKey))
+	parts := strings.Split(key, "/")
+	if len(parts) > 2 {
+		return "", fmt.Errorf("invalid storage key")
+	}
+	for _, part := range parts {
+		safePart, err := utils.SafeFileName(part)
+		if err != nil || safePart != part {
+			return "", fmt.Errorf("invalid storage key")
+		}
+	}
+	if len(parts) == 2 && !isStorageCategory(interfaces.StorageCategory(parts[0])) {
+		return "", fmt.Errorf("invalid storage key category")
+	}
+	return utils.SafePathUnderBase(s.baseDir, filepath.Join(s.baseDir, filepath.FromSlash(key)))
+}
+
+func (s *LocalStorage) directoryForCategory(category interfaces.StorageCategory) (string, error) {
+	if category == "" {
+		return s.baseDir, nil
+	}
+	if !isStorageCategory(category) {
+		return "", fmt.Errorf("unsupported storage category %q", category)
+	}
+	return utils.SafePathUnderBase(s.baseDir, filepath.Join(s.baseDir, string(category)))
+}
+
+func isStorageCategory(category interfaces.StorageCategory) bool {
+	switch category {
+	case interfaces.StorageCategoryPDF, interfaces.StorageCategoryMarkdown, interfaces.StorageCategoryImage:
+		return true
+	default:
+		return false
+	}
 }
 
 type contextReader struct {

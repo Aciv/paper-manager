@@ -103,3 +103,22 @@ func TestLocalStorageSaveBytesAndCopy(t *testing.T) {
 		t.Fatalf("content = %q, want %q", got, want)
 	}
 }
+
+func TestLocalStoragePlacesCategorizedFilesUnderTypeDirectory(t *testing.T) {
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	stored, err := storage.Save(context.Background(), interfaces.FileUpload{
+		Filename: "paper.pdf", Content: strings.NewReader("%PDF-1.7\n"), Category: interfaces.StorageCategoryPDF,
+	})
+	if err != nil {
+		t.Fatalf("save categorized file: %v", err)
+	}
+	if !strings.HasPrefix(stored.Key, "pdf/") {
+		t.Fatalf("storage key = %q, want pdf/ prefix", stored.Key)
+	}
+	if _, err := storage.Open(context.Background(), stored.Key); err != nil {
+		t.Fatalf("open categorized file: %v", err)
+	}
+}

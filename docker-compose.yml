@@ -49,6 +49,7 @@ services:
       PARSER_GRPC_ADDR: 0.0.0.0:50051
       PARSER_MAX_FILE_SIZE: 104857600
       PARSER_GRPC_MAX_MESSAGE_SIZE: 105906176
+      PARSER_IMAGE_DPI: 72
     volumes:
       - ./data/uploads:/data/uploads:ro
       - ./data/recognition-output:/data/recognition-output

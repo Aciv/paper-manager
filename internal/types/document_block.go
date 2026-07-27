@@ -26,6 +26,10 @@ type Block struct {
 	// URL stores the generated image asset for image or table blocks. Text is
 	// the corresponding accessible description rather than the image payload.
 	URL string `gorm:"column:url;type:text;not null;default:'';check:chk_document_blocks_asset_url,type NOT IN ('image','table') OR url <> ''" json:"url,omitempty"`
+	// AssetKey is the private FileStorage key for URL. It is intentionally not
+	// exposed to API clients; the block-image endpoint authorizes access before
+	// opening this object.
+	AssetKey string `gorm:"column:asset_key;type:text;not null;default:''" json:"-"`
 
 	// MarkdownSHA256 identifies the exact Markdown revision to which the
 	// source offsets below belong. Reprocessing replaces the blocks together

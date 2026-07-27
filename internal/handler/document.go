@@ -6,6 +6,7 @@ import (
 	"errors"
 	"mime"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -241,6 +242,39 @@ func (h *DocumentHandler) ListBlocks(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"items": blocks})
+}
+
+// BlockImage streams one rendered image/table crop. The database holds a
+// private storage key, while blocks expose this protected endpoint as URL.
+func (h *DocumentHandler) BlockImage(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
+		return
+	}
+	blockID, err := uuid.Parse(c.Param("blockID"))
+	if err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid block id"), err)
+		return
+	}
+	reader, filename, err := h.documents.GetDocumentBlockImage(c.Request.Context(), documentID.String(), blockID.String())
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			h.writeError(c, apperrors.NewNotFoundError("document block image not found"), nil)
+			return
+		}
+		h.writeError(c, apperrors.NewInternalServerError("open document block image"), err)
+		return
+	}
+	defer reader.Close()
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.DataFromReader(http.StatusOK, -1, contentType, reader, map[string]string{
+		"Content-Disposition":    mime.FormatMediaType("inline", map[string]string{"filename": filename}),
+		"X-Content-Type-Options": "nosniff",
+	})
 }
 
 func (h *DocumentHandler) writeUploadError(c *gin.Context, err error) {

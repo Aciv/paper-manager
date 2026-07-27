@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -321,6 +322,30 @@ func (s *documentService) GetDocumentBlocks(ctx context.Context, id string, page
 	return s.repo.ListBlocks(ctx, documentID, pageNumber)
 }
 
+func (s *documentService) GetDocumentBlockImage(ctx context.Context, documentID, blockID string) (io.ReadCloser, string, error) {
+	documentUUID, err := uuid.Parse(strings.TrimSpace(documentID))
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid document id: %w", err)
+	}
+	blockUUID, err := uuid.Parse(strings.TrimSpace(blockID))
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid block id: %w", err)
+	}
+	block, err := s.repo.GetBlock(ctx, documentUUID, blockUUID)
+	if err != nil {
+		return nil, "", err
+	}
+	if block.AssetKey == "" {
+		return nil, "", sql.ErrNoRows
+	}
+	reader, err := s.storage.Open(ctx, block.AssetKey)
+	if err != nil {
+		logger.Error(ctx, "open document block image failed", "document_id", documentUUID, "block_id", blockUUID, "storage_key", block.AssetKey, "error", err)
+		return nil, "", err
+	}
+	return reader, filepath.Base(block.AssetKey), nil
+}
+
 func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 	doc, err := s.GetDocumentByID(ctx, id)
 	if err != nil {
@@ -343,8 +368,13 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 	if errors.Is(err, sql.ErrNoRows) {
 		markdown = types.DocumentMarkdown{}
 	}
+	blocks, err := s.repo.ListBlocks(ctx, doc.ID, 0)
+	if err != nil {
+		s.restoreDocumentStatusAfterDeleteFailure(ctx, doc)
+		return err
+	}
 
-	return s.deleteDocumentRelations(ctx, doc, &markdown)
+	return s.deleteDocumentRelations(ctx, doc, &markdown, blocks)
 }
 
 // deleteDocumentRelations performs the non-database portion of document
@@ -353,6 +383,7 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 // membership rows atomically.
 func (s *documentService) deleteDocumentRelations(
 	ctx context.Context, document *types.Document, markdown *types.DocumentMarkdown,
+	blocks []types.Block,
 ) error {
 	if s.storage == nil {
 		return errors.New("file storage is not configured")
@@ -369,6 +400,16 @@ func (s *documentService) deleteDocumentRelations(
 			return err
 		}
 		logger.Info(ctx, "document markdown file deleted", "document_id", document.ID, "storage_key", markdown.StorageKey)
+	}
+	for _, block := range blocks {
+		if block.AssetKey == "" {
+			continue
+		}
+		if err := s.storage.Delete(ctx, block.AssetKey); err != nil {
+			s.recordIncompleteDocumentDeletion(ctx, document, "document source and Markdown files deleted; block image deletion must be retried", err)
+			return err
+		}
+		logger.Info(ctx, "document block image deleted", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey)
 	}
 
 	if err := s.repo.Delete(ctx, document.ID); err != nil && !errors.Is(err, sql.ErrNoRows) {

@@ -37,6 +37,11 @@ func TestBuiltinRecognizerMapsByteRequestAndResponse(t *testing.T) {
 			Ordinal: 0, Type: "title", Text: "Parsed paper", PageNumber: 1,
 			PageWidth: 612, PageHeight: 792, BboxX0: 72, BboxY0: 72,
 			BboxX1: 240, BboxY1: 108, MarkdownCodepointStart: 0, MarkdownCodepointEnd: 14,
+		}, {
+			Ordinal: 1, Type: "image", Text: "diagram", PageNumber: 1,
+			PageWidth: 612, PageHeight: 792, BboxX0: 72, BboxY0: 120,
+			BboxX1: 240, BboxY1: 280, MarkdownCodepointStart: 14, MarkdownCodepointEnd: 14,
+			ImageData: []byte("png"), ImageContentType: "image/png",
 		}},
 	}}
 	recognizer := NewBuiltinRecognizerWithClient(client)
@@ -59,7 +64,7 @@ func TestBuiltinRecognizerMapsByteRequestAndResponse(t *testing.T) {
 	if string(result.Markdown) != string(markdown) || result.Metadata.PageCount != 3 || result.Metadata.MarkdownFilename != "paper.md" {
 		t.Fatalf("unexpected recognition result: %+v", result)
 	}
-	if len(result.Blocks) != 1 || result.Blocks[0].Location.PageNumber == nil || *result.Blocks[0].Location.PageNumber != 1 {
+	if len(result.Blocks) != 2 || result.Blocks[0].Location.PageNumber == nil || *result.Blocks[0].Location.PageNumber != 1 || string(result.Blocks[1].ImageData) != "png" {
 		t.Fatalf("unexpected recognition blocks: %+v", result.Blocks)
 	}
 }

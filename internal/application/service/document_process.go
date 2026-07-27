@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -121,8 +122,23 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("load previous Markdown: %w", err)
 	}
-	storedMarkdown, err := s.storage.SaveBytes(ctx, metadata.MarkdownFilename, markdownBytes)
+	previousBlocks, err := s.repo.ListBlocks(ctx, document.ID, 0)
 	if err != nil {
+		return fmt.Errorf("load previous document blocks: %w", err)
+	}
+	blocks, imageKeys, err := s.persistBlocks(ctx, document.ID, metadata.SHA256, result.Blocks)
+	if err != nil {
+		return fmt.Errorf("store recognized block images: %w", err)
+	}
+	cleanupImages := func() {
+		s.deleteStoredObjects(context.WithoutCancel(ctx), imageKeys, "remove uncommitted block image failed", document.ID)
+	}
+	storedMarkdown, err := s.storage.Save(ctx, interfaces.FileUpload{
+		Filename: metadata.MarkdownFilename, ContentType: metadata.ContentType,
+		Content: bytes.NewReader(markdownBytes), Category: interfaces.StorageCategoryMarkdown,
+	})
+	if err != nil {
+		cleanupImages()
 		return fmt.Errorf("store recognized Markdown: %w", err)
 	}
 	markdown := types.DocumentMarkdown{
@@ -132,11 +148,11 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		InputMode: string(types.RecognitionInputBytes), Language: metadata.Language,
 		PageCount: metadata.PageCount, Metadata: types.JSON(`{}`),
 	}
-	blocks := persistedBlocks(document.ID, metadata.SHA256, result.Blocks)
 	if err := s.repo.ReplaceParsedOutput(ctx, markdown, blocks); err != nil {
 		if deleteErr := s.storage.Delete(context.WithoutCancel(ctx), storedMarkdown.Key); deleteErr != nil {
 			logger.Warn(ctx, "remove uncommitted Markdown failed", "document_id", document.ID, "storage_key", storedMarkdown.Key, "error", deleteErr)
 		}
+		cleanupImages()
 		if errors.Is(err, types.ErrDocumentNotProcessing) {
 			logger.Info(ctx, "discard recognized output after status change", "document_id", document.ID)
 			return nil
@@ -147,6 +163,16 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		if err := s.storage.Delete(context.WithoutCancel(ctx), previous.StorageKey); err != nil {
 			logger.Warn(ctx, "remove replaced Markdown failed", "document_id", document.ID, "storage_key", previous.StorageKey, "error", err)
 		}
+	}
+	for _, block := range previousBlocks {
+		if block.AssetKey == "" || block.AssetKey == storedMarkdown.Key {
+			continue
+		}
+		if err := s.storage.Delete(context.WithoutCancel(ctx), block.AssetKey); err != nil {
+			logger.Warn(ctx, "remove replaced block image failed", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey, "error", err)
+			continue
+		}
+		logger.Info(ctx, "replaced document block image deleted", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey)
 	}
 	logger.Info(ctx, "document recognition completed", "document_id", document.ID, "block_count", len(blocks), "markdown_storage_key", storedMarkdown.Key)
 	return nil
@@ -314,19 +340,66 @@ func (s *documentService) failUnsupportedDocumentRecognition(ctx context.Context
 	return fmt.Errorf("unsupported document recognition: %w", asynq.SkipRetry)
 }
 
-func persistedBlocks(documentID uuid.UUID, markdownSHA256 string, recognized []types.RecognitionBlock) []types.Block {
+// persistBlocks converts parser-owned source-map entries into durable blocks.
+// Images are stored before the database transaction because FileStorage may be
+// remote; on every later failure ProcessDocument deletes these uncommitted
+// objects. The database sees only a protected URL plus a private storage key.
+func (s *documentService) persistBlocks(
+	ctx context.Context, documentID uuid.UUID, markdownSHA256 string, recognized []types.RecognitionBlock,
+) ([]types.Block, []string, error) {
 	blocks := make([]types.Block, 0, len(recognized))
+	imageKeys := make([]string, 0)
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			s.deleteStoredObjects(context.WithoutCancel(ctx), imageKeys, "remove uncommitted block image failed", documentID)
+		}
+	}()
 	for _, block := range recognized {
 		if block.Ordinal < 0 || strings.TrimSpace(block.Type) == "" || !isCompletePDFBlockLocation(block.Location) {
 			continue
 		}
+		blockType := strings.ToLower(strings.TrimSpace(block.Type))
 		location := block.Location
-		blocks = append(blocks, types.Block{
-			ID: uuid.New(), DocumentID: documentID, Ordinal: block.Ordinal, Type: block.Type,
+		persisted := types.Block{
+			ID: uuid.New(), DocumentID: documentID, Ordinal: block.Ordinal, Type: blockType,
 			Text: block.Text, MarkdownSHA256: markdownSHA256, Location: &location,
-		})
+		}
+		if blockType == "image" || blockType == "table" {
+			if !strings.EqualFold(strings.TrimSpace(block.ImageContentType), "image/png") || len(block.ImageData) == 0 {
+				return nil, imageKeys, fmt.Errorf("%s block %d has no PNG crop", blockType, block.Ordinal)
+			}
+			if int64(len(block.ImageData)) > s.recognitionOutputLimit() {
+				return nil, imageKeys, fmt.Errorf("%s block %d image exceeds size limit", blockType, block.Ordinal)
+			}
+			stored, err := s.storage.Save(ctx, interfaces.FileUpload{
+				Filename:    fmt.Sprintf("%s-%d.png", documentID, block.Ordinal),
+				ContentType: "image/png", Content: bytes.NewReader(block.ImageData),
+				Category: interfaces.StorageCategoryImage,
+			})
+			if err != nil {
+				return nil, nil, err
+			}
+			persisted.AssetKey = stored.Key
+			persisted.URL = fmt.Sprintf("/api/document/%s/blocks/%s/image", documentID, persisted.ID)
+			imageKeys = append(imageKeys, stored.Key)
+			logger.Info(ctx, "document block image stored", "document_id", documentID, "block_id", persisted.ID, "storage_key", stored.Key)
+		}
+		blocks = append(blocks, persisted)
 	}
-	return blocks
+	succeeded = true
+	return blocks, imageKeys, nil
+}
+
+func (s *documentService) deleteStoredObjects(ctx context.Context, keys []string, message string, documentID uuid.UUID) {
+	for _, key := range keys {
+		if key == "" {
+			continue
+		}
+		if err := s.storage.Delete(ctx, key); err != nil {
+			logger.Warn(ctx, message, "document_id", documentID, "storage_key", key, "error", err)
+		}
+	}
 }
 
 func isCompletePDFBlockLocation(location types.PDFBlockLocation) bool {

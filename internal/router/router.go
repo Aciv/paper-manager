@@ -84,6 +84,7 @@ func ServerFile(router gin.IRoutes, documentHandler *handler.DocumentHandler) {
 	router.GET("/api/document/search", documentHandler.Search)
 	router.GET("/api/document/:id/content", documentHandler.Content)
 	router.GET("/api/document/:id/blocks", documentHandler.ListBlocks)
+	router.GET("/api/document/:id/blocks/:blockID/image", documentHandler.BlockImage)
 	router.PATCH("/api/document/:id", documentHandler.UpdateDocument)
 	router.DELETE("/api/document/:id", documentHandler.DeleteFile)
 }

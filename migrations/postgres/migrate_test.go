@@ -100,3 +100,9 @@ func TestDocumentBlockSourceMapMigrationAddsTypedPDFLocation(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentBlockAssetMigrationKeepsStorageKeyPrivate(t *testing.T) {
+	if !strings.Contains(documentBlockAssetsUp, "asset_key TEXT NOT NULL DEFAULT ''") {
+		t.Fatal("document block asset migration does not add asset_key")
+	}
+}

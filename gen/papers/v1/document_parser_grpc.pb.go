@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.5.1
 // - protoc             v7.35.0
-// source: proto/document_parser.proto
+// source: document_parser.proto
 
 package papersv1
 
@@ -123,5 +123,5 @@ var DocumentParser_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "proto/document_parser.proto",
+	Metadata: "document_parser.proto",
 }

@@ -67,6 +67,10 @@ func (*documentCreatorStub) ListBlocks(context.Context, uuid.UUID, int) ([]types
 	return []types.Block{}, nil
 }
 
+func (*documentCreatorStub) GetBlock(context.Context, uuid.UUID, uuid.UUID) (types.Block, error) {
+	return types.Block{}, sql.ErrNoRows
+}
+
 func (s *documentCreatorStub) UpdateStatus(_ context.Context, id uuid.UUID, status types.DocumentStatus, message *string) error {
 	if s.deleted || s.document.ID != id {
 		return sql.ErrNoRows

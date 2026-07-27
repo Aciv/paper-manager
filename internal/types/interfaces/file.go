@@ -11,7 +11,21 @@ type FileUpload struct {
 	Filename    string
 	ContentType string
 	Content     io.Reader
+	// Category selects a provider-neutral top-level storage directory. Empty
+	// keeps backward-compatible unclassified storage for callers that do not
+	// own a durable document artefact.
+	Category StorageCategory
 }
+
+// StorageCategory separates source PDFs, generated Markdown, and rendered
+// block images without exposing filesystem paths to callers.
+type StorageCategory string
+
+const (
+	StorageCategoryPDF      StorageCategory = "pdf"
+	StorageCategoryMarkdown StorageCategory = "markdown"
+	StorageCategoryImage    StorageCategory = "image"
+)
 
 // StoredFile is the durable, provider-neutral representation of an upload.
 type StoredFile struct {

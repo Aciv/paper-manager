@@ -8,10 +8,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	fileservice "paperMaster/internal/application/service/file"
 	"paperMaster/internal/types"
+	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -72,8 +74,29 @@ func (s *documentStatusRepoStub) ReplaceParsedOutput(_ context.Context, markdown
 	return nil
 }
 
-func (*documentStatusRepoStub) ListBlocks(context.Context, uuid.UUID, int) ([]types.Block, error) {
-	return []types.Block{}, nil
+func (s *documentStatusRepoStub) ListBlocks(_ context.Context, id uuid.UUID, pageNumber int) ([]types.Block, error) {
+	if s.document.ID != id {
+		return nil, sql.ErrNoRows
+	}
+	blocks := make([]types.Block, 0, len(s.blocks))
+	for _, block := range s.blocks {
+		if pageNumber == 0 || (block.Location != nil && block.Location.PageNumber != nil && *block.Location.PageNumber == pageNumber) {
+			blocks = append(blocks, block)
+		}
+	}
+	return blocks, nil
+}
+
+func (s *documentStatusRepoStub) GetBlock(_ context.Context, documentID, blockID uuid.UUID) (types.Block, error) {
+	if s.document.ID != documentID {
+		return types.Block{}, sql.ErrNoRows
+	}
+	for _, block := range s.blocks {
+		if block.ID == blockID {
+			return block, nil
+		}
+	}
+	return types.Block{}, sql.ErrNoRows
 }
 
 func (s *documentStatusRepoStub) Delete(_ context.Context, id uuid.UUID) error {
@@ -266,6 +289,86 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	}
 	if _, err := storage.Open(context.Background(), repo.markdown.StorageKey); err != nil {
 		t.Fatalf("stored markdown is missing: %v", err)
+	}
+	if !strings.HasPrefix(repo.markdown.StorageKey, "markdown/") {
+		t.Fatalf("markdown storage key = %q, want markdown/ prefix", repo.markdown.StorageKey)
+	}
+}
+
+func TestProcessDocumentStoresRenderedImageBlock(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	source, err := storage.Save(context.Background(), interfaces.FileUpload{
+		Filename: "paper.pdf", Content: strings.NewReader("%PDF-1.7\nsource"), Category: interfaces.StorageCategoryPDF,
+	})
+	if err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	documentID := uuid.New()
+	page, start, end := 1, 0, 0
+	width, height, x0, y0, x1, y1 := 612.0, 792.0, 72.0, 72.0, 280.0, 180.0
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf", ContentType: "application/pdf",
+		SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+	}}
+	svc := &documentService{repo: repo, storage: storage, recognizer: &recognitionStub{result: &types.RecognitionResult{
+		OutputMode: types.RecognitionOutputMarkdownBytes, Markdown: []byte("# Parsed\n"),
+		Metadata: types.RecognitionMetadata{MarkdownFilename: "paper.md", ContentType: "text/markdown"},
+		Blocks: []types.RecognitionBlock{{
+			Ordinal: 0, Type: "image", Text: "diagram", ImageData: []byte("PNG crop"), ImageContentType: "image/png",
+			Location: types.PDFBlockLocation{PageNumber: &page, PageWidth: &width, PageHeight: &height,
+				BBoxX0: &x0, BBoxY0: &y0, BBoxX1: &x1, BBoxY1: &y1,
+				MarkdownCodepointStart: &start, MarkdownCodepointEnd: &end},
+		}},
+	}}}
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
+		t.Fatalf("ProcessDocument() error = %v", err)
+	}
+	if len(repo.blocks) != 1 || repo.blocks[0].AssetKey == "" || !strings.HasPrefix(repo.blocks[0].AssetKey, "image/") {
+		t.Fatalf("image block was not persisted: %+v", repo.blocks)
+	}
+	if want := "/api/document/" + documentID.String() + "/blocks/" + repo.blocks[0].ID.String() + "/image"; repo.blocks[0].URL != want {
+		t.Fatalf("block URL = %q, want %q", repo.blocks[0].URL, want)
+	}
+	if _, err := storage.Open(context.Background(), repo.blocks[0].AssetKey); err != nil {
+		t.Fatalf("stored image is missing: %v", err)
+	}
+}
+
+func TestDeleteDocumentRemovesRenderedBlockImages(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	source, err := storage.Save(context.Background(), interfaces.FileUpload{
+		Filename: "paper.pdf", Content: strings.NewReader("%PDF-1.7\nsource"), Category: interfaces.StorageCategoryPDF,
+	})
+	if err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	image, err := storage.Save(context.Background(), interfaces.FileUpload{
+		Filename: "block.png", Content: strings.NewReader("PNG crop"), Category: interfaces.StorageCategoryImage,
+	})
+	if err != nil {
+		t.Fatalf("save block image: %v", err)
+	}
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, StorageKey: source.Key, Status: types.DocumentStatusReady},
+		blocks:   []types.Block{{ID: uuid.New(), DocumentID: documentID, Type: "image", AssetKey: image.Key}},
+	}
+	svc := NewDocumentService(repo, storage)
+	if err := svc.DeleteDocument(context.Background(), documentID.String()); err != nil {
+		t.Fatalf("DeleteDocument() error = %v", err)
+	}
+	if _, err := storage.Open(context.Background(), image.Key); err == nil {
+		t.Fatalf("rendered block image %q remains after document deletion", image.Key)
 	}
 }
 

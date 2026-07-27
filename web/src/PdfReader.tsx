@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Document, Outline, Page, pdfjs } from 'react-pdf';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
+import './PdfReader.css';
 import { api, Block, contentUrl, Document as PaperDocument } from './api';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
@@ -99,6 +100,7 @@ export function PdfReader({ document, onMessage }: { document: PaperDocument; on
       <strong>已选 Block · {selectedBlock.type}</strong>
       <span>第 {selectedBlock.location?.pageNumber} 页</span>
       <p>{selectedBlock.text}</p>
+      {selectedBlock.url && <img className="selected-block-image" src={selectedBlock.url} alt={selectedBlock.text || `${selectedBlock.type} preview`} />}
     </div>}
     <Document file={contentUrl(document.id)} onLoadSuccess={({ numPages }) => setPageCount(numPages)} onLoadError={error => onMessage(`PDF 加载失败：${error.message}`)}>
       <div className="pdf-reader"><aside className="outline"><h3>目录</h3><Outline onItemClick={({ pageNumber }) => goToPage(pageNumber)} onLoadError={() => onMessage('该 PDF 未提供目录。')} /><p className="hint">在阅读区上下滚动可连续阅读全部页面。</p></aside>

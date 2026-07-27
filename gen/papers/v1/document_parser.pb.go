@@ -2,7 +2,7 @@
 // versions:
 // 	protoc-gen-go v1.36.6
 // 	protoc        v7.35.0
-// source: proto/document_parser.proto
+// source: document_parser.proto
 
 package papersv1
 
@@ -38,7 +38,7 @@ type RecognitionRequest struct {
 
 func (x *RecognitionRequest) Reset() {
 	*x = RecognitionRequest{}
-	mi := &file_proto_document_parser_proto_msgTypes[0]
+	mi := &file_document_parser_proto_msgTypes[0]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -50,7 +50,7 @@ func (x *RecognitionRequest) String() string {
 func (*RecognitionRequest) ProtoMessage() {}
 
 func (x *RecognitionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_document_parser_proto_msgTypes[0]
+	mi := &file_document_parser_proto_msgTypes[0]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -63,7 +63,7 @@ func (x *RecognitionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionRequest.ProtoReflect.Descriptor instead.
 func (*RecognitionRequest) Descriptor() ([]byte, []int) {
-	return file_proto_document_parser_proto_rawDescGZIP(), []int{0}
+	return file_document_parser_proto_rawDescGZIP(), []int{0}
 }
 
 func (x *RecognitionRequest) GetDocumentId() string {
@@ -161,7 +161,7 @@ type RecognitionResult struct {
 
 func (x *RecognitionResult) Reset() {
 	*x = RecognitionResult{}
-	mi := &file_proto_document_parser_proto_msgTypes[1]
+	mi := &file_document_parser_proto_msgTypes[1]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -173,7 +173,7 @@ func (x *RecognitionResult) String() string {
 func (*RecognitionResult) ProtoMessage() {}
 
 func (x *RecognitionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_document_parser_proto_msgTypes[1]
+	mi := &file_document_parser_proto_msgTypes[1]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -186,7 +186,7 @@ func (x *RecognitionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionResult.ProtoReflect.Descriptor instead.
 func (*RecognitionResult) Descriptor() ([]byte, []int) {
-	return file_proto_document_parser_proto_rawDescGZIP(), []int{1}
+	return file_document_parser_proto_rawDescGZIP(), []int{1}
 }
 
 func (x *RecognitionResult) GetMarkdown() []byte {
@@ -275,13 +275,17 @@ type RecognitionBlock struct {
 	BboxY1                 float64                `protobuf:"fixed64,10,opt,name=bbox_y1,json=bboxY1,proto3" json:"bbox_y1,omitempty"`
 	MarkdownCodepointStart int32                  `protobuf:"varint,11,opt,name=markdown_codepoint_start,json=markdownCodepointStart,proto3" json:"markdown_codepoint_start,omitempty"`
 	MarkdownCodepointEnd   int32                  `protobuf:"varint,12,opt,name=markdown_codepoint_end,json=markdownCodepointEnd,proto3" json:"markdown_codepoint_end,omitempty"`
-	unknownFields          protoimpl.UnknownFields
-	sizeCache              protoimpl.SizeCache
+	// PNG crop for image/table blocks only. It is transport data, never a
+	// public URL; the Go API stores it and exposes a protected block endpoint.
+	ImageData        []byte `protobuf:"bytes,13,opt,name=image_data,json=imageData,proto3" json:"image_data,omitempty"`
+	ImageContentType string `protobuf:"bytes,14,opt,name=image_content_type,json=imageContentType,proto3" json:"image_content_type,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RecognitionBlock) Reset() {
 	*x = RecognitionBlock{}
-	mi := &file_proto_document_parser_proto_msgTypes[2]
+	mi := &file_document_parser_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -293,7 +297,7 @@ func (x *RecognitionBlock) String() string {
 func (*RecognitionBlock) ProtoMessage() {}
 
 func (x *RecognitionBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_proto_document_parser_proto_msgTypes[2]
+	mi := &file_document_parser_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -306,7 +310,7 @@ func (x *RecognitionBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionBlock.ProtoReflect.Descriptor instead.
 func (*RecognitionBlock) Descriptor() ([]byte, []int) {
-	return file_proto_document_parser_proto_rawDescGZIP(), []int{2}
+	return file_document_parser_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *RecognitionBlock) GetOrdinal() int32 {
@@ -393,11 +397,25 @@ func (x *RecognitionBlock) GetMarkdownCodepointEnd() int32 {
 	return 0
 }
 
-var File_proto_document_parser_proto protoreflect.FileDescriptor
+func (x *RecognitionBlock) GetImageData() []byte {
+	if x != nil {
+		return x.ImageData
+	}
+	return nil
+}
 
-const file_proto_document_parser_proto_rawDesc = "" +
+func (x *RecognitionBlock) GetImageContentType() string {
+	if x != nil {
+		return x.ImageContentType
+	}
+	return ""
+}
+
+var File_document_parser_proto protoreflect.FileDescriptor
+
+const file_document_parser_proto_rawDesc = "" +
 	"\n" +
-	"\x1bproto/document_parser.proto\x12\tpapers.v1\"\xda\x01\n" +
+	"\x15document_parser.proto\x12\tpapers.v1\"\xda\x01\n" +
 	"\x12RecognitionRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1a\n" +
@@ -422,7 +440,7 @@ const file_proto_document_parser_proto_rawDesc = "" +
 	"parserName\x12%\n" +
 	"\x0eparser_version\x18\t \x01(\tR\rparserVersion\x123\n" +
 	"\x06blocks\x18\n" +
-	" \x03(\v2\x1b.papers.v1.RecognitionBlockR\x06blocks\"\x89\x03\n" +
+	" \x03(\v2\x1b.papers.v1.RecognitionBlockR\x06blocks\"\xd6\x03\n" +
 	"\x10RecognitionBlock\x12\x18\n" +
 	"\aordinal\x18\x01 \x01(\x05R\aordinal\x12\x12\n" +
 	"\x04type\x18\x02 \x01(\tR\x04type\x12\x12\n" +
@@ -439,29 +457,32 @@ const file_proto_document_parser_proto_rawDesc = "" +
 	"\abbox_y1\x18\n" +
 	" \x01(\x01R\x06bboxY1\x128\n" +
 	"\x18markdown_codepoint_start\x18\v \x01(\x05R\x16markdownCodepointStart\x124\n" +
-	"\x16markdown_codepoint_end\x18\f \x01(\x05R\x14markdownCodepointEnd2Z\n" +
+	"\x16markdown_codepoint_end\x18\f \x01(\x05R\x14markdownCodepointEnd\x12\x1d\n" +
+	"\n" +
+	"image_data\x18\r \x01(\fR\timageData\x12,\n" +
+	"\x12image_content_type\x18\x0e \x01(\tR\x10imageContentType2Z\n" +
 	"\x0eDocumentParser\x12H\n" +
 	"\tRecognize\x12\x1d.papers.v1.RecognitionRequest\x1a\x1c.papers.v1.RecognitionResultB$Z\"paperMaster/gen/papers/v1;papersv1b\x06proto3"
 
 var (
-	file_proto_document_parser_proto_rawDescOnce sync.Once
-	file_proto_document_parser_proto_rawDescData []byte
+	file_document_parser_proto_rawDescOnce sync.Once
+	file_document_parser_proto_rawDescData []byte
 )
 
-func file_proto_document_parser_proto_rawDescGZIP() []byte {
-	file_proto_document_parser_proto_rawDescOnce.Do(func() {
-		file_proto_document_parser_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_proto_document_parser_proto_rawDesc), len(file_proto_document_parser_proto_rawDesc)))
+func file_document_parser_proto_rawDescGZIP() []byte {
+	file_document_parser_proto_rawDescOnce.Do(func() {
+		file_document_parser_proto_rawDescData = protoimpl.X.CompressGZIP(unsafe.Slice(unsafe.StringData(file_document_parser_proto_rawDesc), len(file_document_parser_proto_rawDesc)))
 	})
-	return file_proto_document_parser_proto_rawDescData
+	return file_document_parser_proto_rawDescData
 }
 
-var file_proto_document_parser_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
-var file_proto_document_parser_proto_goTypes = []any{
+var file_document_parser_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_document_parser_proto_goTypes = []any{
 	(*RecognitionRequest)(nil), // 0: papers.v1.RecognitionRequest
 	(*RecognitionResult)(nil),  // 1: papers.v1.RecognitionResult
 	(*RecognitionBlock)(nil),   // 2: papers.v1.RecognitionBlock
 }
-var file_proto_document_parser_proto_depIdxs = []int32{
+var file_document_parser_proto_depIdxs = []int32{
 	2, // 0: papers.v1.RecognitionResult.blocks:type_name -> papers.v1.RecognitionBlock
 	0, // 1: papers.v1.DocumentParser.Recognize:input_type -> papers.v1.RecognitionRequest
 	1, // 2: papers.v1.DocumentParser.Recognize:output_type -> papers.v1.RecognitionResult
@@ -472,12 +493,12 @@ var file_proto_document_parser_proto_depIdxs = []int32{
 	0, // [0:1] is the sub-list for field type_name
 }
 
-func init() { file_proto_document_parser_proto_init() }
-func file_proto_document_parser_proto_init() {
-	if File_proto_document_parser_proto != nil {
+func init() { file_document_parser_proto_init() }
+func file_document_parser_proto_init() {
+	if File_document_parser_proto != nil {
 		return
 	}
-	file_proto_document_parser_proto_msgTypes[0].OneofWrappers = []any{
+	file_document_parser_proto_msgTypes[0].OneofWrappers = []any{
 		(*RecognitionRequest_Content)(nil),
 		(*RecognitionRequest_FilePath)(nil),
 		(*RecognitionRequest_SourceUrl)(nil),
@@ -486,17 +507,17 @@ func file_proto_document_parser_proto_init() {
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
-			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_document_parser_proto_rawDesc), len(file_proto_document_parser_proto_rawDesc)),
+			RawDescriptor: unsafe.Slice(unsafe.StringData(file_document_parser_proto_rawDesc), len(file_document_parser_proto_rawDesc)),
 			NumEnums:      0,
 			NumMessages:   3,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
-		GoTypes:           file_proto_document_parser_proto_goTypes,
-		DependencyIndexes: file_proto_document_parser_proto_depIdxs,
-		MessageInfos:      file_proto_document_parser_proto_msgTypes,
+		GoTypes:           file_document_parser_proto_goTypes,
+		DependencyIndexes: file_document_parser_proto_depIdxs,
+		MessageInfos:      file_document_parser_proto_msgTypes,
 	}.Build()
-	File_proto_document_parser_proto = out.File
-	file_proto_document_parser_proto_goTypes = nil
-	file_proto_document_parser_proto_depIdxs = nil
+	File_document_parser_proto = out.File
+	file_document_parser_proto_goTypes = nil
+	file_document_parser_proto_depIdxs = nil
 }

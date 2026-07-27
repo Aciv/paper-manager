@@ -46,4 +46,8 @@ message RecognitionBlock {
   double bbox_y1 = 10;
   int32 markdown_codepoint_start = 11;
   int32 markdown_codepoint_end = 12;
+  // PNG crop for image/table blocks only. It is transport data, never a
+  // public URL; the Go API stores it and exposes a protected block endpoint.
+  bytes image_data = 13;
+  string image_content_type = 14;
 }

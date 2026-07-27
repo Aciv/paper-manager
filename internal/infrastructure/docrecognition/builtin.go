@@ -158,9 +158,11 @@ func mapBuiltinBlocks(blocks []*papersv1.RecognitionBlock) []types.RecognitionBl
 			continue
 		}
 		result = append(result, types.RecognitionBlock{
-			Ordinal: ordinal,
-			Type:    strings.TrimSpace(block.GetType()),
-			Text:    block.GetText(),
+			Ordinal:          ordinal,
+			Type:             strings.TrimSpace(block.GetType()),
+			Text:             block.GetText(),
+			ImageData:        append([]byte(nil), block.GetImageData()...),
+			ImageContentType: strings.TrimSpace(block.GetImageContentType()),
 			Location: types.PDFBlockLocation{
 				PageNumber:             &pageNumber,
 				PageWidth:              &pageWidth,

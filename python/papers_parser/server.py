@@ -29,14 +29,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 DEFAULT_MAX_FILE_SIZE = 100 << 20
 DEFAULT_GRPC_MESSAGE_OVERHEAD = 1 << 20
+# 72 DPI is intentionally the default for cropped page regions. 720 DPI uses
+# roughly 100x as many pixels as 72 DPI and is unsuitable for routine block
+# previews; deployments that need print-quality captures can override it.
+DEFAULT_IMAGE_DPI = 72
 
 
 class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
     parser_name = "pymupdf4llm"
 
-    def __init__(self, upload_dir: Path, max_file_size: int):
+    def __init__(self, upload_dir: Path, max_file_size: int, image_dpi: int):
         self.upload_dir = upload_dir.resolve()
         self.max_file_size = max_file_size
+        self.image_dpi = image_dpi
 
     def Recognize(self, request, context):  # noqa: N802 - gRPC generated name
         if request.content_type not in SUPPORTED_TYPES:
@@ -92,14 +97,14 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                 temporary_path.unlink(missing_ok=True)
 
     def _extract_blocks(self, source_path: Path, pages, page_text: list[str]):
-        """Return selectable, asset-free source-map blocks.
+        """Return source-map blocks and 72-DPI PNG crops for visual blocks.
 
         PyMuPDF4LLM's page_boxes positions refer to Python Unicode code-point
         offsets in the page Markdown. We join pages with two newlines, so the
         cumulative offset below describes the complete returned Markdown.
-        Picture/table boxes are deliberately omitted for now: persisted image
-        and table blocks require a separately stored crop URL, and the Go
-        schema correctly rejects pretending that an empty URL is an asset.
+        Image/table bytes remain inside the gRPC response only long enough for
+        the Go API to save them under its durable image/ category. They never
+        become Base64 Markdown or a public parser filesystem path.
         """
         blocks = []
         markdown_offset = 0
@@ -114,14 +119,32 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                     block_type = _block_type(box.get("class", ""))
                     if block_type is None:
                         continue
-                    position = box.get("pos")
                     bbox = box.get("bbox")
-                    if not _valid_box(position, bbox, text, page_rect):
+                    if not _valid_bbox(bbox, page_rect):
                         continue
-                    start, end = int(position[0]), int(position[1])
-                    block_text = text[start:end].strip()
-                    if not block_text:
+                    position = box.get("pos")
+                    if _valid_position(position, text):
+                        start, end = int(position[0]), int(position[1])
+                        block_text = text[start:end].strip()
+                    elif block_type in {"image", "table"}:
+                        # Some layout engines do not associate a Markdown
+                        # range with a visual region. Keep a zero-width anchor
+                        # on its page rather than discarding a usable crop.
+                        start = end = 0
+                        block_text = f"{block_type} on page {page_index + 1}"
+                    else:
                         continue
+                    if not block_text and block_type not in {"image", "table"}:
+                        continue
+                    image_data = b""
+                    image_content_type = ""
+                    if block_type in {"image", "table"}:
+                        try:
+                            image_data = self._render_crop(pdf[page_index], bbox)
+                            image_content_type = "image/png"
+                        except Exception:
+                            LOG.warning("skip unreadable %s crop on page=%d", block_type, page_index + 1, exc_info=True)
+                            continue
                     blocks.append(
                         document_parser_pb2.RecognitionBlock(
                             ordinal=len(blocks),
@@ -136,10 +159,22 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                             bbox_y1=float(bbox[3]),
                             markdown_codepoint_start=markdown_offset + start,
                             markdown_codepoint_end=markdown_offset + end,
+                            image_data=image_data,
+                            image_content_type=image_content_type,
                         )
                     )
                 markdown_offset += len(text) + (2 if page_index + 1 < len(page_text) else 0)
         return blocks
+
+    def _render_crop(self, page, bbox) -> bytes:
+        """Render one bounded PDF rectangle as PNG at the configured DPI."""
+        scale = self.image_dpi / 72.0
+        pixmap = page.get_pixmap(
+            matrix=pymupdf.Matrix(scale, scale),
+            clip=pymupdf.Rect(bbox),
+            alpha=False,
+        )
+        return pixmap.tobytes("png")
 
     def _materialize_source(self, request, context):
         source_type = request.WhichOneof("source")
@@ -193,6 +228,7 @@ def main() -> None:
     parser.add_argument("--address", default=os.getenv("PARSER_GRPC_ADDR", "[::]:50051"))
     parser.add_argument("--upload-dir", default=os.getenv("UPLOAD_DIR", str(DEFAULT_UPLOAD_DIR)))
     parser.add_argument("--max-file-size", type=int, default=int(os.getenv("PARSER_MAX_FILE_SIZE", DEFAULT_MAX_FILE_SIZE)))
+    parser.add_argument("--image-dpi", type=int, default=int(os.getenv("PARSER_IMAGE_DPI", DEFAULT_IMAGE_DPI)))
     parser.add_argument(
         "--grpc-max-message-size",
         type=int,
@@ -205,6 +241,8 @@ def main() -> None:
         raise ValueError("PARSER_MAX_FILE_SIZE must be positive")
     if args.grpc_max_message_size <= 0:
         raise ValueError("PARSER_GRPC_MAX_MESSAGE_SIZE must be positive")
+    if args.image_dpi <= 0 or args.image_dpi > 720:
+        raise ValueError("PARSER_IMAGE_DPI must be between 1 and 720")
 
     server = grpc.server(
         futures.ThreadPoolExecutor(max_workers=10),
@@ -214,7 +252,7 @@ def main() -> None:
         ],
     )
     document_parser_pb2_grpc.add_DocumentParserServicer_to_server(
-        DocumentParser(Path(args.upload_dir), args.max_file_size), server
+        DocumentParser(Path(args.upload_dir), args.max_file_size, args.image_dpi), server
     )
     server.add_insecure_port(args.address)
     server.start()
@@ -223,7 +261,7 @@ def main() -> None:
 
 
 def _block_type(value: str) -> str | None:
-    """Map PyMuPDF4LLM layout classes to persisted, non-asset block types."""
+    """Map PyMuPDF4LLM layout classes to persisted source-map block types."""
     mapping = {
         "text": "text",
         "title": "title",
@@ -232,22 +270,29 @@ def _block_type(value: str) -> str | None:
         "list-item": "list_item",
         "footnote": "footnote",
         "formula": "formula",
+        "image": "image",
+        "picture": "image",
+        "figure": "image",
+        "table": "table",
     }
     return mapping.get(value)
 
 
-def _valid_box(position, bbox, text: str, page_rect: pymupdf.Rect) -> bool:
+def _valid_position(position, text: str) -> bool:
     if not isinstance(position, (list, tuple)) or len(position) != 2:
         return False
+    start, end = position
+    return all(isinstance(value, (int, float)) for value in (start, end)) and 0 <= start <= end <= len(text)
+
+
+def _valid_bbox(bbox, page_rect: pymupdf.Rect) -> bool:
     if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
         return False
-    start, end = position
     x0, y0, x1, y1 = bbox
-    if not all(isinstance(value, (int, float)) for value in (start, end, x0, y0, x1, y1)):
+    if not all(isinstance(value, (int, float)) for value in (x0, y0, x1, y1)):
         return False
     return (
-        0 <= start <= end <= len(text)
-        and 0 <= x0 < x1 <= page_rect.width
+        0 <= x0 < x1 <= page_rect.width
         and 0 <= y0 < y1 <= page_rect.height
     )
 

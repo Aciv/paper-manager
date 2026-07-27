@@ -30,6 +30,8 @@ type DocumentRepository interface {
 	// ListBlocks returns a document's persisted source-map blocks. pageNumber
 	// of zero returns all pages; a positive value returns one PDF page.
 	ListBlocks(ctx context.Context, documentID uuid.UUID, pageNumber int) ([]types.Block, error)
+	// GetBlock returns one source-map block belonging to documentID.
+	GetBlock(ctx context.Context, documentID, blockID uuid.UUID) (types.Block, error)
 	// Delete removes a document. Database rows with document foreign keys are
 	// removed by ON DELETE CASCADE; non-relational diagnostics are handled by
 	// the repository transaction.
@@ -79,6 +81,9 @@ type DocumentService interface {
 	// GetDocumentBlocks returns selectable source-map blocks, optionally scoped
 	// to one one-based PDF page (zero returns every page).
 	GetDocumentBlocks(ctx context.Context, id string, pageNumber int) ([]types.Block, error)
+	// GetDocumentBlockImage opens a rendered image/table asset after verifying
+	// that blockID belongs to documentID.
+	GetDocumentBlockImage(ctx context.Context, documentID, blockID string) (reader io.ReadCloser, filename string, err error)
 	// DeleteDocument removes the stored object and metadata for one document.
 	DeleteDocument(ctx context.Context, id string) error
 	// DeleteDocumentList removes multiple documents sequentially.

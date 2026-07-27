@@ -160,6 +160,15 @@ func (r *documentRepository) ListBlocks(ctx context.Context, documentID uuid.UUI
 	return blocks, nil
 }
 
+func (r *documentRepository) GetBlock(ctx context.Context, documentID, blockID uuid.UUID) (types.Block, error) {
+	var block types.Block
+	err := repositoryError(r.db.WithContext(ctx).First(&block, "document_id = ? AND id = ?", documentID, blockID).Error)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		logger.Error(ctx, "get document block failed", "document_id", documentID, "block_id", blockID, "error", err)
+	}
+	return block, err
+}
+
 func (r *documentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	var deadLettersDeleted int64
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

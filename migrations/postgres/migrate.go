@@ -36,6 +36,9 @@ var documentMarkdownsUp string
 //go:embed 000008_document_block_source_map.up.sql
 var documentBlockSourceMapUp string
 
+//go:embed 000009_document_block_assets.up.sql
+var documentBlockAssetsUp string
+
 type migration struct {
 	version int64
 	up      string
@@ -51,6 +54,7 @@ var migrations = []migration{
 	{version: 6, up: paperMetadataTagsIndexUp},
 	{version: 7, up: documentMarkdownsUp},
 	{version: 8, up: documentBlockSourceMapUp},
+	{version: 9, up: documentBlockAssetsUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

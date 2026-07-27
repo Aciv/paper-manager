@@ -114,13 +114,15 @@ type RecognitionMetadata struct {
 
 // RecognitionBlock is a parser-owned source-map entry. It intentionally does
 // not contain a database ID or DocumentID: the application assigns those when
-// it durably writes the recognition result. Image and table blocks are not
-// emitted until the recognizer can also provide a durable asset URL.
+// it durably writes the recognition result. ImageData is transport-only; the
+// document service validates and stores it, then exposes a protected URL.
 type RecognitionBlock struct {
-	Ordinal  int              `json:"ordinal"`
-	Type     string           `json:"type"`
-	Text     string           `json:"text"`
-	Location PDFBlockLocation `json:"location"`
+	Ordinal          int              `json:"ordinal"`
+	Type             string           `json:"type"`
+	Text             string           `json:"text"`
+	Location         PDFBlockLocation `json:"location"`
+	ImageData        []byte           `json:"-"`
+	ImageContentType string           `json:"image_content_type,omitempty"`
 }
 
 // RecognitionResult is the raw output package from an external recognizer.

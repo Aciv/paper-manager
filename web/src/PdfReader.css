@@ -1,0 +1,9 @@
+.selected-block-image {
+  display: block;
+  max-width: min(100%, 720px);
+  max-height: 480px;
+  object-fit: contain;
+  border: 1px solid #bfdbfe;
+  border-radius: 5px;
+  background: #fff;
+}
