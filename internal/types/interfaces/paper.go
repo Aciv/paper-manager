@@ -12,7 +12,8 @@ import (
 type PaperService interface {
 	// GetMetadata retrieves one document's bibliographic metadata.
 	GetMetadata(ctx context.Context, documentID string) (*types.PaperMetadata, error)
-	// UpdateMetadata applies a validated partial bibliographic update.
+	// UpdateMetadata applies a validated partial bibliographic update. Calls
+	// without an internal MetadataSource are treated as manual edits.
 	UpdateMetadata(
 		ctx context.Context,
 		documentID string,

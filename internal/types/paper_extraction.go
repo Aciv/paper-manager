@@ -17,6 +17,9 @@ const (
 	MaxPaperExtractionMarkdownBytes = 32 << 20
 	// MaxPaperExtractionBlocks prevents unbounded protobuf and model input.
 	MaxPaperExtractionBlocks = 50_000
+	// MaxPaperExtractionReferences bounds placeholder creation and follow-up
+	// catalog calls from one malformed or adversarial extraction response.
+	MaxPaperExtractionReferences = 2_000
 )
 
 // ErrInvalidPaperExtraction indicates invalid or contradictory extractor data.
@@ -256,6 +259,13 @@ func (result PaperExtractionResult) Validate() error {
 		if err := result.Abstract.Validate(); err != nil {
 			return fmt.Errorf("%w: abstract: %v", ErrInvalidPaperExtraction, err)
 		}
+	}
+	if len(result.References) > MaxPaperExtractionReferences {
+		return fmt.Errorf(
+			"%w: reference count exceeds %d",
+			ErrInvalidPaperExtraction,
+			MaxPaperExtractionReferences,
+		)
 	}
 	for index, reference := range result.References {
 		if strings.TrimSpace(reference) == "" {

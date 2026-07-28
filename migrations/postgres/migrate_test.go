@@ -46,12 +46,25 @@ func TestPaperMetadataAndBasesMigrationCreatesNormalizedTables(t *testing.T) {
 		"RENAME COLUMN filename TO original_filename",
 		"CREATE TABLE IF NOT EXISTS paper_metadata",
 		"tags JSONB NOT NULL DEFAULT '[]'::jsonb",
+		"metadata_source TEXT NOT NULL DEFAULT 'unknown'",
 		"CREATE TABLE IF NOT EXISTS document_bases",
 		"CREATE TABLE IF NOT EXISTS document_base_files",
 		"ON DELETE CASCADE",
 	} {
 		if !strings.Contains(paperMetadataAndBasesUp, fragment) {
 			t.Fatalf("paper metadata/base migration does not include %q", fragment)
+		}
+	}
+}
+
+func TestPaperMetadataSourceMigrationAddsOriginPrecedenceField(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS metadata_source",
+		"'unknown', 'extraction', 'catalog', 'manual'",
+		"chk_paper_metadata_source",
+	} {
+		if !strings.Contains(paperMetadataSourceUp, fragment) {
+			t.Fatalf("paper metadata source migration does not include %q", fragment)
 		}
 	}
 }

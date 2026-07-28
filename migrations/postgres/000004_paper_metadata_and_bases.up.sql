@@ -33,10 +33,14 @@ CREATE TABLE IF NOT EXISTS paper_metadata (
     pages TEXT NOT NULL DEFAULT '',
     language VARCHAR(16) NOT NULL DEFAULT '',
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+    metadata_source TEXT NOT NULL DEFAULT 'unknown',
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT chk_paper_metadata_authors_array CHECK (jsonb_typeof(authors) = 'array'),
-    CONSTRAINT chk_paper_metadata_tags_array CHECK (jsonb_typeof(tags) = 'array')
+    CONSTRAINT chk_paper_metadata_tags_array CHECK (jsonb_typeof(tags) = 'array'),
+    CONSTRAINT chk_paper_metadata_source CHECK (
+        metadata_source IN ('unknown', 'extraction', 'catalog', 'manual')
+    )
 );
 
 -- A metadata row is present for legacy and newly uploaded documents, even

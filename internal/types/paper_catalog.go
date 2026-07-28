@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -40,12 +41,15 @@ func (status PaperCatalogStatus) IsValid() bool {
 }
 
 // PaperCatalogResolveCommand is the typed application command decoded from a
-// queue payload. ExtractionID points to the durable query source.
+// queue payload. The service reloads paper_metadata and paper_citations using
+// DocumentID; no transient extraction result identifier is persisted.
+// MarkdownSHA256 is optional for lookup based only on durable DOI/title/URL
+// metadata. When supplied, it guards a query derived from parsed Markdown
+// against a concurrent reparse.
 type PaperCatalogResolveCommand struct {
 	RequestID      string
 	DocumentID     uuid.UUID
 	MarkdownSHA256 string
-	ExtractionID   uuid.UUID
 	Attempt        int
 }
 
@@ -54,11 +58,10 @@ func (command PaperCatalogResolveCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
 	}
-	if command.ExtractionID == uuid.Nil {
-		return fmt.Errorf("%w: extraction_id is required", ErrInvalidPaperCatalogData)
-	}
-	if err := validateSHA256("markdown_sha256", command.MarkdownSHA256); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidPaperCatalogData, err)
+	if strings.TrimSpace(command.MarkdownSHA256) != "" {
+		if err := validateSHA256("markdown_sha256", command.MarkdownSHA256); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidPaperCatalogData, err)
+		}
 	}
 	if command.Attempt < 0 {
 		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperCatalogData)
@@ -67,19 +70,24 @@ func (command PaperCatalogResolveCommand) Validate() error {
 }
 
 // PaperLookupQuery is the provider-neutral query constructed from one
-// extraction result. At least DOI or title must be present.
+// extraction result. SourceURL supports exact provider-native lookups, such as
+// an arXiv abstract or PDF URL.
 type PaperLookupQuery struct {
 	DOI           string   `json:"doi,omitempty"`
 	Title         string   `json:"title,omitempty"`
+	SourceURL     string   `json:"source_url,omitempty"`
 	Authors       []string `json:"authors,omitempty"`
 	PublishedYear int      `json:"published_year,omitempty"`
+	Venue         string   `json:"venue,omitempty"`
 	Limit         int      `json:"limit,omitempty"`
 }
 
 // Validate checks provider-independent query requirements.
 func (query PaperLookupQuery) Validate() error {
-	if strings.TrimSpace(query.DOI) == "" && strings.TrimSpace(query.Title) == "" {
-		return fmt.Errorf("%w: DOI or title is required", ErrInvalidPaperCatalogData)
+	if strings.TrimSpace(query.DOI) == "" &&
+		strings.TrimSpace(query.Title) == "" &&
+		strings.TrimSpace(query.SourceURL) == "" {
+		return fmt.Errorf("%w: DOI, title, or source URL is required", ErrInvalidPaperCatalogData)
 	}
 	if query.PublishedYear < 0 {
 		return fmt.Errorf("%w: published year cannot be negative", ErrInvalidPaperCatalogData)
@@ -139,10 +147,16 @@ func (candidate PaperCatalogCandidate) Validate() error {
 	if strings.TrimSpace(candidate.Title) == "" {
 		return fmt.Errorf("%w: title is required", ErrInvalidPaperCatalogData)
 	}
-	if candidate.ProviderScore < 0 || candidate.ProviderScore > 1 {
+	if math.IsNaN(candidate.ProviderScore) ||
+		math.IsInf(candidate.ProviderScore, 0) ||
+		candidate.ProviderScore < 0 ||
+		candidate.ProviderScore > 1 {
 		return fmt.Errorf("%w: provider_score must be between 0 and 1", ErrInvalidPaperCatalogData)
 	}
-	if candidate.MatchScore < 0 || candidate.MatchScore > 1 {
+	if math.IsNaN(candidate.MatchScore) ||
+		math.IsInf(candidate.MatchScore, 0) ||
+		candidate.MatchScore < 0 ||
+		candidate.MatchScore > 1 {
 		return fmt.Errorf("%w: match_score must be between 0 and 1", ErrInvalidPaperCatalogData)
 	}
 	if len(candidate.RawMetadata) > 0 && !json.Valid(candidate.RawMetadata) {

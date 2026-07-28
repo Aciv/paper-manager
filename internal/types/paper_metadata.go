@@ -14,25 +14,51 @@ type PaperAuthor struct {
 	Affiliation string `json:"affiliation,omitempty"`
 }
 
+// PaperMetadataSource identifies the writer that produced the current
+// canonical metadata snapshot. Higher-priority writers must not be replaced
+// by lower-priority asynchronous work.
+type PaperMetadataSource string
+
+const (
+	PaperMetadataSourceUnknown    PaperMetadataSource = "unknown"
+	PaperMetadataSourceExtraction PaperMetadataSource = "extraction"
+	PaperMetadataSourceCatalog    PaperMetadataSource = "catalog"
+	PaperMetadataSourceManual     PaperMetadataSource = "manual"
+)
+
+// IsValid reports whether source is a supported metadata origin.
+func (source PaperMetadataSource) IsValid() bool {
+	switch source {
+	case PaperMetadataSourceUnknown,
+		PaperMetadataSourceExtraction,
+		PaperMetadataSourceCatalog,
+		PaperMetadataSourceManual:
+		return true
+	default:
+		return false
+	}
+}
+
 // PaperMetadata stores bibliographic facts about a document. It intentionally
 // excludes base-specific state such as reading progress and personal tags.
 type PaperMetadata struct {
-	DocumentID  uuid.UUID     `gorm:"column:document_id;type:uuid;primaryKey" json:"documentId"`
-	Title       string        `gorm:"column:title;type:text;not null;default:''" json:"title,omitempty"`
-	Abstract    string        `gorm:"column:abstract;type:text;not null;default:''" json:"abstract,omitempty"`
-	Authors     []PaperAuthor `gorm:"column:authors;type:jsonb;serializer:json;not null" json:"authors"`
-	Tags        []string      `gorm:"column:tags;type:jsonb;serializer:json;not null" json:"tags"`
-	SourceName  string        `gorm:"column:source_name;type:text;not null;default:''" json:"sourceName,omitempty"`
-	SourceURL   string        `gorm:"column:source_url;type:text;not null;default:''" json:"sourceUrl,omitempty"`
-	Venue       string        `gorm:"column:venue;type:text;not null;default:''" json:"venue,omitempty"`
-	PublishedAt *time.Time    `gorm:"column:published_at;type:date" json:"publishedAt,omitempty"`
-	Volume      string        `gorm:"column:volume;type:text;not null;default:''" json:"volume,omitempty"`
-	Issue       string        `gorm:"column:issue;type:text;not null;default:''" json:"issue,omitempty"`
-	Pages       string        `gorm:"column:pages;type:text;not null;default:''" json:"pages,omitempty"`
-	Language    string        `gorm:"column:language;type:varchar(16);not null;default:''" json:"language,omitempty"`
-	Metadata    JSON          `gorm:"column:metadata;type:jsonb;serializer:json;not null" json:"metadata,omitempty"`
-	CreatedAt   time.Time     `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
-	UpdatedAt   time.Time     `gorm:"column:updated_at;autoUpdateTime" json:"updatedAt"`
+	DocumentID     uuid.UUID           `gorm:"column:document_id;type:uuid;primaryKey" json:"documentId"`
+	Title          string              `gorm:"column:title;type:text;not null;default:''" json:"title,omitempty"`
+	Abstract       string              `gorm:"column:abstract;type:text;not null;default:''" json:"abstract,omitempty"`
+	Authors        []PaperAuthor       `gorm:"column:authors;type:jsonb;serializer:json;not null" json:"authors"`
+	Tags           []string            `gorm:"column:tags;type:jsonb;serializer:json;not null" json:"tags"`
+	SourceName     string              `gorm:"column:source_name;type:text;not null;default:''" json:"sourceName,omitempty"`
+	SourceURL      string              `gorm:"column:source_url;type:text;not null;default:''" json:"sourceUrl,omitempty"`
+	Venue          string              `gorm:"column:venue;type:text;not null;default:''" json:"venue,omitempty"`
+	PublishedAt    *time.Time          `gorm:"column:published_at;type:date" json:"publishedAt,omitempty"`
+	Volume         string              `gorm:"column:volume;type:text;not null;default:''" json:"volume,omitempty"`
+	Issue          string              `gorm:"column:issue;type:text;not null;default:''" json:"issue,omitempty"`
+	Pages          string              `gorm:"column:pages;type:text;not null;default:''" json:"pages,omitempty"`
+	Language       string              `gorm:"column:language;type:varchar(16);not null;default:''" json:"language,omitempty"`
+	Metadata       JSON                `gorm:"column:metadata;type:jsonb;serializer:json;not null" json:"metadata,omitempty"`
+	MetadataSource PaperMetadataSource `gorm:"column:metadata_source;type:text;not null;default:'unknown'" json:"metadataSource"`
+	CreatedAt      time.Time           `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
+	UpdatedAt      time.Time           `gorm:"column:updated_at;autoUpdateTime" json:"updatedAt"`
 }
 
 func (PaperMetadata) TableName() string { return "paper_metadata" }
@@ -82,11 +108,16 @@ type PaperMetadataUpdate struct {
 	Issue       *string        `json:"issue,omitempty"`
 	Pages       *string        `json:"pages,omitempty"`
 	Language    *string        `json:"language,omitempty"`
+	// MetadataSource is internal write provenance. HTTP clients cannot set it;
+	// PaperService assigns manual while automated pipelines assign their
+	// explicit source.
+	MetadataSource *PaperMetadataSource `json:"-"`
 }
 
 // HasChanges reports whether this patch changes at least one paper field.
 func (u *PaperMetadataUpdate) HasChanges() bool {
 	return u != nil && (u.Title != nil || u.Abstract != nil || u.Authors != nil || u.Tags != nil ||
 		u.SourceName != nil || u.SourceURL != nil || u.Venue != nil || u.PublishedAt != nil ||
-		u.Volume != nil || u.Issue != nil || u.Pages != nil || u.Language != nil)
+		u.Volume != nil || u.Issue != nil || u.Pages != nil || u.Language != nil ||
+		u.MetadataSource != nil)
 }

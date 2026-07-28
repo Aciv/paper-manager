@@ -62,10 +62,11 @@ func (s *paperService) GetMetadata(
 	metadata, err := s.metadata.GetByDocumentID(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return &types.PaperMetadata{
-			DocumentID: id,
-			Authors:    []types.PaperAuthor{},
-			Tags:       []string{},
-			Metadata:   types.JSON(`{}`),
+			DocumentID:     id,
+			Authors:        []types.PaperAuthor{},
+			Tags:           []string{},
+			Metadata:       types.JSON(`{}`),
+			MetadataSource: types.PaperMetadataSourceUnknown,
 		}, nil
 	}
 	if err != nil {
@@ -93,11 +94,24 @@ func (s *paperService) UpdateMetadata(
 	if err != nil {
 		return nil, err
 	}
+	if normalized.MetadataSource == nil {
+		source := types.PaperMetadataSourceManual
+		normalized.MetadataSource = &source
+	}
 	updated, err := s.metadata.Upsert(ctx, id, *normalized)
 	if err != nil {
 		return nil, err
 	}
-	logger.Info(ctx, "paper metadata update completed", "document_id", id)
+	if updated.MetadataSource == *normalized.MetadataSource {
+		logger.Info(ctx, "paper metadata update completed",
+			"document_id", id,
+			"metadata_source", updated.MetadataSource)
+	} else {
+		logger.Info(ctx, "paper metadata update ignored",
+			"document_id", id,
+			"incoming_source", *normalized.MetadataSource,
+			"current_source", updated.MetadataSource)
+	}
 	return &updated, nil
 }
 
@@ -404,6 +418,13 @@ func normalizePaperMetadataUpdate(
 		return nil, nil
 	}
 	normalized := *update
+	if normalized.MetadataSource != nil && !normalized.MetadataSource.IsValid() {
+		return nil, fmt.Errorf(
+			"%w: invalid metadata source %q",
+			ErrInvalidPaperMetadata,
+			*normalized.MetadataSource,
+		)
+	}
 	for _, field := range []*string{
 		normalized.Title,
 		normalized.Abstract,

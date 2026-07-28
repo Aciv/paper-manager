@@ -14,12 +14,19 @@ import (
 
 type paperDocumentRepoStub struct {
 	documents     map[uuid.UUID]types.Document
+	markdowns     map[uuid.UUID]types.DocumentMarkdown
+	blocks        map[uuid.UUID][]types.Block
 	ensureCreated int
 	referenced    func(uuid.UUID) bool
+	search        func(types.DocumentSearch) (types.DocumentPage, error)
 }
 
 func newPaperDocumentRepoStub(documents ...types.Document) *paperDocumentRepoStub {
-	repo := &paperDocumentRepoStub{documents: make(map[uuid.UUID]types.Document)}
+	repo := &paperDocumentRepoStub{
+		documents: make(map[uuid.UUID]types.Document),
+		markdowns: make(map[uuid.UUID]types.DocumentMarkdown),
+		blocks:    make(map[uuid.UUID][]types.Block),
+	}
 	for _, document := range documents {
 		repo.documents[document.ID] = document
 	}
@@ -77,15 +84,21 @@ func (r *paperDocumentRepoStub) DeleteUnknownIfUnreferenced(
 	return true, nil
 }
 
-func (*paperDocumentRepoStub) Search(
-	context.Context, types.DocumentSearch,
+func (r *paperDocumentRepoStub) Search(
+	_ context.Context, search types.DocumentSearch,
 ) (types.DocumentPage, error) {
+	if r.search != nil {
+		return r.search(search)
+	}
 	return types.DocumentPage{}, nil
 }
 
-func (*paperDocumentRepoStub) GetMarkdown(
-	context.Context, uuid.UUID,
+func (r *paperDocumentRepoStub) GetMarkdown(
+	_ context.Context, documentID uuid.UUID,
 ) (types.DocumentMarkdown, error) {
+	if markdown, ok := r.markdowns[documentID]; ok {
+		return markdown, nil
+	}
 	return types.DocumentMarkdown{}, sql.ErrNoRows
 }
 
@@ -95,10 +108,22 @@ func (*paperDocumentRepoStub) ReplaceParsedOutput(
 	return nil
 }
 
-func (*paperDocumentRepoStub) ListBlocks(
-	context.Context, uuid.UUID, int,
+func (r *paperDocumentRepoStub) ListBlocks(
+	_ context.Context, documentID uuid.UUID, pageNumber int,
 ) ([]types.Block, error) {
-	return nil, nil
+	blocks := r.blocks[documentID]
+	if pageNumber == 0 {
+		return append([]types.Block(nil), blocks...), nil
+	}
+	filtered := make([]types.Block, 0)
+	for _, block := range blocks {
+		if block.Location != nil &&
+			block.Location.PageNumber != nil &&
+			*block.Location.PageNumber == pageNumber {
+			filtered = append(filtered, block)
+		}
+	}
+	return filtered, nil
 }
 
 func (*paperDocumentRepoStub) GetBlock(
@@ -204,6 +229,9 @@ func (r *paperMetadataRepoStub) Upsert(
 	}
 	if update.Tags != nil {
 		metadata.Tags = append([]string(nil), (*update.Tags)...)
+	}
+	if update.MetadataSource != nil {
+		metadata.MetadataSource = *update.MetadataSource
 	}
 	r.items[documentID] = metadata
 	return metadata, nil
@@ -479,6 +507,9 @@ func TestPaperServiceNormalizesMetadataUpdateAndSearch(t *testing.T) {
 	}
 	if len(updated.Tags) != 2 || updated.Tags[0] != "ai" || updated.Tags[1] != "systems" {
 		t.Fatalf("tags = %#v, want normalized unique tags", updated.Tags)
+	}
+	if updated.MetadataSource != types.PaperMetadataSourceManual {
+		t.Fatalf("metadata source = %q, want manual", updated.MetadataSource)
 	}
 
 	_, err = service.SearchMetadata(context.Background(), types.PaperSearch{

@@ -2,6 +2,7 @@ package types
 
 import (
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/google/uuid"
@@ -25,10 +26,15 @@ func TestPaperLookupQueryValidateAndEffectiveLimit(t *testing.T) {
 	}
 }
 
-func TestPaperLookupQueryRequiresDOIOrTitle(t *testing.T) {
+func TestPaperLookupQueryRequiresLookupIdentifier(t *testing.T) {
 	err := (PaperLookupQuery{}).Validate()
 	if !errors.Is(err, ErrInvalidPaperCatalogData) {
 		t.Fatalf("expected ErrInvalidPaperCatalogData, got %v", err)
+	}
+
+	query := PaperLookupQuery{SourceURL: "https://arxiv.org/abs/2401.01234"}
+	if err := query.Validate(); err != nil {
+		t.Fatalf("source URL query rejected: %v", err)
 	}
 }
 
@@ -51,21 +57,33 @@ func TestPaperCatalogCandidateValidate(t *testing.T) {
 	if err := candidate.Validate(); !errors.Is(err, ErrInvalidPaperCatalogData) {
 		t.Fatalf("expected invalid raw metadata error, got %v", err)
 	}
+
+	candidate.RawMetadata = nil
+	candidate.ProviderScore = math.NaN()
+	if err := candidate.Validate(); !errors.Is(err, ErrInvalidPaperCatalogData) {
+		t.Fatalf("expected invalid NaN score error, got %v", err)
+	}
 }
 
 func TestPaperCatalogResolveCommandValidate(t *testing.T) {
 	command := PaperCatalogResolveCommand{
 		DocumentID:     uuid.New(),
-		ExtractionID:   uuid.New(),
 		MarkdownSHA256: validTestSHA256(),
 	}
 	if err := command.Validate(); err != nil {
 		t.Fatalf("valid catalog command rejected: %v", err)
 	}
 
-	command.ExtractionID = uuid.Nil
+	command.DocumentID = uuid.Nil
 	if err := command.Validate(); !errors.Is(err, ErrInvalidPaperCatalogData) {
-		t.Fatalf("expected extraction id validation error, got %v", err)
+		t.Fatalf("expected document id validation error, got %v", err)
+	}
+}
+
+func TestPaperCatalogResolveCommandAllowsUnknownWithoutRevision(t *testing.T) {
+	command := PaperCatalogResolveCommand{DocumentID: uuid.New()}
+	if err := command.Validate(); err != nil {
+		t.Fatalf("source-free catalog command rejected: %v", err)
 	}
 }
 

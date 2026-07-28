@@ -8,6 +8,8 @@ import (
 	"paperMaster/internal/config"
 	"paperMaster/internal/handler"
 	"paperMaster/internal/infrastructure/docrecognition"
+	"paperMaster/internal/infrastructure/papercatalog"
+	"paperMaster/internal/infrastructure/paperextraction"
 	"paperMaster/internal/router"
 
 	"go.uber.org/dig"
@@ -28,8 +30,11 @@ func Build() *dig.Container {
 	must(dependencies.Provide(router.NewAsynqServer))
 	must(dependencies.Provide(router.NewTaskInspector))
 	must(dependencies.Provide(docrecognition.NewRecognizer))
+	must(dependencies.Provide(paperextraction.NewExtractor))
+	must(dependencies.Provide(papercatalog.NewRegistryFromConfig))
 	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessing))
 	must(dependencies.Provide(appservice.NewPaperService))
+	must(dependencies.Provide(appservice.NewPaperInfoService))
 	must(dependencies.Provide(appservice.NewDocumentBaseService))
 	must(dependencies.Provide(appservice.NewDocumentHousekeepingService))
 	must(dependencies.Provide(repository.NewTaskDeadLetterRepository))

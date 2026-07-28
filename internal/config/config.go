@@ -15,6 +15,8 @@ const DefaultMaxUploadSize int64 = 100 << 20 // 100 MiB
 const (
 	defaultDocumentHousekeepingInterval = 5 * time.Minute
 	defaultDocumentStaleThreshold       = time.Hour + 10*time.Minute
+	defaultPaperCatalogTimeout          = 10 * time.Second
+	defaultPaperCatalogConcurrency      = 4
 )
 
 // Config contains the infrastructure options selected at process startup.
@@ -37,6 +39,13 @@ type Config struct {
 	DocumentRecognitionDriver    string
 	ParserGRPCAddress            string
 	ParserGRPCMaxMessageSize     int
+	PaperCatalogProviders        []string
+	PaperCatalogTimeout          time.Duration
+	PaperCatalogConcurrency      int
+	PaperCatalogUserAgent        string
+	SemanticScholarAPIKey        string
+	OpenAlexAPIKey               string
+	CrossrefMailto               string
 }
 
 func Load() (Config, error) {
@@ -68,6 +77,25 @@ func Load() (Config, error) {
 		}
 		parserMessageSize = parsed
 	}
+	paperCatalogTimeout, err := durationEnv("PAPER_CATALOG_TIMEOUT", defaultPaperCatalogTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	paperCatalogConcurrency, err := positiveIntEnv(
+		"PAPER_CATALOG_CONCURRENCY",
+		defaultPaperCatalogConcurrency,
+		32,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	paperCatalogProviders := listEnv(
+		"PAPER_CATALOG_PROVIDERS",
+		"arxiv,semantic_scholar,openalex,crossref",
+	)
+	if len(paperCatalogProviders) == 0 {
+		return Config{}, fmt.Errorf("PAPER_CATALOG_PROVIDERS must contain at least one provider")
+	}
 	return Config{
 		HTTPAddress:                  env("HTTP_ADDR", "127.0.0.1:8080"),
 		DatabaseDriver:               strings.ToLower(env("DB_DRIVER", "postgres")),
@@ -84,7 +112,26 @@ func Load() (Config, error) {
 		DocumentRecognitionDriver:    strings.ToLower(env("DOCUMENT_RECOGNITION_DRIVER", "default")),
 		ParserGRPCAddress:            env("PARSER_GRPC_ADDR", "127.0.0.1:50051"),
 		ParserGRPCMaxMessageSize:     int(parserMessageSize),
+		PaperCatalogProviders:        paperCatalogProviders,
+		PaperCatalogTimeout:          paperCatalogTimeout,
+		PaperCatalogConcurrency:      paperCatalogConcurrency,
+		PaperCatalogUserAgent:        env("PAPER_CATALOG_USER_AGENT", "papersManager/1.0"),
+		SemanticScholarAPIKey:        strings.TrimSpace(os.Getenv("SEMANTIC_SCHOLAR_API_KEY")),
+		OpenAlexAPIKey:               strings.TrimSpace(os.Getenv("OPENALEX_API_KEY")),
+		CrossrefMailto:               strings.TrimSpace(os.Getenv("CROSSREF_MAILTO")),
 	}, nil
+}
+
+func positiveIntEnv(key string, fallback, maximum int) (int, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed <= 0 || parsed > maximum {
+		return 0, fmt.Errorf("%s must be between 1 and %d", key, maximum)
+	}
+	return parsed, nil
 }
 
 func durationEnv(key string, fallback time.Duration) (time.Duration, error) {
@@ -104,4 +151,22 @@ func env(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func listEnv(key, fallback string) []string {
+	raw := env(key, fallback)
+	values := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		values = append(values, value)
+	}
+	return values
 }

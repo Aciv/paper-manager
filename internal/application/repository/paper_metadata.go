@@ -37,6 +37,8 @@ func (r *paperMetadataRepository) Upsert(
 	ctx context.Context, documentID uuid.UUID, update types.PaperMetadataUpdate,
 ) (types.PaperMetadata, error) {
 	var updated types.PaperMetadata
+	applied := false
+	incomingSource := types.PaperMetadataSourceUnknown
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		metadata := &types.PaperMetadata{}
 		preparePaperMetadata(metadata, documentID)
@@ -48,9 +50,17 @@ func (r *paperMetadataRepository) Upsert(
 			return err
 		}
 		if len(changes) > 0 {
-			if err := tx.Model(&types.PaperMetadata{}).Where("document_id = ?", documentID).Updates(changes).Error; err != nil {
-				return err
+			if update.MetadataSource != nil {
+				incomingSource = *update.MetadataSource
 			}
+			result := tx.Model(&types.PaperMetadata{}).
+				Where("document_id = ?", documentID).
+				Where("metadata_source IN ?", paperMetadataWritableSources(incomingSource)).
+				Updates(changes)
+			if result.Error != nil {
+				return result.Error
+			}
+			applied = result.RowsAffected > 0
 		}
 		return tx.First(&updated, "document_id = ?", documentID).Error
 	})
@@ -58,7 +68,17 @@ func (r *paperMetadataRepository) Upsert(
 		logger.Error(ctx, "upsert paper metadata failed", "document_id", documentID, "error", err)
 		return types.PaperMetadata{}, repositoryError(err)
 	}
-	logger.Info(ctx, "paper metadata updated", "document_id", documentID)
+	if applied {
+		logger.Info(ctx, "paper metadata updated",
+			"document_id", documentID,
+			"metadata_source", incomingSource)
+	} else {
+		logger.Info(ctx, "paper metadata update skipped",
+			"document_id", documentID,
+			"incoming_source", incomingSource,
+			"current_source", updated.MetadataSource,
+			"reason", "higher-priority metadata source")
+	}
 	return updated, nil
 }
 
@@ -123,6 +143,7 @@ func preparePaperMetadata(metadata *types.PaperMetadata, documentID uuid.UUID) {
 	metadata.Authors = []types.PaperAuthor{}
 	metadata.Tags = []string{}
 	metadata.Metadata = types.JSON(`{}`)
+	metadata.MetadataSource = types.PaperMetadataSourceUnknown
 }
 
 func paperMetadataChanges(update *types.PaperMetadataUpdate) (map[string]interface{}, error) {
@@ -179,7 +200,43 @@ func paperMetadataChanges(update *types.PaperMetadataUpdate) (map[string]interfa
 	if update.Language != nil {
 		changes["language"] = *update.Language
 	}
+	if update.MetadataSource != nil {
+		if !update.MetadataSource.IsValid() {
+			return nil, fmt.Errorf("invalid paper metadata source %q", *update.MetadataSource)
+		}
+		changes["metadata_source"] = *update.MetadataSource
+	}
 	return changes, nil
+}
+
+// paperMetadataWritableSources returns the current origins that an incoming
+// write may replace. The repository applies this predicate in the UPDATE
+// itself so concurrent workers cannot bypass source precedence.
+func paperMetadataWritableSources(
+	incoming types.PaperMetadataSource,
+) []types.PaperMetadataSource {
+	switch incoming {
+	case types.PaperMetadataSourceManual:
+		return []types.PaperMetadataSource{
+			types.PaperMetadataSourceUnknown,
+			types.PaperMetadataSourceExtraction,
+			types.PaperMetadataSourceCatalog,
+			types.PaperMetadataSourceManual,
+		}
+	case types.PaperMetadataSourceCatalog:
+		return []types.PaperMetadataSource{
+			types.PaperMetadataSourceUnknown,
+			types.PaperMetadataSourceExtraction,
+			types.PaperMetadataSourceCatalog,
+		}
+	case types.PaperMetadataSourceExtraction:
+		return []types.PaperMetadataSource{
+			types.PaperMetadataSourceUnknown,
+			types.PaperMetadataSourceExtraction,
+		}
+	default:
+		return []types.PaperMetadataSource{types.PaperMetadataSourceUnknown}
+	}
 }
 
 var _ interfaces.PaperMetadataRepository = (*paperMetadataRepository)(nil)

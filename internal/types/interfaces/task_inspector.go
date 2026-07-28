@@ -26,7 +26,7 @@ type TaskInspector interface {
 	// CancelTasksForDocument: the housekeeping sweep calls it before
 	// flipping a long-idle "processing" row to "failed" so
 	// it can tell a genuinely orphaned row (no task anywhere) from one
-	// whose enrichment subtasks are merely backlogged behind a busy
+	// whose processing subtasks are merely backlogged behind a busy
 	// queue (no span heartbeat yet because no worker has picked them up).
 	//
 	// Best-effort and short-circuiting: it returns true as soon as the

@@ -34,3 +34,48 @@ func TestPaperMetadataChangesNormalizesNilTagsToJSONBArray(t *testing.T) {
 		t.Fatalf("nil tags encoded as %#v, want []", expression.Vars[0])
 	}
 }
+
+func TestPaperMetadataWritableSourcesEnforcesPriority(t *testing.T) {
+	tests := []struct {
+		incoming types.PaperMetadataSource
+		want     []types.PaperMetadataSource
+	}{
+		{
+			incoming: types.PaperMetadataSourceExtraction,
+			want: []types.PaperMetadataSource{
+				types.PaperMetadataSourceUnknown,
+				types.PaperMetadataSourceExtraction,
+			},
+		},
+		{
+			incoming: types.PaperMetadataSourceCatalog,
+			want: []types.PaperMetadataSource{
+				types.PaperMetadataSourceUnknown,
+				types.PaperMetadataSourceExtraction,
+				types.PaperMetadataSourceCatalog,
+			},
+		},
+		{
+			incoming: types.PaperMetadataSourceManual,
+			want: []types.PaperMetadataSource{
+				types.PaperMetadataSourceUnknown,
+				types.PaperMetadataSourceExtraction,
+				types.PaperMetadataSourceCatalog,
+				types.PaperMetadataSourceManual,
+			},
+		},
+	}
+	for _, test := range tests {
+		got := paperMetadataWritableSources(test.incoming)
+		if len(got) != len(test.want) {
+			t.Fatalf("%s writable source count = %d, want %d",
+				test.incoming, len(got), len(test.want))
+		}
+		for index := range test.want {
+			if got[index] != test.want[index] {
+				t.Fatalf("%s writable sources = %#v, want %#v",
+					test.incoming, got, test.want)
+			}
+		}
+	}
+}

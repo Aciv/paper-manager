@@ -84,6 +84,13 @@ services:
       DOCUMENT_RECOGNITION_DRIVER: builtin
       REDIS_ADDR: redis:6379
       CORS_ORIGIN: http://localhost:5173
+      PAPER_CATALOG_PROVIDERS: ${PAPER_CATALOG_PROVIDERS:-arxiv,semantic_scholar,openalex,crossref}
+      PAPER_CATALOG_TIMEOUT: ${PAPER_CATALOG_TIMEOUT:-10s}
+      PAPER_CATALOG_CONCURRENCY: ${PAPER_CATALOG_CONCURRENCY:-4}
+      PAPER_CATALOG_USER_AGENT: ${PAPER_CATALOG_USER_AGENT:-papersManager/1.0}
+      SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
+      OPENALEX_API_KEY: ${OPENALEX_API_KEY:-}
+      CROSSREF_MAILTO: ${CROSSREF_MAILTO:-}
     volumes:
       - ./data/uploads:/data/uploads
       - ./data/recognition-output:/data/recognition-output

@@ -94,6 +94,19 @@ func TestPaperExtractionResultValidate(t *testing.T) {
 	}
 }
 
+func TestPaperExtractionResultRejectsTooManyReferences(t *testing.T) {
+	result := PaperExtractionResult{
+		ExtractorName: "markdown-rules",
+		References:    make([]string, MaxPaperExtractionReferences+1),
+	}
+	for index := range result.References {
+		result.References[index] = "reference"
+	}
+	if err := result.Validate(); !errors.Is(err, ErrInvalidPaperExtraction) {
+		t.Fatalf("expected reference count validation error, got %v", err)
+	}
+}
+
 func TestPaperExtractionStatusIsValid(t *testing.T) {
 	if !PaperExtractionStatusSuccess.IsValid() {
 		t.Fatal("success extraction status should be valid")

@@ -42,19 +42,17 @@ func TestPaperMetadataExtractPayloadRejectsInvalidFields(t *testing.T) {
 		{DocumentID: uuid.NewString(), MarkdownSHA256: validTestSHA256(), Attempt: -1},
 	}
 	for index, payload := range tests {
-		if err := payload.Validate(); !errors.Is(err, ErrInvalidPaperTaskPayload) {
-			t.Errorf("case %d: expected ErrInvalidPaperTaskPayload, got %v", index, err)
+		if err := payload.Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
+			t.Errorf("case %d: expected ErrInvalidPaperInfoTaskPayload, got %v", index, err)
 		}
 	}
 }
 
 func TestPaperCatalogResolvePayloadCommand(t *testing.T) {
 	documentID := uuid.New()
-	extractionID := uuid.New()
 	payload := PaperCatalogResolvePayload{
 		DocumentID:     documentID.String(),
 		MarkdownSHA256: validTestSHA256(),
-		ExtractionID:   extractionID.String(),
 		Attempt:        1,
 	}
 
@@ -62,7 +60,7 @@ func TestPaperCatalogResolvePayloadCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convert valid catalog payload: %v", err)
 	}
-	if command.DocumentID != documentID || command.ExtractionID != extractionID {
+	if command.DocumentID != documentID {
 		t.Fatalf("unexpected command identifiers: %#v", command)
 	}
 	if err := command.Validate(); err != nil {
@@ -70,12 +68,23 @@ func TestPaperCatalogResolvePayloadCommand(t *testing.T) {
 	}
 }
 
-func TestPaperCatalogResolvePayloadRequiresExtractionID(t *testing.T) {
+func TestPaperCatalogResolvePayloadRejectsInvalidRevision(t *testing.T) {
 	payload := PaperCatalogResolvePayload{
 		DocumentID:     uuid.NewString(),
-		MarkdownSHA256: validTestSHA256(),
+		MarkdownSHA256: "invalid",
 	}
-	if err := payload.Validate(); !errors.Is(err, ErrInvalidPaperTaskPayload) {
-		t.Fatalf("expected ErrInvalidPaperTaskPayload, got %v", err)
+	if err := payload.Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
+		t.Fatalf("expected ErrInvalidPaperInfoTaskPayload, got %v", err)
+	}
+}
+
+func TestPaperCatalogResolvePayloadAllowsUnknownWithoutRevision(t *testing.T) {
+	payload := PaperCatalogResolvePayload{DocumentID: uuid.NewString()}
+	command, err := payload.Command()
+	if err != nil {
+		t.Fatalf("source-free catalog payload rejected: %v", err)
+	}
+	if command.MarkdownSHA256 != "" {
+		t.Fatalf("unexpected Markdown revision %q", command.MarkdownSHA256)
 	}
 }

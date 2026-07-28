@@ -32,9 +32,9 @@ const (
 	//TypeKnowledgeListDelete  = "knowledge:list_delete"
 )
 
-// ErrInvalidPaperTaskPayload indicates that an enrichment task cannot be
-// safely converted into a typed application command.
-var ErrInvalidPaperTaskPayload = errors.New("invalid paper enrichment task payload")
+// ErrInvalidPaperInfoTaskPayload indicates that a paper-information task
+// cannot be safely converted into a typed application command.
+var ErrInvalidPaperInfoTaskPayload = errors.New("invalid paper info task payload")
 
 type DocumentProcessPayload struct {
 	// RequestID carries the HTTP correlation ID into asynchronous work.
@@ -75,7 +75,7 @@ type PaperMetadataExtractPayload struct {
 	DocumentID string `json:"document_id"`
 	// MarkdownSHA256 pins the task to one parsed Markdown revision.
 	MarkdownSHA256 string `json:"markdown_sha256"`
-	// Attempt identifies one user-initiated enrichment run. Queue retries retain
+	// Attempt identifies one user-initiated paper-info run. Queue retries retain
 	// the same attempt.
 	Attempt int `json:"attempt,omitempty"`
 }
@@ -93,10 +93,10 @@ func (p PaperMetadataExtractPayload) Command() (PaperMetadataExtractCommand, err
 		return PaperMetadataExtractCommand{}, err
 	}
 	if err := validateSHA256("markdown_sha256", p.MarkdownSHA256); err != nil {
-		return PaperMetadataExtractCommand{}, fmt.Errorf("%w: %v", ErrInvalidPaperTaskPayload, err)
+		return PaperMetadataExtractCommand{}, fmt.Errorf("%w: %v", ErrInvalidPaperInfoTaskPayload, err)
 	}
 	if p.Attempt < 0 {
-		return PaperMetadataExtractCommand{}, fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperTaskPayload)
+		return PaperMetadataExtractCommand{}, fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperInfoTaskPayload)
 	}
 	return PaperMetadataExtractCommand{
 		RequestID:      strings.TrimSpace(p.RequestID),
@@ -107,18 +107,17 @@ func (p PaperMetadataExtractPayload) Command() (PaperMetadataExtractCommand, err
 }
 
 // PaperCatalogResolvePayload is the durable queue message for external catalog
-// lookup. ExtractionID identifies the persisted Python result that supplies
-// the query; title, authors, and provider responses never enter Redis.
+// lookup. Query inputs are reloaded from paper_metadata and paper_citations;
+// title, authors, references, and provider responses never enter Redis.
 type PaperCatalogResolvePayload struct {
 	// RequestID carries HTTP correlation into asynchronous work.
 	RequestID string `json:"request_id,omitempty"`
 	// DocumentID identifies the source document.
 	DocumentID string `json:"document_id"`
-	// MarkdownSHA256 rejects catalog work made stale by document reprocessing.
-	MarkdownSHA256 string `json:"markdown_sha256"`
-	// ExtractionID identifies the persisted extraction run used as query input.
-	ExtractionID string `json:"extraction_id"`
-	// Attempt identifies one user-initiated enrichment run. Queue retries retain
+	// MarkdownSHA256 rejects stale work when lookup inputs came from parsed
+	// Markdown. It is omitted for metadata-only lookup and unknown placeholders.
+	MarkdownSHA256 string `json:"markdown_sha256,omitempty"`
+	// Attempt identifies one user-initiated paper-info run. Queue retries retain
 	// the same attempt.
 	Attempt int `json:"attempt,omitempty"`
 }
@@ -135,21 +134,18 @@ func (p PaperCatalogResolvePayload) Command() (PaperCatalogResolveCommand, error
 	if err != nil {
 		return PaperCatalogResolveCommand{}, err
 	}
-	extractionID, err := parsePaperTaskUUID("extraction_id", p.ExtractionID)
-	if err != nil {
-		return PaperCatalogResolveCommand{}, err
-	}
-	if err := validateSHA256("markdown_sha256", p.MarkdownSHA256); err != nil {
-		return PaperCatalogResolveCommand{}, fmt.Errorf("%w: %v", ErrInvalidPaperTaskPayload, err)
+	if strings.TrimSpace(p.MarkdownSHA256) != "" {
+		if err := validateSHA256("markdown_sha256", p.MarkdownSHA256); err != nil {
+			return PaperCatalogResolveCommand{}, fmt.Errorf("%w: %v", ErrInvalidPaperInfoTaskPayload, err)
+		}
 	}
 	if p.Attempt < 0 {
-		return PaperCatalogResolveCommand{}, fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperTaskPayload)
+		return PaperCatalogResolveCommand{}, fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperInfoTaskPayload)
 	}
 	return PaperCatalogResolveCommand{
 		RequestID:      strings.TrimSpace(p.RequestID),
 		DocumentID:     documentID,
 		MarkdownSHA256: strings.ToLower(strings.TrimSpace(p.MarkdownSHA256)),
-		ExtractionID:   extractionID,
 		Attempt:        p.Attempt,
 	}, nil
 }
@@ -157,7 +153,7 @@ func (p PaperCatalogResolvePayload) Command() (PaperCatalogResolveCommand, error
 func parsePaperTaskUUID(fieldName, value string) (uuid.UUID, error) {
 	id, err := uuid.Parse(strings.TrimSpace(value))
 	if err != nil || id == uuid.Nil {
-		return uuid.Nil, fmt.Errorf("%w: %s must be a non-zero UUID", ErrInvalidPaperTaskPayload, fieldName)
+		return uuid.Nil, fmt.Errorf("%w: %s must be a non-zero UUID", ErrInvalidPaperInfoTaskPayload, fieldName)
 	}
 	return id, nil
 }

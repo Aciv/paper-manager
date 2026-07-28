@@ -45,6 +45,9 @@ var paperCitationsUp string
 //go:embed 000011_unknown_citations.up.sql
 var unknownCitationsUp string
 
+//go:embed 000012_paper_metadata_source.up.sql
+var paperMetadataSourceUp string
+
 type migration struct {
 	version int64
 	up      string
@@ -63,6 +66,7 @@ var migrations = []migration{
 	{version: 9, up: documentBlockAssetsUp},
 	{version: 10, up: paperCitationsUp},
 	{version: 11, up: unknownCitationsUp},
+	{version: 12, up: paperMetadataSourceUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The
