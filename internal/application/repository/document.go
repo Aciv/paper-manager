@@ -65,6 +65,64 @@ func (r *documentRepository) Get(ctx context.Context, id uuid.UUID) (types.Docum
 	return document, err
 }
 
+func (r *documentRepository) EnsureUnknown(
+	ctx context.Context, id uuid.UUID,
+) (types.Document, bool, error) {
+	if id == uuid.Nil {
+		return types.Document{}, false, errors.New("unknown document id is required")
+	}
+	placeholder := types.Document{
+		ID:               id,
+		OriginalFilename: "",
+		ContentType:      types.UnknownDocumentContentType,
+		SizeBytes:        0,
+		DOI:              "",
+		StorageKey:       types.UnknownDocumentStorageScheme + id.String(),
+		Status:           types.DocumentStatusUnknown,
+	}
+	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&placeholder)
+	if result.Error != nil {
+		logger.Error(ctx, "ensure unknown document failed", "document_id", id, "error", result.Error)
+		return types.Document{}, false, result.Error
+	}
+	document, err := r.Get(ctx, id)
+	if err != nil {
+		return types.Document{}, false, err
+	}
+	if document.Status != types.DocumentStatusUnknown {
+		return types.Document{}, false, fmt.Errorf("%w: %s", types.ErrUnknownDocumentConflict, id)
+	}
+	created := result.RowsAffected > 0
+	if created {
+		logger.Info(ctx, "unknown document created", "document_id", id)
+	}
+	return document, created, nil
+}
+
+func (r *documentRepository) DeleteUnknownIfUnreferenced(
+	ctx context.Context, id uuid.UUID,
+) (bool, error) {
+	result := r.db.WithContext(ctx).
+		Where(
+			`id = ? AND status = ? AND NOT EXISTS (
+				SELECT 1 FROM paper_citations
+				WHERE citing_document_id = documents.id OR cited_document_id = documents.id
+			)`,
+			id,
+			types.DocumentStatusUnknown,
+		).
+		Delete(&types.Document{})
+	if result.Error != nil {
+		logger.Error(ctx, "delete unreferenced unknown document failed", "document_id", id, "error", result.Error)
+		return false, result.Error
+	}
+	deleted := result.RowsAffected > 0
+	if deleted {
+		logger.Info(ctx, "unreferenced unknown document deleted", "document_id", id)
+	}
+	return deleted, nil
+}
+
 func (r *documentRepository) Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
 	page := search.Page
 	if page < 1 {
@@ -78,7 +136,8 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 		pageSize = types.DocumentPageSize
 	}
 
-	query := r.db.WithContext(ctx).Model(&types.Document{})
+	query := r.db.WithContext(ctx).Model(&types.Document{}).
+		Where("documents.status <> ?", types.DocumentStatusUnknown)
 	if search.ID != nil {
 		query = query.Where("documents.id = ?", *search.ID)
 	}
@@ -199,7 +258,7 @@ func (r *documentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 		return err
 	}
 	logger.Info(ctx, "document database record deleted", "document_id", id, "dead_letters_deleted", deadLettersDeleted,
-		"cascaded_relations", "document_blocks,document_markdowns,paper_metadata,document_base_files")
+		"cascaded_relations", "document_blocks,document_markdowns,paper_metadata,document_base_files,paper_citations")
 	return nil
 }
 

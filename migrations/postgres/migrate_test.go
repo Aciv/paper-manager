@@ -106,3 +106,31 @@ func TestDocumentBlockAssetMigrationKeepsStorageKeyPrivate(t *testing.T) {
 		t.Fatal("document block asset migration does not add asset_key")
 	}
 }
+
+func TestPaperCitationsMigrationCreatesDirectionalCascadeRelation(t *testing.T) {
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS paper_citations",
+		"citing_document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE",
+		"cited_document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE",
+		"raw_reference TEXT NOT NULL",
+		"PRIMARY KEY (citing_document_id, cited_document_id)",
+		"CHECK (citing_document_id <> cited_document_id)",
+		"idx_paper_citations_cited_document_id",
+	} {
+		if !strings.Contains(paperCitationsUp, fragment) {
+			t.Fatalf("paper citations migration does not include %q", fragment)
+		}
+	}
+}
+
+func TestUnknownCitationsMigrationAddsPlaceholderStatusAndRawEvidence(t *testing.T) {
+	for _, fragment := range []string{
+		"'unknown'",
+		"ADD COLUMN IF NOT EXISTS raw_reference TEXT NOT NULL DEFAULT ''",
+		"ALTER COLUMN raw_reference DROP DEFAULT",
+	} {
+		if !strings.Contains(unknownCitationsUp, fragment) {
+			t.Fatalf("unknown citations migration does not include %q", fragment)
+		}
+	}
+}

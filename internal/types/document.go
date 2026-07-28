@@ -9,14 +9,20 @@ import (
 
 // ErrDuplicateDOI is returned when a non-empty DOI already belongs to a document.
 var (
-	ErrDuplicateDOI          = errors.New("document with this DOI already exists")
-	ErrDocumentNotProcessing = errors.New("document is no longer processing")
+	ErrDuplicateDOI            = errors.New("document with this DOI already exists")
+	ErrDocumentNotProcessing   = errors.New("document is no longer processing")
+	ErrUnknownDocumentConflict = errors.New(
+		"unknown placeholder ID belongs to a source document",
+	)
 )
 
 // DocumentStatus is the lifecycle state persisted in documents.status.
 type DocumentStatus string
 
 const (
+	// DocumentStatusUnknown identifies a bibliographic placeholder without a
+	// source file. It must not be queued for document recognition.
+	DocumentStatusUnknown    DocumentStatus = "unknown"
 	DocumentStatusUploaded   DocumentStatus = "uploaded"
 	DocumentStatusQueued     DocumentStatus = "queued"
 	DocumentStatusProcessing DocumentStatus = "processing"
@@ -24,6 +30,15 @@ const (
 	DocumentStatusDeleting   DocumentStatus = "deleting"
 	DocumentStatusReady      DocumentStatus = "ready"
 	DocumentStatusFailed     DocumentStatus = "failed"
+)
+
+const (
+	// UnknownDocumentContentType distinguishes bibliographic placeholders from
+	// uploaded source files.
+	UnknownDocumentContentType = "application/x-paper-reference"
+	// UnknownDocumentStorageScheme provides a collision-free internal key for a
+	// placeholder that deliberately has no object in FileStorage.
+	UnknownDocumentStorageScheme = "unknown://"
 )
 
 // Document maps to the documents table.
@@ -34,7 +49,7 @@ type Document struct {
 	SizeBytes        int64          `gorm:"column:size_bytes;not null;check:size_bytes >= 0" json:"sizeBytes"`
 	DOI              string         `gorm:"column:doi;type:text;not null;default:'';index:idx_documents_doi" json:"doi,omitempty"`
 	StorageKey       string         `gorm:"column:storage_key;type:text;not null;uniqueIndex" json:"-"`
-	Status           DocumentStatus `gorm:"column:status;type:text;not null;default:uploaded;check:chk_documents_status,status IN ('uploaded','queued','processing','cancelled','deleting','ready','failed')" json:"status"`
+	Status           DocumentStatus `gorm:"column:status;type:text;not null;default:uploaded;check:chk_documents_status,status IN ('unknown','uploaded','queued','processing','cancelled','deleting','ready','failed')" json:"status"`
 	ErrorMessage     *string        `gorm:"column:error_message;type:text" json:"errorMessage,omitempty"`
 	CreatedAt        time.Time      `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
 	UpdatedAt        time.Time      `gorm:"column:updated_at;autoUpdateTime" json:"updatedAt"`

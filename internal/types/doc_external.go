@@ -143,7 +143,4 @@ type RecognitionResult struct {
 	// sent in task payloads and is converted to persisted Blocks by the
 	// document service.
 	Blocks []RecognitionBlock `json:"blocks,omitempty"`
-	// PaperMetadata is optional bibliographic data extracted alongside the
-	// Markdown. It remains separate from the raw parser output package.
-	PaperMetadata *PaperMetadata `json:"paper_metadata,omitempty"`
 }

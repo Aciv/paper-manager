@@ -52,6 +52,30 @@ func (s *documentStatusRepoStub) Get(_ context.Context, id uuid.UUID) (types.Doc
 	return s.document, nil
 }
 
+func (s *documentStatusRepoStub) EnsureUnknown(
+	_ context.Context, id uuid.UUID,
+) (types.Document, bool, error) {
+	if s.document.ID == id {
+		return s.document, false, nil
+	}
+	s.document = types.Document{
+		ID:         id,
+		StorageKey: types.UnknownDocumentStorageScheme + id.String(),
+		Status:     types.DocumentStatusUnknown,
+	}
+	return s.document, true, nil
+}
+
+func (s *documentStatusRepoStub) DeleteUnknownIfUnreferenced(
+	_ context.Context, id uuid.UUID,
+) (bool, error) {
+	if s.document.ID != id || s.document.Status != types.DocumentStatusUnknown {
+		return false, nil
+	}
+	s.deleted = true
+	return true, nil
+}
+
 func (s *documentStatusRepoStub) Search(context.Context, types.DocumentSearch) (types.DocumentPage, error) {
 	return types.DocumentPage{}, nil
 }
@@ -223,6 +247,45 @@ func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 		if _, err := storage.Open(context.Background(), key); err == nil {
 			t.Fatalf("stored object %q still exists after deletion", key)
 		}
+	}
+}
+
+func TestUnknownDocumentHasNoSourceFile(t *testing.T) {
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{
+		document: types.Document{
+			ID:     documentID,
+			Status: types.DocumentStatusUnknown,
+		},
+	}
+	svc := NewDocumentService(repo, nil)
+
+	reader, _, err := svc.GetDocumentFile(context.Background(), documentID.String())
+	if reader != nil {
+		reader.Close()
+		t.Fatal("GetDocumentFile() returned a reader for an unknown placeholder")
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetDocumentFile() error = %v, want sql.ErrNoRows", err)
+	}
+}
+
+func TestDeleteUnknownDocumentSkipsObjectStorage(t *testing.T) {
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{
+		document: types.Document{
+			ID:         documentID,
+			StorageKey: "unknown://" + documentID.String(),
+			Status:     types.DocumentStatusUnknown,
+		},
+	}
+	svc := NewDocumentService(repo, nil)
+
+	if err := svc.DeleteDocument(context.Background(), documentID.String()); err != nil {
+		t.Fatalf("DeleteDocument() error = %v", err)
+	}
+	if !repo.deleted {
+		t.Fatal("unknown placeholder was not deleted from the repository")
 	}
 }
 

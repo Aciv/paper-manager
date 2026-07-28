@@ -4,10 +4,17 @@
 .vscode
 .example
 .cc_task
+.codex_plan
 AGENTS.md
+__pycache__/
+*.py[cod]
 
+/model_train
 
 # Runtime files
 Logs/
 data/uploads/
 
+# Local model corpora and trained artifacts
+model_train/data/
+model_train/artifacts/

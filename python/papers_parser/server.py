@@ -22,8 +22,19 @@ import pymupdf4llm
 
 import document_parser_pb2
 import document_parser_pb2_grpc
+from logger import get_logger
+from papers_parser.markdown_cleaner import clean_markdown_page
+from papers_parser.markdown_metadata import extract_paper_sections
 
-LOG = logging.getLogger(__name__)
+
+def _log_level_from_env() -> int:
+    """Return a safe standard-library logging level from ``LOG_LEVEL``."""
+    configured = os.getenv("LOG_LEVEL", "INFO").strip().upper()
+    level = getattr(logging, configured, None)
+    return level if isinstance(level, int) else logging.INFO
+
+
+LOG = get_logger(__name__, _log_level_from_env())
 SUPPORTED_TYPES = {"application/pdf"}
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
@@ -38,7 +49,12 @@ DEFAULT_IMAGE_DPI = 72
 class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
     parser_name = "pymupdf4llm"
 
-    def __init__(self, upload_dir: Path, max_file_size: int, image_dpi: int):
+    def __init__(
+        self,
+        upload_dir: Path,
+        max_file_size: int,
+        image_dpi: int,
+    ):
         self.upload_dir = upload_dir.resolve()
         self.max_file_size = max_file_size
         self.image_dpi = image_dpi
@@ -61,13 +77,19 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                 context.abort(grpc.StatusCode.CANCELLED, "recognition request was cancelled")
 
             pages = pymupdf4llm.to_markdown(str(source_path), page_chunks=True)
-            page_text = [page["text"] if isinstance(page, dict) else str(page) for page in pages]
+            raw_page_text = [page["text"] if isinstance(page, dict) else str(page) for page in pages]
+            cleaned_pages = [clean_markdown_page(text) for text in raw_page_text]
+            page_text = [page.text for page in cleaned_pages]
             markdown = "\n\n".join(page_text).encode("utf-8")
             if not context.is_active():
                 context.abort(grpc.StatusCode.CANCELLED, "recognition request was cancelled")
 
             stem = Path(request.filename).stem or "document"
-            blocks = self._extract_blocks(source_path, pages, page_text)
+            blocks = self._extract_blocks(source_path, pages, raw_page_text, cleaned_pages)
+            # Run deterministic Markdown section extraction for local parser
+            # diagnostics only. References remain raw strings and this path
+            # deliberately performs no DOI parsing or network lookups.
+            sections = extract_paper_sections(markdown.decode("utf-8"))
             result = document_parser_pb2.RecognitionResult(
                 markdown=markdown,
                 markdown_filename=f"{stem}.md",
@@ -86,6 +108,24 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                 len(blocks),
                 len(markdown),
             )
+            removed_lines = sum(page.removed_lines for page in cleaned_pages)
+            removed_characters = sum(page.removed_characters for page in cleaned_pages)
+            if removed_lines or removed_characters:
+                LOG.info(
+                    "markdown cleanup applied document=%s removed_lines=%d removed_characters=%d",
+                    request.document_id,
+                    removed_lines,
+                    removed_characters,
+                )
+            LOG.debug(
+                "markdown paper sections extracted document=%s title_found=%s author_count=%d "
+                "abstract_chars=%d reference_count=%d",
+                request.document_id,
+                bool(sections.title),
+                len(sections.authors),
+                len(sections.abstract),
+                len(sections.references),
+            )
             return result
         except grpc.RpcError:
             raise
@@ -96,7 +136,7 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
 
-    def _extract_blocks(self, source_path: Path, pages, page_text: list[str]):
+    def _extract_blocks(self, source_path: Path, pages, raw_page_text: list[str], cleaned_pages):
         """Return source-map blocks and 72-DPI PNG crops for visual blocks.
 
         PyMuPDF4LLM's page_boxes positions refer to Python Unicode code-point
@@ -110,9 +150,11 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         markdown_offset = 0
         with pymupdf.open(str(source_path)) as pdf:
             for page_index, raw_page in enumerate(pages):
-                text = page_text[page_index]
+                raw_text = raw_page_text[page_index]
+                cleaned_page = cleaned_pages[page_index]
+                text = cleaned_page.text
                 if not isinstance(raw_page, dict) or page_index >= len(pdf):
-                    markdown_offset += len(text) + (2 if page_index + 1 < len(page_text) else 0)
+                    markdown_offset += len(text) + (2 if page_index + 1 < len(cleaned_pages) else 0)
                     continue
                 page_rect = pdf[page_index].rect
                 for box in raw_page.get("page_boxes", []):
@@ -123,8 +165,12 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                     if not _valid_bbox(bbox, page_rect):
                         continue
                     position = box.get("pos")
-                    if _valid_position(position, text):
-                        start, end = int(position[0]), int(position[1])
+                    if _valid_position(position, raw_text):
+                        raw_start, raw_end = position
+                        mapped_position = cleaned_page.map_range(raw_start, raw_end)
+                        if mapped_position is None:
+                            continue
+                        start, end = mapped_position
                         block_text = text[start:end].strip()
                     elif block_type in {"image", "table"}:
                         # Some layout engines do not associate a Markdown
@@ -163,7 +209,7 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                             image_content_type=image_content_type,
                         )
                     )
-                markdown_offset += len(text) + (2 if page_index + 1 < len(page_text) else 0)
+                markdown_offset += len(text) + (2 if page_index + 1 < len(cleaned_pages) else 0)
         return blocks
 
     def _render_crop(self, page, bbox) -> bytes:
@@ -252,7 +298,8 @@ def main() -> None:
         ],
     )
     document_parser_pb2_grpc.add_DocumentParserServicer_to_server(
-        DocumentParser(Path(args.upload_dir), args.max_file_size, args.image_dpi), server
+        DocumentParser(Path(args.upload_dir), args.max_file_size, args.image_dpi),
+        server,
     )
     server.add_insecure_port(args.address)
     server.start()
@@ -282,7 +329,7 @@ def _valid_position(position, text: str) -> bool:
     if not isinstance(position, (list, tuple)) or len(position) != 2:
         return False
     start, end = position
-    return all(isinstance(value, (int, float)) for value in (start, end)) and 0 <= start <= end <= len(text)
+    return all(isinstance(value, int) and not isinstance(value, bool) for value in (start, end)) and 0 <= start <= end <= len(text)
 
 
 def _valid_bbox(bbox, page_rect: pymupdf.Rect) -> bool:
@@ -298,5 +345,4 @@ def _valid_bbox(bbox, page_rect: pymupdf.Rect) -> bool:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
     main()

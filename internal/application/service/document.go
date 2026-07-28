@@ -23,7 +23,6 @@ import (
 
 type documentService struct {
 	repo          interfaces.DocumentRepository
-	papers        interfaces.PaperMetadataRepository
 	storage       interfaces.FileStorage
 	taskInspector interfaces.TaskInspector
 	taskEnqueuer  interfaces.DocumentTaskEnqueuer
@@ -41,7 +40,6 @@ var ErrDuplicateDOI = types.ErrDuplicateDOI
 var (
 	ErrInvalidDocumentFilename = errors.New("invalid document filename")
 	ErrInvalidDocumentDOI      = errors.New("invalid document DOI")
-	ErrInvalidPaperMetadata    = errors.New("invalid paper metadata")
 	ErrDocumentParseFinished   = errors.New("document parsing has already finished")
 	ErrDocumentDeleting        = errors.New("document is being deleted")
 )
@@ -62,26 +60,20 @@ func NewDocumentServiceWithTaskInspector(
 	return &documentService{repo: repo, storage: storage, taskInspector: taskInspector}
 }
 
-// NewDocumentServiceWithPaperMetadata is the production constructor. It
-// injects the separate bibliographic repository while keeping one document
-// domain service as the handler-facing orchestration boundary.
-func NewDocumentServiceWithPaperMetadata(
+// NewDocumentServiceWithProcessing is the production constructor for source
+// document storage, recognition, queueing, and cancellation dependencies.
+func NewDocumentServiceWithProcessing(
 	cfg config.Config,
 	repo interfaces.DocumentRepository,
-	papers interfaces.PaperMetadataRepository,
 	storage interfaces.FileStorage,
 	taskInspector interfaces.TaskInspector,
 	taskEnqueuer interfaces.DocumentTaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer,
 ) interfaces.DocumentService {
 	return &documentService{
-		repo: repo, papers: papers, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer, recognizer: recognizer,
+		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer, recognizer: recognizer,
 		recognitionOutputDir: cfg.RecognitionOutputDirectory, maxRecognitionOutputSize: cfg.MaxUploadSize,
 	}
-}
-
-func (s *documentService) GetRepository() interfaces.DocumentRepository {
-	return s.repo
 }
 
 func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error) {
@@ -226,79 +218,13 @@ func (s *documentService) SearchDocument(ctx context.Context, search types.Docum
 	return s.repo.Search(ctx, search)
 }
 
-// GetPaperMetadata returns a virtual empty metadata value for a document that
-// has not yet received bibliographic data. This lets a newly uploaded file be
-// edited through the paper API without forcing an empty row at upload time.
-func (s *documentService) GetPaperMetadata(ctx context.Context, documentID string) (*types.PaperMetadata, error) {
-	id, err := parsePaperDocumentID(documentID)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.repo.Get(ctx, id); err != nil {
-		return nil, err
-	}
-	if s.papers == nil {
-		return nil, errors.New("paper metadata repository is not configured")
-	}
-	metadata, err := s.papers.GetByDocumentID(ctx, id)
-	if errors.Is(err, sql.ErrNoRows) {
-		return &types.PaperMetadata{DocumentID: id, Authors: []types.PaperAuthor{}, Tags: []string{}, Metadata: types.JSON(`{}`)}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &metadata, nil
-}
-
-func (s *documentService) UpdatePaperMetadata(ctx context.Context, documentID string, update types.PaperMetadataUpdate) (*types.PaperMetadata, error) {
-	if !update.HasChanges() {
-		return nil, errors.New("at least one paper metadata field is required")
-	}
-	id, err := parsePaperDocumentID(documentID)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := s.repo.Get(ctx, id); err != nil {
-		return nil, err
-	}
-	if s.papers == nil {
-		return nil, errors.New("paper metadata repository is not configured")
-	}
-	normalized, err := normalizePaperMetadataUpdate(&update)
-	if err != nil {
-		return nil, err
-	}
-	updated, err := s.papers.Upsert(ctx, id, *normalized)
-	if err != nil {
-		return nil, err
-	}
-	return &updated, nil
-}
-
-func (s *documentService) SearchPaperMetadata(ctx context.Context, search types.PaperSearch) (types.PaperMetadataPage, error) {
-	if s.papers == nil {
-		return types.PaperMetadataPage{}, errors.New("paper metadata repository is not configured")
-	}
-	search.Title = strings.TrimSpace(search.Title)
-	search.Author = strings.TrimSpace(search.Author)
-	if search.TagMode == "" {
-		search.TagMode = types.PaperTagModeAll
-	}
-	if search.TagMode != types.PaperTagModeAll && search.TagMode != types.PaperTagModeAny {
-		return types.PaperMetadataPage{}, fmt.Errorf("invalid tag mode %q", search.TagMode)
-	}
-	tags, err := normalizePaperTags(search.Tags)
-	if err != nil {
-		return types.PaperMetadataPage{}, err
-	}
-	search.Tags = tags
-	return s.papers.Search(ctx, search)
-}
-
 func (s *documentService) GetDocumentFile(ctx context.Context, id string) (io.ReadCloser, string, error) {
 	doc, err := s.GetDocumentByID(ctx, id)
 	if err != nil {
 		return nil, "", err
+	}
+	if doc.Status == types.DocumentStatusUnknown {
+		return nil, "", sql.ErrNoRows
 	}
 	rc, err := s.storage.Open(ctx, doc.StorageKey)
 	if err != nil {
@@ -352,7 +278,7 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 		return err
 	}
 	transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, doc.ID, types.DocumentStatusDeleting, nil,
-		[]types.DocumentStatus{types.DocumentStatusUploaded, types.DocumentStatusQueued, types.DocumentStatusProcessing, types.DocumentStatusCancelled, types.DocumentStatusReady, types.DocumentStatusFailed})
+		[]types.DocumentStatus{types.DocumentStatusUnknown, types.DocumentStatusUploaded, types.DocumentStatusQueued, types.DocumentStatusProcessing, types.DocumentStatusCancelled, types.DocumentStatusReady, types.DocumentStatusFailed})
 	if err != nil {
 		return err
 	}
@@ -385,16 +311,21 @@ func (s *documentService) deleteDocumentRelations(
 	ctx context.Context, document *types.Document, markdown *types.DocumentMarkdown,
 	blocks []types.Block,
 ) error {
-	if s.storage == nil {
-		return errors.New("file storage is not configured")
+	if document.Status != types.DocumentStatusUnknown {
+		if s.storage == nil {
+			return errors.New("file storage is not configured")
+		}
+		if err := s.storage.Delete(ctx, document.StorageKey); err != nil {
+			s.restoreDocumentStatusAfterDeleteFailure(ctx, document)
+			return err
+		}
+		logger.Info(ctx, "document source file deleted", "document_id", document.ID, "storage_key", document.StorageKey)
 	}
-	if err := s.storage.Delete(ctx, document.StorageKey); err != nil {
-		s.restoreDocumentStatusAfterDeleteFailure(ctx, document)
-		return err
-	}
-	logger.Info(ctx, "document source file deleted", "document_id", document.ID, "storage_key", document.StorageKey)
 
 	if markdown != nil && markdown.StorageKey != "" && markdown.StorageKey != document.StorageKey {
+		if s.storage == nil {
+			return errors.New("file storage is not configured")
+		}
 		if err := s.storage.Delete(ctx, markdown.StorageKey); err != nil {
 			s.recordIncompleteDocumentDeletion(ctx, document, "document source file deleted; markdown deletion must be retried", err)
 			return err
@@ -404,6 +335,9 @@ func (s *documentService) deleteDocumentRelations(
 	for _, block := range blocks {
 		if block.AssetKey == "" {
 			continue
+		}
+		if s.storage == nil {
+			return errors.New("file storage is not configured")
 		}
 		if err := s.storage.Delete(ctx, block.AssetKey); err != nil {
 			s.recordIncompleteDocumentDeletion(ctx, document, "document source and Markdown files deleted; block image deletion must be retried", err)
@@ -442,69 +376,6 @@ func (s *documentService) DeleteDocumentList(ctx context.Context, ids []string) 
 		}
 	}
 	return nil
-}
-
-func parsePaperDocumentID(value string) (uuid.UUID, error) {
-	id, err := uuid.Parse(strings.TrimSpace(value))
-	if err != nil {
-		return uuid.Nil, fmt.Errorf("invalid document id: %w", err)
-	}
-	return id, nil
-}
-
-func normalizePaperMetadataUpdate(update *types.PaperMetadataUpdate) (*types.PaperMetadataUpdate, error) {
-	if update == nil {
-		return nil, nil
-	}
-	normalized := *update
-	for _, field := range []*string{normalized.Title, normalized.Abstract, normalized.SourceName, normalized.SourceURL, normalized.Venue, normalized.Volume, normalized.Issue, normalized.Pages, normalized.Language} {
-		if field == nil {
-			continue
-		}
-		if !utf8.ValidString(*field) || strings.ContainsAny(*field, "\r\n\t") {
-			return nil, fmt.Errorf("%w: text contains invalid characters", ErrInvalidPaperMetadata)
-		}
-		*field = strings.TrimSpace(*field)
-	}
-	if normalized.Tags != nil {
-		tags, err := normalizePaperTags(*normalized.Tags)
-		if err != nil {
-			return nil, err
-		}
-		normalized.Tags = &tags
-	}
-	if normalized.Authors != nil {
-		authors := make([]types.PaperAuthor, 0, len(*normalized.Authors))
-		for _, author := range *normalized.Authors {
-			author.Name, author.Affiliation = strings.TrimSpace(author.Name), strings.TrimSpace(author.Affiliation)
-			if author.Name == "" || !utf8.ValidString(author.Name) || strings.ContainsAny(author.Name, "\r\n\t") {
-				return nil, fmt.Errorf("%w: authors must have a valid name", ErrInvalidPaperMetadata)
-			}
-			authors = append(authors, author)
-		}
-		normalized.Authors = &authors
-	}
-	return &normalized, nil
-}
-
-func normalizePaperTags(input []string) ([]string, error) {
-	const maxPaperTagCount, maxPaperTagLength = 32, 64
-	if len(input) > maxPaperTagCount {
-		return nil, fmt.Errorf("%w: tags cannot contain more than %d values", ErrInvalidPaperMetadata, maxPaperTagCount)
-	}
-	seen, tags := make(map[string]struct{}, len(input)), make([]string, 0, len(input))
-	for _, tag := range input {
-		tag = strings.ToLower(strings.TrimSpace(tag))
-		if !utf8.ValidString(tag) || tag == "" || utf8.RuneCountInString(tag) > maxPaperTagLength || strings.ContainsAny(tag, "\r\n\t") {
-			return nil, fmt.Errorf("%w: tags must be non-empty values up to 64 characters", ErrInvalidPaperMetadata)
-		}
-		if _, exists := seen[tag]; exists {
-			continue
-		}
-		seen[tag] = struct{}{}
-		tags = append(tags, tag)
-	}
-	return tags, nil
 }
 
 func isDocumentStatus(status types.DocumentStatus) bool {

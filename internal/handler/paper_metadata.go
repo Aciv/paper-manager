@@ -17,10 +17,10 @@ import (
 	"github.com/google/uuid"
 )
 
-type PaperMetadataHandler struct{ documents interfaces.DocumentService }
+type PaperMetadataHandler struct{ papers interfaces.PaperService }
 
-func NewPaperMetadataHandler(documents interfaces.DocumentService) *PaperMetadataHandler {
-	return &PaperMetadataHandler{documents: documents}
+func NewPaperMetadataHandler(papers interfaces.PaperService) *PaperMetadataHandler {
+	return &PaperMetadataHandler{papers: papers}
 }
 
 func (h *PaperMetadataHandler) Get(c *gin.Context) {
@@ -28,7 +28,7 @@ func (h *PaperMetadataHandler) Get(c *gin.Context) {
 		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
 		return
 	}
-	metadata, err := h.documents.GetPaperMetadata(c.Request.Context(), c.Param("documentID"))
+	metadata, err := h.papers.GetMetadata(c.Request.Context(), c.Param("documentID"))
 	if err != nil {
 		h.handleServiceError(c, err)
 		return
@@ -46,7 +46,7 @@ func (h *PaperMetadataHandler) Update(c *gin.Context) {
 		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
 		return
 	}
-	metadata, err := h.documents.UpdatePaperMetadata(c.Request.Context(), c.Param("documentID"), update)
+	metadata, err := h.papers.UpdateMetadata(c.Request.Context(), c.Param("documentID"), update)
 	if err != nil {
 		h.handleServiceError(c, err)
 		return
@@ -65,7 +65,7 @@ func (h *PaperMetadataHandler) Search(c *gin.Context) {
 		}
 		search.Page = page
 	}
-	result, err := h.documents.SearchPaperMetadata(c.Request.Context(), search)
+	result, err := h.papers.SearchMetadata(c.Request.Context(), search)
 	if err != nil {
 		h.handleServiceError(c, err)
 		return

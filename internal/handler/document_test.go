@@ -37,6 +37,31 @@ func (s *documentCreatorStub) Get(_ context.Context, id uuid.UUID) (types.Docume
 	return s.document, nil
 }
 
+func (s *documentCreatorStub) EnsureUnknown(
+	_ context.Context, id uuid.UUID,
+) (types.Document, bool, error) {
+	if !s.deleted && s.document.ID == id {
+		return s.document, false, nil
+	}
+	s.deleted = false
+	s.document = types.Document{
+		ID:         id,
+		StorageKey: types.UnknownDocumentStorageScheme + id.String(),
+		Status:     types.DocumentStatusUnknown,
+	}
+	return s.document, true, nil
+}
+
+func (s *documentCreatorStub) DeleteUnknownIfUnreferenced(
+	_ context.Context, id uuid.UUID,
+) (bool, error) {
+	if s.deleted || s.document.ID != id || s.document.Status != types.DocumentStatusUnknown {
+		return false, nil
+	}
+	s.deleted = true
+	return true, nil
+}
+
 func (s *documentCreatorStub) Search(_ context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
 	result := types.DocumentPage{Page: search.Page, PageSize: search.PageSize, Items: []types.Document{}}
 	if s.deleted || (search.ID != nil && *search.ID != s.document.ID) || (search.DOI != "" && search.DOI != s.document.DOI) {

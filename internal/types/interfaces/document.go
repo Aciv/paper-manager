@@ -17,6 +17,13 @@ type DocumentRepository interface {
 	Create(ctx context.Context, document types.Document) (types.Document, error)
 	// Get retrieves one document by UUID.
 	Get(ctx context.Context, id uuid.UUID) (types.Document, error)
+	// EnsureUnknown creates an internal bibliographic placeholder when absent
+	// and returns whether this call inserted it. A conflicting non-placeholder
+	// row with the same deterministic ID is an error.
+	EnsureUnknown(ctx context.Context, id uuid.UUID) (document types.Document, created bool, err error)
+	// DeleteUnknownIfUnreferenced deletes an unknown placeholder only when no
+	// citation points from or to it. The boolean reports whether it was deleted.
+	DeleteUnknownIfUnreferenced(ctx context.Context, id uuid.UUID) (deleted bool, err error)
 	// Search returns a paginated document result using ID or DOI filters.
 	Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
 	// GetMarkdown returns the current parsed Markdown source for a document.
@@ -48,9 +55,6 @@ type DocumentRepository interface {
 
 // DocumentService contains document lifecycle and storage orchestration.
 type DocumentService interface {
-	// GetRepository exposes the document repository for infrastructure-level
-	// integrations that must perform a repository query through the service.
-	GetRepository() DocumentRepository
 	// CreateDocumentFromFile stores an upload and creates its source record.
 	CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error)
 	// GetDocumentByID parses and retrieves a document by its textual UUID.
@@ -70,12 +74,6 @@ type DocumentService interface {
 	CancelDocumentParse(ctx context.Context, id string) (*types.Document, error)
 	// SearchDocument performs paginated ID and DOI searches.
 	SearchDocument(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
-	// GetPaperMetadata retrieves bibliographic data associated with a document.
-	GetPaperMetadata(ctx context.Context, documentID string) (*types.PaperMetadata, error)
-	// UpdatePaperMetadata applies a partial bibliographic update for a document.
-	UpdatePaperMetadata(ctx context.Context, documentID string, update types.PaperMetadataUpdate) (*types.PaperMetadata, error)
-	// SearchPaperMetadata searches formal title, author, and discipline tags.
-	SearchPaperMetadata(ctx context.Context, search types.PaperSearch) (types.PaperMetadataPage, error)
 	// GetDocumentFile opens the stored object and returns its original filename.
 	GetDocumentFile(ctx context.Context, id string) (reader io.ReadCloser, filename string, err error)
 	// GetDocumentBlocks returns selectable source-map blocks, optionally scoped
