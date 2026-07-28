@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"math"
 	"testing"
 
 	"github.com/google/uuid"
@@ -85,6 +86,11 @@ func TestPaperExtractionResultValidate(t *testing.T) {
 	result.Title.Confidence = 1.1
 	if err := result.Validate(); !errors.Is(err, ErrInvalidPaperExtraction) {
 		t.Fatalf("expected confidence validation error, got %v", err)
+	}
+
+	result.Title.Confidence = math.NaN()
+	if err := result.Validate(); !errors.Is(err, ErrInvalidPaperExtraction) {
+		t.Fatalf("expected non-finite confidence validation error, got %v", err)
 	}
 }
 

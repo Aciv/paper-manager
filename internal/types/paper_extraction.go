@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"unicode/utf8"
 
@@ -109,7 +110,10 @@ func (candidate PaperTextCandidate) Validate() error {
 	if strings.TrimSpace(candidate.Value) == "" {
 		return fmt.Errorf("%w: candidate value is required", ErrInvalidPaperExtraction)
 	}
-	if candidate.Confidence < 0 || candidate.Confidence > 1 {
+	if math.IsNaN(candidate.Confidence) ||
+		math.IsInf(candidate.Confidence, 0) ||
+		candidate.Confidence < 0 ||
+		candidate.Confidence > 1 {
 		return fmt.Errorf("%w: candidate confidence must be between 0 and 1", ErrInvalidPaperExtraction)
 	}
 	for index, evidence := range candidate.Evidence {
@@ -154,6 +158,7 @@ func (request PaperExtractionRequest) Validate() error {
 	if len(request.Blocks) > MaxPaperExtractionBlocks {
 		return fmt.Errorf("%w: block count exceeds %d", ErrInvalidPaperExtraction, MaxPaperExtractionBlocks)
 	}
+	markdownCodepoints := utf8.RuneCount(request.Markdown)
 	ordinals := make(map[int]struct{}, len(request.Blocks))
 	for index, block := range request.Blocks {
 		if block.Ordinal < 0 {
@@ -166,8 +171,59 @@ func (request PaperExtractionRequest) Validate() error {
 		if strings.TrimSpace(block.Type) == "" {
 			return fmt.Errorf("%w: block %d type is required", ErrInvalidPaperExtraction, index)
 		}
+		if err := validatePaperSourceLocation(block.Location, markdownCodepoints); err != nil {
+			return fmt.Errorf("%w: block %d: %v", ErrInvalidPaperExtraction, index, err)
+		}
 	}
 	return nil
+}
+
+func validatePaperSourceLocation(location *PDFBlockLocation, markdownCodepoints int) error {
+	if location == nil {
+		return nil
+	}
+	if location.PageNumber == nil ||
+		location.PageWidth == nil ||
+		location.PageHeight == nil ||
+		location.BBoxX0 == nil ||
+		location.BBoxY0 == nil ||
+		location.BBoxX1 == nil ||
+		location.BBoxY1 == nil ||
+		location.MarkdownCodepointStart == nil ||
+		location.MarkdownCodepointEnd == nil {
+		return errors.New("source location must be complete when present")
+	}
+	if *location.PageNumber < 1 {
+		return errors.New("source location page number must be positive")
+	}
+	if !finitePaperExtractionFloat(*location.PageWidth) ||
+		!finitePaperExtractionFloat(*location.PageHeight) ||
+		*location.PageWidth <= 0 ||
+		*location.PageHeight <= 0 {
+		return errors.New("source location page dimensions must be positive")
+	}
+	if !finitePaperExtractionFloat(*location.BBoxX0) ||
+		!finitePaperExtractionFloat(*location.BBoxY0) ||
+		!finitePaperExtractionFloat(*location.BBoxX1) ||
+		!finitePaperExtractionFloat(*location.BBoxY1) ||
+		*location.BBoxX0 < 0 ||
+		*location.BBoxY0 < 0 ||
+		*location.BBoxX1 <= *location.BBoxX0 ||
+		*location.BBoxY1 <= *location.BBoxY0 ||
+		*location.BBoxX1 > *location.PageWidth ||
+		*location.BBoxY1 > *location.PageHeight {
+		return errors.New("source location bounding box is outside its page")
+	}
+	if *location.MarkdownCodepointStart < 0 ||
+		*location.MarkdownCodepointEnd < *location.MarkdownCodepointStart ||
+		*location.MarkdownCodepointEnd > markdownCodepoints {
+		return errors.New("source location Markdown range is invalid")
+	}
+	return nil
+}
+
+func finitePaperExtractionFloat(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }
 
 // PaperExtractionResult contains parser candidates, not canonical database

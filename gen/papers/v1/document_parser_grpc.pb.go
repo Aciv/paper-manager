@@ -125,3 +125,114 @@ var DocumentParser_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "document_parser.proto",
 }
+
+const (
+	PaperMetadataExtractor_Extract_FullMethodName = "/papers.v1.PaperMetadataExtractor/Extract"
+)
+
+// PaperMetadataExtractorClient is the client API for PaperMetadataExtractor service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// PaperMetadataExtractor derives candidates from an already-persisted
+// Markdown revision. It performs no catalog lookups and writes no database
+// state; Go remains responsible for orchestration and canonical persistence.
+type PaperMetadataExtractorClient interface {
+	Extract(ctx context.Context, in *PaperExtractionRequest, opts ...grpc.CallOption) (*PaperExtractionResult, error)
+}
+
+type paperMetadataExtractorClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewPaperMetadataExtractorClient(cc grpc.ClientConnInterface) PaperMetadataExtractorClient {
+	return &paperMetadataExtractorClient{cc}
+}
+
+func (c *paperMetadataExtractorClient) Extract(ctx context.Context, in *PaperExtractionRequest, opts ...grpc.CallOption) (*PaperExtractionResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PaperExtractionResult)
+	err := c.cc.Invoke(ctx, PaperMetadataExtractor_Extract_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PaperMetadataExtractorServer is the server API for PaperMetadataExtractor service.
+// All implementations must embed UnimplementedPaperMetadataExtractorServer
+// for forward compatibility.
+//
+// PaperMetadataExtractor derives candidates from an already-persisted
+// Markdown revision. It performs no catalog lookups and writes no database
+// state; Go remains responsible for orchestration and canonical persistence.
+type PaperMetadataExtractorServer interface {
+	Extract(context.Context, *PaperExtractionRequest) (*PaperExtractionResult, error)
+	mustEmbedUnimplementedPaperMetadataExtractorServer()
+}
+
+// UnimplementedPaperMetadataExtractorServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedPaperMetadataExtractorServer struct{}
+
+func (UnimplementedPaperMetadataExtractorServer) Extract(context.Context, *PaperExtractionRequest) (*PaperExtractionResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method Extract not implemented")
+}
+func (UnimplementedPaperMetadataExtractorServer) mustEmbedUnimplementedPaperMetadataExtractorServer() {
+}
+func (UnimplementedPaperMetadataExtractorServer) testEmbeddedByValue() {}
+
+// UnsafePaperMetadataExtractorServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to PaperMetadataExtractorServer will
+// result in compilation errors.
+type UnsafePaperMetadataExtractorServer interface {
+	mustEmbedUnimplementedPaperMetadataExtractorServer()
+}
+
+func RegisterPaperMetadataExtractorServer(s grpc.ServiceRegistrar, srv PaperMetadataExtractorServer) {
+	// If the following call pancis, it indicates UnimplementedPaperMetadataExtractorServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&PaperMetadataExtractor_ServiceDesc, srv)
+}
+
+func _PaperMetadataExtractor_Extract_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PaperExtractionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PaperMetadataExtractorServer).Extract(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PaperMetadataExtractor_Extract_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PaperMetadataExtractorServer).Extract(ctx, req.(*PaperExtractionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// PaperMetadataExtractor_ServiceDesc is the grpc.ServiceDesc for PaperMetadataExtractor service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var PaperMetadataExtractor_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "papers.v1.PaperMetadataExtractor",
+	HandlerType: (*PaperMetadataExtractorServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "Extract",
+			Handler:    _PaperMetadataExtractor_Extract_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "document_parser.proto",
+}

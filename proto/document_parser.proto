@@ -7,6 +7,13 @@ option go_package = "paperMaster/gen/papers/v1;papersv1";
 service DocumentParser {
   rpc Recognize(RecognitionRequest) returns (RecognitionResult);
 }
+
+// PaperMetadataExtractor derives candidates from an already-persisted
+// Markdown revision. It performs no catalog lookups and writes no database
+// state; Go remains responsible for orchestration and canonical persistence.
+service PaperMetadataExtractor {
+  rpc Extract(PaperExtractionRequest) returns (PaperExtractionResult);
+}
 message RecognitionRequest {
   string document_id = 1;
   string filename = 2;
@@ -50,4 +57,56 @@ message RecognitionBlock {
   // public URL; the Go API stores it and exposes a protected block endpoint.
   bytes image_data = 13;
   string image_content_type = 14;
+}
+
+message PaperExtractionRequest {
+  string document_id = 1;
+  string markdown_sha256 = 2;
+  bytes markdown = 3;
+  // Compact source-map data only: no database IDs, storage keys, URLs, or
+  // image bytes cross this RPC.
+  repeated PaperSourceBlock blocks = 4;
+}
+
+message PaperSourceBlock {
+  int32 ordinal = 1;
+  string type = 2;
+  string text = 3;
+  PaperSourceLocation location = 4;
+}
+
+message PaperSourceLocation {
+  int32 page_number = 1;
+  double page_width = 2;
+  double page_height = 3;
+  double bbox_x0 = 4;
+  double bbox_y0 = 5;
+  double bbox_x1 = 6;
+  double bbox_y1 = 7;
+  int32 markdown_codepoint_start = 8;
+  int32 markdown_codepoint_end = 9;
+}
+
+message PaperExtractionResult {
+  PaperTextCandidate title = 1;
+  repeated PaperTextCandidate authors = 2;
+  PaperTextCandidate abstract = 3;
+  // References stay as raw extraction strings. Go resolves them through
+  // external paper catalogs in a later task.
+  repeated string references = 4;
+  string extractor_name = 5;
+  string extractor_version = 6;
+}
+
+message PaperTextCandidate {
+  string value = 1;
+  double confidence = 2;
+  repeated PaperSourceEvidence evidence = 3;
+}
+
+message PaperSourceEvidence {
+  int32 block_ordinal = 1;
+  int32 page_number = 2;
+  int32 markdown_codepoint_start = 3;
+  int32 markdown_codepoint_end = 4;
 }

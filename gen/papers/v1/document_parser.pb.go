@@ -411,6 +411,466 @@ func (x *RecognitionBlock) GetImageContentType() string {
 	return ""
 }
 
+type PaperExtractionRequest struct {
+	state          protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId     string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	MarkdownSha256 string                 `protobuf:"bytes,2,opt,name=markdown_sha256,json=markdownSha256,proto3" json:"markdown_sha256,omitempty"`
+	Markdown       []byte                 `protobuf:"bytes,3,opt,name=markdown,proto3" json:"markdown,omitempty"`
+	// Compact source-map data only: no database IDs, storage keys, URLs, or
+	// image bytes cross this RPC.
+	Blocks        []*PaperSourceBlock `protobuf:"bytes,4,rep,name=blocks,proto3" json:"blocks,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PaperExtractionRequest) Reset() {
+	*x = PaperExtractionRequest{}
+	mi := &file_document_parser_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PaperExtractionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PaperExtractionRequest) ProtoMessage() {}
+
+func (x *PaperExtractionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PaperExtractionRequest.ProtoReflect.Descriptor instead.
+func (*PaperExtractionRequest) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *PaperExtractionRequest) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+func (x *PaperExtractionRequest) GetMarkdownSha256() string {
+	if x != nil {
+		return x.MarkdownSha256
+	}
+	return ""
+}
+
+func (x *PaperExtractionRequest) GetMarkdown() []byte {
+	if x != nil {
+		return x.Markdown
+	}
+	return nil
+}
+
+func (x *PaperExtractionRequest) GetBlocks() []*PaperSourceBlock {
+	if x != nil {
+		return x.Blocks
+	}
+	return nil
+}
+
+type PaperSourceBlock struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Ordinal       int32                  `protobuf:"varint,1,opt,name=ordinal,proto3" json:"ordinal,omitempty"`
+	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	Location      *PaperSourceLocation   `protobuf:"bytes,4,opt,name=location,proto3" json:"location,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PaperSourceBlock) Reset() {
+	*x = PaperSourceBlock{}
+	mi := &file_document_parser_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PaperSourceBlock) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PaperSourceBlock) ProtoMessage() {}
+
+func (x *PaperSourceBlock) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PaperSourceBlock.ProtoReflect.Descriptor instead.
+func (*PaperSourceBlock) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PaperSourceBlock) GetOrdinal() int32 {
+	if x != nil {
+		return x.Ordinal
+	}
+	return 0
+}
+
+func (x *PaperSourceBlock) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *PaperSourceBlock) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+func (x *PaperSourceBlock) GetLocation() *PaperSourceLocation {
+	if x != nil {
+		return x.Location
+	}
+	return nil
+}
+
+type PaperSourceLocation struct {
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	PageNumber             int32                  `protobuf:"varint,1,opt,name=page_number,json=pageNumber,proto3" json:"page_number,omitempty"`
+	PageWidth              float64                `protobuf:"fixed64,2,opt,name=page_width,json=pageWidth,proto3" json:"page_width,omitempty"`
+	PageHeight             float64                `protobuf:"fixed64,3,opt,name=page_height,json=pageHeight,proto3" json:"page_height,omitempty"`
+	BboxX0                 float64                `protobuf:"fixed64,4,opt,name=bbox_x0,json=bboxX0,proto3" json:"bbox_x0,omitempty"`
+	BboxY0                 float64                `protobuf:"fixed64,5,opt,name=bbox_y0,json=bboxY0,proto3" json:"bbox_y0,omitempty"`
+	BboxX1                 float64                `protobuf:"fixed64,6,opt,name=bbox_x1,json=bboxX1,proto3" json:"bbox_x1,omitempty"`
+	BboxY1                 float64                `protobuf:"fixed64,7,opt,name=bbox_y1,json=bboxY1,proto3" json:"bbox_y1,omitempty"`
+	MarkdownCodepointStart int32                  `protobuf:"varint,8,opt,name=markdown_codepoint_start,json=markdownCodepointStart,proto3" json:"markdown_codepoint_start,omitempty"`
+	MarkdownCodepointEnd   int32                  `protobuf:"varint,9,opt,name=markdown_codepoint_end,json=markdownCodepointEnd,proto3" json:"markdown_codepoint_end,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *PaperSourceLocation) Reset() {
+	*x = PaperSourceLocation{}
+	mi := &file_document_parser_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PaperSourceLocation) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PaperSourceLocation) ProtoMessage() {}
+
+func (x *PaperSourceLocation) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PaperSourceLocation.ProtoReflect.Descriptor instead.
+func (*PaperSourceLocation) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *PaperSourceLocation) GetPageNumber() int32 {
+	if x != nil {
+		return x.PageNumber
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetPageWidth() float64 {
+	if x != nil {
+		return x.PageWidth
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetPageHeight() float64 {
+	if x != nil {
+		return x.PageHeight
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetBboxX0() float64 {
+	if x != nil {
+		return x.BboxX0
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetBboxY0() float64 {
+	if x != nil {
+		return x.BboxY0
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetBboxX1() float64 {
+	if x != nil {
+		return x.BboxX1
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetBboxY1() float64 {
+	if x != nil {
+		return x.BboxY1
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetMarkdownCodepointStart() int32 {
+	if x != nil {
+		return x.MarkdownCodepointStart
+	}
+	return 0
+}
+
+func (x *PaperSourceLocation) GetMarkdownCodepointEnd() int32 {
+	if x != nil {
+		return x.MarkdownCodepointEnd
+	}
+	return 0
+}
+
+type PaperExtractionResult struct {
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	Title    *PaperTextCandidate    `protobuf:"bytes,1,opt,name=title,proto3" json:"title,omitempty"`
+	Authors  []*PaperTextCandidate  `protobuf:"bytes,2,rep,name=authors,proto3" json:"authors,omitempty"`
+	Abstract *PaperTextCandidate    `protobuf:"bytes,3,opt,name=abstract,proto3" json:"abstract,omitempty"`
+	// References stay as raw extraction strings. Go resolves them through
+	// external paper catalogs in a later task.
+	References       []string `protobuf:"bytes,4,rep,name=references,proto3" json:"references,omitempty"`
+	ExtractorName    string   `protobuf:"bytes,5,opt,name=extractor_name,json=extractorName,proto3" json:"extractor_name,omitempty"`
+	ExtractorVersion string   `protobuf:"bytes,6,opt,name=extractor_version,json=extractorVersion,proto3" json:"extractor_version,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
+}
+
+func (x *PaperExtractionResult) Reset() {
+	*x = PaperExtractionResult{}
+	mi := &file_document_parser_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PaperExtractionResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PaperExtractionResult) ProtoMessage() {}
+
+func (x *PaperExtractionResult) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PaperExtractionResult.ProtoReflect.Descriptor instead.
+func (*PaperExtractionResult) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *PaperExtractionResult) GetTitle() *PaperTextCandidate {
+	if x != nil {
+		return x.Title
+	}
+	return nil
+}
+
+func (x *PaperExtractionResult) GetAuthors() []*PaperTextCandidate {
+	if x != nil {
+		return x.Authors
+	}
+	return nil
+}
+
+func (x *PaperExtractionResult) GetAbstract() *PaperTextCandidate {
+	if x != nil {
+		return x.Abstract
+	}
+	return nil
+}
+
+func (x *PaperExtractionResult) GetReferences() []string {
+	if x != nil {
+		return x.References
+	}
+	return nil
+}
+
+func (x *PaperExtractionResult) GetExtractorName() string {
+	if x != nil {
+		return x.ExtractorName
+	}
+	return ""
+}
+
+func (x *PaperExtractionResult) GetExtractorVersion() string {
+	if x != nil {
+		return x.ExtractorVersion
+	}
+	return ""
+}
+
+type PaperTextCandidate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Value         string                 `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	Confidence    float64                `protobuf:"fixed64,2,opt,name=confidence,proto3" json:"confidence,omitempty"`
+	Evidence      []*PaperSourceEvidence `protobuf:"bytes,3,rep,name=evidence,proto3" json:"evidence,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PaperTextCandidate) Reset() {
+	*x = PaperTextCandidate{}
+	mi := &file_document_parser_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PaperTextCandidate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PaperTextCandidate) ProtoMessage() {}
+
+func (x *PaperTextCandidate) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PaperTextCandidate.ProtoReflect.Descriptor instead.
+func (*PaperTextCandidate) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *PaperTextCandidate) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *PaperTextCandidate) GetConfidence() float64 {
+	if x != nil {
+		return x.Confidence
+	}
+	return 0
+}
+
+func (x *PaperTextCandidate) GetEvidence() []*PaperSourceEvidence {
+	if x != nil {
+		return x.Evidence
+	}
+	return nil
+}
+
+type PaperSourceEvidence struct {
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	BlockOrdinal           int32                  `protobuf:"varint,1,opt,name=block_ordinal,json=blockOrdinal,proto3" json:"block_ordinal,omitempty"`
+	PageNumber             int32                  `protobuf:"varint,2,opt,name=page_number,json=pageNumber,proto3" json:"page_number,omitempty"`
+	MarkdownCodepointStart int32                  `protobuf:"varint,3,opt,name=markdown_codepoint_start,json=markdownCodepointStart,proto3" json:"markdown_codepoint_start,omitempty"`
+	MarkdownCodepointEnd   int32                  `protobuf:"varint,4,opt,name=markdown_codepoint_end,json=markdownCodepointEnd,proto3" json:"markdown_codepoint_end,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
+}
+
+func (x *PaperSourceEvidence) Reset() {
+	*x = PaperSourceEvidence{}
+	mi := &file_document_parser_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PaperSourceEvidence) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PaperSourceEvidence) ProtoMessage() {}
+
+func (x *PaperSourceEvidence) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PaperSourceEvidence.ProtoReflect.Descriptor instead.
+func (*PaperSourceEvidence) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *PaperSourceEvidence) GetBlockOrdinal() int32 {
+	if x != nil {
+		return x.BlockOrdinal
+	}
+	return 0
+}
+
+func (x *PaperSourceEvidence) GetPageNumber() int32 {
+	if x != nil {
+		return x.PageNumber
+	}
+	return 0
+}
+
+func (x *PaperSourceEvidence) GetMarkdownCodepointStart() int32 {
+	if x != nil {
+		return x.MarkdownCodepointStart
+	}
+	return 0
+}
+
+func (x *PaperSourceEvidence) GetMarkdownCodepointEnd() int32 {
+	if x != nil {
+		return x.MarkdownCodepointEnd
+	}
+	return 0
+}
+
 var File_document_parser_proto protoreflect.FileDescriptor
 
 const file_document_parser_proto_rawDesc = "" +
@@ -460,9 +920,56 @@ const file_document_parser_proto_rawDesc = "" +
 	"\x16markdown_codepoint_end\x18\f \x01(\x05R\x14markdownCodepointEnd\x12\x1d\n" +
 	"\n" +
 	"image_data\x18\r \x01(\fR\timageData\x12,\n" +
-	"\x12image_content_type\x18\x0e \x01(\tR\x10imageContentType2Z\n" +
+	"\x12image_content_type\x18\x0e \x01(\tR\x10imageContentType\"\xb3\x01\n" +
+	"\x16PaperExtractionRequest\x12\x1f\n" +
+	"\vdocument_id\x18\x01 \x01(\tR\n" +
+	"documentId\x12'\n" +
+	"\x0fmarkdown_sha256\x18\x02 \x01(\tR\x0emarkdownSha256\x12\x1a\n" +
+	"\bmarkdown\x18\x03 \x01(\fR\bmarkdown\x123\n" +
+	"\x06blocks\x18\x04 \x03(\v2\x1b.papers.v1.PaperSourceBlockR\x06blocks\"\x90\x01\n" +
+	"\x10PaperSourceBlock\x12\x18\n" +
+	"\aordinal\x18\x01 \x01(\x05R\aordinal\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text\x12:\n" +
+	"\blocation\x18\x04 \x01(\v2\x1e.papers.v1.PaperSourceLocationR\blocation\"\xca\x02\n" +
+	"\x13PaperSourceLocation\x12\x1f\n" +
+	"\vpage_number\x18\x01 \x01(\x05R\n" +
+	"pageNumber\x12\x1d\n" +
+	"\n" +
+	"page_width\x18\x02 \x01(\x01R\tpageWidth\x12\x1f\n" +
+	"\vpage_height\x18\x03 \x01(\x01R\n" +
+	"pageHeight\x12\x17\n" +
+	"\abbox_x0\x18\x04 \x01(\x01R\x06bboxX0\x12\x17\n" +
+	"\abbox_y0\x18\x05 \x01(\x01R\x06bboxY0\x12\x17\n" +
+	"\abbox_x1\x18\x06 \x01(\x01R\x06bboxX1\x12\x17\n" +
+	"\abbox_y1\x18\a \x01(\x01R\x06bboxY1\x128\n" +
+	"\x18markdown_codepoint_start\x18\b \x01(\x05R\x16markdownCodepointStart\x124\n" +
+	"\x16markdown_codepoint_end\x18\t \x01(\x05R\x14markdownCodepointEnd\"\xb4\x02\n" +
+	"\x15PaperExtractionResult\x123\n" +
+	"\x05title\x18\x01 \x01(\v2\x1d.papers.v1.PaperTextCandidateR\x05title\x127\n" +
+	"\aauthors\x18\x02 \x03(\v2\x1d.papers.v1.PaperTextCandidateR\aauthors\x129\n" +
+	"\babstract\x18\x03 \x01(\v2\x1d.papers.v1.PaperTextCandidateR\babstract\x12\x1e\n" +
+	"\n" +
+	"references\x18\x04 \x03(\tR\n" +
+	"references\x12%\n" +
+	"\x0eextractor_name\x18\x05 \x01(\tR\rextractorName\x12+\n" +
+	"\x11extractor_version\x18\x06 \x01(\tR\x10extractorVersion\"\x86\x01\n" +
+	"\x12PaperTextCandidate\x12\x14\n" +
+	"\x05value\x18\x01 \x01(\tR\x05value\x12\x1e\n" +
+	"\n" +
+	"confidence\x18\x02 \x01(\x01R\n" +
+	"confidence\x12:\n" +
+	"\bevidence\x18\x03 \x03(\v2\x1e.papers.v1.PaperSourceEvidenceR\bevidence\"\xcb\x01\n" +
+	"\x13PaperSourceEvidence\x12#\n" +
+	"\rblock_ordinal\x18\x01 \x01(\x05R\fblockOrdinal\x12\x1f\n" +
+	"\vpage_number\x18\x02 \x01(\x05R\n" +
+	"pageNumber\x128\n" +
+	"\x18markdown_codepoint_start\x18\x03 \x01(\x05R\x16markdownCodepointStart\x124\n" +
+	"\x16markdown_codepoint_end\x18\x04 \x01(\x05R\x14markdownCodepointEnd2Z\n" +
 	"\x0eDocumentParser\x12H\n" +
-	"\tRecognize\x12\x1d.papers.v1.RecognitionRequest\x1a\x1c.papers.v1.RecognitionResultB$Z\"paperMaster/gen/papers/v1;papersv1b\x06proto3"
+	"\tRecognize\x12\x1d.papers.v1.RecognitionRequest\x1a\x1c.papers.v1.RecognitionResult2h\n" +
+	"\x16PaperMetadataExtractor\x12N\n" +
+	"\aExtract\x12!.papers.v1.PaperExtractionRequest\x1a .papers.v1.PaperExtractionResultB$Z\"paperMaster/gen/papers/v1;papersv1b\x06proto3"
 
 var (
 	file_document_parser_proto_rawDescOnce sync.Once
@@ -476,21 +983,35 @@ func file_document_parser_proto_rawDescGZIP() []byte {
 	return file_document_parser_proto_rawDescData
 }
 
-var file_document_parser_proto_msgTypes = make([]protoimpl.MessageInfo, 3)
+var file_document_parser_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_document_parser_proto_goTypes = []any{
-	(*RecognitionRequest)(nil), // 0: papers.v1.RecognitionRequest
-	(*RecognitionResult)(nil),  // 1: papers.v1.RecognitionResult
-	(*RecognitionBlock)(nil),   // 2: papers.v1.RecognitionBlock
+	(*RecognitionRequest)(nil),     // 0: papers.v1.RecognitionRequest
+	(*RecognitionResult)(nil),      // 1: papers.v1.RecognitionResult
+	(*RecognitionBlock)(nil),       // 2: papers.v1.RecognitionBlock
+	(*PaperExtractionRequest)(nil), // 3: papers.v1.PaperExtractionRequest
+	(*PaperSourceBlock)(nil),       // 4: papers.v1.PaperSourceBlock
+	(*PaperSourceLocation)(nil),    // 5: papers.v1.PaperSourceLocation
+	(*PaperExtractionResult)(nil),  // 6: papers.v1.PaperExtractionResult
+	(*PaperTextCandidate)(nil),     // 7: papers.v1.PaperTextCandidate
+	(*PaperSourceEvidence)(nil),    // 8: papers.v1.PaperSourceEvidence
 }
 var file_document_parser_proto_depIdxs = []int32{
 	2, // 0: papers.v1.RecognitionResult.blocks:type_name -> papers.v1.RecognitionBlock
-	0, // 1: papers.v1.DocumentParser.Recognize:input_type -> papers.v1.RecognitionRequest
-	1, // 2: papers.v1.DocumentParser.Recognize:output_type -> papers.v1.RecognitionResult
-	2, // [2:3] is the sub-list for method output_type
-	1, // [1:2] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	4, // 1: papers.v1.PaperExtractionRequest.blocks:type_name -> papers.v1.PaperSourceBlock
+	5, // 2: papers.v1.PaperSourceBlock.location:type_name -> papers.v1.PaperSourceLocation
+	7, // 3: papers.v1.PaperExtractionResult.title:type_name -> papers.v1.PaperTextCandidate
+	7, // 4: papers.v1.PaperExtractionResult.authors:type_name -> papers.v1.PaperTextCandidate
+	7, // 5: papers.v1.PaperExtractionResult.abstract:type_name -> papers.v1.PaperTextCandidate
+	8, // 6: papers.v1.PaperTextCandidate.evidence:type_name -> papers.v1.PaperSourceEvidence
+	0, // 7: papers.v1.DocumentParser.Recognize:input_type -> papers.v1.RecognitionRequest
+	3, // 8: papers.v1.PaperMetadataExtractor.Extract:input_type -> papers.v1.PaperExtractionRequest
+	1, // 9: papers.v1.DocumentParser.Recognize:output_type -> papers.v1.RecognitionResult
+	6, // 10: papers.v1.PaperMetadataExtractor.Extract:output_type -> papers.v1.PaperExtractionResult
+	9, // [9:11] is the sub-list for method output_type
+	7, // [7:9] is the sub-list for method input_type
+	7, // [7:7] is the sub-list for extension type_name
+	7, // [7:7] is the sub-list for extension extendee
+	0, // [0:7] is the sub-list for field type_name
 }
 
 func init() { file_document_parser_proto_init() }
@@ -509,9 +1030,9 @@ func file_document_parser_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_document_parser_proto_rawDesc), len(file_document_parser_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   3,
+			NumMessages:   9,
 			NumExtensions: 0,
-			NumServices:   1,
+			NumServices:   2,
 		},
 		GoTypes:           file_document_parser_proto_goTypes,
 		DependencyIndexes: file_document_parser_proto_depIdxs,

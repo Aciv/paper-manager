@@ -101,3 +101,84 @@ class DocumentParser:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class PaperMetadataExtractorStub:
+    """PaperMetadataExtractor derives candidates from an already-persisted
+    Markdown revision. It performs no catalog lookups and writes no database
+    state; Go remains responsible for orchestration and canonical persistence.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.Extract = channel.unary_unary(
+                '/papers.v1.PaperMetadataExtractor/Extract',
+                request_serializer=document__parser__pb2.PaperExtractionRequest.SerializeToString,
+                response_deserializer=document__parser__pb2.PaperExtractionResult.FromString,
+                _registered_method=True)
+
+
+class PaperMetadataExtractorServicer:
+    """PaperMetadataExtractor derives candidates from an already-persisted
+    Markdown revision. It performs no catalog lookups and writes no database
+    state; Go remains responsible for orchestration and canonical persistence.
+    """
+
+    def Extract(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_PaperMetadataExtractorServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'Extract': grpc.unary_unary_rpc_method_handler(
+                    servicer.Extract,
+                    request_deserializer=document__parser__pb2.PaperExtractionRequest.FromString,
+                    response_serializer=document__parser__pb2.PaperExtractionResult.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'papers.v1.PaperMetadataExtractor', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('papers.v1.PaperMetadataExtractor', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class PaperMetadataExtractor:
+    """PaperMetadataExtractor derives candidates from an already-persisted
+    Markdown revision. It performs no catalog lookups and writes no database
+    state; Go remains responsible for orchestration and canonical persistence.
+    """
+
+    @staticmethod
+    def Extract(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/papers.v1.PaperMetadataExtractor/Extract',
+            document__parser__pb2.PaperExtractionRequest.SerializeToString,
+            document__parser__pb2.PaperExtractionResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
