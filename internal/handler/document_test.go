@@ -64,7 +64,10 @@ func (s *documentCreatorStub) DeleteUnknownIfUnreferenced(
 
 func (s *documentCreatorStub) Search(_ context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
 	result := types.DocumentPage{Page: search.Page, PageSize: search.PageSize, Items: []types.Document{}}
-	if s.deleted || (search.ID != nil && *search.ID != s.document.ID) || (search.DOI != "" && search.DOI != s.document.DOI) {
+	if s.deleted ||
+		(search.ID != nil && *search.ID != s.document.ID) ||
+		(search.DOI != "" && search.DOI != s.document.DOI) ||
+		(search.FileSHA256 != "" && search.FileSHA256 != s.document.FileSHA256) {
 		return result, nil
 	}
 	result.Items = append(result.Items, s.document)
@@ -128,6 +131,14 @@ func (s *documentCreatorStub) UpdateDocumentInfo(_ context.Context, id uuid.UUID
 		s.document.DOI = *doi
 	}
 	return s.document, nil
+}
+
+func (s *documentCreatorStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, doi string) (bool, error) {
+	if s.deleted || s.document.ID != id || s.document.DOI != "" {
+		return false, nil
+	}
+	s.document.DOI = doi
+	return true, nil
 }
 
 func newDocumentHandler(storage *fileservice.LocalStorage, repo *documentCreatorStub) *handler.DocumentHandler {
@@ -215,6 +226,45 @@ func TestUploadRouteStoresDocument(t *testing.T) {
 	}
 	if _, err := storage.Open(context.Background(), documents.document.StorageKey); err == nil {
 		t.Fatal("stored file still exists after deletion")
+	}
+}
+
+func TestUploadRouteRejectsDuplicateFileHash(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	documents := &documentCreatorStub{}
+	documentService := service.NewDocumentService(documents, storage)
+	documentHandler := handler.NewDocumentHandler(config.Config{MaxUploadSize: fileservice.DefaultMaxUploadSize}, documentService)
+	processHandler := handler.NewDocumentProcessHandler(documentService)
+	engine := router.NewRouter(router.RouterParams{DocumentHandler: documentHandler, DocumentProcessHandler: processHandler})
+
+	upload := func() *httptest.ResponseRecorder {
+		var body bytes.Buffer
+		writer := multipart.NewWriter(&body)
+		part, err := writer.CreateFormFile("file", "same.txt")
+		if err != nil {
+			t.Fatalf("create multipart file: %v", err)
+		}
+		if _, err := part.Write([]byte("identical upload")); err != nil {
+			t.Fatalf("write multipart file: %v", err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatalf("close multipart body: %v", err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/document/upload", &body)
+		request.Header.Set("Content-Type", writer.FormDataContentType())
+		response := httptest.NewRecorder()
+		engine.ServeHTTP(response, request)
+		return response
+	}
+
+	if response := upload(); response.Code != http.StatusCreated {
+		t.Fatalf("first upload status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if response := upload(); response.Code != http.StatusConflict {
+		t.Fatalf("duplicate upload status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 

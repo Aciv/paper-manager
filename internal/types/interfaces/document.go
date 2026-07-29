@@ -51,6 +51,11 @@ type DocumentRepository interface {
 	// UpdateDocumentInfo changes original-file metadata. Nil fields keep their
 	// stored values; paper metadata is owned by PaperMetadataRepository.
 	UpdateDocumentInfo(ctx context.Context, id uuid.UUID, originalFilename, doi *string) (types.Document, error)
+	// SetDOIIfEmpty atomically records a normalized provider DOI only while the
+	// current value is blank. It returns false when a user or another worker
+	// supplied a DOI first, and returns ErrDuplicateDOI if another document owns
+	// the provider DOI.
+	SetDOIIfEmpty(ctx context.Context, id uuid.UUID, doi string) (bool, error)
 }
 
 // DocumentService contains document lifecycle and storage orchestration.

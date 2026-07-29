@@ -281,6 +281,8 @@ func (h *DocumentHandler) writeUploadError(c *gin.Context, err error) {
 	switch {
 	case errors.Is(err, appservice.ErrDuplicateDOI):
 		h.writeError(c, apperrors.NewConflictError("doi already exists"), err)
+	case errors.Is(err, appservice.ErrDuplicateFileHash):
+		h.writeError(c, apperrors.NewConflictError("an identical file already exists"), err)
 	case errors.Is(err, fileservice.ErrFileTooLarge):
 		h.writeError(c, apperrors.NewPayloadTooLargeError("file exceeds the configured upload limit"), err)
 	case errors.Is(err, fileservice.ErrUnsupportedFileType):

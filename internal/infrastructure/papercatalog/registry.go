@@ -48,9 +48,10 @@ func NewRegistryFromConfig(cfg config.Config) (interfaces.PaperCatalogRegistry, 
 	if cfg.PaperCatalogTimeout <= 0 {
 		return nil, fmt.Errorf("paper catalog timeout must be positive")
 	}
-	newClient := func() *http.Client {
-		return &http.Client{Timeout: cfg.PaperCatalogTimeout}
+	newClient := func(provider string) *http.Client {
+		return &http.Client{Timeout: cfg.PaperCatalogTimeoutFor(provider)}
 	}
+	throttle := newProviderThrottle()
 	providers := make([]interfaces.PaperCatalogProvider, 0, len(cfg.PaperCatalogProviders))
 	for _, configuredName := range cfg.PaperCatalogProviders {
 		name := strings.ToLower(strings.TrimSpace(configuredName))
@@ -61,24 +62,23 @@ func NewRegistryFromConfig(cfg config.Config) (interfaces.PaperCatalogRegistry, 
 		switch name {
 		case SemanticScholarProvider:
 			provider, err = NewSemanticScholarProvider(
-				newClient(),
+				newClient(name),
 				cfg.SemanticScholarAPIKey,
 				cfg.PaperCatalogUserAgent,
 			)
 		case OpenAlexProvider:
 			provider, err = NewOpenAlexProvider(
-				newClient(),
+				newClient(name),
 				cfg.OpenAlexAPIKey,
 				cfg.PaperCatalogUserAgent,
 			)
 		case ArXivProvider:
 			provider, err = NewArXivProvider(
-				newClient(),
-				cfg.PaperCatalogUserAgent,
+				newClient(name), cfg.PaperCatalogUserAgent, 0,
 			)
 		case CrossrefProvider:
 			provider, err = NewCrossrefProvider(
-				newClient(),
+				newClient(name),
 				cfg.CrossrefMailto,
 				cfg.PaperCatalogUserAgent,
 			)
@@ -88,7 +88,7 @@ func NewRegistryFromConfig(cfg config.Config) (interfaces.PaperCatalogRegistry, 
 		if err != nil {
 			return nil, fmt.Errorf("initialize paper catalog provider %q: %w", name, err)
 		}
-		providers = append(providers, provider)
+		providers = append(providers, wrapProvider(provider, cfg, throttle))
 	}
 	return NewRegistry(providers...)
 }

@@ -87,15 +87,24 @@ func (s *paperInfoService) RetryCatalogResolution(
 	if document.Status == types.DocumentStatusDeleting {
 		return types.PaperInfoStatus{}, ErrPaperInfoDeleting
 	}
-	markdownSHA256 := ""
-	if document.Status != types.DocumentStatusUnknown {
-		if markdown, markdownErr := s.documents.GetMarkdown(ctx, document.ID); markdownErr == nil {
-			markdownSHA256 = markdown.SHA256
-		} else if !errors.Is(markdownErr, sql.ErrNoRows) {
-			return types.PaperInfoStatus{}, markdownErr
+	if document.Status == types.DocumentStatusUnknown {
+		queued, err := s.enqueueUnknownReferenceCatalogRetries(ctx, document)
+		if err != nil {
+			return types.PaperInfoStatus{}, err
 		}
+		if queued == 0 {
+			return types.PaperInfoStatus{}, ErrPaperInfoCatalogUnavailable
+		}
+		logger.Info(ctx, "unknown paper reference catalog retries queued", "document_id", document.ID, "queued_count", queued)
+		return s.GetStatus(ctx, document.ID.String())
 	}
-	if !hasUsablePaperLookupIdentity(document.DOI, metadata.Title) && !s.hasIncomingReference(ctx, document) {
+	markdownSHA256 := ""
+	if markdown, markdownErr := s.documents.GetMarkdown(ctx, document.ID); markdownErr == nil {
+		markdownSHA256 = markdown.SHA256
+	} else if !errors.Is(markdownErr, sql.ErrNoRows) {
+		return types.PaperInfoStatus{}, markdownErr
+	}
+	if !hasUsablePaperLookupIdentity(document.DOI, metadata.Title) {
 		return types.PaperInfoStatus{}, ErrPaperInfoCatalogUnavailable
 	}
 	task, options, err := NewPaperCatalogResolveTask(
@@ -115,6 +124,75 @@ func (s *paperInfoService) RetryCatalogResolution(
 	}
 	logger.Info(ctx, "paper catalog resolution retry queued", "document_id", document.ID)
 	return s.GetStatus(ctx, document.ID.String())
+}
+
+// enqueueUnknownReferenceCatalogRetries retries an unknown placeholder through
+// each source document that cites it. A placeholder has no Markdown/file of
+// its own, so source-scope work would have no durable query context and must
+// never be queued for it.
+func (s *paperInfoService) enqueueUnknownReferenceCatalogRetries(
+	ctx context.Context,
+	placeholder types.Document,
+) (int, error) {
+	if s.tasks == nil {
+		return 0, errors.New("task queue is not configured")
+	}
+	incoming, err := s.papers.ListCitedBy(ctx, placeholder.ID.String())
+	if err != nil {
+		return 0, fmt.Errorf("list incoming references: %w", err)
+	}
+	attempt := nextPaperInfoManualAttempt()
+	seen := make(map[string]struct{}, len(incoming))
+	queued := 0
+	for _, citation := range incoming {
+		if err := ctx.Err(); err != nil {
+			return queued, err
+		}
+		if citation.CitingDocumentID == uuid.Nil || citation.CitingDocumentID == placeholder.ID {
+			continue
+		}
+		key := citation.CitingDocumentID.String() + "\x00" + citation.RawReference
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+
+		source, err := s.documents.Get(ctx, citation.CitingDocumentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return queued, err
+		}
+		if source.Status == types.DocumentStatusDeleting || source.Status == types.DocumentStatusUnknown {
+			continue
+		}
+		markdownSHA256 := ""
+		if markdown, err := s.documents.GetMarkdown(ctx, source.ID); err == nil {
+			markdownSHA256 = markdown.SHA256
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			return queued, err
+		}
+		task, options, err := NewPaperCatalogResolveTask(
+			types.PaperCatalogResolvePayload{
+				DocumentID:      source.ID.String(),
+				MarkdownSHA256:  markdownSHA256,
+				Attempt:         attempt,
+				Scope:           types.PaperCatalogScopeReference,
+				CitedDocumentID: placeholder.ID.String(),
+			},
+			s.cfg.PaperCatalogTaskTimeout,
+			s.cfg.PaperCatalogTaskMaxRetry,
+		)
+		if err != nil {
+			return queued, fmt.Errorf("build unknown reference catalog task: %w", err)
+		}
+		if err := enqueueManagedTask(ctx, s.tasks, task, options, source.ID.String()); err != nil {
+			return queued, err
+		}
+		queued++
+	}
+	return queued, nil
 }
 
 // nextPaperInfoManualAttempt yields a positive, process-monotonic ID for an
@@ -219,18 +297,6 @@ func (s *paperInfoService) isQueued(
 		return false, false
 	}
 	return queued, true
-}
-
-func (s *paperInfoService) hasIncomingReference(ctx context.Context, document types.Document) bool {
-	if document.Status != types.DocumentStatusUnknown {
-		return false
-	}
-	citations, err := s.papers.ListCitedBy(ctx, document.ID.String())
-	if err != nil {
-		logger.Warn(ctx, "list incoming references for paper retry failed", "document_id", document.ID, "error", err)
-		return false
-	}
-	return len(citations) > 0
 }
 
 var _ interfaces.PaperInfoService = (*paperInfoService)(nil)

@@ -147,3 +147,15 @@ func TestUnknownCitationsMigrationAddsPlaceholderStatusAndRawEvidence(t *testing
 		}
 	}
 }
+
+func TestDocumentFileHashMigrationAddsDeduplicationGuard(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS file_sha256 CHAR(64) NOT NULL DEFAULT ''",
+		"uq_documents_file_sha256_nonempty",
+		"WHERE file_sha256 <> ''",
+	} {
+		if !strings.Contains(documentFileHashUp, fragment) {
+			t.Fatalf("document file-hash migration does not include %q", fragment)
+		}
+	}
+}

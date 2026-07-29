@@ -38,12 +38,17 @@ type arXivProvider struct {
 func NewArXivProvider(
 	client *http.Client,
 	userAgent string,
+	requestSpacing ...time.Duration,
 ) (interfaces.PaperCatalogProvider, error) {
+	spacing := arXivRequestSpacing
+	if len(requestSpacing) > 0 {
+		spacing = requestSpacing[0]
+	}
 	return newArXivProvider(
 		arXivBaseURL,
 		client,
 		userAgent,
-		arXivRequestSpacing,
+		spacing,
 	)
 }
 

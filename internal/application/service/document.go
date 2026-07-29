@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -38,8 +40,12 @@ type documentService struct {
 	extractionTaskMaxRetry   int
 }
 
-// ErrDuplicateDOI indicates that a document with the same DOI already exists.
-var ErrDuplicateDOI = types.ErrDuplicateDOI
+// Upload conflict sentinels are aliases so handlers do not depend on storage
+// or repository implementation details.
+var (
+	ErrDuplicateDOI      = types.ErrDuplicateDOI
+	ErrDuplicateFileHash = types.ErrDuplicateFileHash
+)
 
 var (
 	ErrInvalidDocumentFilename = errors.New("invalid document filename")
@@ -99,13 +105,36 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 			return nil, ErrDuplicateDOI
 		}
 	}
+	fileHash, err := multipartFileSHA256(file)
+	if err != nil {
+		return nil, err
+	}
+	page, searchErr := s.repo.Search(ctx, types.DocumentSearch{FileSHA256: fileHash, Page: 1, PageSize: 1})
+	if searchErr != nil {
+		logger.Error(ctx, "check document file hash failed", "error", searchErr)
+		return nil, searchErr
+	}
+	if page.Total > 0 {
+		logger.Warn(ctx, "duplicate document file hash rejected", "file_sha256", fileHash)
+		return nil, types.ErrDuplicateFileHash
+	}
 	stored, err := fileservice.SaveMultipart(ctx, s.storage, file)
 	if err != nil {
 		logger.Error(ctx, "store document file failed", "filename", file.Filename, "error", err)
 		return nil, err
 	}
+	if stored.SHA256 != "" && !strings.EqualFold(stored.SHA256, fileHash) {
+		logger.Error(ctx, "stored document hash differs from uploaded bytes",
+			"storage_key", stored.Key,
+			"uploaded_file_sha256", fileHash,
+			"stored_file_sha256", stored.SHA256)
+		if cleanupErr := s.storage.Delete(context.WithoutCancel(ctx), stored.Key); cleanupErr != nil {
+			logger.Warn(ctx, "remove hash-mismatched stored file failed", "storage_key", stored.Key, "error", cleanupErr)
+		}
+		return nil, errors.New("stored file hash differs from uploaded file hash")
+	}
 	doc := types.Document{ID: uuid.New(), OriginalFilename: stored.Filename, ContentType: stored.ContentType,
-		SizeBytes: stored.Size, DOI: doi, StorageKey: stored.Key, Status: types.DocumentStatusUploaded}
+		SizeBytes: stored.Size, DOI: doi, FileSHA256: fileHash, StorageKey: stored.Key, Status: types.DocumentStatusUploaded}
 	created, err := s.repo.Create(ctx, doc)
 	if err != nil {
 		logger.Error(ctx, "create document record failed", "document_id", doc.ID, "error", err)
@@ -121,6 +150,19 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 		}
 	}
 	return &created, nil
+}
+
+func multipartFileSHA256(file *multipart.FileHeader) (string, error) {
+	input, err := file.Open()
+	if err != nil {
+		return "", fmt.Errorf("open uploaded file for hash: %w", err)
+	}
+	defer input.Close()
+	hash := sha256.New()
+	if _, err := io.Copy(hash, input); err != nil {
+		return "", fmt.Errorf("hash uploaded file: %w", err)
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (s *documentService) enqueueDocumentRecognition(ctx context.Context, documentID uuid.UUID) error {

@@ -32,6 +32,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(docrecognition.NewRecognizer))
 	must(dependencies.Provide(paperextraction.NewExtractor))
 	must(dependencies.Provide(papercatalog.NewRegistryFromConfig))
+	must(dependencies.Provide(papercatalog.NewReferenceCatalogLimiter))
 	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessing))
 	must(dependencies.Provide(appservice.NewPaperService))
 	must(dependencies.Provide(appservice.NewPaperInfoService))

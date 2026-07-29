@@ -372,7 +372,8 @@ func classifyPaperTaskError(err error) error {
 		errors.Is(err, types.ErrInvalidPaperExtraction) ||
 		errors.Is(err, types.ErrInvalidPaperCatalogData) ||
 		errors.Is(err, service.ErrInvalidPaperMetadata) ||
-		errors.Is(err, service.ErrPaperCatalogNoMatch) {
+		errors.Is(err, service.ErrPaperCatalogNoMatch) ||
+		errors.Is(err, service.ErrPaperInfoCatalogUnavailable) {
 		return skipPaperTask(err)
 	}
 

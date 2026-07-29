@@ -82,7 +82,7 @@ func (r *taskDeadLetterRepository) Insert(ctx context.Context, dl *types.TaskDea
 		logger.Error(ctx, "insert task dead letter failed", "task_type", dl.TaskType, "error", err)
 		return err
 	}
-	logger.Info(ctx, "task dead letter recorded", "task_type", dl.TaskType, "scope", dl.Scope, "scope_id", dl.ScopeID)
+	logger.Info(ctx, "task dead letter recorded", "task_type", dl.TaskType, "scope", dl.Scope, "scope_id", dl.ScopeID, "last_error", dl.LastError)
 	return nil
 }
 

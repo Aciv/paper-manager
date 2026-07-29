@@ -14,9 +14,9 @@ type PaperAuthor struct {
 	Affiliation string `json:"affiliation,omitempty"`
 }
 
-// PaperMetadataSource identifies the writer that produced the current
-// canonical metadata snapshot. Higher-priority writers must not be replaced
-// by lower-priority asynchronous work.
+// PaperMetadataSource identifies the writer of the most recent metadata
+// update. It is provenance only: persistence is last-write-wins per non-nil
+// field and does not impose a source-priority order.
 type PaperMetadataSource string
 
 const (
@@ -109,8 +109,7 @@ type PaperMetadataUpdate struct {
 	Pages       *string        `json:"pages,omitempty"`
 	Language    *string        `json:"language,omitempty"`
 	// MetadataSource is internal write provenance. HTTP clients cannot set it;
-	// PaperService assigns manual while automated pipelines assign their
-	// explicit source.
+	// PaperService assigns manual while automated pipelines assign their source.
 	MetadataSource *PaperMetadataSource `json:"-"`
 }
 

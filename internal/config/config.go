@@ -13,14 +13,17 @@ import (
 const DefaultMaxUploadSize int64 = 100 << 20 // 100 MiB
 
 const (
-	defaultDocumentHousekeepingInterval = 5 * time.Minute
-	defaultDocumentStaleThreshold       = time.Hour + 10*time.Minute
-	defaultPaperCatalogTimeout          = 10 * time.Second
-	defaultPaperCatalogConcurrency      = 4
-	defaultPaperExtractionTaskTimeout   = 2 * time.Minute
-	defaultPaperExtractionTaskMaxRetry  = 3
-	defaultPaperCatalogTaskTimeout      = 10 * time.Minute
-	defaultPaperCatalogTaskMaxRetry     = 5
+	defaultDocumentHousekeepingInterval                = 5 * time.Minute
+	defaultDocumentStaleThreshold                      = time.Hour + 10*time.Minute
+	defaultPaperCatalogTimeout                         = 10 * time.Second
+	defaultPaperCatalogConcurrency                     = 4
+	defaultPaperExtractionTaskTimeout                  = 2 * time.Minute
+	defaultPaperExtractionTaskMaxRetry                 = 3
+	defaultPaperCatalogTaskTimeout                     = 10 * time.Minute
+	defaultPaperCatalogTaskMaxRetry                    = 5
+	defaultPaperReferenceCatalogMaxPerDocument         = 25
+	defaultPaperReferenceCatalogConcurrency            = 2
+	defaultPaperReferenceCatalogPerDocumentConcurrency = 1
 )
 
 // Config contains the infrastructure options selected at process startup.
@@ -46,14 +49,22 @@ type Config struct {
 	PaperCatalogProviders        []string
 	PaperCatalogTimeout          time.Duration
 	PaperCatalogConcurrency      int
-	PaperCatalogUserAgent        string
-	SemanticScholarAPIKey        string
-	OpenAlexAPIKey               string
-	CrossrefMailto               string
-	PaperExtractionTaskTimeout   time.Duration
-	PaperExtractionTaskMaxRetry  int
-	PaperCatalogTaskTimeout      time.Duration
-	PaperCatalogTaskMaxRetry     int
+	// Per-provider policies override the legacy shared timeout/concurrency.
+	// Keys use the stable catalog provider name (for example "arxiv").
+	PaperCatalogProviderTimeouts                map[string]time.Duration
+	PaperCatalogProviderSpacings                map[string]time.Duration
+	PaperCatalogProviderConcurrency             map[string]int
+	PaperCatalogUserAgent                       string
+	SemanticScholarAPIKey                       string
+	OpenAlexAPIKey                              string
+	CrossrefMailto                              string
+	PaperExtractionTaskTimeout                  time.Duration
+	PaperExtractionTaskMaxRetry                 int
+	PaperCatalogTaskTimeout                     time.Duration
+	PaperCatalogTaskMaxRetry                    int
+	PaperReferenceCatalogMaxPerDocument         int
+	PaperReferenceCatalogConcurrency            int
+	PaperReferenceCatalogPerDocumentConcurrency int
 }
 
 func Load() (Config, error) {
@@ -104,6 +115,10 @@ func Load() (Config, error) {
 	if len(paperCatalogProviders) == 0 {
 		return Config{}, fmt.Errorf("PAPER_CATALOG_PROVIDERS must contain at least one provider")
 	}
+	providerTimeouts, providerSpacings, providerConcurrency, err := paperCatalogProviderPolicy(paperCatalogProviders, paperCatalogTimeout)
+	if err != nil {
+		return Config{}, err
+	}
 	paperExtractionTaskTimeout, err := durationEnv(
 		"PAPER_EXTRACTION_TASK_TIMEOUT",
 		defaultPaperExtractionTaskTimeout,
@@ -134,34 +149,129 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	paperReferenceCatalogMaxPerDocument, err := positiveIntEnv(
+		"PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT",
+		defaultPaperReferenceCatalogMaxPerDocument,
+		500,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	paperReferenceCatalogConcurrency, err := positiveIntEnv("PAPER_REFERENCE_CATALOG_CONCURRENCY", defaultPaperReferenceCatalogConcurrency, 32)
+	if err != nil {
+		return Config{}, err
+	}
+	paperReferenceCatalogPerDocumentConcurrency, err := positiveIntEnv("PAPER_REFERENCE_CATALOG_PER_DOCUMENT_CONCURRENCY", defaultPaperReferenceCatalogPerDocumentConcurrency, 16)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
-		HTTPAddress:                  env("HTTP_ADDR", "127.0.0.1:8080"),
-		DatabaseDriver:               strings.ToLower(env("DB_DRIVER", "postgres")),
-		DatabaseURL:                  env("DATABASE_URL", "postgres://papers:papers@localhost:5432/papers?sslmode=disable"),
-		CORSOrigin:                   env("CORS_ORIGIN", "http://localhost:5173"),
-		FileStorageDriver:            strings.ToLower(env("FILE_STORAGE_DRIVER", "local")),
-		UploadDirectory:              uploadDirectory,
-		RecognitionOutputDirectory:   env("RECOGNITION_OUTPUT_DIR", filepath.Join(uploadDirectory, "recognition-output")),
-		MaxUploadSize:                maxUploadSize,
-		AutoMigrate:                  !strings.EqualFold(env("AUTO_MIGRATE", "true"), "false"),
-		DocumentHousekeepingEnabled:  !strings.EqualFold(env("DOCUMENT_HOUSEKEEPING_ENABLED", "true"), "false"),
-		DocumentHousekeepingInterval: housekeepingInterval,
-		DocumentStaleThreshold:       staleThreshold,
-		DocumentRecognitionDriver:    strings.ToLower(env("DOCUMENT_RECOGNITION_DRIVER", "default")),
-		ParserGRPCAddress:            env("PARSER_GRPC_ADDR", "127.0.0.1:50051"),
-		ParserGRPCMaxMessageSize:     int(parserMessageSize),
-		PaperCatalogProviders:        paperCatalogProviders,
-		PaperCatalogTimeout:          paperCatalogTimeout,
-		PaperCatalogConcurrency:      paperCatalogConcurrency,
-		PaperCatalogUserAgent:        env("PAPER_CATALOG_USER_AGENT", "papersManager/1.0"),
-		SemanticScholarAPIKey:        strings.TrimSpace(os.Getenv("SEMANTIC_SCHOLAR_API_KEY")),
-		OpenAlexAPIKey:               strings.TrimSpace(os.Getenv("OPENALEX_API_KEY")),
-		CrossrefMailto:               strings.TrimSpace(os.Getenv("CROSSREF_MAILTO")),
-		PaperExtractionTaskTimeout:   paperExtractionTaskTimeout,
-		PaperExtractionTaskMaxRetry:  paperExtractionTaskMaxRetry,
-		PaperCatalogTaskTimeout:      paperCatalogTaskTimeout,
-		PaperCatalogTaskMaxRetry:     paperCatalogTaskMaxRetry,
+		HTTPAddress:                                 env("HTTP_ADDR", "127.0.0.1:8080"),
+		DatabaseDriver:                              strings.ToLower(env("DB_DRIVER", "postgres")),
+		DatabaseURL:                                 env("DATABASE_URL", "postgres://papers:papers@localhost:5432/papers?sslmode=disable"),
+		CORSOrigin:                                  env("CORS_ORIGIN", "http://localhost:5173"),
+		FileStorageDriver:                           strings.ToLower(env("FILE_STORAGE_DRIVER", "local")),
+		UploadDirectory:                             uploadDirectory,
+		RecognitionOutputDirectory:                  env("RECOGNITION_OUTPUT_DIR", filepath.Join(uploadDirectory, "recognition-output")),
+		MaxUploadSize:                               maxUploadSize,
+		AutoMigrate:                                 !strings.EqualFold(env("AUTO_MIGRATE", "true"), "false"),
+		DocumentHousekeepingEnabled:                 !strings.EqualFold(env("DOCUMENT_HOUSEKEEPING_ENABLED", "true"), "false"),
+		DocumentHousekeepingInterval:                housekeepingInterval,
+		DocumentStaleThreshold:                      staleThreshold,
+		DocumentRecognitionDriver:                   strings.ToLower(env("DOCUMENT_RECOGNITION_DRIVER", "default")),
+		ParserGRPCAddress:                           env("PARSER_GRPC_ADDR", "127.0.0.1:50051"),
+		ParserGRPCMaxMessageSize:                    int(parserMessageSize),
+		PaperCatalogProviders:                       paperCatalogProviders,
+		PaperCatalogTimeout:                         paperCatalogTimeout,
+		PaperCatalogConcurrency:                     paperCatalogConcurrency,
+		PaperCatalogProviderTimeouts:                providerTimeouts,
+		PaperCatalogProviderSpacings:                providerSpacings,
+		PaperCatalogProviderConcurrency:             providerConcurrency,
+		PaperCatalogUserAgent:                       env("PAPER_CATALOG_USER_AGENT", "papersManager/1.0"),
+		SemanticScholarAPIKey:                       strings.TrimSpace(os.Getenv("SEMANTIC_SCHOLAR_API_KEY")),
+		OpenAlexAPIKey:                              strings.TrimSpace(os.Getenv("OPENALEX_API_KEY")),
+		CrossrefMailto:                              strings.TrimSpace(os.Getenv("CROSSREF_MAILTO")),
+		PaperExtractionTaskTimeout:                  paperExtractionTaskTimeout,
+		PaperExtractionTaskMaxRetry:                 paperExtractionTaskMaxRetry,
+		PaperCatalogTaskTimeout:                     paperCatalogTaskTimeout,
+		PaperCatalogTaskMaxRetry:                    paperCatalogTaskMaxRetry,
+		PaperReferenceCatalogMaxPerDocument:         paperReferenceCatalogMaxPerDocument,
+		PaperReferenceCatalogConcurrency:            paperReferenceCatalogConcurrency,
+		PaperReferenceCatalogPerDocumentConcurrency: paperReferenceCatalogPerDocumentConcurrency,
 	}, nil
+}
+
+// PaperCatalogTimeoutFor returns a provider-specific budget while preserving
+// PAPER_CATALOG_TIMEOUT for existing deployments.
+func (c Config) PaperCatalogTimeoutFor(provider string) time.Duration {
+	if timeout := c.PaperCatalogProviderTimeouts[strings.ToLower(strings.TrimSpace(provider))]; timeout > 0 {
+		return timeout
+	}
+	return c.PaperCatalogTimeout
+}
+
+func (c Config) PaperCatalogSpacingFor(provider string) time.Duration {
+	if spacing := c.PaperCatalogProviderSpacings[strings.ToLower(strings.TrimSpace(provider))]; spacing > 0 {
+		return spacing
+	}
+	return time.Second
+}
+
+func (c Config) PaperCatalogConcurrencyFor(provider string) int {
+	if concurrency := c.PaperCatalogProviderConcurrency[strings.ToLower(strings.TrimSpace(provider))]; concurrency > 0 {
+		return concurrency
+	}
+	return 1
+}
+
+func paperCatalogProviderPolicy(providers []string, fallbackTimeout time.Duration) (map[string]time.Duration, map[string]time.Duration, map[string]int, error) {
+	timeouts := make(map[string]time.Duration, len(providers))
+	spacings := make(map[string]time.Duration, len(providers))
+	concurrency := make(map[string]int, len(providers))
+	defaults := map[string]struct {
+		spacing     time.Duration
+		concurrency int
+	}{
+		"arxiv": {3 * time.Second, 1}, "semantic_scholar": {time.Second, 1},
+		"openalex": {time.Second, 1}, "crossref": {500 * time.Millisecond, 1},
+	}
+	for _, provider := range providers {
+		key := strings.ToLower(strings.TrimSpace(provider))
+		envKey := strings.ToUpper(strings.NewReplacer("-", "_", ":", "_").Replace(key))
+		defaultPolicy, ok := defaults[key]
+		if !ok {
+			defaultPolicy = struct {
+				spacing     time.Duration
+				concurrency int
+			}{time.Second, 1}
+		}
+		if key == "semantic_scholar" && strings.TrimSpace(os.Getenv("SEMANTIC_SCHOLAR_API_KEY")) != "" {
+			defaultPolicy.spacing = 100 * time.Millisecond
+			defaultPolicy.concurrency = 10
+		}
+		if key == "openalex" && strings.TrimSpace(os.Getenv("OPENALEX_API_KEY")) != "" {
+			defaultPolicy.spacing = 100 * time.Millisecond
+			defaultPolicy.concurrency = 10
+		}
+		if key == "crossref" && strings.TrimSpace(os.Getenv("CROSSREF_MAILTO")) != "" {
+			defaultPolicy.spacing = 300 * time.Millisecond
+			defaultPolicy.concurrency = 3
+		}
+		var err error
+		timeouts[key], err = durationEnv("PAPER_CATALOG_"+envKey+"_TIMEOUT", fallbackTimeout)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		spacings[key], err = durationEnv("PAPER_CATALOG_"+envKey+"_SPACING", defaultPolicy.spacing)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		concurrency[key], err = positiveIntEnv("PAPER_CATALOG_"+envKey+"_CONCURRENCY", defaultPolicy.concurrency, 100)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+	}
+	return timeouts, spacings, concurrency, nil
 }
 
 func positiveIntEnv(key string, fallback, maximum int) (int, error) {

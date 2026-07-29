@@ -195,6 +195,26 @@ func (r *paperDocumentRepoStub) UpdateDocumentInfo(
 	return document, nil
 }
 
+func (r *paperDocumentRepoStub) SetDOIIfEmpty(
+	_ context.Context, id uuid.UUID, doi string,
+) (bool, error) {
+	document, ok := r.documents[id]
+	if !ok {
+		return false, sql.ErrNoRows
+	}
+	if document.DOI != "" {
+		return false, nil
+	}
+	for otherID, other := range r.documents {
+		if otherID != id && other.DOI == doi && doi != "" {
+			return false, types.ErrDuplicateDOI
+		}
+	}
+	document.DOI = doi
+	r.documents[id] = document
+	return true, nil
+}
+
 type paperMetadataRepoStub struct {
 	items      map[uuid.UUID]types.PaperMetadata
 	lastSearch types.PaperSearch

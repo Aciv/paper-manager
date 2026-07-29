@@ -88,3 +88,22 @@ func TestPaperCatalogResolvePayloadAllowsUnknownWithoutRevision(t *testing.T) {
 		t.Fatalf("unexpected Markdown revision %q", command.MarkdownSHA256)
 	}
 }
+
+func TestPaperCatalogResolvePayloadReferenceScope(t *testing.T) {
+	documentID := uuid.New()
+	citedID := uuid.New()
+	payload := PaperCatalogResolvePayload{
+		DocumentID: documentID.String(), Scope: PaperCatalogScopeReference,
+		CitedDocumentID: citedID.String(), MarkdownSHA256: validTestSHA256(),
+	}
+	command, err := payload.Command()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if command.Scope != PaperCatalogScopeReference || command.CitedDocumentID != citedID {
+		t.Fatalf("reference command = %#v", command)
+	}
+	if err := (PaperCatalogResolvePayload{DocumentID: documentID.String(), Scope: PaperCatalogScopeReference}).Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
+		t.Fatalf("reference payload without cited ID error = %v", err)
+	}
+}

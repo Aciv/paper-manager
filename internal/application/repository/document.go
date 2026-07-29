@@ -40,9 +40,13 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 
 func (r *documentRepository) Create(ctx context.Context, document types.Document) (types.Document, error) {
 	document.DOI = strings.ToLower(strings.TrimSpace(document.DOI))
+	document.FileSHA256 = strings.ToLower(strings.TrimSpace(document.FileSHA256))
 	err := r.db.WithContext(ctx).Create(&document).Error
 	if isDuplicateDOIError(err) {
 		err = fmt.Errorf("%w: %s", types.ErrDuplicateDOI, document.DOI)
+	}
+	if isDuplicateFileHashError(err) {
+		err = fmt.Errorf("%w: %s", types.ErrDuplicateFileHash, document.FileSHA256)
 	}
 	if err != nil {
 		logger.Error(ctx, "create document record failed", "document_id", document.ID, "storage_key", document.StorageKey, "error", err)
@@ -143,6 +147,9 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	}
 	if search.DOI != "" {
 		query = query.Where("documents.doi = ?", search.DOI)
+	}
+	if search.FileSHA256 != "" {
+		query = query.Where("documents.file_sha256 = ?", strings.ToLower(strings.TrimSpace(search.FileSHA256)))
 	}
 
 	result := types.DocumentPage{Page: page, PageSize: pageSize, Items: []types.Document{}}
@@ -328,6 +335,28 @@ func (r *documentRepository) UpdateDocumentInfo(
 	return updated, nil
 }
 
+func (r *documentRepository) SetDOIIfEmpty(ctx context.Context, id uuid.UUID, doi string) (bool, error) {
+	doi = strings.ToLower(strings.TrimSpace(doi))
+	if doi == "" {
+		return false, nil
+	}
+	result := r.db.WithContext(ctx).Model(&types.Document{}).
+		Where("id = ? AND doi = ''", id).
+		Update("doi", doi)
+	if isDuplicateDOIError(result.Error) {
+		return false, fmt.Errorf("%w: %s", types.ErrDuplicateDOI, doi)
+	}
+	if result.Error != nil {
+		logger.Error(ctx, "backfill document DOI failed", "document_id", id, "error", result.Error)
+		return false, repositoryError(result.Error)
+	}
+	if result.RowsAffected > 0 {
+		logger.Info(ctx, "document DOI backfilled", "document_id", id, "doi", doi)
+		return true, nil
+	}
+	return false, nil
+}
+
 func valueOrEmpty(value *string) string {
 	if value == nil {
 		return ""
@@ -338,6 +367,11 @@ func valueOrEmpty(value *string) string {
 func isDuplicateDOIError(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.ConstraintName == "uq_documents_doi_nonempty"
+}
+
+func isDuplicateFileHashError(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.ConstraintName == "uq_documents_file_sha256_nonempty"
 }
 
 func repositoryError(err error) error {

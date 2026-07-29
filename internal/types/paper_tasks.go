@@ -12,6 +12,17 @@ import (
 // cannot be safely converted into a typed application command.
 var ErrInvalidPaperInfoTaskPayload = errors.New("invalid paper info task payload")
 
+// PaperCatalogScope identifies whether a catalog task resolves the uploaded
+// source paper or one of its outgoing references. Both scopes deliberately use
+// the same task type: they share provider policy while reference tasks remain
+// schedulable on the low-priority queue.
+type PaperCatalogScope string
+
+const (
+	PaperCatalogScopeSource    PaperCatalogScope = "source"
+	PaperCatalogScopeReference PaperCatalogScope = "reference"
+)
+
 // PaperMetadataExtractPayload is the durable queue message for candidate
 // extraction. It intentionally contains no Markdown, PDF bytes, Blocks, or
 // provider response data; the worker reloads all inputs from durable storage.
@@ -41,6 +52,12 @@ type PaperCatalogResolvePayload struct {
 	// Attempt identifies one user-initiated paper-info run. Queue retries retain
 	// the same attempt.
 	Attempt int `json:"attempt,omitempty"`
+	// Scope defaults to source for compatibility with tasks enqueued before
+	// reference work was split out.
+	Scope PaperCatalogScope `json:"scope,omitempty"`
+	// CitedDocumentID identifies the unknown placeholder to resolve when Scope
+	// is reference. The citing source remains DocumentID.
+	CitedDocumentID string `json:"cited_document_id,omitempty"`
 }
 
 // Validate verifies that the extraction payload is safe to enqueue.
@@ -89,11 +106,30 @@ func (p PaperCatalogResolvePayload) Command() (PaperCatalogResolveCommand, error
 	if p.Attempt < 0 {
 		return PaperCatalogResolveCommand{}, fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperInfoTaskPayload)
 	}
+	scope := p.Scope
+	if scope == "" {
+		scope = PaperCatalogScopeSource
+	}
+	if scope != PaperCatalogScopeSource && scope != PaperCatalogScopeReference {
+		return PaperCatalogResolveCommand{}, fmt.Errorf("%w: unsupported catalog scope %q", ErrInvalidPaperInfoTaskPayload, scope)
+	}
+	var citedDocumentID uuid.UUID
+	if scope == PaperCatalogScopeReference {
+		citedDocumentID, err = parsePaperTaskUUID("cited_document_id", p.CitedDocumentID)
+		if err != nil {
+			return PaperCatalogResolveCommand{}, err
+		}
+		if citedDocumentID == documentID {
+			return PaperCatalogResolveCommand{}, fmt.Errorf("%w: cited_document_id must differ from document_id", ErrInvalidPaperInfoTaskPayload)
+		}
+	}
 	return PaperCatalogResolveCommand{
-		RequestID:      strings.TrimSpace(p.RequestID),
-		DocumentID:     documentID,
-		MarkdownSHA256: strings.ToLower(strings.TrimSpace(p.MarkdownSHA256)),
-		Attempt:        p.Attempt,
+		RequestID:       strings.TrimSpace(p.RequestID),
+		DocumentID:      documentID,
+		MarkdownSHA256:  strings.ToLower(strings.TrimSpace(p.MarkdownSHA256)),
+		Attempt:         p.Attempt,
+		Scope:           scope,
+		CitedDocumentID: citedDocumentID,
 	}, nil
 }
 

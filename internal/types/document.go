@@ -10,6 +10,7 @@ import (
 // ErrDuplicateDOI is returned when a non-empty DOI already belongs to a document.
 var (
 	ErrDuplicateDOI            = errors.New("document with this DOI already exists")
+	ErrDuplicateFileHash       = errors.New("document with this file hash already exists")
 	ErrDocumentNotProcessing   = errors.New("document is no longer processing")
 	ErrUnknownDocumentConflict = errors.New(
 		"unknown placeholder ID belongs to a source document",
@@ -48,6 +49,7 @@ type Document struct {
 	ContentType      string         `gorm:"column:content_type;type:text;not null" json:"contentType"`
 	SizeBytes        int64          `gorm:"column:size_bytes;not null;check:size_bytes >= 0" json:"sizeBytes"`
 	DOI              string         `gorm:"column:doi;type:text;not null;default:'';index:idx_documents_doi" json:"doi,omitempty"`
+	FileSHA256       string         `gorm:"column:file_sha256;type:char(64);not null;default:''" json:"-"`
 	StorageKey       string         `gorm:"column:storage_key;type:text;not null;uniqueIndex" json:"-"`
 	Status           DocumentStatus `gorm:"column:status;type:text;not null;default:uploaded;check:chk_documents_status,status IN ('unknown','uploaded','queued','processing','cancelled','deleting','ready','failed')" json:"status"`
 	ErrorMessage     *string        `gorm:"column:error_message;type:text" json:"errorMessage,omitempty"`
@@ -63,10 +65,11 @@ const MaxDocumentSearchPage = 10000
 // DocumentSearch describes source-document lookup. Bibliographic title and
 // tag filtering belongs to PaperSearch and PaperMetadataRepository.
 type DocumentSearch struct {
-	ID       *uuid.UUID
-	DOI      string
-	Page     int
-	PageSize int
+	ID         *uuid.UUID
+	DOI        string
+	FileSHA256 string
+	Page       int
+	PageSize   int
 }
 
 // DocumentPage is the paginated result returned by document search endpoints.

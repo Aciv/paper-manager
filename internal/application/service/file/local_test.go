@@ -2,6 +2,8 @@ package file
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"strings"
@@ -24,6 +26,10 @@ func TestLocalStorageSaveAndOpen(t *testing.T) {
 	}
 	if stored.Filename != "notes.json" || stored.ContentType != "application/json" || stored.Size == 0 {
 		t.Fatalf("unexpected stored file: %+v", stored)
+	}
+	wantHash := sha256.Sum256([]byte(`{"title":"paper"}`))
+	if stored.SHA256 != hex.EncodeToString(wantHash[:]) {
+		t.Fatalf("stored SHA256 = %q, want %x", stored.SHA256, wantHash)
 	}
 
 	opened, err := storage.Open(context.Background(), stored.Key)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -302,6 +303,7 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 		papers,
 		nil,
 		nil,
+		nil,
 	)
 
 	resolvable, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
@@ -374,6 +376,7 @@ func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
 		papers,
 		nil,
 		nil,
+		nil,
 	)
 
 	_, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
@@ -435,6 +438,7 @@ func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
 		&paperInfoExtractorStub{},
 		registry,
 		papers,
+		nil,
 		nil,
 		nil,
 	)
@@ -510,6 +514,7 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 		papers,
 		nil,
 		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -519,10 +524,86 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Reference resolution is independent low-priority work. The source task
+	// must not synchronously inspect an entire bibliography.
+	err = service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
+		DocumentID: documentID, MarkdownSHA256: revision,
+		Scope: types.PaperCatalogScopeReference, CitedDocumentID: placeholderID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(papers.resolutions) != 1 ||
 		papers.resolutions[0].CitedDocumentID != resolvedID ||
 		papers.resolutions[0].RawReference != rawReference {
 		t.Fatalf("unexpected citation resolutions: %#v", papers.resolutions)
+	}
+}
+
+func TestPaperInfoResolveSourceQueuesBoundedDeduplicatedReferences(t *testing.T) {
+	documentID := uuid.New()
+	first := uuid.New()
+	second := uuid.New()
+	duplicate := uuid.New()
+	revision := testMarkdownSHA([]byte("# Source\n"))
+	documents := readyPaperInfoDocumentRepo(documentID, revision)
+	for _, id := range []uuid.UUID{first, second, duplicate} {
+		documents.documents[id] = types.Document{ID: id, Status: types.DocumentStatusUnknown}
+	}
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
+	papers.citations[documentID.String()] = []types.PaperCitation{
+		{CitingDocumentID: documentID, CitedDocumentID: first, RawReference: "Ada. 2024. One. doi:10.1000/one"},
+		{CitingDocumentID: documentID, CitedDocumentID: duplicate, RawReference: "Other rendering. doi:10.1000/one"},
+		{CitingDocumentID: documentID, CitedDocumentID: second, RawReference: "Grace. 2023. Two. doi:10.1000/two"},
+	}
+	queue := &paperInfoQueueStub{}
+	service := NewPaperInfoService(config.Config{PaperCatalogConcurrency: 1, PaperReferenceCatalogMaxPerDocument: 2}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/source", "Source Paper", 1)}, nil
+	}}}}, papers, queue, nil, nil)
+	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID, MarkdownSHA256: revision}); err != nil {
+		t.Fatal(err)
+	}
+	if len(queue.tasks) != 2 {
+		t.Fatalf("reference tasks = %d, want two distinct bounded tasks", len(queue.tasks))
+	}
+	seen := map[string]bool{}
+	for _, task := range queue.tasks {
+		var payload types.PaperCatalogResolvePayload
+		if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if payload.Scope != types.PaperCatalogScopeReference || payload.CitedDocumentID == "" {
+			t.Fatalf("reference task payload = %#v", payload)
+		}
+		seen[payload.CitedDocumentID] = true
+	}
+	if !seen[first.String()] || !seen[second.String()] || seen[duplicate.String()] {
+		t.Fatalf("deduplicated references = %#v", seen)
+	}
+}
+
+func TestPaperInfoResolveSourceBackfillsBlankDOIWithoutOverwritingConflict(t *testing.T) {
+	documentID := uuid.New()
+	otherID := uuid.New()
+	documents := newPaperDocumentRepoStub(
+		types.Document{ID: documentID, Status: types.DocumentStatusProcessing},
+		types.Document{ID: otherID, Status: types.DocumentStatusReady, DOI: "10.1000/owned"},
+	)
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
+	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1)}, nil
+	}}
+	service := NewPaperInfoService(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
+	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
+		t.Fatal(err)
+	}
+	if got := documents.documents[documentID].DOI; got != "" {
+		t.Fatalf("conflicting provider DOI overwrote document: %q", got)
+	}
+	if len(papers.updates) != 1 {
+		t.Fatalf("catalog metadata should survive DOI conflict, updates=%d", len(papers.updates))
 	}
 }
 
@@ -553,6 +634,7 @@ func TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup(t *testing.T
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
 		papers,
+		nil,
 		nil,
 		nil,
 	)
@@ -597,6 +679,7 @@ func TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup(t *testing.T) {
 		papers,
 		nil,
 		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -610,7 +693,7 @@ func TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup(t *testing.T) {
 	}
 }
 
-func TestPaperInfoResolveUnknownFromIncomingReferenceWithoutMarkdown(t *testing.T) {
+func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 	citingID := uuid.New()
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(
@@ -649,10 +732,13 @@ func TestPaperInfoResolveUnknownFromIncomingReferenceWithoutMarkdown(t *testing.
 		papers,
 		nil,
 		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: unknownID,
+		DocumentID:      citingID,
+		Scope:           types.PaperCatalogScopeReference,
+		CitedDocumentID: unknownID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -665,7 +751,29 @@ func TestPaperInfoResolveUnknownFromIncomingReferenceWithoutMarkdown(t *testing.
 	}
 }
 
-func TestPaperInfoResolveUnknownRepointsIncomingCitationToStoredPaper(t *testing.T) {
+func TestPaperInfoResolveUnknownSourceScopeIsUnavailable(t *testing.T) {
+	unknownID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: unknownID, Status: types.DocumentStatusUnknown,
+	})
+	service := NewPaperInfoService(
+		config.Config{PaperCatalogConcurrency: 1},
+		documents,
+		&paperInfoStorageStub{},
+		&paperInfoExtractorStub{},
+		&paperInfoRegistryStub{},
+		newPaperInfoPaperServiceStub(),
+		nil,
+		nil,
+		nil,
+	)
+	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: unknownID})
+	if !errors.Is(err, ErrPaperInfoCatalogUnavailable) {
+		t.Fatalf("unknown source-scope resolve error = %v, want ErrPaperInfoCatalogUnavailable", err)
+	}
+}
+
+func TestPaperInfoResolveUnknownReferenceRepointsCitationToStoredPaper(t *testing.T) {
 	citingID := uuid.New()
 	unknownID := uuid.New()
 	storedID := uuid.New()
@@ -710,10 +818,13 @@ func TestPaperInfoResolveUnknownRepointsIncomingCitationToStoredPaper(t *testing
 		papers,
 		nil,
 		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: unknownID,
+		DocumentID:      citingID,
+		Scope:           types.PaperCatalogScopeReference,
+		CitedDocumentID: unknownID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -764,6 +875,7 @@ func TestPaperInfoResolveMetadataAllowsProcessingDocumentWithoutMarkdown(t *test
 		papers,
 		nil,
 		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -794,6 +906,7 @@ func TestPaperInfoResolveMetadataRejectsDeletingDocument(t *testing.T) {
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{},
 		newPaperInfoPaperServiceStub(),
+		nil,
 		nil,
 		nil,
 	)
@@ -912,6 +1025,7 @@ func TestFindStoredCatalogDocumentFallsBackToNormalizedTitle(t *testing.T) {
 		papers,
 		nil,
 		nil,
+		nil,
 	).(*paperInfoService)
 
 	found, err := service.findStoredCatalogDocument(
@@ -951,6 +1065,7 @@ func TestFindStoredCatalogDocumentRejectsTitleWithDifferentAuthors(t *testing.T)
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{},
 		papers,
+		nil,
 		nil,
 		nil,
 	).(*paperInfoService)

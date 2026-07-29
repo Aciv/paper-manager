@@ -4,6 +4,7 @@ package file
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -153,7 +154,8 @@ func (s *LocalStorage) Save(ctx context.Context, upload interfaces.FileUpload) (
 		ctx:    ctx,
 		reader: io.MultiReader(bytes.NewReader(sample), upload.Content),
 	}, s.maxSize+1)
-	size, copyErr := io.Copy(temporary, limited)
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(temporary, hash), limited)
 	if syncErr := temporary.Sync(); syncErr != nil && copyErr == nil {
 		copyErr = syncErr
 	}
@@ -195,7 +197,7 @@ func (s *LocalStorage) Save(ctx context.Context, upload interfaces.FileUpload) (
 		return interfaces.StoredFile{}, fmt.Errorf("set upload permissions: %w", err)
 	}
 	logger.Info(ctx, "uploaded file stored", "filename", filename, "storage_key", key, "size", size)
-	return interfaces.StoredFile{Key: key, Filename: filename, ContentType: contentType, Size: size}, nil
+	return interfaces.StoredFile{Key: key, Filename: filename, ContentType: contentType, Size: size, SHA256: fmt.Sprintf("%x", hash.Sum(nil))}, nil
 }
 
 func isZIPOfficeExtension(extension string) bool {

@@ -37,7 +37,6 @@ func (r *paperMetadataRepository) Upsert(
 	ctx context.Context, documentID uuid.UUID, update types.PaperMetadataUpdate,
 ) (types.PaperMetadata, error) {
 	var updated types.PaperMetadata
-	applied := false
 	incomingSource := types.PaperMetadataSourceUnknown
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		metadata := &types.PaperMetadata{}
@@ -53,14 +52,15 @@ func (r *paperMetadataRepository) Upsert(
 			if update.MetadataSource != nil {
 				incomingSource = *update.MetadataSource
 			}
+			// Metadata is last-write-wins. `paperMetadataChanges` contains only
+			// non-nil fields, so a partial update never alters omitted fields.
+			// A non-nil empty string/slice remains an explicit clear operation.
 			result := tx.Model(&types.PaperMetadata{}).
 				Where("document_id = ?", documentID).
-				Where("metadata_source IN ?", paperMetadataWritableSources(incomingSource)).
 				Updates(changes)
 			if result.Error != nil {
 				return result.Error
 			}
-			applied = result.RowsAffected > 0
 		}
 		return tx.First(&updated, "document_id = ?", documentID).Error
 	})
@@ -68,17 +68,7 @@ func (r *paperMetadataRepository) Upsert(
 		logger.Error(ctx, "upsert paper metadata failed", "document_id", documentID, "error", err)
 		return types.PaperMetadata{}, repositoryError(err)
 	}
-	if applied {
-		logger.Info(ctx, "paper metadata updated",
-			"document_id", documentID,
-			"metadata_source", incomingSource)
-	} else {
-		logger.Info(ctx, "paper metadata update skipped",
-			"document_id", documentID,
-			"incoming_source", incomingSource,
-			"current_source", updated.MetadataSource,
-			"reason", "higher-priority metadata source")
-	}
+	logger.Info(ctx, "paper metadata updated", "document_id", documentID, "metadata_source", incomingSource)
 	return updated, nil
 }
 
@@ -207,36 +197,6 @@ func paperMetadataChanges(update *types.PaperMetadataUpdate) (map[string]interfa
 		changes["metadata_source"] = *update.MetadataSource
 	}
 	return changes, nil
-}
-
-// paperMetadataWritableSources returns the current origins that an incoming
-// write may replace. The repository applies this predicate in the UPDATE
-// itself so concurrent workers cannot bypass source precedence.
-func paperMetadataWritableSources(
-	incoming types.PaperMetadataSource,
-) []types.PaperMetadataSource {
-	switch incoming {
-	case types.PaperMetadataSourceManual:
-		return []types.PaperMetadataSource{
-			types.PaperMetadataSourceUnknown,
-			types.PaperMetadataSourceExtraction,
-			types.PaperMetadataSourceCatalog,
-			types.PaperMetadataSourceManual,
-		}
-	case types.PaperMetadataSourceCatalog:
-		return []types.PaperMetadataSource{
-			types.PaperMetadataSourceUnknown,
-			types.PaperMetadataSourceExtraction,
-			types.PaperMetadataSourceCatalog,
-		}
-	case types.PaperMetadataSourceExtraction:
-		return []types.PaperMetadataSource{
-			types.PaperMetadataSourceUnknown,
-			types.PaperMetadataSourceExtraction,
-		}
-	default:
-		return []types.PaperMetadataSource{types.PaperMetadataSourceUnknown}
-	}
 }
 
 var _ interfaces.PaperMetadataRepository = (*paperMetadataRepository)(nil)

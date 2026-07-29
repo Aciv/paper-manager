@@ -102,16 +102,9 @@ func (s *paperService) UpdateMetadata(
 	if err != nil {
 		return nil, err
 	}
-	if updated.MetadataSource == *normalized.MetadataSource {
-		logger.Info(ctx, "paper metadata update completed",
-			"document_id", id,
-			"metadata_source", updated.MetadataSource)
-	} else {
-		logger.Info(ctx, "paper metadata update ignored",
-			"document_id", id,
-			"incoming_source", *normalized.MetadataSource,
-			"current_source", updated.MetadataSource)
-	}
+	logger.Info(ctx, "paper metadata update completed",
+		"document_id", id,
+		"metadata_source", updated.MetadataSource)
 	return &updated, nil
 }
 

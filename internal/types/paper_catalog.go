@@ -47,10 +47,12 @@ func (status PaperCatalogStatus) IsValid() bool {
 // metadata. When supplied, it guards a query derived from parsed Markdown
 // against a concurrent reparse.
 type PaperCatalogResolveCommand struct {
-	RequestID      string
-	DocumentID     uuid.UUID
-	MarkdownSHA256 string
-	Attempt        int
+	RequestID       string
+	DocumentID      uuid.UUID
+	MarkdownSHA256  string
+	Attempt         int
+	Scope           PaperCatalogScope
+	CitedDocumentID uuid.UUID
 }
 
 // Validate verifies identifiers and revision information on the command.
@@ -65,6 +67,18 @@ func (command PaperCatalogResolveCommand) Validate() error {
 	}
 	if command.Attempt < 0 {
 		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperCatalogData)
+	}
+	if command.Scope == "" {
+		command.Scope = PaperCatalogScopeSource
+	}
+	if command.Scope != PaperCatalogScopeSource && command.Scope != PaperCatalogScopeReference {
+		return fmt.Errorf("%w: unsupported catalog scope %q", ErrInvalidPaperCatalogData, command.Scope)
+	}
+	if command.Scope == PaperCatalogScopeReference && command.CitedDocumentID == uuid.Nil {
+		return fmt.Errorf("%w: cited_document_id is required for reference scope", ErrInvalidPaperCatalogData)
+	}
+	if command.Scope == PaperCatalogScopeSource && command.CitedDocumentID != uuid.Nil {
+		return fmt.Errorf("%w: cited_document_id is only valid for reference scope", ErrInvalidPaperCatalogData)
 	}
 	return nil
 }

@@ -172,6 +172,14 @@ func (s *documentStatusRepoStub) UpdateDocumentInfo(_ context.Context, id uuid.U
 	return s.document, nil
 }
 
+func (s *documentStatusRepoStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, doi string) (bool, error) {
+	if s.document.ID != id || s.document.DOI != "" {
+		return false, nil
+	}
+	s.document.DOI = doi
+	return true, nil
+}
+
 func TestFailDocumentIfProcessingDoesNotOverwriteReadyStatus(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}}
 	svc := NewDocumentService(repo, nil)

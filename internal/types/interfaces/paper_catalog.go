@@ -6,6 +6,13 @@ import (
 	"paperMaster/internal/types"
 )
 
+// PaperReferenceCatalogLimiter bounds low-priority reference resolution across
+// workers and within a single citing document. Implementations return an error
+// that may expose Asynq retry metadata when no distributed lease is available.
+type PaperReferenceCatalogLimiter interface {
+	AcquireReference(ctx context.Context, documentID string) (release func(), err error)
+}
+
 // PaperCatalogProvider adapts one external scholarly catalog to normalized Go
 // query and candidate types. Implementations own HTTP authentication,
 // provider-specific pagination, and response normalization.

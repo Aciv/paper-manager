@@ -24,14 +24,15 @@ import (
 )
 
 const (
-	minPaperCatalogMatchScore = 0.72
-	paperTitleMatchWeight     = 0.70
-	paperAuthorMatchWeight    = 0.15
-	paperYearMatchWeight      = 0.05
-	paperVenueMatchWeight     = 0.05
-	paperProviderScoreWeight  = 0.05
-	maxAutomaticPaperTags     = 32
-	localPaperTitleSearchSize = 50
+	minPaperCatalogMatchScore             = 0.72
+	paperTitleMatchWeight                 = 0.70
+	paperAuthorMatchWeight                = 0.15
+	paperYearMatchWeight                  = 0.05
+	paperVenueMatchWeight                 = 0.05
+	paperProviderScoreWeight              = 0.05
+	maxAutomaticPaperTags                 = 32
+	localPaperTitleSearchSize             = 50
+	defaultReferenceCatalogMaxPerDocument = 25
 )
 
 var (
@@ -69,15 +70,16 @@ var (
 // paperInfoService coordinates durable document state, Python extraction,
 // external catalogs, and the canonical PaperService boundary.
 type paperInfoService struct {
-	cfg            config.Config
-	documents      interfaces.DocumentRepository
-	storage        interfaces.FileStorage
-	extractor      interfaces.PaperMetadataExtractor
-	catalogs       interfaces.PaperCatalogRegistry
-	papers         interfaces.PaperService
-	tasks          interfaces.TaskEnqueuer
-	inspector      interfaces.TaskInspector
-	maxConcurrency int
+	cfg              config.Config
+	documents        interfaces.DocumentRepository
+	storage          interfaces.FileStorage
+	extractor        interfaces.PaperMetadataExtractor
+	catalogs         interfaces.PaperCatalogRegistry
+	papers           interfaces.PaperService
+	tasks            interfaces.TaskEnqueuer
+	inspector        interfaces.TaskInspector
+	referenceLimiter interfaces.PaperReferenceCatalogLimiter
+	maxConcurrency   int
 }
 
 // NewPaperInfoService creates the application-level paper information
@@ -91,21 +93,23 @@ func NewPaperInfoService(
 	papers interfaces.PaperService,
 	tasks interfaces.TaskEnqueuer,
 	inspector interfaces.TaskInspector,
+	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
 ) interfaces.PaperInfoService {
 	concurrency := cfg.PaperCatalogConcurrency
 	if concurrency <= 0 {
 		concurrency = 1
 	}
 	return &paperInfoService{
-		cfg:            cfg,
-		documents:      documents,
-		storage:        storage,
-		extractor:      extractor,
-		catalogs:       catalogs,
-		papers:         papers,
-		tasks:          tasks,
-		inspector:      inspector,
-		maxConcurrency: concurrency,
+		cfg:              cfg,
+		documents:        documents,
+		storage:          storage,
+		extractor:        extractor,
+		catalogs:         catalogs,
+		papers:           papers,
+		tasks:            tasks,
+		inspector:        inspector,
+		referenceLimiter: referenceLimiter,
+		maxConcurrency:   concurrency,
 	}
 }
 
@@ -124,6 +128,7 @@ func (s *paperInfoService) ExtractMetadata(
 
 	markdown, blocks, err := s.loadExtractionSource(ctx, command)
 	if err != nil {
+		logger.Error(ctx, "paper metadata extraction source unavailable", "error", err)
 		return false, err
 	}
 	result, err := s.extractor.Extract(ctx, &types.PaperExtractionRequest{
@@ -195,7 +200,11 @@ func (s *paperInfoService) ResolveMetadata(
 	if err := command.Validate(); err != nil {
 		return err
 	}
+	if command.Scope == "" {
+		command.Scope = types.PaperCatalogScopeSource
+	}
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
+	ctx = logger.WithAttrs(ctx, "catalog_scope", command.Scope)
 	logger.Info(ctx, "paper catalog resolution started")
 	document, err := s.documents.Get(ctx, command.DocumentID)
 	if err != nil {
@@ -208,163 +217,114 @@ func (s *paperInfoService) ResolveMetadata(
 	); err != nil {
 		return err
 	}
+	if command.Scope == types.PaperCatalogScopeReference {
+		return s.resolveReferenceMetadata(ctx, document, command)
+	}
+	return s.resolveSourceMetadata(ctx, document, command)
+}
+
+func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, command types.PaperCatalogResolveCommand) error {
+	// Unknown rows are bibliographic placeholders only. They have no source
+	// document of their own, so catalog work must always be rooted at the
+	// uploaded document that cited them (reference scope).
+	if document.Status == types.DocumentStatusUnknown {
+		return ErrPaperInfoCatalogUnavailable
+	}
 	metadata, err := s.papers.GetMetadata(ctx, command.DocumentID.String())
 	if err != nil {
 		return err
 	}
-
-	var outgoingCitations []types.PaperCitation
-	var incomingCitations []types.PaperCitation
-	if document.Status == types.DocumentStatusUnknown {
-		incomingCitations, err = s.papers.ListCitedBy(ctx, command.DocumentID.String())
-	} else {
-		outgoingCitations, err = s.papers.ListCitations(ctx, command.DocumentID.String())
+	query := metadataLookupQuery(document, metadata)
+	if err := query.Validate(); err != nil {
+		return ErrPaperCatalogNoMatch
 	}
+	selected, found, err := s.selectCatalogCandidate(ctx, query)
 	if err != nil {
 		return err
 	}
-
-	selectedCount := 0
-	query := metadataLookupQuery(document, metadata)
-	if document.Status == types.DocumentStatusUnknown {
-		query = applyIncomingReferenceQuery(query, incomingCitations)
-	}
-	if query.Validate() == nil {
-		selected, found, lookupErr := s.selectCatalogCandidate(ctx, query)
-		if lookupErr != nil {
-			return lookupErr
-		}
-		if found {
-			if err := s.ensureCatalogSourceCurrent(
-				ctx,
-				document,
-				command.MarkdownSHA256,
-			); err != nil {
-				return err
-			}
-			applied, applyErr := s.applySourceCatalogCandidate(
-				ctx,
-				document,
-				incomingCitations,
-				selected,
-			)
-			if applyErr != nil {
-				return applyErr
-			}
-			if applied {
-				selectedCount++
-				logger.Info(ctx, "paper catalog source match applied",
-					"provider", selected.Provider,
-					"provider_id", selected.ProviderID,
-					"match_score", selected.MatchScore,
-					"source_free", document.Status == types.DocumentStatusUnknown)
-			}
-		}
-	}
-
-	/*
-		for _, citation := range outgoingCitations {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			cited, err := s.documents.Get(ctx, citation.CitedDocumentID)
-			if err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					continue
-				}
-				return err
-			}
-			if cited.Status != types.DocumentStatusUnknown {
-				continue
-			}
-			referenceQuery := referenceLookupQuery(citation.RawReference)
-			if referenceQuery.Validate() != nil {
-				continue
-			}
-			selected, found, lookupErr := s.selectCatalogCandidate(ctx, referenceQuery)
-			if lookupErr != nil {
-				return lookupErr
-			}
-			if !found {
-				continue
-			}
-			if err := s.ensureCatalogSourceCurrent(
-				ctx,
-				document,
-				command.MarkdownSHA256,
-			); err != nil {
-				return err
-			}
-			resolvedID, err := s.findStoredCatalogDocument(ctx, selected, command.DocumentID)
-			if err != nil {
-				return err
-			}
-			if resolvedID != uuid.Nil {
-				if _, err := s.papers.ResolveCitation(
-					ctx,
-					command.DocumentID.String(),
-					resolvedID.String(),
-					citation.RawReference,
-				); err != nil {
-					logger.Error(ctx, "resolve paper citation failed",
-						"cited_document_id", resolvedID,
-						"error", err)
-					return fmt.Errorf("resolve paper citation: %w", err)
-				}
-			} else {
-				if _, err := s.papers.UpdateMetadata(
-					ctx,
-					citation.CitedDocumentID.String(),
-					catalogMetadataUpdate(selected),
-				); err != nil {
-					logger.Error(ctx, "persist unresolved citation metadata failed",
-						"placeholder_document_id", citation.CitedDocumentID,
-						"error", err)
-					return fmt.Errorf("persist unresolved citation metadata: %w", err)
-				}
-			}
-			selectedCount++
-		}
-	*/
-	if selectedCount == 0 {
+	if !found {
 		return ErrPaperCatalogNoMatch
 	}
-	logger.Info(ctx, "paper catalog resolution completed",
-		"selected_count", selectedCount,
-		"outgoing_citation_count", len(outgoingCitations),
-		"incoming_citation_count", len(incomingCitations))
+	if err := s.ensureCatalogSourceCurrent(ctx, document, command.MarkdownSHA256); err != nil {
+		return err
+	}
+	applied, err := s.applySourceCatalogCandidate(ctx, document, selected)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return ErrPaperCatalogNoMatch
+	}
+	if err := s.enqueueReferenceCatalogTasks(ctx, document, command); err != nil {
+		return err
+	}
+	logger.Info(ctx, "paper catalog source match applied", "provider", selected.Provider, "provider_id", selected.ProviderID, "match_score", selected.MatchScore)
+	return nil
+}
+
+func (s *paperInfoService) resolveReferenceMetadata(ctx context.Context, source types.Document, command types.PaperCatalogResolveCommand) error {
+	if s.referenceLimiter != nil {
+		release, err := s.referenceLimiter.AcquireReference(ctx, source.ID.String())
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
+	citations, err := s.papers.ListCitations(ctx, source.ID.String())
+	if err != nil {
+		return err
+	}
+	var citation *types.PaperCitation
+	for index := range citations {
+		if citations[index].CitedDocumentID == command.CitedDocumentID {
+			citation = &citations[index]
+			break
+		}
+	}
+	if citation == nil {
+		return ErrStalePaperInfo
+	}
+	cited, err := s.documents.Get(ctx, command.CitedDocumentID)
+	if err != nil {
+		return err
+	}
+	if cited.Status != types.DocumentStatusUnknown {
+		return nil
+	}
+	query := referenceLookupQuery(citation.RawReference)
+	if err := query.Validate(); err != nil {
+		return ErrPaperCatalogNoMatch
+	}
+	selected, found, err := s.selectCatalogCandidate(ctx, query)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return ErrPaperCatalogNoMatch
+	}
+	if err := s.ensureCatalogSourceCurrent(ctx, source, command.MarkdownSHA256); err != nil {
+		return err
+	}
+	resolvedID, err := s.findStoredCatalogDocument(ctx, selected, source.ID)
+	if err != nil {
+		return err
+	}
+	if resolvedID != uuid.Nil {
+		if _, err := s.papers.ResolveCitation(ctx, source.ID.String(), resolvedID.String(), citation.RawReference); err != nil {
+			return fmt.Errorf("resolve paper citation: %w", err)
+		}
+	} else if _, err := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); err != nil {
+		return fmt.Errorf("persist unresolved citation metadata: %w", err)
+	}
+	logger.Info(ctx, "paper catalog reference match applied", "cited_document_id", cited.ID, "provider", selected.Provider, "provider_id", selected.ProviderID, "match_score", selected.MatchScore)
 	return nil
 }
 
 func (s *paperInfoService) applySourceCatalogCandidate(
 	ctx context.Context,
 	document types.Document,
-	incomingCitations []types.PaperCitation,
 	selected types.PaperCatalogCandidate,
 ) (bool, error) {
-	if document.Status == types.DocumentStatusUnknown && len(incomingCitations) > 0 {
-		resolvedID, err := s.findStoredCatalogDocument(ctx, selected, document.ID)
-		if err != nil {
-			return false, err
-		}
-		if resolvedID != uuid.Nil {
-			for _, citation := range incomingCitations {
-				if _, err := s.papers.ResolveCitation(
-					ctx,
-					citation.CitingDocumentID.String(),
-					resolvedID.String(),
-					citation.RawReference,
-				); err != nil {
-					logger.Error(ctx, "resolve incoming paper citation failed",
-						"citing_document_id", citation.CitingDocumentID,
-						"cited_document_id", resolvedID,
-						"error", err)
-					return false, fmt.Errorf("resolve incoming paper citation: %w", err)
-				}
-			}
-			return true, nil
-		}
-	}
 	updated, err := s.papers.UpdateMetadata(
 		ctx,
 		document.ID.String(),
@@ -384,7 +344,101 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 			"current_source", updated.MetadataSource)
 		return false, nil
 	}
+	if strings.TrimSpace(document.DOI) == "" && strings.TrimSpace(selected.DOI) != "" {
+		applied, doiErr := s.documents.SetDOIIfEmpty(ctx, document.ID, normalizePaperDOI(selected.DOI))
+		if doiErr != nil {
+			if errors.Is(doiErr, types.ErrDuplicateDOI) {
+				logger.Warn(ctx, "catalog DOI belongs to another document; metadata retained", "document_id", document.ID, "doi", normalizePaperDOI(selected.DOI))
+			} else {
+				return false, fmt.Errorf("backfill catalog DOI: %w", doiErr)
+			}
+		} else if applied {
+			logger.Info(ctx, "catalog DOI applied to document", "document_id", document.ID, "doi", normalizePaperDOI(selected.DOI))
+		}
+	}
 	return true, nil
+}
+
+// enqueueReferenceCatalogTasks creates bounded, independent low-priority
+// work after the source-paper lookup commits. A large bibliography therefore
+// cannot hold the source task open or monopolise provider calls. Each task
+// reloads the citation by placeholder ID; raw reference text never enters
+// Redis. Equivalent references are deduplicated before enqueueing.
+func (s *paperInfoService) enqueueReferenceCatalogTasks(
+	ctx context.Context,
+	document types.Document,
+	command types.PaperCatalogResolveCommand,
+) error {
+	if s.tasks == nil {
+		return nil
+	}
+	citations, err := s.papers.ListCitations(ctx, document.ID.String())
+	if err != nil {
+		return err
+	}
+	limit := s.cfg.PaperReferenceCatalogMaxPerDocument
+	if limit <= 0 {
+		limit = defaultReferenceCatalogMaxPerDocument
+	}
+	seen := make(map[string]struct{}, len(citations))
+	queued := 0
+	for _, citation := range citations {
+		if queued >= limit {
+			break
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		cited, err := s.documents.Get(ctx, citation.CitedDocumentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if cited.Status != types.DocumentStatusUnknown {
+			continue
+		}
+		key := referenceCatalogDedupKey(citation.RawReference)
+		if key == "" {
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		task, options, err := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{
+			RequestID: command.RequestID, DocumentID: document.ID.String(),
+			MarkdownSHA256: command.MarkdownSHA256, Attempt: command.Attempt,
+			Scope: types.PaperCatalogScopeReference, CitedDocumentID: cited.ID.String(),
+		}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+		if err != nil {
+			return fmt.Errorf("build reference catalog task: %w", err)
+		}
+		if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
+			return err
+		}
+		queued++
+	}
+	logger.Info(ctx, "reference catalog tasks queued", "document_id", document.ID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
+	return nil
+}
+
+func referenceCatalogDedupKey(rawReference string) string {
+	query := referenceLookupQuery(rawReference)
+	if doi := normalizePaperDOI(query.DOI); doi != "" {
+		return "doi:" + doi
+	}
+	if arxiv := paperArXivID(query.SourceURL); arxiv != "" {
+		return "arxiv:" + arxiv
+	}
+	if url := strings.ToLower(strings.TrimSpace(query.SourceURL)); url != "" {
+		return "url:" + url
+	}
+	if raw := normalizedPaperTitle(rawReference); raw != "" {
+		return "raw:" + raw
+	}
+	return ""
 }
 
 func (s *paperInfoService) loadExtractionSource(
@@ -609,29 +663,6 @@ func metadataLookupQuery(
 	}
 	if metadata.PublishedAt != nil {
 		query.PublishedYear = metadata.PublishedAt.Year()
-	}
-	return query
-}
-
-// have to do precise Reference split and recognition
-func applyIncomingReferenceQuery(
-	query types.PaperLookupQuery,
-	incomingCitations []types.PaperCitation,
-) types.PaperLookupQuery {
-	for _, citation := range incomingCitations {
-		referenceQuery := referenceLookupQuery(citation.RawReference)
-		if query.DOI == "" {
-			query.DOI = referenceQuery.DOI
-		}
-		if query.SourceURL == "" {
-			query.SourceURL = referenceQuery.SourceURL
-		}
-		if query.Title == "" {
-			query.Title = referenceQuery.Title
-		}
-		if query.DOI != "" && query.SourceURL != "" && query.Title != "" {
-			break
-		}
 	}
 	return query
 }

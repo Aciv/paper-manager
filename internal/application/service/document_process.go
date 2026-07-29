@@ -590,7 +590,9 @@ func NewPaperMetadataExtractTask(
 }
 
 // NewPaperCatalogResolveTask validates and creates a catalog-resolution task.
-// Initial revision-bound work has a deterministic task ID. Explicit retries
+// Source work uses the default queue so it precedes bibliography expansion;
+// reference work uses the low-priority queue. Initial revision-bound work has
+// a deterministic task ID. Explicit retries
 // carry a positive Attempt and get a fresh ID; Asynq retries retain the same
 // payload and therefore the same ID. Metadata-only lookups use a short
 // uniqueness window because no source revision is available for the ID.
@@ -599,6 +601,9 @@ func NewPaperCatalogResolveTask(
 	timeout time.Duration,
 	maxRetry int,
 ) (*asynq.Task, []asynq.Option, error) {
+	if payload.Scope == "" {
+		payload.Scope = types.PaperCatalogScopeSource
+	}
 	if err := payload.Validate(); err != nil {
 		return nil, nil, err
 	}
@@ -612,8 +617,12 @@ func NewPaperCatalogResolveTask(
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode paper catalog resolution task: %w", err)
 	}
+	queue := types.QueueDefault
+	if payload.Scope == types.PaperCatalogScopeReference {
+		queue = types.QueueLow
+	}
 	options := []asynq.Option{
-		asynq.Queue(types.QueueLow),
+		asynq.Queue(queue),
 		asynq.MaxRetry(maxRetry),
 		asynq.Timeout(timeout),
 	}
@@ -623,6 +632,8 @@ func NewPaperCatalogResolveTask(
 			payload.DocumentID,
 			payload.MarkdownSHA256,
 			payload.Attempt,
+			string(payload.Scope),
+			payload.CitedDocumentID,
 		)))
 	} else {
 		options = append(options, asynq.Unique(time.Minute))
@@ -638,7 +649,7 @@ func newPaperInfoJSONTask(taskType string, payload any) (*asynq.Task, error) {
 	return asynq.NewTask(taskType, encoded), nil
 }
 
-func paperInfoTaskID(taskType, documentID, revision string, attempt int) string {
+func paperInfoTaskID(taskType, documentID, revision string, attempt int, parts ...string) string {
 	stage := strings.NewReplacer(":", "-", "_", "-").Replace(taskType)
 	revision = strings.ToLower(strings.TrimSpace(revision))
 	base := stage + "-" + strings.TrimSpace(documentID)
@@ -647,6 +658,12 @@ func paperInfoTaskID(taskType, documentID, revision string, attempt int) string 
 	}
 	if attempt > 0 {
 		base += "-attempt-" + strconv.Itoa(attempt)
+	}
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			base += "-" + strings.NewReplacer(":", "-", "_", "-", "/", "-").Replace(part)
+		}
 	}
 	return base
 }
