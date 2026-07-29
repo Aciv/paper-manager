@@ -138,7 +138,7 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 	if err != nil {
 		return err
 	}
-	if err := enqueueDocumentOwnedTask(
+	if err := enqueueManagedTask(
 		ctx,
 		s.taskEnqueuer,
 		task,
@@ -154,7 +154,10 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 	return nil
 }
 
-func enqueueDocumentOwnedTask(
+// enqueueManagedTask submits a task built by an application service. A
+// duplicate unique-window submission is idempotent, but a TaskID conflict is
+// reported: an archived dead-letter task can own that ID without live work.
+func enqueueManagedTask(
 	ctx context.Context,
 	enqueuer interfaces.TaskEnqueuer,
 	task *asynq.Task,
@@ -168,21 +171,20 @@ func enqueueDocumentOwnedTask(
 		return errors.New("task is required")
 	}
 	_, err := enqueuer.EnqueueContext(ctx, task, options...)
-	if errors.Is(err, asynq.ErrTaskIDConflict) ||
-		errors.Is(err, asynq.ErrDuplicateTask) {
-		logger.Debug(ctx, "document task already queued",
+	if errors.Is(err, asynq.ErrDuplicateTask) {
+		logger.Debug(ctx, "task already queued",
 			"document_id", documentID,
 			"task_type", task.Type())
 		return nil
 	}
 	if err != nil {
-		logger.Error(ctx, "enqueue document task failed",
+		logger.Error(ctx, "enqueue task failed",
 			"document_id", documentID,
 			"task_type", task.Type(),
 			"error", err)
 		return fmt.Errorf("enqueue %s: %w", task.Type(), err)
 	}
-	logger.Info(ctx, "document task enqueued",
+	logger.Info(ctx, "task enqueued",
 		"document_id", documentID,
 		"task_type", task.Type())
 	return nil

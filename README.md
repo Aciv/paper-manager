@@ -79,8 +79,16 @@ go run ./cmd/server
 - `PATCH /api/document/{id}`：仅更新 `originalFilename`、`doi`。旧的请求字段 `filename` 暂作为输入别名兼容。
 - `GET /api/paper/{documentID}`、`PATCH /api/paper/{documentID}`：获取或更新独立的论文书目信息；标签通过 `paperMetadata.tags` 数组维护。
 - `GET /api/paper/search`：支持 `title`、`author`（作者姓名模糊匹配）、重复的 `tag` 参数、`tagMode=all|any` 及 `page`；标签查询使用 PostgreSQL JSONB GIN 索引。
+- `GET|POST|PUT /api/paper/{documentID}/citations`、`DELETE /api/paper/{documentID}/citations/{citedDocumentID}`：读取、新增、整体替换或删除本论文的引用关系；`GET /api/paper/{documentID}/cited-by` 查询反向引用，`POST /api/paper/{documentID}/citations/resolve` 可将一个原始引用显式指向库内论文。
+- `GET /api/paper/{documentID}/info`：返回论文元数据提取和论文库查询的当前可观察状态，独立于 `documents.status`。`POST /api/paper/{documentID}/info/extraction/retry` 与 `.../catalog/retry` 仅提交当前安全输入对应的 Asynq 重试任务。
 - `DELETE /api/document/{id}`：删除文档元数据及其已存储的原始文件。
 - `POST /api/document/bases`、`GET /api/document/bases`、`GET|PATCH|DELETE /api/document/bases/{baseID}`：管理文档 Base。
 - `PUT|DELETE /api/document/bases/{baseID}/documents/{documentID}`：加入或移除 Base 成员；`GET /api/document/bases/{baseID}/documents?page=1` 分页列出成员。
 
 Python worker 位于 [`python/`](python/README.md)。启动它和 Redis 后，PDF 上传会经 Asynq 与 gRPC 异步解析：`pymupdf4llm` 生成按页 Markdown 和布局块，Go API 将其写入 PostgreSQL 并将文档状态更新为 `ready`。
+
+## 论文信息异步流程
+
+文档解析成功后，API 在 `default` 队列提交 `paper:metadata_extract`：worker 从持久化 Markdown 和 Blocks 调用 Python 的 `PaperMetadataExtractor.Extract`，再将标题、作者、摘要和原始参考文献写入 `paper_metadata` / `paper_citations`。提取成功且存在 DOI 或标题时，worker 在 `low` 队列提交 `paper:catalog_resolve`，依次查询 `PAPER_CATALOG_PROVIDERS`（默认 arXiv、Semantic Scholar、OpenAlex、Crossref）。论文信息任务失败不会把已解析文档从 `ready` 改成 `failed`；重试与死信由 Asynq 负责。
+
+队列和超时由 `REDIS_ADDR`、`PAPER_EXTRACTION_TASK_TIMEOUT`、`PAPER_EXTRACTION_TASK_MAX_RETRY`、`PAPER_CATALOG_TASK_TIMEOUT`、`PAPER_CATALOG_TASK_MAX_RETRY` 配置。Semantic Scholar 的 `SEMANTIC_SCHOLAR_API_KEY`、OpenAlex 的 `OPENALEX_API_KEY` 与 Crossref 的 `CROSSREF_MAILTO` 均可选；不要提交真实值。变更 `proto/document_parser.proto` 后，按 [`python/README.md`](python/README.md) 中的 Python 与 Go `grpc_tools.protoc` 命令重新生成两个语言的 stub，绝不手改生成文件。

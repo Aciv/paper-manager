@@ -32,6 +32,22 @@ export type PaperMetadata = {
 
 export type PaperMetadataUpdate = Partial<Omit<PaperMetadata, 'documentId'>>;
 
+export type PaperCitation = {
+  citingDocumentId: string;
+  citedDocumentId: string;
+  rawReference: string;
+  createdAt: string;
+};
+
+export type PaperInfoStageState = 'idle' | 'queued' | 'completed' | 'unavailable' | 'unknown';
+
+export type PaperInfoStatus = {
+  documentId: string;
+  metadataSource: 'unknown' | 'extraction' | 'catalog' | 'manual';
+  extraction: { state: PaperInfoStageState };
+  catalog: { state: PaperInfoStageState };
+};
+
 export type DocumentBase = {
   id: string;
   name: string;
@@ -136,6 +152,11 @@ export const api = {
     query.set('page', String(search.page ?? 1));
     return requestFrom(paperBaseUrl, `/search?${query.toString()}`);
   },
+  listPaperCitations: (documentID: string): Promise<{ items: PaperCitation[] }> => requestFrom<{ items: PaperCitation[] }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/citations`),
+  listPaperCitedBy: (documentID: string): Promise<{ items: PaperCitation[] }> => requestFrom<{ items: PaperCitation[] }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/cited-by`),
+  getPaperInfoStatus: (documentID: string): Promise<{ paperInfo: PaperInfoStatus }> => requestFrom<{ paperInfo: PaperInfoStatus }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info`),
+  retryPaperExtraction: (documentID: string): Promise<{ paperInfo: PaperInfoStatus }> => requestFrom<{ paperInfo: PaperInfoStatus }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/extraction/retry`, { method: 'POST' }),
+  retryPaperCatalog: (documentID: string): Promise<{ paperInfo: PaperInfoStatus }> => requestFrom<{ paperInfo: PaperInfoStatus }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/catalog/retry`, { method: 'POST' }),
   listDocumentBases: (): Promise<{ items: DocumentBase[] }> => request<{ items: DocumentBase[] }>('/bases'),
   createDocumentBase: (payload: { name: string; description?: string }): Promise<{ documentBase: DocumentBase }> => request<{ documentBase: DocumentBase }>('/bases', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),

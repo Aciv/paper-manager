@@ -1,0 +1,158 @@
+package service
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"testing"
+
+	"paperMaster/internal/config"
+	"paperMaster/internal/types"
+
+	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
+)
+
+type paperInfoQueueStub struct {
+	tasks []*asynq.Task
+	err   error
+}
+
+func (q *paperInfoQueueStub) EnqueueContext(
+	_ context.Context,
+	task *asynq.Task,
+	_ ...asynq.Option,
+) (*asynq.TaskInfo, error) {
+	q.tasks = append(q.tasks, task)
+	if q.err != nil {
+		return nil, q.err
+	}
+	return &asynq.TaskInfo{ID: "queued"}, nil
+}
+
+type paperInfoInspectorStub struct{ queued map[string]bool }
+
+func (*paperInfoInspectorStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
+	return 0, 0, nil
+}
+func (*paperInfoInspectorStub) HasQueuedTasksForDocument(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (s *paperInfoInspectorStub) HasQueuedTaskTypeForDocument(
+	_ context.Context,
+	_ string,
+	taskType string,
+) (bool, error) {
+	return s.queued[taskType], nil
+}
+
+func TestPaperInfoControlStatusAndRetries(t *testing.T) {
+	ctx := context.Background()
+	documentID := uuid.New()
+	markdown := []byte("# Paper\n")
+	revision := testMarkdownSHA(markdown)
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: documentID, Status: types.DocumentStatusReady, DOI: "10.1000/example",
+	})
+	documents.markdowns[documentID] = types.DocumentMarkdown{
+		DocumentID: documentID, StorageKey: "markdown/paper.md", SHA256: revision,
+	}
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{
+		DocumentID: documentID, MetadataSource: types.PaperMetadataSourceExtraction,
+	}
+	queue := &paperInfoQueueStub{}
+	inspector := &paperInfoInspectorStub{queued: map[string]bool{}}
+	controls := NewPaperInfoService(
+		config.Config{},
+		documents,
+		nil,
+		nil,
+		nil,
+		papers,
+		queue,
+		inspector,
+	)
+
+	status, err := controls.GetStatus(ctx, documentID.String())
+	if err != nil {
+		t.Fatalf("GetStatus() error = %v", err)
+	}
+	if status.Extraction.State != types.PaperInfoStageCompleted || status.Catalog.State != types.PaperInfoStageIdle {
+		t.Fatalf("unexpected status: %#v", status)
+	}
+	if _, err := controls.RetryExtraction(ctx, documentID.String()); err != nil {
+		t.Fatalf("RetryExtraction() error = %v", err)
+	}
+	if _, err := controls.RetryCatalogResolution(ctx, documentID.String()); err != nil {
+		t.Fatalf("RetryCatalogResolution() error = %v", err)
+	}
+	if len(queue.tasks) != 2 || queue.tasks[0].Type() != types.TypePaperMetadataExtract || queue.tasks[1].Type() != types.TypePaperCatalogResolve {
+		t.Fatalf("queued tasks = %#v", queue.tasks)
+	}
+	var extraction types.PaperMetadataExtractPayload
+	if err := json.Unmarshal(queue.tasks[0].Payload(), &extraction); err != nil {
+		t.Fatal(err)
+	}
+	var catalog types.PaperCatalogResolvePayload
+	if err := json.Unmarshal(queue.tasks[1].Payload(), &catalog); err != nil {
+		t.Fatal(err)
+	}
+	if extraction.Attempt <= 0 || catalog.Attempt <= 0 || extraction.Attempt == catalog.Attempt {
+		t.Fatalf("manual retry attempts = extraction:%d catalog:%d, want distinct positive values", extraction.Attempt, catalog.Attempt)
+	}
+}
+
+func TestPaperInfoTaskIDUsesManualAttempt(t *testing.T) {
+	base := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", "revision", 0)
+	firstRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", "revision", 1)
+	secondRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", "revision", 2)
+	if base == firstRetry || firstRetry == secondRetry {
+		t.Fatalf("task IDs must distinguish manual attempts: %q, %q, %q", base, firstRetry, secondRetry)
+	}
+}
+
+func TestEnqueueManagedTaskReturnsTaskIDConflict(t *testing.T) {
+	err := enqueueManagedTask(
+		context.Background(),
+		&paperInfoQueueStub{err: asynq.ErrTaskIDConflict},
+		asynq.NewTask(types.TypePaperCatalogResolve, nil),
+		nil,
+		"document-id",
+	)
+	if !errors.Is(err, asynq.ErrTaskIDConflict) {
+		t.Fatalf("enqueueManagedTask() error = %v, want ErrTaskIDConflict", err)
+	}
+}
+
+func TestPaperInfoControlAllowsUnknownCitationCatalogRetry(t *testing.T) {
+	ctx := context.Background()
+	placeholderID := uuid.New()
+	citingID := uuid.New()
+	documents := newPaperDocumentRepoStub(
+		types.Document{ID: placeholderID, Status: types.DocumentStatusUnknown},
+		types.Document{ID: citingID, Status: types.DocumentStatusReady},
+	)
+	papers := newPaperInfoPaperServiceStub()
+	papers.citations[citingID.String()] = []types.PaperCitation{{
+		CitingDocumentID: citingID, CitedDocumentID: placeholderID, RawReference: "A referenced paper.",
+	}}
+	queue := &paperInfoQueueStub{}
+	controls := NewPaperInfoService(
+		config.Config{},
+		documents,
+		nil,
+		nil,
+		nil,
+		papers,
+		queue,
+		&paperInfoInspectorStub{queued: map[string]bool{}},
+	)
+
+	if _, err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
+		t.Fatalf("RetryCatalogResolution() error = %v", err)
+	}
+	if len(queue.tasks) != 1 || queue.tasks[0].Type() != types.TypePaperCatalogResolve {
+		t.Fatalf("queued tasks = %#v", queue.tasks)
+	}
+}

@@ -23,6 +23,8 @@ type RouterParams struct {
 	DocumentHandler        *handler.DocumentHandler
 	DocumentProcessHandler *handler.DocumentProcessHandler
 	PaperMetadataHandler   *handler.PaperMetadataHandler
+	PaperCitationHandler   *handler.PaperCitationHandler
+	PaperInfoHandler       *handler.PaperInfoHandler
 	DocumentBaseHandler    *handler.DocumentBaseHandler
 }
 
@@ -56,7 +58,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 	})
 	ServerFile(r, params.DocumentHandler)
 	ServerProcess(r, params.DocumentProcessHandler)
-	ServerPaperMetadata(r, params.PaperMetadataHandler)
+	ServerPaperMetadata(r, params.PaperMetadataHandler, params.PaperCitationHandler, params.PaperInfoHandler)
 	ServerDocumentBase(r, params.DocumentBaseHandler)
 
 	return r
@@ -98,13 +100,30 @@ func ServerProcess(router gin.IRoutes, processHandler *handler.DocumentProcessHa
 }
 
 // ServerPaperMetadata registers the bibliography and paper-search API.
-func ServerPaperMetadata(router gin.IRoutes, paperHandler *handler.PaperMetadataHandler) {
-	if paperHandler == nil {
-		return
+func ServerPaperMetadata(
+	router gin.IRoutes,
+	metadataHandler *handler.PaperMetadataHandler,
+	citationHandler *handler.PaperCitationHandler,
+	infoHandler *handler.PaperInfoHandler,
+) {
+	if metadataHandler != nil {
+		router.GET("/api/paper/search", metadataHandler.Search)
+		router.GET("/api/paper/:documentID", metadataHandler.Get)
+		router.PATCH("/api/paper/:documentID", metadataHandler.Update)
 	}
-	router.GET("/api/paper/search", paperHandler.Search)
-	router.GET("/api/paper/:documentID", paperHandler.Get)
-	router.PATCH("/api/paper/:documentID", paperHandler.Update)
+	if citationHandler != nil {
+		router.GET("/api/paper/:documentID/citations", citationHandler.List)
+		router.POST("/api/paper/:documentID/citations", citationHandler.Add)
+		router.PUT("/api/paper/:documentID/citations", citationHandler.Replace)
+		router.POST("/api/paper/:documentID/citations/resolve", citationHandler.Resolve)
+		router.DELETE("/api/paper/:documentID/citations/:citedDocumentID", citationHandler.Remove)
+		router.GET("/api/paper/:documentID/cited-by", citationHandler.ListCitedBy)
+	}
+	if infoHandler != nil {
+		router.GET("/api/paper/:documentID/info", infoHandler.Status)
+		router.POST("/api/paper/:documentID/info/extraction/retry", infoHandler.RetryExtraction)
+		router.POST("/api/paper/:documentID/info/catalog/retry", infoHandler.RetryCatalog)
+	}
 }
 
 // ServerDocumentBase registers collection and collection-membership API.

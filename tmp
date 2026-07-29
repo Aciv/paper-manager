@@ -1,0 +1,91 @@
+-[ RECORD 1 ]---+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+document_id     | 0f2af36c-4808-4305-a4c3-71ae0acac1a9
+title           | Unlocking the conversion of Web Screenshots into HTML Code with the WebSight Dataset
+abstract        | Using vision-language models (VLMs) in web development presents a promising strategy to increase efficiency and unblock no-code solutions: by providing a screenshot or a sketch of a UI, a VLM could generate the code to reproduce it, for instance in a language like HTML. Despite the advancements in VLMs for various tasks, the specific challenge of converting a screenshot into a corresponding HTML has been minimally explored. We posit that this is mainly due to the absence of a suitable, high-quality dataset. This work introduces WebSight, a synthetic dataset consisting of 2 million pairs of HTML codes and their corresponding screenshots. We fine-tune a foundational VLM on our dataset and show proficiency in converting webpage screenshots to functional HTML code. To accelerate the research in this area, we open-source WebSight.
+authors         | [{"name": "Hugo Laurençon"}, {"name": "Léo Tronchon"}, {"name": "Victor Sanh"}]
+tags            | ["cs.hc", "cs.ai", "cs.cv"]
+source_name     | arXiv
+source_url      | https://arxiv.org/abs/2403.09029v1
+venue           | 
+published_at    | 2024-03-14
+volume          | 
+issue           | 
+pages           | 
+language        | 
+metadata        | {}
+created_at      | 2026-07-29 02:08:14.908051+00
+updated_at      | 2026-07-29 02:48:18.755437+00
+metadata_source | catalog
+-[ RECORD 2 ]---+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+document_id     | 0bada5fd-d8b0-5739-b9cb-83e2376abbf1
+title           | Web2Code: A Large-scale Webpage-to-Code Dataset and Evaluation Framework for Multimodal LLMs
+abstract        | 
+authors         | [{"name": "Sukmin Yun"}, {"name": "Haokun Lin"}, {"name": "Rusiru Thushara"}, {"name": "Mohammad Amin Bhat"}, {"name": "Yongxin Wang"}, {"name": "Zutao Jiang"}, {"name": "Mingkai Deng"}, {"name": "Jinhong Wang"}, {"name": "Tianhua Tao"}, {"name": "Junbo Li"}, {"name": "Haonan Li"}, {"name": "Preslav Nakov"}, {"name": "Timothy Baldwin"}, {"name": "Zhengzhong Liu"}, {"name": "Eric Xing"}, {"name": "Xiaodan Liang"}, {"name": "Zhiqiang Shen"}]
+tags            | ["natural language processing techniques", "web data mining and analysis", "wikis in education and collaboration"]
+source_name     | OpenAlex
+source_url      | https://doi.org/10.52202/079017-3560
+venue           | OpenAlex
+published_at    | 2024-01-01
+volume          | 
+issue           | 
+pages           | 
+language        | 
+metadata        | {}
+created_at      | 2026-07-29 02:07:57.439935+00
+updated_at      | 2026-07-29 02:07:57.441581+00
+metadata_source | catalog
+-[ RECORD 3 ]---+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+document_id     | 08bcaff8-2fd4-56f3-b7ad-fe53761b2377
+title           | Code generation from a graphical user interface via attention-based encoder–decoder model
+abstract        | 
+authors         | [{"name": "Wen-Yin Chen"}, {"name": "Pavol Podstreleny"}, {"name": "Wen-Huang Cheng"}, {"name": "Yung-Yao Chen"}, {"name": "K. Hua"}]
+tags            | ["computer science"]
+source_name     | Semantic Scholar
+source_url      | https://www.semanticscholar.org/paper/1a20df4c9d11241ea505a56cbc31572c0a39dd40
+venue           | Multimedia Systems
+published_at    | 2021-05-18
+volume          | 28
+issue           | 
+pages           | 121 - 130
+language        | 
+metadata        | {}
+created_at      | 2026-07-29 02:07:47.414929+00
+updated_at      | 2026-07-29 02:07:47.415548+00
+metadata_source | catalog
+-[ RECORD 4 ]---+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+document_id     | 08b3e2ea-d3a1-55e4-9f1f-d5cb189a2902
+title           | Web pages from mockup design based on convolutional neural network and class activation mapping
+abstract        | 
+authors         | [{"name": "André Armstrong Janino Cizotto", "affiliation": "Pontifícia Universidade Católica do Paraná"}, {"name": "Rodrigo Clemente Thom de Souza", "affiliation": "Universidade Estadual de Maringá"}, {"name": "Viviana Cocco Mariani", "affiliation": "Pontifícia Universidade Católica do Paraná"}, {"name": "Leandro dos Santos Coelho", "affiliation": "Pontifícia Universidade Católica do Paraná"}]
+tags            | ["web data mining and analysis", "digital accessibility for disabilities"]
+source_name     | Multimedia Tools and Applications
+source_url      | https://doi.org/10.1007/s11042-023-15108-3
+venue           | Multimedia Tools and Applications
+published_at    | 2023-03-24
+volume          | 
+issue           | 
+pages           | 
+language        | en
+metadata        | {}
+created_at      | 2026-07-29 02:07:41.122569+00
+updated_at      | 2026-07-29 02:07:41.13639+00
+metadata_source | catalog
+-[ RECORD 5 ]---+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+document_id     | afa5a7e4-b872-4474-8b4d-363cbb4fc008
+title           | DOne: Decoupling Structure and Rendering for High-Fidelity Design-to-Code Generation
+abstract        | While Vision Language Models (VLMs) have shown promise in Design-to-Code generation, they suffer from a “holistic bottleneck”—failing to reconcile high-level structural hierarchy with fine-grained visual details, often resulting in layout distortions or generic placeholders. To bridge this gap, we propose DOne, an end-to-end framework that decouples structure understanding from element rendering. DOne introduces (1) a learned layout segmentation module to decompose complex designs, avoiding the limitations of heuristic cropping; (2) a specialized hybrid element retriever to handle the extreme aspect ratios and densities of UI components; and (3) a schemaguided generation paradigm that bridges layout and code. To rigorously assess performance, we introduce HiFi2Code, a benchmark featuring significantly higher layout complexity than existing datasets. Extensive evaluations on the HiFi2Code demonstrate that DOne outperforms exiting methods in both high-level visual similarity (e.g., over 10% in GPT Score) and fine-grained element alignment. Human evaluations confirm a 3 _×_ productivity gain with higher visual fidelity.
+authors         | [{"name": "Xinhao Huang"}, {"name": "Jinke Yu"}, {"name": "Wenhao Xu"}, {"name": "Zeyi Wen"}, {"name": "Ying Zhou"}, {"name": "Junzhuo Liu"}, {"name": "Junhao Ji"}, {"name": "Zulong Chen"}]
+tags            | ["caonima"]
+source_name     | 
+source_url      | 
+venue           | 
+published_at    | 
+volume          | 
+issue           | 
+pages           | 
+language        | 
+metadata        | {}
+created_at      | 2026-07-27 02:09:39.2011+00
+updated_at      | 2026-07-29 02:07:26.334934+00
+metadata_source | extraction
+

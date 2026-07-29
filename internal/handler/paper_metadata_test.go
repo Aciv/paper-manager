@@ -18,6 +18,7 @@ type paperHandlerServiceStub struct {
 	metadata   types.PaperMetadata
 	lastUpdate types.PaperMetadataUpdate
 	lastSearch types.PaperSearch
+	citations  []types.PaperCitation
 }
 
 func (s *paperHandlerServiceStub) GetMetadata(
@@ -68,16 +69,16 @@ func (*paperHandlerServiceStub) RemoveCitation(context.Context, string, string) 
 	return nil
 }
 
-func (*paperHandlerServiceStub) ListCitations(
+func (s *paperHandlerServiceStub) ListCitations(
 	context.Context, string,
 ) ([]types.PaperCitation, error) {
-	return nil, nil
+	return append([]types.PaperCitation(nil), s.citations...), nil
 }
 
-func (*paperHandlerServiceStub) ListCitedBy(
+func (s *paperHandlerServiceStub) ListCitedBy(
 	context.Context, string,
 ) ([]types.PaperCitation, error) {
-	return nil, nil
+	return append([]types.PaperCitation(nil), s.citations...), nil
 }
 
 func (*paperHandlerServiceStub) ResolveCitation(
@@ -149,5 +150,31 @@ func TestPaperMetadataHandlerKeepsGetUpdateAndSearchBehavior(t *testing.T) {
 		len(service.lastSearch.Tags) != 1 ||
 		service.lastSearch.Tags[0] != "ai" {
 		t.Fatalf("search request = %#v", service.lastSearch)
+	}
+}
+
+func TestPaperCitationHandlerListsForwardAndReverseEdges(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	documentID := uuid.New()
+	otherID := uuid.New()
+	service := &paperHandlerServiceStub{citations: []types.PaperCitation{{
+		CitingDocumentID: documentID,
+		CitedDocumentID:  otherID,
+		RawReference:     "A reference",
+	}}}
+	handler := NewPaperCitationHandler(service)
+	engine := gin.New()
+	engine.GET("/api/paper/:documentID/citations", handler.List)
+	engine.GET("/api/paper/:documentID/cited-by", handler.ListCitedBy)
+
+	for _, path := range []string{
+		"/api/paper/" + documentID.String() + "/citations",
+		"/api/paper/" + documentID.String() + "/cited-by",
+	} {
+		recorder := httptest.NewRecorder()
+		engine.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, path, nil))
+		if recorder.Code != http.StatusOK || !bytes.Contains(recorder.Body.Bytes(), []byte(otherID.String())) {
+			t.Fatalf("GET %s status=%d body=%s", path, recorder.Code, recorder.Body.String())
+		}
 	}
 }

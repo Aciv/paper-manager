@@ -300,6 +300,8 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 		extractor,
 		&paperInfoRegistryStub{},
 		papers,
+		nil,
+		nil,
 	)
 
 	resolvable, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
@@ -370,6 +372,8 @@ func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
 		extractor,
 		&paperInfoRegistryStub{},
 		papers,
+		nil,
+		nil,
 	)
 
 	_, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
@@ -431,6 +435,8 @@ func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
 		&paperInfoExtractorStub{},
 		registry,
 		papers,
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -502,6 +508,8 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
 		papers,
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -545,6 +553,8 @@ func TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup(t *testing.T
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
 		papers,
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -585,6 +595,8 @@ func TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup(t *testing.T) {
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
 		papers,
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -635,6 +647,8 @@ func TestPaperInfoResolveUnknownFromIncomingReferenceWithoutMarkdown(t *testing.
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
 		papers,
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -694,6 +708,8 @@ func TestPaperInfoResolveUnknownRepointsIncomingCitationToStoredPaper(t *testing
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
 		papers,
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -746,6 +762,8 @@ func TestPaperInfoResolveMetadataAllowsProcessingDocumentWithoutMarkdown(t *test
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
 		papers,
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -776,6 +794,8 @@ func TestPaperInfoResolveMetadataRejectsDeletingDocument(t *testing.T) {
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{},
 		newPaperInfoPaperServiceStub(),
+		nil,
+		nil,
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
@@ -890,6 +910,8 @@ func TestFindStoredCatalogDocumentFallsBackToNormalizedTitle(t *testing.T) {
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{},
 		papers,
+		nil,
+		nil,
 	).(*paperInfoService)
 
 	found, err := service.findStoredCatalogDocument(
@@ -929,6 +951,8 @@ func TestFindStoredCatalogDocumentRejectsTitleWithDifferentAuthors(t *testing.T)
 		&paperInfoExtractorStub{},
 		&paperInfoRegistryStub{},
 		papers,
+		nil,
+		nil,
 	).(*paperInfoService)
 
 	found, err := service.findStoredCatalogDocument(

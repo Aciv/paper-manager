@@ -42,6 +42,8 @@ func Build() *dig.Container {
 	must(dependencies.Provide(handler.NewDocumentHandler))
 	must(dependencies.Provide(handler.NewDocumentProcessHandler))
 	must(dependencies.Provide(handler.NewPaperMetadataHandler))
+	must(dependencies.Provide(handler.NewPaperCitationHandler))
+	must(dependencies.Provide(handler.NewPaperInfoHandler))
 	must(dependencies.Provide(handler.NewDocumentBaseHandler))
 	must(dependencies.Provide(router.NewRouter))
 	return dependencies

@@ -1,7 +1,8 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, Document, DocumentBase, DocumentPage, DocumentSearch, PaperMetadata } from './api';
+import { api, Document, DocumentBase, DocumentPage, DocumentSearch, PaperCitation, PaperInfoStageState, PaperInfoStatus, PaperMetadata } from './api';
 import { PdfReader } from './PdfReader';
+import './PaperInfo.css';
 import './styles.css';
 
 const acceptedFiles = '.txt,.json,.md,.markdown,.csv,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx';
@@ -24,6 +25,13 @@ function parseTags(value: string) {
   return value.split(',').map((tag) => tag.trim()).filter(Boolean);
 }
 
+function paperInfoStateLabel(state: PaperInfoStageState) {
+  const labels: Record<PaperInfoStageState, string> = {
+    idle: '空闲', queued: '排队或运行中', completed: '已完成', unavailable: '不可用', unknown: '队列状态未知',
+  };
+  return labels[state];
+}
+
 function App() {
   const [filters, setFilters] = useState<DocumentSearch>({ page: 1 });
   const [page, setPage] = useState<DocumentPage>({ items: [], page: 1, pageSize: 10, total: 0 });
@@ -37,6 +45,9 @@ function App() {
   const [editTitle, setEditTitle] = useState('');
   const [editTags, setEditTags] = useState('');
   const [paperMetadata, setPaperMetadata] = useState<PaperMetadata>();
+  const [paperInfo, setPaperInfo] = useState<PaperInfoStatus>();
+  const [citations, setCitations] = useState<PaperCitation[]>([]);
+  const [citedBy, setCitedBy] = useState<PaperCitation[]>([]);
   const [paperSearchTitle, setPaperSearchTitle] = useState('');
   const [paperSearchAuthor, setPaperSearchAuthor] = useState('');
   const [paperSearchTags, setPaperSearchTags] = useState('');
@@ -82,6 +93,9 @@ function App() {
     setEditOriginalFilename(selected?.originalFilename ?? '');
     setEditDoi(selected?.doi ?? '');
     setPaperMetadata(undefined);
+    setPaperInfo(undefined);
+    setCitations([]);
+    setCitedBy([]);
     if (!selected) {
       setEditTitle('');
       setEditTags('');
@@ -92,6 +106,15 @@ function App() {
       setEditTitle(metadata.title ?? '');
       setEditTags(metadata.tags.join(', '));
     }).catch((error) => setMessage(error instanceof Error ? `加载论文信息失败：${error.message}` : '加载论文信息失败。'));
+    void Promise.all([
+      api.getPaperInfoStatus(selected.id),
+      api.listPaperCitations(selected.id),
+      api.listPaperCitedBy(selected.id),
+    ]).then(([{ paperInfo: status }, { items: outgoing }, { items: incoming }]) => {
+      setPaperInfo(status);
+      setCitations(outgoing);
+      setCitedBy(incoming);
+    }).catch((error) => setMessage(error instanceof Error ? `加载论文任务或引用失败：${error.message}` : '加载论文任务或引用失败。'));
   }, [selected?.id]);
 
   async function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -201,6 +224,22 @@ function App() {
       await load(filters);
     } catch (error) {
       setMessage(error instanceof Error ? `更新失败：${error.message}` : '更新失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function retryPaperInfo(stage: 'extraction' | 'catalog') {
+    if (!selected) return;
+    setBusy(true);
+    try {
+      const response = stage === 'extraction'
+        ? await api.retryPaperExtraction(selected.id)
+        : await api.retryPaperCatalog(selected.id);
+      setPaperInfo(response.paperInfo);
+      setMessage(stage === 'extraction' ? '已提交论文元数据提取重试。' : '已提交论文库查询重试。');
+    } catch (error) {
+      setMessage(error instanceof Error ? `论文任务重试失败：${error.message}` : '论文任务重试失败。');
     } finally {
       setBusy(false);
     }
@@ -341,6 +380,7 @@ function App() {
               <dt>文档 ID</dt><dd><code>{selected.id}</code></dd>
               <dt>DOI</dt><dd>{selected.doi || '未设置'}</dd>
               <dt>学科标签</dt><dd>{paperMetadata?.tags.length ? paperMetadata.tags.join(' · ') : '未设置'}</dd>
+			  <dt>论文信息来源</dt><dd>{paperInfo?.metadataSource ?? '加载中'}</dd>
               <dt>类型</dt><dd>{selected.contentType}</dd>
               <dt>大小</dt><dd>{formatBytes(selected.sizeBytes)}</dd>
               <dt>状态</dt><dd><span className={`status status-${selected.status}`}>{selected.status}</span></dd>
@@ -359,6 +399,21 @@ function App() {
               <input id="edit-tags" value={editTags} onChange={(event) => setEditTags(event.target.value)} placeholder="computer science, graphics" disabled={busy} />
               <button type="submit" disabled={busy || (editOriginalFilename === selected.originalFilename && editDoi === (selected.doi ?? '') && editTitle === (paperMetadata?.title ?? '') && editTags === (paperMetadata?.tags.join(', ') ?? ''))}>保存修改</button>
             </form>
+			<section className="paper-info-panel">
+			  <div className="panel-heading"><h4>论文信息任务</h4><span>独立于文档解析状态</span></div>
+			  <div className="paper-info-stages">
+				<div><strong>元数据提取</strong><span className={`paper-stage paper-stage-${paperInfo?.extraction.state ?? 'unknown'}`}>{paperInfoStateLabel(paperInfo?.extraction.state ?? 'unknown')}</span><button type="button" onClick={() => void retryPaperInfo('extraction')} disabled={busy || paperInfo?.extraction.state === 'unavailable'}>重试提取</button></div>
+				<div><strong>论文库查询</strong><span className={`paper-stage paper-stage-${paperInfo?.catalog.state ?? 'unknown'}`}>{paperInfoStateLabel(paperInfo?.catalog.state ?? 'unknown')}</span><button type="button" onClick={() => void retryPaperInfo('catalog')} disabled={busy || paperInfo?.catalog.state === 'unavailable'}>重试查询</button></div>
+			  </div>
+			  <p className="hint">状态仅显示当前队列观察结果和已落库的元数据来源；历史失败请查看 Asynq 死信记录。</p>
+			</section>
+			<section className="citation-panel">
+			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>
+			  <div className="citation-columns">
+				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><code>{citation.citedDocumentId}</code><p>{citation.rawReference}</p></li>)}</ol>}</div>
+				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><code>{citation.citingDocumentId}</code><p>{citation.rawReference}</p></li>)}</ol>}</div>
+			  </div>
+			</section>
             <p className={selected.status === 'failed' ? 'detail-error' : 'hint'}>{selectedDescription}</p>
 			{selected.contentType === 'application/pdf' && <PdfReader document={selected} onMessage={setMessage} />}
           </>}

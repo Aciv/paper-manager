@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -216,7 +217,7 @@ func (s *documentService) enqueuePaperInfoAfterRecognition(
 	if err != nil {
 		return fmt.Errorf("build paper metadata extraction task: %w", err)
 	}
-	if err := enqueueDocumentOwnedTask(
+	if err := enqueueManagedTask(
 		ctx,
 		s.taskEnqueuer,
 		task,
@@ -583,13 +584,16 @@ func NewPaperMetadataExtractTask(
 			types.TypePaperMetadataExtract,
 			payload.DocumentID,
 			payload.MarkdownSHA256,
+			payload.Attempt,
 		)),
 	}, nil
 }
 
 // NewPaperCatalogResolveTask validates and creates a catalog-resolution task.
-// Revision-bound work has a deterministic task ID; metadata-only lookups use a
-// short uniqueness window because no source revision is available for the ID.
+// Initial revision-bound work has a deterministic task ID. Explicit retries
+// carry a positive Attempt and get a fresh ID; Asynq retries retain the same
+// payload and therefore the same ID. Metadata-only lookups use a short
+// uniqueness window because no source revision is available for the ID.
 func NewPaperCatalogResolveTask(
 	payload types.PaperCatalogResolvePayload,
 	timeout time.Duration,
@@ -618,6 +622,7 @@ func NewPaperCatalogResolveTask(
 			types.TypePaperCatalogResolve,
 			payload.DocumentID,
 			payload.MarkdownSHA256,
+			payload.Attempt,
 		)))
 	} else {
 		options = append(options, asynq.Unique(time.Minute))
@@ -633,13 +638,17 @@ func newPaperInfoJSONTask(taskType string, payload any) (*asynq.Task, error) {
 	return asynq.NewTask(taskType, encoded), nil
 }
 
-func paperInfoTaskID(taskType, documentID, revision string) string {
+func paperInfoTaskID(taskType, documentID, revision string, attempt int) string {
 	stage := strings.NewReplacer(":", "-", "_", "-").Replace(taskType)
 	revision = strings.ToLower(strings.TrimSpace(revision))
-	if revision == "" {
-		return stage + "-" + strings.TrimSpace(documentID)
+	base := stage + "-" + strings.TrimSpace(documentID)
+	if revision != "" {
+		base += "-" + revision
 	}
-	return stage + "-" + strings.TrimSpace(documentID) + "-" + revision
+	if attempt > 0 {
+		base += "-attempt-" + strconv.Itoa(attempt)
+	}
+	return base
 }
 
 var _ interfaces.DocumentRecognizer

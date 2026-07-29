@@ -1,0 +1,561 @@
+# Paper Metadata Extraction and Catalog Resolution Plan
+
+Last updated: 2026-07-29
+
+## Objective
+
+Build a two-stage asynchronous paper-information pipeline:
+
+1. Python extracts candidate title, authors, abstract, and raw references from
+   persisted Markdown and source-map blocks.
+2. Go queries paper catalogs such as Semantic Scholar, OpenAlex, arXiv, and
+   Crossref, ranks normalized candidates, and safely updates canonical
+   `paper_metadata`.
+
+Document recognition must remain independent: paper-information failure must not
+change a successfully parsed document from `ready` to `failed`.
+
+## Progress Summary
+
+- Overall status: the paper-information pipeline, its HTTP/UI control plane,
+  deterministic tests, smoke coverage, and operating documentation are
+  complete.
+- Completed phases: 10 of 10.
+- Current phase: complete.
+- Next deliverable: operate the pipeline with real parser/catalog credentials;
+  future changes should start a new plan phase rather than extending this one.
+
+## Decisions and Constraints
+
+- Task types are `paper:metadata_extract` and `paper:catalog_resolve`.
+- Asynq payloads contain identifiers and an optional `markdown_sha256`; never
+  Markdown, PDF bytes, Blocks, credentials, or external provider responses.
+- Extraction workers always reload durable Markdown and reject a changed
+  SHA-256. Catalog workers validate the SHA-256 only when the query was tied to
+  a parsed revision; metadata-only and source-free lookup omit it.
+- Python produces candidates and evidence only; it does not query external
+  catalogs or write the database.
+- Go owns catalog access, candidate scoring, automatic persistence, and
+  retries. Users correct metadata only after the automatic pipeline finishes
+  or cannot produce a satisfactory result.
+- The default catalog order starts with arXiv. Operator-configured order is
+  preserved without query-dependent reordering. Within the arXiv adapter, an
+  arXiv URL, `arXiv:` identifier, or `10.48550/arXiv.*` DOI uses exact
+  `id_list` lookup instead of broad title/DOI search.
+- Exact DOI and arXiv identifiers remain priority matches. A differing DOI is
+  not negative evidence because providers may expose different identifiers;
+  non-exact candidates are ranked primarily by title similarity.
+- Local paper reconciliation tries normalized DOI first, then strict normalized
+  title. Title fallback excludes self and unresolved/deleting documents and
+  rejects conflicting known authors or publication years.
+- `paper_metadata.metadata_source` records the current snapshot origin.
+  Atomic persistence precedence is `manual > catalog > extraction > unknown`;
+  an asynchronous lower-priority writer may not replace a higher-priority
+  snapshot.
+- Catalog lookup is independent of document parsing status. Uploaded, queued,
+  processing, ready, failed, cancelled, and unknown documents may resolve from
+  durable metadata. Deleting/missing documents are rejected. A supplied
+  Markdown SHA-256 is checked, but readiness is not.
+- Superseded 2026-07-28: catalog enqueue was identity-driven and could begin
+  from a durable DOI before extraction completed.
+- Catalog resolution is chained by the extraction worker only after extraction
+  succeeds and persists its result. A usable DOI or extracted title is then
+  sufficient to enqueue catalog resolution.
+- Paper extraction tasks use the default queue with a 2-minute/3-retry default;
+  catalog tasks use the low queue with a 10-minute/5-retry default. These
+  policies are configurable through `PAPER_*_TASK_TIMEOUT` and
+  `PAPER_*_TASK_MAX_RETRY`.
+- Superseded 2026-07-28: recognition, paper extraction, and paper catalog
+  enqueue methods shared one typed `DocumentTaskEnqueuer`.
+- Queue dispatch uses one generic, context-aware `TaskEnqueuer` implemented by
+  `*asynq.Client`; task constructors own payload validation, serialization,
+  queue, retry, timeout, and deduplication policy.
+- Paper-info stages rely on Asynq retry/dead-letter behavior and explicit
+  retries; they do not run a separate database-scanning housekeeping service.
+- Stale/cancelled paper tasks are revoked without dead-letter creation.
+  Invalid or deterministic unsupported work is archived immediately; transient
+  gRPC/provider/429/5xx failures retry and honor provider Retry-After.
+- Real-provider tests are opt-in through `PAPER_CATALOG_LIVE_TEST=1`; normal
+  tests remain offline and deterministic. Credentials come only from the
+  existing environment variables.
+- `DocumentService` owns source-file lifecycle, parsing state, Markdown, and
+  source-map Blocks; it must not grow into the paper-domain service.
+- A dedicated `PaperService` owns canonical `paper_metadata` operations and
+  `paper_citations` operations, including unresolved placeholders. Its
+  constructor injects
+  `DocumentRepository`, `PaperMetadataRepository`, and
+  `PaperCitationRepository` directly rather than reaching through
+  `DocumentService.GetRepository()`.
+- `PaperInfoService` remains separate from `PaperService`: paper-info processing
+  coordinates Python extraction and external catalogs, then uses the paper
+  domain boundary to persist canonical metadata and citation edges.
+- Raw references remain `[]string` during extraction.
+- A reference that cannot yet be matched to a stored paper uses an internal
+  placeholder `Document` with status `unknown`; the citation row also retains
+  the exact extraction reference in `raw_reference`. Placeholder documents
+  have no readable source file and must never enter document recognition.
+- Catalog lookup may target an `unknown` placeholder before its source file is
+  uploaded. It builds the query from `paper_metadata` first, then fills missing
+  DOI, source URL, or title from incoming `raw_reference` values. A local match
+  repoints incoming citations; otherwise the placeholder receives canonical
+  catalog metadata and remains source-free.
+- `paper_metadata` is both the current extraction snapshot and the canonical
+  catalog result. Extraction writes title/authors/abstract directly; catalog
+  resolution reads those fields and may replace them with the selected work.
+- Raw extracted references are persisted directly in `paper_citations`; no
+  paper-info run or catalog-candidate archive is maintained.
+- Superseded 2026-07-28: do not persist extraction runs, per-field provenance,
+  catalog candidate history, or separate extraction/lookup status. Asynq
+  retries/dead letters handle operational failures, and users correct the
+  final metadata when automation is insufficient.
+- Superseded 2026-07-27: catalog results were originally designed with
+  `resolved`, `no_match`, `ambiguous`, `failed`, and `stale` states.
+- Extraction and catalog result types now record only terminal `success` or
+  `failed`. Queue lifecycle remains in Asynq; detailed no-match, ambiguity,
+  stale-work, and cancellation reasons belong in task errors or result
+  metadata rather than these database-facing status enums.
+- Generated protobuf files must be regenerated, never edited manually.
+
+## Phase 0 — Architecture
+
+Status: completed
+
+- [x] Separate parser recognition from paper metadata extraction.
+- [x] Define the two asynchronous task categories and their ordering.
+- [x] Establish Python/Go responsibility boundaries.
+- [x] Define revision guarding with `markdown_sha256`.
+- [x] Identify the current disconnected path: Python extracts sections only
+  for logging while Go's optional `RecognitionResult.PaperMetadata` is not in
+  the protobuf contract.
+
+## Phase 1 — Shared Go Contracts
+
+Status: completed
+
+- [x] Add `PaperMetadataExtractPayload` and `PaperCatalogResolvePayload`.
+- [x] Add extraction request/result, candidate, evidence, and status types.
+- [x] Add normalized catalog query/candidate/provider types.
+- [x] Superseded 2026-07-28: add `PaperMetadataExtractor`,
+  `PaperCatalogProvider`, `PaperInfoService`, and narrow typed paper-task
+  enqueuer interfaces.
+- [x] Superseded 2026-07-28: keep `*asynq.Task` out of new
+  application-service interfaces; the generic queue boundary now deliberately
+  accepts `*asynq.Task` so `*asynq.Client` satisfies it directly.
+- [x] Remove the misleading `RecognitionResult.PaperMetadata` field after all
+  call sites are migrated.
+- [x] Add validation and unit tests for payloads and domain types.
+
+Validation completed 2026-07-27:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types/...`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+## Phase 2 — Paper Domain Service
+
+Status: completed
+
+- [x] Add a handler-facing `PaperService` interface and implementation for
+  metadata get/update/search plus citation add/replace/remove/forward/reverse
+  queries.
+- [x] Inject `DocumentRepository`, `PaperMetadataRepository`, and
+  `PaperCitationRepository` directly into `PaperService`.
+- [x] Validate both citation endpoints through `DocumentRepository` before
+  changing a relationship; do not access repositories through
+  `DocumentService.GetRepository()`.
+- [x] For an unmatched extraction reference, create or reuse an internal
+  `unknown` placeholder Document and retain its raw text on the citation edge;
+  when a catalog match later succeeds, repoint the edge and clean up an
+  unreferenced placeholder.
+- [x] Move paper metadata methods out of `DocumentService`; keep document
+  upload, storage, parsing, Markdown, and Blocks there.
+- [x] Migrate `PaperMetadataHandler` to `PaperService` without changing its
+  existing HTTP behavior.
+- [x] Register `PaperService` through the DI container.
+- [x] Add focused service tests for missing documents, self-citations,
+  idempotent citation writes, metadata updates, and forward/reverse queries.
+
+Validation completed 2026-07-28:
+
+- `go test ./internal/application/service ./internal/handler ./internal/application/repository ./internal/types ./internal/container`
+- `go test ./...`
+- `go build ./...`
+- `git diff --check`
+
+## Phase 3 — Python Extraction RPC
+
+Status: completed
+
+- [x] Add a dedicated extraction RPC to the protobuf contract.
+- [x] Accept bounded Markdown bytes plus compact source-map Block data.
+- [x] Return title, authors, abstract, `references []string`, confidence, and
+  source evidence.
+- [x] Connect the existing deterministic Markdown rules.
+- [x] Leave an implementation boundary for the future CRF model.
+- [x] Regenerate Go and Python protobuf stubs.
+- [x] Add Python unit tests and Go gRPC adapter tests.
+
+Validation completed 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/infrastructure/paperextraction ./internal/infrastructure/docrecognition`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `cd python && ../.venv/bin/python -m unittest discover -s papers_parser -p 'test_*.py'`
+- `git diff --check`
+
+## Phase 4 — Persistence and Migrations
+
+Status: completed
+
+- [x] Add a directional `paper_citations` relation keyed by
+  `(citing_document_id, cited_document_id)`, with cascade deletion and
+  bidirectional repository queries.
+- [x] Add `paper_citations.raw_reference` and carry it through the GORM model,
+  repository writes, replacements, and query results.
+- [x] Extend the persisted document-status constraint for `unknown`
+  placeholder papers and keep placeholders out of source-file operations.
+- [x] Superseded 2026-07-28: do not add `paper_info_runs`; extraction
+  writes directly to the existing `paper_metadata` row.
+- [x] Superseded 2026-07-28: do not persist separate extraction/lookup status,
+  raw result archives, selected-provider history, scores, or safe errors.
+- [x] Superseded 2026-07-28: do not add `paper_catalog_candidates`; catalog
+  selection remains an in-memory automatic step.
+- [x] Reuse existing `paper_metadata.document_id ... ON DELETE CASCADE` and
+  existing citation cascade indexes; no paper-info migration is required.
+- [x] Superseded 2026-07-28: no paper-info run repository interfaces or GORM
+  implementations are required.
+- [x] Move stale-revision write tests to Phase 6, where workers recheck the
+  current Markdown SHA-256 immediately before automatic writes.
+
+Citation validation completed 2026-07-27:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/repository ./internal/types ./migrations/postgres`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Unresolved citation validation completed 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/application/repository ./internal/application/service ./migrations/postgres`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+## Phase 5 — Catalog Infrastructure
+
+Status: completed
+
+- [x] Create adapters under `internal/infrastructure/papercatalog/`.
+- [x] Implement Semantic Scholar, OpenAlex, arXiv, and Crossref behind one
+  normalized `PaperCatalogProvider` interface.
+- [x] Add provider-specific timeouts, rate-limit handling, bounded responses,
+  and safe logging.
+- [x] Add a registry/factory controlled by environment configuration.
+- [x] Unit-test adapters with local HTTP test servers; do not depend on live
+  provider APIs in normal tests.
+- [x] Superseded 2026-07-28: do not dynamically move arXiv based on query
+  contents; provider order comes from configuration.
+- [x] Put arXiv first in the default provider order and retain exact arXiv ID
+  lookup for arXiv-native URLs/identifiers/DOIs.
+- [x] Add opt-in live tests for all four providers and execute them against
+  stable known-paper queries; normal tests must remain offline.
+
+Validation completed 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/infrastructure/papercatalog ./internal/types ./internal/config ./internal/container`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Superseded dynamic-priority refinement validated 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/infrastructure/papercatalog ./internal/container`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Default-order correction validated 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/config ./internal/infrastructure/papercatalog ./internal/types ./internal/container`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Live-provider validation completed 2026-07-28:
+
+- `PAPER_CATALOG_LIVE_TEST=1 GOCACHE=/tmp/papermaster-go-cache go test ./internal/infrastructure/papercatalog -run '^TestLivePaperCatalogProviders$' -v -count=1`
+- arXiv returned `Attention Is All You Need` for ID `1706.03762`.
+- Semantic Scholar returned `S2ORC: The Semantic Scholar Open Research Corpus`
+  for DOI `10.18653/v1/2020.acl-main.447`.
+- OpenAlex and Crossref returned `Deep learning` for DOI
+  `10.1038/nature14539`.
+- Live Semantic Scholar validation exposed and fixed mixed-type
+  `externalIds` decoding; the offline fixture now includes numeric
+  `CorpusId`.
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+## Phase 6 — Paper Info Application Service
+
+Status: completed
+
+- [x] Allow `unknown` placeholder papers to run catalog lookup without
+  Markdown or a `ready` document status, using `paper_metadata` or incoming
+  citation `raw_reference` as the durable query source.
+- [x] Rename the orchestration boundary, implementation, tests, and logging
+  to PaperInfo; the service coordinates paper information
+  extraction and lookup rather than enriching document content.
+
+- [x] Implement extraction orchestration and write title, authors, and
+  abstract directly to `paper_metadata`; replace outgoing raw references in
+  `paper_citations`.
+- [x] Implement concurrent provider lookup with bounded concurrency.
+- [x] Superseded 2026-07-28: Phase 6 does not use query-dependent
+  `PaperCatalogRegistry.ProvidersFor` ordering.
+- [x] Build queries with `paper_metadata.source_url` and iterate the configured
+  `PaperCatalogRegistry.Providers` order; the arXiv adapter itself chooses
+  exact `id_list` lookup when possible.
+- [x] Read catalog query inputs directly from `paper_metadata` and unresolved
+  `paper_citations`, then overwrite them with the selected automatic result.
+- [x] Depend on `PaperService` or a narrow canonical-paper writer interface
+  when applying selected metadata and citation results; do not put external
+  provider orchestration inside `PaperService`.
+- [x] Rank DOI exact matches first, then title, author, year, and venue
+  similarity.
+- [x] Make title similarity the dominant weighted signal and do not penalize
+  candidates solely because two non-empty DOI values differ; retain exact
+  DOI/arXiv matches as priority signals.
+- [x] Persist metadata origin (`unknown`, `extraction`, `catalog`, `manual`)
+  and enforce atomic write precedence so concurrent extraction cannot replace
+  catalog or manual metadata.
+- [x] Allow catalog lookup for source documents before `ready`; reject only
+  deletion, missing records, placeholder identity changes, or a mismatched
+  supplied Markdown revision.
+- [x] Resolve a selected catalog candidate to an existing source document by
+  DOI first and then by strict normalized title, excluding self and unresolved
+  placeholders.
+- [x] Superseded 2026-07-27: do not represent queue/business branches as
+  extraction or catalog status values.
+- [x] Superseded 2026-07-28: do not persist paper-info status or result
+  archives; Asynq retry/dead-letter handling is sufficient.
+- [x] Superseded 2026-07-28: unrestricted automatic replacement was replaced
+  by row-level metadata-source precedence; per-field provenance remains
+  intentionally out of scope.
+- [x] Recheck the current Markdown SHA-256 for extraction and for catalog work
+  that supplies a revision. Catalog lookup without a revision may run during
+  parsing or after cancellation/failure; deletion still wins. Source-free
+  `unknown` lookup verifies that the placeholder identity did not change.
+
+Validation completed 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/config ./internal/infrastructure/paperextraction ./internal/infrastructure/papercatalog ./internal/application/service ./internal/container`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Optional validation unavailable:
+
+- `CGO_ENABLED=1 GOCACHE=/tmp/papermaster-go-cache go test -race ./internal/application/service -run 'TestPaperInfo' -count=1`
+  could not run because this environment does not have the `gcc` C compiler.
+
+PaperInfo naming refinement validated 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/service ./internal/types ./internal/container`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Source-free unknown-paper lookup validated 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/application/service ./internal/container`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Title-dominant catalog scoring validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w internal/application/service/paper_info.go internal/application/service/paper_info_test.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/service -run '^TestScorePaperCatalogCandidate' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Concurrent catalog lookup and metadata-source precedence validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w internal/types/paper_metadata.go internal/types/paper_catalog.go internal/types/tasks.go internal/application/repository/paper_metadata.go internal/application/repository/paper_metadata_test.go internal/application/service/paper.go internal/application/service/paper_test.go internal/application/service/paper_info.go internal/application/service/paper_info_test.go migrations/postgres/migrate.go migrations/postgres/migrate_test.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/application/repository ./internal/application/service ./migrations/postgres`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Local normalized-title reconciliation validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w internal/application/service/paper_info.go internal/application/service/paper_info_test.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/service -run 'TestFindStoredCatalogDocument|TestPaperInfoResolveMetadataRepointsMatchedCitation' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+## Phase 7 — Asynq Wiring and Recovery
+
+Status: completed
+
+- [x] Add enqueue methods and register both handlers in the Asynq mux.
+- [x] Enqueue extraction only after parsed Markdown and Blocks are committed.
+- [x] Superseded 2026-07-28: catalog resolution did not require extraction
+  success and recognition could enqueue it directly from a DOI.
+- [x] Chain catalog resolution only after extraction succeeds; at that point,
+  enqueue when either a usable DOI or extracted title exists.
+- [x] Configure task-specific queues, retry counts, and timeouts.
+- [x] Retry transient gRPC/HTTP/429/5xx failures; skip retry for invalid input
+  and unsupported deterministic cases.
+- [x] Superseded 2026-07-28: extend task inspection, cancellation, dead-letter
+  scope inference, and a separate housekeeping sweep for both task types.
+- [x] Ensure a failed enqueue remains durably recoverable instead of losing
+  the paper-info request.
+- [x] Superseded 2026-07-28: consolidate `PaperInfoTaskEnqueuer` into the typed
+  `DocumentTaskEnqueuer`; the final design uses one generic `TaskEnqueuer`.
+- [x] Supersede and remove `PaperInfoHousekeepingService`; retain document
+  status housekeeping, task retry, cancellation, and dead-letter handling.
+- [x] Replace typed `DocumentTaskEnqueuer` methods with generic
+  `TaskEnqueuer.EnqueueContext`, while retaining centralized typed task
+  constructors and existing queue policy.
+- [x] Move paper-task construction policy from `types` into the paper service
+  package; retain payload validation and payload-to-command conversion in
+  `types`.
+- [x] Move document-task construction policy from `types` into the document
+  service package so the types layer contains only task contracts.
+
+Document-task ownership refinement validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w internal/types/tasks.go internal/application/service/document_tasks.go internal/application/service/document.go internal/router/tasks_test.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/application/service ./internal/router ./internal/container -count=1`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Paper-task ownership refinement validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w internal/types/tasks.go internal/types/paper_tasks.go internal/application/service/paper_info_tasks.go internal/application/service/document_process.go internal/router/tasks.go internal/router/tasks_test.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/application/service ./internal/router ./internal/container -count=1`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Generic context-aware task dispatch validated 2026-07-28:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/types ./internal/router ./internal/application/service ./internal/container -count=1`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Validation completed 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w cmd/server/main.go internal/config/config.go internal/config/config_test.go internal/types/interfaces/paper_info.go internal/types/interfaces/task_inspector.go internal/types/interfaces/task_dead_letter.go internal/application/service/paper_info.go internal/application/service/paper_info_test.go internal/infrastructure/papercatalog/common.go internal/router/paper_tasks.go internal/router/paper_tasks_test.go internal/router/tasks.go internal/router/task_inspector.go internal/router/task_inspector_test.go internal/middleware/asynqdl/asynqdl.go internal/middleware/asynqdl/asynqdl_test.go internal/application/repository/task_dead_letter.go internal/application/service/document.go internal/application/service/document_process.go internal/application/service/document_housekeeping.go internal/application/service/document_housekeeping_test.go internal/application/service/document_test.go internal/application/service/paper_info_housekeeping.go internal/application/service/paper_info_housekeeping_test.go internal/container/container.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/router -run 'TestProcessPaper|TestClassifyPaper|TestPaperTask|TestMatchesDocument' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/service -run 'TestProcessDocument(PersistsMarkdownAndPDFBlocks|ReadyRetryRepairsPaperInfoHandoff)|TestPaperInfoHousekeepingRecoveryGate|TestPaperInfoExtractMetadata' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/service -run 'TestProcessDocument(PersistsMarkdownAndPDFBlocks|ReadyRetryRepairsPaperInfoHandoff)|TestDeleteDocumentRemovesRenderedBlockImages|TestPaperInfoHousekeepingRecoveryGate|TestPaperInfo(ExtractMetadata|ResolveMetadataRejectsDOIChanged)' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/middleware/asynqdl -run 'TestMiddleware_(SkipRetry|RevokeTask)' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `docker compose config --quiet`
+- `git diff --check`
+
+Strict queue-order correction validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w internal/application/service/document.go internal/application/service/document_process.go internal/application/service/document_test.go internal/application/service/paper_info_housekeeping.go internal/router/paper_tasks_test.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/service ./internal/router -run 'TestProcessDocument|TestProcessPaperMetadataExtractTask|TestPaperInfoHousekeeping' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/router -run '^TestProcessPaperMetadataExtractTask' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Unified document-task enqueuer validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w internal/types/interfaces/task.go internal/types/interfaces/paper_info.go internal/application/service/document.go internal/application/service/document_process.go internal/application/service/document_test.go internal/application/service/paper_info_housekeeping.go internal/container/container.go internal/router/tasks.go internal/router/tasks_test.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/router -run 'TestDocumentTaskEnqueuer|TestProcessPaper|TestPaperTask' -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/application/service ./internal/container ./internal/types/interfaces -count=1`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+Paper-info housekeeping removal validated 2026-07-28:
+
+- `/root/go/go_file/bin/gofmt -w cmd/server/main.go internal/container/container.go`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./cmd/server ./internal/container ./internal/application/service ./internal/router -count=1`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `git diff --check`
+
+## Phase 8 — HTTP API and UI Visibility
+
+Status: completed
+
+- [x] Add forward-reference and reverse-citation endpoints backed by
+  `PaperService`.
+- [x] Add endpoints to inspect paper-info status and manually retry extraction
+  or catalog resolution.
+- [x] Superseded 2026-07-29: do not expose ambiguous candidates for manual
+  selection. The approved automatic resolver does not persist candidate
+  history; only safe selected matches are written.
+- [x] Display extraction and catalog status separately from document parse
+  status.
+- [x] Use safe `ServerError` handling and repository logging conventions from
+  `AGENTS.md`.
+
+Implementation completed 2026-07-29:
+
+- `PaperCitationHandler` exposes forward/reverse list plus complete citation
+  mutation endpoints through `PaperService`.
+- `PaperInfoControlService` derives honest queue/provenance status without a
+  new persistence table and submits bounded extraction/catalog retry tasks.
+- The React console displays paper-information state and both citation
+  directions, with retry controls independent of `Document.Status`.
+
+Validation completed 2026-07-29:
+
+- `GOCACHE=/tmp/papermaster-go-cache go test ./internal/handler ./internal/application/service -count=1 -v`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `cd web && npm run build`
+- `git diff --check`
+
+## Phase 9 — Validation and Documentation
+
+Status: completed
+
+- [x] Run `gofmt` on changed Go files.
+- [x] Run `go test ./...`.
+- [x] Run `go build ./...`.
+- [x] Run Python parser/extractor tests.
+- [x] Run `cd web && npm run build` after UI changes.
+- [x] Add paper-info HTTP smoke coverage for citation success, status, and
+  retry. Keep no-match, provider-outage, stale-revision, cancellation, and
+  deletion deterministic through focused Go/API scripts; ambiguity remains
+  intentionally automatic with no candidate-selection endpoint.
+- [x] Document protobuf regeneration, environment variables, task queues, and
+  provider credentials without committing secrets.
+
+Validation completed 2026-07-29:
+
+- `bash -n scripts/test_paper_info_api.sh scripts/test_all_api.sh`
+- `GOCACHE=/tmp/papermaster-go-cache go test ./...`
+- `GOCACHE=/tmp/papermaster-go-cache go build ./...`
+- `cd python && ../.venv/bin/python -m unittest discover -s papers_parser -p 'test_*.py'`
+- `cd web && npm run build`
+- `docker compose config --quiet`
+- `git diff --check`
+
+## Progress Update Rules
+
+- Change a phase to `in progress` before implementation begins.
+- Mark an item complete only after its implementation and focused validation
+  both pass.
+- Record blockers beneath the affected phase with the failing command and a
+  concise cause.
+- Update the summary, current phase, next deliverable, and date at the end of
+  every material work session.
+- Do not erase completed history when the design changes; mark superseded
+  items explicitly and add the replacement.

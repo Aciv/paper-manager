@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -151,33 +152,59 @@ func WithAttrs(c context.Context, args ...any) context.Context {
 }
 
 func Debug(c context.Context, msg string, args ...any) {
-	GetLogger(c).Debug(msg, args...)
+	log(c, slog.LevelDebug, msg, args...)
 }
 
 func DebugWithArgs(ctx context.Context, msg string, args ...any) {
-	GetLogger(ctx).With(args...).Debug(msg)
+	log(ctx, slog.LevelDebug, msg, args...)
 }
 
 func Info(c context.Context, msg string, args ...any) {
-	GetLogger(c).Info(msg, args...)
+	log(c, slog.LevelInfo, msg, args...)
 }
 
 func InfoWithArgs(ctx context.Context, msg string, args ...any) {
-	GetLogger(ctx).With(args...).Info(msg)
+	log(ctx, slog.LevelInfo, msg, args...)
 }
 
 func Warn(c context.Context, msg string, args ...any) {
-	GetLogger(c).Warn(msg, args...)
+	log(c, slog.LevelWarn, msg, args...)
 }
 
 func WarnWithArgs(ctx context.Context, msg string, args ...any) {
-	GetLogger(ctx).With(args...).Warn(msg)
+	log(ctx, slog.LevelWarn, msg, args...)
 }
 
 func Error(c context.Context, msg string, args ...any) {
-	GetLogger(c).Error(msg, args...)
+	log(c, slog.LevelError, msg, args...)
 }
 
 func ErrorWithArgs(ctx context.Context, msg string, args ...any) {
-	GetLogger(ctx).With(args...).Error(msg)
+	log(ctx, slog.LevelError, msg, args...)
+}
+
+// log writes a record with the program counter of the package that called the
+// public logger helper. slog.Logger.Info and its siblings normally capture
+// their direct caller, which would otherwise be this package's wrapper and
+// make every application log appear to originate from logger/logger.go.
+func log(ctx context.Context, level slog.Level, msg string, args ...any) {
+	entryLogger := GetLogger(ctx)
+	handler := entryLogger.Handler()
+	if !handler.Enabled(ctx, level) {
+		return
+	}
+
+	record := slog.NewRecord(time.Now(), level, msg, callerPC())
+	record.Add(args...)
+	_ = handler.Handle(ctx, record)
+}
+
+// callerPC returns the public helper's caller. The fixed depth is deliberate:
+// runtime.Callers -> callerPC -> log -> Debug/Info/Warn/Error -> application.
+func callerPC() uintptr {
+	var pcs [1]uintptr
+	if runtime.Callers(4, pcs[:]) == 0 {
+		return 0
+	}
+	return pcs[0]
 }

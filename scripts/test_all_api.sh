@@ -9,6 +9,7 @@ tests=(
   test_upload_api.sh
   test_document_crud_api.sh
   test_paper_metadata_api.sh
+  test_paper_info_api.sh
   test_document_base_api.sh
   test_cancel_api.sh
 )

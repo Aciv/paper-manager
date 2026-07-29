@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"unicode"
 	"unicode/utf8"
 
@@ -40,6 +41,18 @@ var (
 	// ErrPaperCatalogNoMatch means providers were reachable but no candidate
 	// was sufficiently similar to safely overwrite canonical paper data.
 	ErrPaperCatalogNoMatch = errors.New("no satisfactory paper catalog match")
+	// ErrPaperInfoExtractionUnavailable means there is no current Markdown
+	// revision to submit to the Python extractor.
+	ErrPaperInfoExtractionUnavailable = errors.New("paper metadata extraction is unavailable")
+	// ErrPaperInfoCatalogUnavailable means durable metadata/reference evidence
+	// cannot form a safe external catalog query.
+	ErrPaperInfoCatalogUnavailable = errors.New("paper catalog resolution is unavailable")
+	// ErrPaperInfoDeleting prevents a manual retry from racing deletion.
+	ErrPaperInfoDeleting = errors.New("document is being deleted")
+
+	// paperInfoManualAttempt distinguishes operator-initiated retries from an
+	// initial revision-bound task and from Asynq's retries of that task.
+	paperInfoManualAttempt atomic.Int64
 )
 
 var (
@@ -56,11 +69,14 @@ var (
 // paperInfoService coordinates durable document state, Python extraction,
 // external catalogs, and the canonical PaperService boundary.
 type paperInfoService struct {
+	cfg            config.Config
 	documents      interfaces.DocumentRepository
 	storage        interfaces.FileStorage
 	extractor      interfaces.PaperMetadataExtractor
 	catalogs       interfaces.PaperCatalogRegistry
 	papers         interfaces.PaperService
+	tasks          interfaces.TaskEnqueuer
+	inspector      interfaces.TaskInspector
 	maxConcurrency int
 }
 
@@ -73,17 +89,22 @@ func NewPaperInfoService(
 	extractor interfaces.PaperMetadataExtractor,
 	catalogs interfaces.PaperCatalogRegistry,
 	papers interfaces.PaperService,
+	tasks interfaces.TaskEnqueuer,
+	inspector interfaces.TaskInspector,
 ) interfaces.PaperInfoService {
 	concurrency := cfg.PaperCatalogConcurrency
 	if concurrency <= 0 {
 		concurrency = 1
 	}
 	return &paperInfoService{
+		cfg:            cfg,
 		documents:      documents,
 		storage:        storage,
 		extractor:      extractor,
 		catalogs:       catalogs,
 		papers:         papers,
+		tasks:          tasks,
+		inspector:      inspector,
 		maxConcurrency: concurrency,
 	}
 }
@@ -241,69 +262,70 @@ func (s *paperInfoService) ResolveMetadata(
 		}
 	}
 
-	for _, citation := range outgoingCitations {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		cited, err := s.documents.Get(ctx, citation.CitedDocumentID)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
+	/*
+		for _, citation := range outgoingCitations {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			cited, err := s.documents.Get(ctx, citation.CitedDocumentID)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					continue
+				}
+				return err
+			}
+			if cited.Status != types.DocumentStatusUnknown {
 				continue
 			}
-			return err
-		}
-		if cited.Status != types.DocumentStatusUnknown {
-			continue
-		}
-		referenceQuery := referenceLookupQuery(citation.RawReference)
-		if referenceQuery.Validate() != nil {
-			continue
-		}
-		selected, found, lookupErr := s.selectCatalogCandidate(ctx, referenceQuery)
-		if lookupErr != nil {
-			return lookupErr
-		}
-		if !found {
-			continue
-		}
-		if err := s.ensureCatalogSourceCurrent(
-			ctx,
-			document,
-			command.MarkdownSHA256,
-		); err != nil {
-			return err
-		}
-		resolvedID, err := s.findStoredCatalogDocument(ctx, selected, command.DocumentID)
-		if err != nil {
-			return err
-		}
-		if resolvedID != uuid.Nil {
-			if _, err := s.papers.ResolveCitation(
-				ctx,
-				command.DocumentID.String(),
-				resolvedID.String(),
-				citation.RawReference,
-			); err != nil {
-				logger.Error(ctx, "resolve paper citation failed",
-					"cited_document_id", resolvedID,
-					"error", err)
-				return fmt.Errorf("resolve paper citation: %w", err)
+			referenceQuery := referenceLookupQuery(citation.RawReference)
+			if referenceQuery.Validate() != nil {
+				continue
 			}
-		} else {
-			if _, err := s.papers.UpdateMetadata(
-				ctx,
-				citation.CitedDocumentID.String(),
-				catalogMetadataUpdate(selected),
-			); err != nil {
-				logger.Error(ctx, "persist unresolved citation metadata failed",
-					"placeholder_document_id", citation.CitedDocumentID,
-					"error", err)
-				return fmt.Errorf("persist unresolved citation metadata: %w", err)
+			selected, found, lookupErr := s.selectCatalogCandidate(ctx, referenceQuery)
+			if lookupErr != nil {
+				return lookupErr
 			}
+			if !found {
+				continue
+			}
+			if err := s.ensureCatalogSourceCurrent(
+				ctx,
+				document,
+				command.MarkdownSHA256,
+			); err != nil {
+				return err
+			}
+			resolvedID, err := s.findStoredCatalogDocument(ctx, selected, command.DocumentID)
+			if err != nil {
+				return err
+			}
+			if resolvedID != uuid.Nil {
+				if _, err := s.papers.ResolveCitation(
+					ctx,
+					command.DocumentID.String(),
+					resolvedID.String(),
+					citation.RawReference,
+				); err != nil {
+					logger.Error(ctx, "resolve paper citation failed",
+						"cited_document_id", resolvedID,
+						"error", err)
+					return fmt.Errorf("resolve paper citation: %w", err)
+				}
+			} else {
+				if _, err := s.papers.UpdateMetadata(
+					ctx,
+					citation.CitedDocumentID.String(),
+					catalogMetadataUpdate(selected),
+				); err != nil {
+					logger.Error(ctx, "persist unresolved citation metadata failed",
+						"placeholder_document_id", citation.CitedDocumentID,
+						"error", err)
+					return fmt.Errorf("persist unresolved citation metadata: %w", err)
+				}
+			}
+			selectedCount++
 		}
-		selectedCount++
-	}
-
+	*/
 	if selectedCount == 0 {
 		return ErrPaperCatalogNoMatch
 	}

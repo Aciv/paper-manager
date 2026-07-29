@@ -41,7 +41,7 @@ func Logger() gin.HandlerFunc {
 
 		ctx := c.Request.Context()
 		requestID, _ := ctx.Value(types.RequestIDContextKey).(string)
-		logger.GetLogger(ctx).WithGroup("http_request").Info("request completed",
+		logger.Info(ctx, "request completed", slog.Group("http_request",
 			slog.String("request_id", secutils.SanitizeForLog(requestID)),
 			slog.String("method", c.Request.Method),
 			slog.String("path", secutils.SanitizeForLog(path)),
@@ -49,6 +49,6 @@ func Logger() gin.HandlerFunc {
 			slog.Int("size", c.Writer.Size()),
 			slog.String("latency", time.Since(started).String()),
 			slog.String("client_ip", secutils.SanitizeForLog(c.ClientIP())),
-		)
+		))
 	}
 }

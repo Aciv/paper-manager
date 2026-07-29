@@ -42,6 +42,18 @@ func (stub *paperInfoServiceStub) ResolveMetadata(
 	return stub.resolveErr
 }
 
+func (*paperInfoServiceStub) GetStatus(context.Context, string) (types.PaperInfoStatus, error) {
+	return types.PaperInfoStatus{}, nil
+}
+
+func (*paperInfoServiceStub) RetryExtraction(context.Context, string) (types.PaperInfoStatus, error) {
+	return types.PaperInfoStatus{}, nil
+}
+
+func (*paperInfoServiceStub) RetryCatalogResolution(context.Context, string) (types.PaperInfoStatus, error) {
+	return types.PaperInfoStatus{}, nil
+}
+
 type documentTaskClientStub struct {
 	tasks       []*asynq.Task
 	optionCount []int

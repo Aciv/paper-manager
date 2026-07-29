@@ -301,8 +301,7 @@ func enqueueTask(
 		return errors.New("task is required")
 	}
 	_, err := enqueuer.EnqueueContext(ctx, task, options...)
-	if errors.Is(err, asynq.ErrTaskIDConflict) ||
-		errors.Is(err, asynq.ErrDuplicateTask) {
+	if errors.Is(err, asynq.ErrDuplicateTask) {
 		logger.Debug(ctx, "task already queued",
 			"document_id", documentID,
 			"task_type", task.Type())
