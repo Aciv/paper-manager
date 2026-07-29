@@ -50,6 +50,9 @@ var (
 	ErrPaperInfoCatalogUnavailable = errors.New("paper catalog resolution is unavailable")
 	// ErrPaperInfoDeleting prevents a manual retry from racing deletion.
 	ErrPaperInfoDeleting = errors.New("document is being deleted")
+	// ErrPaperInfoAttemptActive prevents a retry from overlapping queued or
+	// running work for the same durable document stage.
+	ErrPaperInfoAttemptActive = errors.New("paper information attempt is still active")
 
 	// paperInfoManualAttempt distinguishes operator-initiated retries from an
 	// initial revision-bound task and from Asynq's retries of that task.
@@ -79,6 +82,7 @@ type paperInfoService struct {
 	tasks            interfaces.TaskEnqueuer
 	inspector        interfaces.TaskInspector
 	referenceLimiter interfaces.PaperReferenceCatalogLimiter
+	spans            SpanTracker
 	maxConcurrency   int
 }
 
@@ -95,6 +99,32 @@ func NewPaperInfoService(
 	inspector interfaces.TaskInspector,
 	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
 ) interfaces.PaperInfoService {
+	return newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, nil)
+}
+
+// NewPaperInfoServiceWithSpanTracker is the production DI constructor. The
+// base constructor is retained for focused tests and callers without spans.
+func NewPaperInfoServiceWithSpanTracker(
+	cfg config.Config,
+	documents interfaces.DocumentRepository,
+	storage interfaces.FileStorage,
+	extractor interfaces.PaperMetadataExtractor,
+	catalogs interfaces.PaperCatalogRegistry,
+	papers interfaces.PaperService,
+	tasks interfaces.TaskEnqueuer,
+	inspector interfaces.TaskInspector,
+	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
+	spans SpanTracker,
+) interfaces.PaperInfoService {
+	return newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, spans)
+}
+
+func newPaperInfoService(
+	cfg config.Config, documents interfaces.DocumentRepository, storage interfaces.FileStorage,
+	extractor interfaces.PaperMetadataExtractor, catalogs interfaces.PaperCatalogRegistry,
+	papers interfaces.PaperService, tasks interfaces.TaskEnqueuer, inspector interfaces.TaskInspector,
+	referenceLimiter interfaces.PaperReferenceCatalogLimiter, spans SpanTracker,
+) interfaces.PaperInfoService {
 	concurrency := cfg.PaperCatalogConcurrency
 	if concurrency <= 0 {
 		concurrency = 1
@@ -109,6 +139,7 @@ func NewPaperInfoService(
 		tasks:            tasks,
 		inspector:        inspector,
 		referenceLimiter: referenceLimiter,
+		spans:            spans,
 		maxConcurrency:   concurrency,
 	}
 }
@@ -119,12 +150,28 @@ func NewPaperInfoService(
 func (s *paperInfoService) ExtractMetadata(
 	ctx context.Context,
 	command types.PaperMetadataExtractCommand,
-) (bool, error) {
+) (catalogResolvable bool, outputErr error) {
 	if err := command.Validate(); err != nil {
 		return false, err
 	}
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
 	logger.Info(ctx, "paper metadata extraction started")
+	var spanID uuid.UUID
+	if s.spans != nil {
+		var spanErr error
+		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.TaskScopeDocument, command.DocumentID.String(), 0)
+		if spanErr != nil {
+			logger.Warn(ctx, "start metadata extraction span failed", "error", spanErr)
+		}
+		defer func() {
+			if outputErr != nil {
+				code, reason := spanFailure(outputErr)
+				_ = s.spans.Fail(context.WithoutCancel(ctx), spanID, code, reason)
+			} else {
+				_ = s.spans.Succeed(context.WithoutCancel(ctx), spanID)
+			}
+		}()
+	}
 
 	markdown, blocks, err := s.loadExtractionSource(ctx, command)
 	if err != nil {
@@ -176,7 +223,7 @@ func (s *paperInfoService) ExtractMetadata(
 	if err != nil {
 		return false, err
 	}
-	catalogResolvable := hasUsablePaperLookupIdentity(document.DOI, updatedMetadata.Title)
+	catalogResolvable = hasUsablePaperLookupIdentity(document.DOI, updatedMetadata.Title)
 	logger.Info(ctx, "paper metadata extraction persisted",
 		"author_count", len(result.Authors),
 		"reference_count", len(references),
@@ -196,7 +243,7 @@ func hasUsablePaperLookupIdentity(doi, title string) bool {
 func (s *paperInfoService) ResolveMetadata(
 	ctx context.Context,
 	command types.PaperCatalogResolveCommand,
-) error {
+) (outputErr error) {
 	if err := command.Validate(); err != nil {
 		return err
 	}
@@ -205,7 +252,30 @@ func (s *paperInfoService) ResolveMetadata(
 	}
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
 	ctx = logger.WithAttrs(ctx, "catalog_scope", command.Scope)
+	if command.Scope == types.PaperCatalogScopeReference {
+		ctx = logger.WithAttrs(ctx, "cited_document_id", command.CitedDocumentID)
+	}
 	logger.Info(ctx, "paper catalog resolution started")
+	var spanID uuid.UUID
+	if s.spans != nil {
+		kind := types.ProcessingSpanCatalogSource
+		if command.Scope == types.PaperCatalogScopeReference {
+			kind = types.ProcessingSpanCatalogReference
+		}
+		var spanErr error
+		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), kind, string(command.Scope), command.CitedDocumentID.String(), 0)
+		if spanErr != nil {
+			logger.Warn(ctx, "start catalog resolution span failed", "error", spanErr)
+		}
+		defer func() {
+			if outputErr != nil {
+				code, reason := spanFailure(outputErr)
+				_ = s.spans.Fail(context.WithoutCancel(ctx), spanID, code, reason)
+			} else {
+				_ = s.spans.Succeed(context.WithoutCancel(ctx), spanID)
+			}
+		}()
+	}
 	document, err := s.documents.Get(ctx, command.DocumentID)
 	if err != nil {
 		return err
@@ -223,6 +293,13 @@ func (s *paperInfoService) ResolveMetadata(
 	return s.resolveSourceMetadata(ctx, document, command)
 }
 
+func paperAttempt(attempt int) int {
+	if attempt < 1 {
+		return 1
+	}
+	return attempt
+}
+
 func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, command types.PaperCatalogResolveCommand) error {
 	// Unknown rows are bibliographic placeholders only. They have no source
 	// document of their own, so catalog work must always be rooted at the
@@ -238,7 +315,13 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 	if err := query.Validate(); err != nil {
 		return ErrPaperCatalogNoMatch
 	}
-	selected, found, err := s.selectCatalogCandidate(ctx, query)
+	selected, found, err := s.selectCatalogCandidate(
+		ctx,
+		query,
+		document.ID,
+		paperAttempt(command.Attempt),
+		providerSpanScopeID(types.PaperCatalogScopeSource, document.ID, uuid.Nil),
+	)
 	if err != nil {
 		return err
 	}
@@ -295,7 +378,13 @@ func (s *paperInfoService) resolveReferenceMetadata(ctx context.Context, source 
 	if err := query.Validate(); err != nil {
 		return ErrPaperCatalogNoMatch
 	}
-	selected, found, err := s.selectCatalogCandidate(ctx, query)
+	selected, found, err := s.selectCatalogCandidate(
+		ctx,
+		query,
+		source.ID,
+		paperAttempt(command.Attempt),
+		providerSpanScopeID(types.PaperCatalogScopeReference, source.ID, command.CitedDocumentID),
+	)
 	if err != nil {
 		return err
 	}
@@ -691,9 +780,27 @@ type providerSearchResult struct {
 	err        error
 }
 
+// providerSpanScopeID distinguishes catalog provider calls for separate
+// references in one source document. Provider span rows are upserted by their
+// scope tuple; using only provider.Name() previously made concurrent reference
+// tasks overwrite each other's running/succeeded/failed state.
+func providerSpanScopeID(
+	scope types.PaperCatalogScope,
+	sourceDocumentID, citedDocumentID uuid.UUID,
+) string {
+	targetID := sourceDocumentID
+	if scope == types.PaperCatalogScopeReference && citedDocumentID != uuid.Nil {
+		targetID = citedDocumentID
+	}
+	return string(scope) + ":" + targetID.String()
+}
+
 func (s *paperInfoService) selectCatalogCandidate(
 	ctx context.Context,
 	query types.PaperLookupQuery,
+	documentID uuid.UUID,
+	attempt int,
+	spanScopeID string,
 ) (types.PaperCatalogCandidate, bool, error) {
 	if err := query.Validate(); err != nil {
 		return types.PaperCatalogCandidate{}, false, err
@@ -713,6 +820,18 @@ func (s *paperInfoService) selectCatalogCandidate(
 		wait.Add(1)
 		go func(index int, provider interfaces.PaperCatalogProvider) {
 			defer wait.Done()
+			var providerSpan uuid.UUID
+			if s.spans != nil {
+				providerSpan, _ = s.spans.Begin(
+					ctx,
+					documentID,
+					attempt,
+					types.ProcessingSpanCatalogProvider,
+					"provider",
+					spanScopeID+":"+provider.Name(),
+					0,
+				)
+			}
 			select {
 			// require sema
 			case semaphore <- struct{}{}:
@@ -723,6 +842,14 @@ func (s *paperInfoService) selectCatalogCandidate(
 				return
 			}
 			results[index].candidates, results[index].err = provider.Search(ctx, query)
+			if s.spans != nil {
+				if results[index].err != nil {
+					code, reason := spanFailure(results[index].err)
+					_ = s.spans.Fail(context.WithoutCancel(ctx), providerSpan, code, reason)
+				} else {
+					_ = s.spans.Succeed(context.WithoutCancel(ctx), providerSpan)
+				}
+			}
 		}(index, provider)
 	}
 	wait.Wait()

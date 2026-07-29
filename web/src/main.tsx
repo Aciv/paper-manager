@@ -1,6 +1,6 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, Document, DocumentBase, DocumentPage, DocumentSearch, PaperCitation, PaperInfoStageState, PaperInfoStatus, PaperMetadata } from './api';
+import { api, Document, DocumentBase, DocumentPage, DocumentProcessingView, DocumentSearch, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
 import { PdfReader } from './PdfReader';
 import './PaperInfo.css';
 import './styles.css';
@@ -25,11 +25,24 @@ function parseTags(value: string) {
   return value.split(',').map((tag) => tag.trim()).filter(Boolean);
 }
 
-function paperInfoStateLabel(state: PaperInfoStageState) {
-  const labels: Record<PaperInfoStageState, string> = {
-    idle: '空闲', queued: '排队或运行中', completed: '已完成', unavailable: '不可用', unknown: '队列状态未知',
-  };
+function processingStateLabel(state: ProcessingSpanStatus) {
+  const labels: Record<ProcessingSpanStatus, string> = { queued: '排队中', running: '运行中', succeeded: '已完成', failed: '失败', cancelled: '已取消' };
   return labels[state];
+}
+
+function processingKindLabel(kind: string) {
+  const labels: Record<string, string> = {
+    recognition: '文档识别',
+    metadata_extraction: '元数据提取',
+    catalog_source: '源论文查询',
+    catalog_reference: '引用论文查询',
+    catalog_provider: '论文库提供方查询',
+  };
+  return labels[kind] ?? kind;
+}
+
+function isActiveSpan(stage: ProcessingSpan) {
+  return stage.status === 'queued' || stage.status === 'running';
 }
 
 function App() {
@@ -45,7 +58,7 @@ function App() {
   const [editTitle, setEditTitle] = useState('');
   const [editTags, setEditTags] = useState('');
   const [paperMetadata, setPaperMetadata] = useState<PaperMetadata>();
-  const [paperInfo, setPaperInfo] = useState<PaperInfoStatus>();
+  const [processing, setProcessing] = useState<DocumentProcessingView>();
   const [citations, setCitations] = useState<PaperCitation[]>([]);
   const [citedBy, setCitedBy] = useState<PaperCitation[]>([]);
   const [paperSearchTitle, setPaperSearchTitle] = useState('');
@@ -62,6 +75,9 @@ function App() {
   const pageCount = Math.max(1, Math.ceil(page.total / page.pageSize));
   const hasPreviousPage = page.page > 1;
   const hasNextPage = page.page < pageCount;
+  const parseStages = processing?.stages.filter((stage) => stage.kind === 'recognition') ?? [];
+  const paperInfoStages = processing?.stages.filter((stage) => stage.kind !== 'recognition') ?? [];
+  const paperInfoActive = paperInfoStages.some(isActiveSpan);
 
   async function load(nextFilters = filters) {
     setBusy(true);
@@ -93,7 +109,7 @@ function App() {
     setEditOriginalFilename(selected?.originalFilename ?? '');
     setEditDoi(selected?.doi ?? '');
     setPaperMetadata(undefined);
-    setPaperInfo(undefined);
+    setProcessing(undefined);
     setCitations([]);
     setCitedBy([]);
     if (!selected) {
@@ -107,15 +123,23 @@ function App() {
       setEditTags(metadata.tags.join(', '));
     }).catch((error) => setMessage(error instanceof Error ? `加载论文信息失败：${error.message}` : '加载论文信息失败。'));
     void Promise.all([
-      api.getPaperInfoStatus(selected.id),
+      api.getDocumentProcessing(selected.id),
       api.listPaperCitations(selected.id),
       api.listPaperCitedBy(selected.id),
-    ]).then(([{ paperInfo: status }, { items: outgoing }, { items: incoming }]) => {
-      setPaperInfo(status);
+    ]).then(([{ processing: view }, { items: outgoing }, { items: incoming }]) => {
+      setProcessing(view);
       setCitations(outgoing);
       setCitedBy(incoming);
     }).catch((error) => setMessage(error instanceof Error ? `加载论文任务或引用失败：${error.message}` : '加载论文任务或引用失败。'));
   }, [selected?.id]);
+
+  useEffect(() => {
+    if (!selected || !processing?.stages.some((stage) => stage.status === 'queued' || stage.status === 'running')) return;
+    const timer = window.setInterval(() => {
+      void api.getDocumentProcessing(selected.id).then(({ processing: view }) => setProcessing(view)).catch(() => undefined);
+    }, document.visibilityState === 'visible' ? 2500 : 8000);
+    return () => window.clearInterval(timer);
+  }, [selected?.id, processing?.stages]);
 
   async function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -233,13 +257,31 @@ function App() {
     if (!selected) return;
     setBusy(true);
     try {
-      const response = stage === 'extraction'
-        ? await api.retryPaperExtraction(selected.id)
-        : await api.retryPaperCatalog(selected.id);
-      setPaperInfo(response.paperInfo);
+      if (stage === 'extraction') {
+        await api.retryPaperExtraction(selected.id);
+      } else {
+        await api.retryPaperCatalog(selected.id);
+      }
+	  const { processing: view } = await api.getDocumentProcessing(selected.id);
+	  setProcessing(view);
       setMessage(stage === 'extraction' ? '已提交论文元数据提取重试。' : '已提交论文库查询重试。');
     } catch (error) {
       setMessage(error instanceof Error ? `论文任务重试失败：${error.message}` : '论文任务重试失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function cancelPaperInfo() {
+    if (!selected || !window.confirm('取消当前论文信息提取与查询任务？已解析的文档内容不会被删除。')) return;
+    setBusy(true);
+    try {
+      await api.cancelPaperInfo(selected.id);
+      const { processing: view } = await api.getDocumentProcessing(selected.id);
+      setProcessing(view);
+      setMessage('已取消论文信息处理。');
+    } catch (error) {
+      setMessage(error instanceof Error ? `取消论文任务失败：${error.message}` : '取消论文任务失败。');
     } finally {
       setBusy(false);
     }
@@ -380,7 +422,7 @@ function App() {
               <dt>文档 ID</dt><dd><code>{selected.id}</code></dd>
               <dt>DOI</dt><dd>{selected.doi || '未设置'}</dd>
               <dt>学科标签</dt><dd>{paperMetadata?.tags.length ? paperMetadata.tags.join(' · ') : '未设置'}</dd>
-			  <dt>论文信息来源</dt><dd>{paperInfo?.metadataSource ?? '加载中'}</dd>
+			  <dt>论文信息来源</dt><dd>{paperMetadata?.metadataSource ?? '加载中'}</dd>
               <dt>类型</dt><dd>{selected.contentType}</dd>
               <dt>大小</dt><dd>{formatBytes(selected.sizeBytes)}</dd>
               <dt>状态</dt><dd><span className={`status status-${selected.status}`}>{selected.status}</span></dd>
@@ -400,12 +442,20 @@ function App() {
               <button type="submit" disabled={busy || (editOriginalFilename === selected.originalFilename && editDoi === (selected.doi ?? '') && editTitle === (paperMetadata?.title ?? '') && editTags === (paperMetadata?.tags.join(', ') ?? ''))}>保存修改</button>
             </form>
 			<section className="paper-info-panel">
+			  <div className="panel-heading"><h4>文档解析进度</h4><span>{processing?.latestAttempt ? `尝试 ${processing.latestAttempt}` : '尚未开始'}</span></div>
+			  <div className="paper-info-stages">
+				{parseStages.length ? parseStages.map((stage) => <div key={stage.id}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">暂无持久化解析记录。</p>}
+			  </div>
+			</section>
+			<section className="paper-info-panel">
 			  <div className="panel-heading"><h4>论文信息任务</h4><span>独立于文档解析状态</span></div>
 			  <div className="paper-info-stages">
-				<div><strong>元数据提取</strong><span className={`paper-stage paper-stage-${paperInfo?.extraction.state ?? 'unknown'}`}>{paperInfoStateLabel(paperInfo?.extraction.state ?? 'unknown')}</span><button type="button" onClick={() => void retryPaperInfo('extraction')} disabled={busy || paperInfo?.extraction.state === 'unavailable'}>重试提取</button></div>
-				<div><strong>论文库查询</strong><span className={`paper-stage paper-stage-${paperInfo?.catalog.state ?? 'unknown'}`}>{paperInfoStateLabel(paperInfo?.catalog.state ?? 'unknown')}</span><button type="button" onClick={() => void retryPaperInfo('catalog')} disabled={busy || paperInfo?.catalog.state === 'unavailable'}>重试查询</button></div>
+				{paperInfoStages.length ? paperInfoStages.map((stage) => <div key={stage.id}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">尚未产生论文信息处理 span。</p>}
+				<div><strong>元数据提取</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('extraction')} disabled={busy || paperInfoActive}>重试提取</button></div>
+				<div><strong>论文库查询</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('catalog')} disabled={busy || paperInfoActive}>重试查询</button></div>
 			  </div>
-			  <p className="hint">状态仅显示当前队列观察结果和已落库的元数据来源；历史失败请查看 Asynq 死信记录。</p>
+			  {paperInfoActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消论文信息任务</button>}
+			  <p className="hint">状态来自持久化处理 span；元数据来源来自已落库的论文信息。历史失败请查看 Asynq 死信记录。</p>
 			</section>
 			<section className="citation-panel">
 			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>

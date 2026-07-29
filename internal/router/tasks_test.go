@@ -42,16 +42,16 @@ func (stub *paperInfoServiceStub) ResolveMetadata(
 	return stub.resolveErr
 }
 
-func (*paperInfoServiceStub) GetStatus(context.Context, string) (types.PaperInfoStatus, error) {
-	return types.PaperInfoStatus{}, nil
+func (*paperInfoServiceStub) RetryExtraction(context.Context, string) error {
+	return nil
 }
 
-func (*paperInfoServiceStub) RetryExtraction(context.Context, string) (types.PaperInfoStatus, error) {
-	return types.PaperInfoStatus{}, nil
+func (*paperInfoServiceStub) RetryCatalogResolution(context.Context, string) error {
+	return nil
 }
 
-func (*paperInfoServiceStub) RetryCatalogResolution(context.Context, string) (types.PaperInfoStatus, error) {
-	return types.PaperInfoStatus{}, nil
+func (*paperInfoServiceStub) Cancel(context.Context, string) error {
+	return nil
 }
 
 type documentTaskClientStub struct {

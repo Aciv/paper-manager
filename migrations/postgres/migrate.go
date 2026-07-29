@@ -51,6 +51,9 @@ var paperMetadataSourceUp string
 //go:embed 000013_document_file_hash.up.sql
 var documentFileHashUp string
 
+//go:embed 000014_document_processing_spans.up.sql
+var documentProcessingSpansUp string
+
 type migration struct {
 	version int64
 	up      string
@@ -71,6 +74,7 @@ var migrations = []migration{
 	{version: 11, up: unknownCitationsUp},
 	{version: 12, up: paperMetadataSourceUp},
 	{version: 13, up: documentFileHashUp},
+	{version: 14, up: documentProcessingSpansUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

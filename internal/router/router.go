@@ -97,6 +97,7 @@ func ServerProcess(router gin.IRoutes, processHandler *handler.DocumentProcessHa
 		return
 	}
 	router.POST("/api/document/:id/cancel", processHandler.CancelDocumentParse)
+	router.GET("/api/document/:id/processing", processHandler.Status)
 }
 
 // ServerPaperMetadata registers the bibliography and paper-search API.
@@ -120,9 +121,9 @@ func ServerPaperMetadata(
 		router.GET("/api/paper/:documentID/cited-by", citationHandler.ListCitedBy)
 	}
 	if infoHandler != nil {
-		router.GET("/api/paper/:documentID/info", infoHandler.Status)
 		router.POST("/api/paper/:documentID/info/extraction/retry", infoHandler.RetryExtraction)
 		router.POST("/api/paper/:documentID/info/catalog/retry", infoHandler.RetryCatalog)
+		router.POST("/api/paper/:documentID/info/cancel", infoHandler.Cancel)
 	}
 }
 

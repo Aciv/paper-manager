@@ -46,7 +46,7 @@ func (s *paperInfoInspectorStub) HasQueuedTaskTypeForDocument(
 	return s.queued[taskType], nil
 }
 
-func TestPaperInfoControlStatusAndRetries(t *testing.T) {
+func TestPaperInfoControlRetries(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()
 	markdown := []byte("# Paper\n")
@@ -75,17 +75,10 @@ func TestPaperInfoControlStatusAndRetries(t *testing.T) {
 		nil,
 	)
 
-	status, err := controls.GetStatus(ctx, documentID.String())
-	if err != nil {
-		t.Fatalf("GetStatus() error = %v", err)
-	}
-	if status.Extraction.State != types.PaperInfoStageCompleted || status.Catalog.State != types.PaperInfoStageIdle {
-		t.Fatalf("unexpected status: %#v", status)
-	}
-	if _, err := controls.RetryExtraction(ctx, documentID.String()); err != nil {
+	if err := controls.RetryExtraction(ctx, documentID.String()); err != nil {
 		t.Fatalf("RetryExtraction() error = %v", err)
 	}
-	if _, err := controls.RetryCatalogResolution(ctx, documentID.String()); err != nil {
+	if err := controls.RetryCatalogResolution(ctx, documentID.String()); err != nil {
 		t.Fatalf("RetryCatalogResolution() error = %v", err)
 	}
 	if len(queue.tasks) != 2 || queue.tasks[0].Type() != types.TypePaperMetadataExtract || queue.tasks[1].Type() != types.TypePaperCatalogResolve {
@@ -151,7 +144,7 @@ func TestPaperInfoControlAllowsUnknownCitationCatalogRetry(t *testing.T) {
 		nil,
 	)
 
-	if _, err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
+	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
 		t.Fatalf("RetryCatalogResolution() error = %v", err)
 	}
 	if len(queue.tasks) != 1 || queue.tasks[0].Type() != types.TypePaperCatalogResolve {
@@ -188,7 +181,7 @@ func TestPaperInfoControlFansOutUnknownRetryAcrossIncomingCitations(t *testing.T
 		config.Config{}, documents, nil, nil, nil, papers, queue,
 		&paperInfoInspectorStub{queued: map[string]bool{}}, nil,
 	)
-	if _, err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
+	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
 		t.Fatalf("RetryCatalogResolution() error = %v", err)
 	}
 	if len(queue.tasks) != 2 {

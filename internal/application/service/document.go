@@ -31,6 +31,7 @@ type documentService struct {
 	taskInspector interfaces.TaskInspector
 	taskEnqueuer  interfaces.TaskEnqueuer
 	recognizer    interfaces.DocumentRecognizer
+	spans         SpanTracker
 	// recognitionOutputDir is the trusted shared-volume root for directory
 	// recognizers. It is deliberately separate from upload storage: recognizer
 	// output is untrusted until ProcessDocument validates and copies it.
@@ -80,9 +81,31 @@ func NewDocumentServiceWithProcessing(
 	taskEnqueuer interfaces.TaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer,
 ) interfaces.DocumentService {
+	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, nil)
+}
+
+// NewDocumentServiceWithProcessingAndSpanTracker is the DI constructor used
+// in production. The legacy constructor remains for focused service tests.
+func NewDocumentServiceWithProcessingAndSpanTracker(
+	cfg config.Config,
+	repo interfaces.DocumentRepository,
+	storage interfaces.FileStorage,
+	taskInspector interfaces.TaskInspector,
+	taskEnqueuer interfaces.TaskEnqueuer,
+	recognizer interfaces.DocumentRecognizer,
+	spans SpanTracker,
+) interfaces.DocumentService {
+	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, spans)
+}
+
+func newDocumentServiceWithProcessing(
+	cfg config.Config, repo interfaces.DocumentRepository, storage interfaces.FileStorage,
+	taskInspector interfaces.TaskInspector, taskEnqueuer interfaces.TaskEnqueuer,
+	recognizer interfaces.DocumentRecognizer, spans SpanTracker,
+) interfaces.DocumentService {
 	return &documentService{
 		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer,
-		recognizer: recognizer, recognitionOutputDir: cfg.RecognitionOutputDirectory,
+		recognizer: recognizer, spans: spans, recognitionOutputDir: cfg.RecognitionOutputDirectory,
 		maxRecognitionOutputSize: cfg.MaxUploadSize,
 		extractionTaskTimeout:    cfg.PaperExtractionTaskTimeout,
 		extractionTaskMaxRetry:   cfg.PaperExtractionTaskMaxRetry,

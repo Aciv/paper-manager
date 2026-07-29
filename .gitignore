@@ -6,6 +6,7 @@
 .cc_task
 .codex_plan
 AGENTS.md
+CLAUDE.md
 __pycache__/
 *.py[cod]
 

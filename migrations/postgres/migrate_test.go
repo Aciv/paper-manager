@@ -159,3 +159,16 @@ func TestDocumentFileHashMigrationAddsDeduplicationGuard(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentProcessingSpanMigrationCreatesLifecycleTable(t *testing.T) {
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS document_processing_spans",
+		"REFERENCES documents(id) ON DELETE CASCADE",
+		"uq_document_processing_spans_attempt_kind_scope",
+		"idx_document_processing_spans_active",
+	} {
+		if !strings.Contains(documentProcessingSpansUp, fragment) {
+			t.Fatalf("processing span migration does not include %q", fragment)
+		}
+	}
+}

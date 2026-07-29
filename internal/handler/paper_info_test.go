@@ -13,9 +13,9 @@ import (
 )
 
 type paperInfoControlHandlerStub struct {
-	status      types.PaperInfoStatus
-	extractions int
-	catalogs    int
+	extractions   int
+	catalogs      int
+	cancellations int
 }
 
 func (*paperInfoControlHandlerStub) ExtractMetadata(
@@ -32,50 +32,42 @@ func (*paperInfoControlHandlerStub) ResolveMetadata(
 	return nil
 }
 
-func (s *paperInfoControlHandlerStub) GetStatus(context.Context, string) (types.PaperInfoStatus, error) {
-	return s.status, nil
-}
-func (s *paperInfoControlHandlerStub) RetryExtraction(context.Context, string) (types.PaperInfoStatus, error) {
+func (s *paperInfoControlHandlerStub) RetryExtraction(context.Context, string) error {
 	s.extractions++
-	s.status.Extraction.State = types.PaperInfoStageQueued
-	return s.status, nil
+	return nil
 }
-func (s *paperInfoControlHandlerStub) RetryCatalogResolution(context.Context, string) (types.PaperInfoStatus, error) {
+func (s *paperInfoControlHandlerStub) RetryCatalogResolution(context.Context, string) error {
 	s.catalogs++
-	s.status.Catalog.State = types.PaperInfoStageQueued
-	return s.status, nil
+	return nil
+}
+func (s *paperInfoControlHandlerStub) Cancel(context.Context, string) error {
+	s.cancellations++
+	return nil
 }
 
-func TestPaperInfoHandlerExposesStatusAndRetryControls(t *testing.T) {
+func TestPaperInfoHandlerExposesRetryAndCancellationControls(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	documentID := uuid.New()
-	controls := &paperInfoControlHandlerStub{status: types.PaperInfoStatus{
-		DocumentID: documentID,
-		Extraction: types.PaperInfoStageStatus{State: types.PaperInfoStageIdle},
-		Catalog:    types.PaperInfoStageStatus{State: types.PaperInfoStageIdle},
-	}}
+	controls := &paperInfoControlHandlerStub{}
 	handler := NewPaperInfoHandler(controls)
 	engine := gin.New()
-	engine.GET("/api/paper/:documentID/info", handler.Status)
 	engine.POST("/api/paper/:documentID/info/extraction/retry", handler.RetryExtraction)
 	engine.POST("/api/paper/:documentID/info/catalog/retry", handler.RetryCatalog)
+	engine.POST("/api/paper/:documentID/info/cancel", handler.Cancel)
 
 	for _, request := range []struct{ method, path string }{
-		{http.MethodGet, "/api/paper/" + documentID.String() + "/info"},
 		{http.MethodPost, "/api/paper/" + documentID.String() + "/info/extraction/retry"},
 		{http.MethodPost, "/api/paper/" + documentID.String() + "/info/catalog/retry"},
+		{http.MethodPost, "/api/paper/" + documentID.String() + "/info/cancel"},
 	} {
 		recorder := httptest.NewRecorder()
 		engine.ServeHTTP(recorder, httptest.NewRequest(request.method, request.path, nil))
-		want := http.StatusOK
-		if request.method == http.MethodPost {
-			want = http.StatusAccepted
-		}
+		want := http.StatusAccepted
 		if recorder.Code != want {
 			t.Fatalf("%s %s status=%d body=%s", request.method, request.path, recorder.Code, recorder.Body.String())
 		}
 	}
-	if controls.extractions != 1 || controls.catalogs != 1 {
-		t.Fatalf("retry calls = extraction:%d catalog:%d", controls.extractions, controls.catalogs)
+	if controls.extractions != 1 || controls.catalogs != 1 || controls.cancellations != 1 {
+		t.Fatalf("control calls = extraction:%d catalog:%d cancellation:%d", controls.extractions, controls.catalogs, controls.cancellations)
 	}
 }

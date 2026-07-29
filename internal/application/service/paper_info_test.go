@@ -95,6 +95,54 @@ func (r *paperInfoRegistryStub) Providers() []interfaces.PaperCatalogProvider {
 	return append([]interfaces.PaperCatalogProvider(nil), r.providers...)
 }
 
+type paperInfoSpanStart struct {
+	documentID uuid.UUID
+	attempt    int
+	kind       types.ProcessingSpanKind
+	scope      string
+	scopeID    string
+}
+
+type paperInfoSpanStub struct {
+	mu     sync.Mutex
+	starts []paperInfoSpanStart
+}
+
+func (s *paperInfoSpanStub) Begin(
+	_ context.Context,
+	documentID uuid.UUID,
+	attempt int,
+	kind types.ProcessingSpanKind,
+	scope, scopeID string,
+	_ int,
+) (uuid.UUID, error) {
+	s.mu.Lock()
+	s.starts = append(s.starts, paperInfoSpanStart{
+		documentID: documentID,
+		attempt:    attempt,
+		kind:       kind,
+		scope:      scope,
+		scopeID:    scopeID,
+	})
+	s.mu.Unlock()
+	return uuid.New(), nil
+}
+func (*paperInfoSpanStub) Succeed(context.Context, uuid.UUID) error { return nil }
+func (*paperInfoSpanStub) Fail(context.Context, uuid.UUID, string, string) error {
+	return nil
+}
+func (*paperInfoSpanStub) CancelDocument(context.Context, uuid.UUID, string, string) error {
+	return nil
+}
+func (*paperInfoSpanStub) GetView(context.Context, types.Document) (types.DocumentProcessingView, error) {
+	return types.DocumentProcessingView{}, nil
+}
+func (*paperInfoSpanStub) HasActive(context.Context, uuid.UUID, ...types.ProcessingSpanKind) (bool, error) {
+	return false, nil
+}
+func (*paperInfoSpanStub) FinalizeAttempt(context.Context, string, int, string, error, string, string) {
+}
+
 type paperInfoMetadataWrite struct {
 	documentID string
 	update     types.PaperMetadataUpdate
@@ -457,6 +505,52 @@ func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
 		papers.updates[0].update.Title == nil ||
 		*papers.updates[0].update.Title != "Exact DOI title" {
 		t.Fatalf("exact DOI candidate was not selected: %#v", papers.updates)
+	}
+}
+
+func TestProviderSpansDistinguishConcurrentReferenceTargets(t *testing.T) {
+	sourceID, firstReferenceID, secondReferenceID := uuid.New(), uuid.New(), uuid.New()
+	spans := &paperInfoSpanStub{}
+	service := newPaperInfoService(
+		config.Config{PaperCatalogConcurrency: 1},
+		nil,
+		nil,
+		nil,
+		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{
+			&paperInfoProviderStub{name: "openalex", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+				return []types.PaperCatalogCandidate{testCatalogCandidate("openalex", "10.1000/example", "Example Paper", 1)}, nil
+			}},
+		}},
+		nil,
+		nil,
+		nil,
+		nil,
+		spans,
+	).(*paperInfoService)
+	query := types.PaperLookupQuery{Title: "Example Paper"}
+	for _, targetID := range []uuid.UUID{firstReferenceID, secondReferenceID} {
+		if _, _, err := service.selectCatalogCandidate(
+			context.Background(),
+			query,
+			sourceID,
+			1,
+			providerSpanScopeID(types.PaperCatalogScopeReference, sourceID, targetID),
+		); err != nil {
+			t.Fatalf("selectCatalogCandidate() error = %v", err)
+		}
+	}
+	if len(spans.starts) != 2 {
+		t.Fatalf("provider span starts = %d, want 2", len(spans.starts))
+	}
+	first, second := spans.starts[0], spans.starts[1]
+	if first.scope != "provider" || second.scope != "provider" || first.scopeID == second.scopeID {
+		t.Fatalf("provider span scopes = %#v, %#v; reference targets must not share a span key", first, second)
+	}
+	if want := "reference:" + firstReferenceID.String() + ":openalex"; first.scopeID != want {
+		t.Fatalf("first provider scope id = %q, want %q", first.scopeID, want)
+	}
+	if want := "reference:" + secondReferenceID.String() + ":openalex"; second.scopeID != want {
+		t.Fatalf("second provider scope id = %q, want %q", second.scopeID, want)
 	}
 }
 

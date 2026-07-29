@@ -23,14 +23,15 @@ type PaperInfoService interface {
 		ctx context.Context,
 		command types.PaperCatalogResolveCommand,
 	) error
-	// GetStatus returns the current safely observable queue/provenance state for
-	// extraction and catalog work. It is independent from document parsing.
-	GetStatus(ctx context.Context, documentID string) (types.PaperInfoStatus, error)
 	// RetryExtraction enqueues extraction for the current durable Markdown
-	// revision. It rejects source-free placeholders and unparsed documents.
-	RetryExtraction(ctx context.Context, documentID string) (types.PaperInfoStatus, error)
+	// revision. It rejects source-free placeholders, unparsed documents, and
+	// active span attempts.
+	RetryExtraction(ctx context.Context, documentID string) error
 	// RetryCatalogResolution enqueues catalog lookup from current metadata or an
-	// unresolved incoming reference. It rejects deleting documents and empty
-	// lookup identities.
-	RetryCatalogResolution(ctx context.Context, documentID string) (types.PaperInfoStatus, error)
+	// unresolved incoming reference. It rejects deleting documents, active span
+	// attempts, and empty lookup identities.
+	RetryCatalogResolution(ctx context.Context, documentID string) error
+	// Cancel stops queued/active paper-information work without changing a
+	// ready document's parse lifecycle state.
+	Cancel(ctx context.Context, documentID string) error
 }

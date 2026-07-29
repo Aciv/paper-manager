@@ -28,9 +28,10 @@ export type PaperMetadata = {
   issue?: string;
   pages?: string;
   language?: string;
+  metadataSource: 'unknown' | 'extraction' | 'catalog' | 'manual';
 };
 
-export type PaperMetadataUpdate = Partial<Omit<PaperMetadata, 'documentId'>>;
+export type PaperMetadataUpdate = Partial<Omit<PaperMetadata, 'documentId' | 'metadataSource'>>;
 
 export type PaperCitation = {
   citingDocumentId: string;
@@ -39,13 +40,26 @@ export type PaperCitation = {
   createdAt: string;
 };
 
-export type PaperInfoStageState = 'idle' | 'queued' | 'completed' | 'unavailable' | 'unknown';
-
-export type PaperInfoStatus = {
+export type ProcessingSpanStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
+export type ProcessingSpan = {
+  id: string;
   documentId: string;
-  metadataSource: 'unknown' | 'extraction' | 'catalog' | 'manual';
-  extraction: { state: PaperInfoStageState };
-  catalog: { state: PaperInfoStageState };
+  attempt: number;
+  kind: string;
+  scope: string;
+  scopeId?: string;
+  status: ProcessingSpanStatus;
+  retryCount: number;
+  errorCode?: string;
+  errorReason?: string;
+  startedAt: string;
+  finishedAt?: string;
+};
+export type DocumentProcessingView = {
+  documentId: string;
+  documentStatus: DocumentStatus;
+  latestAttempt: number;
+  stages: ProcessingSpan[];
 };
 
 export type DocumentBase = {
@@ -133,6 +147,7 @@ export const api = {
     { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
   ),
   cancelDocument: (id: string): Promise<{ document: Document }> => request<{ document: Document }>(`/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  getDocumentProcessing: (id: string): Promise<{ processing: DocumentProcessingView }> => request<{ processing: DocumentProcessingView }>(`/${encodeURIComponent(id)}/processing`),
   deleteDocument: (id: string): Promise<void> => request<void>(`/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listDocumentBlocks: (id: string, page?: number): Promise<{ items: Block[] }> => {
     const query = page ? `?page=${encodeURIComponent(String(page))}` : '';
@@ -154,9 +169,9 @@ export const api = {
   },
   listPaperCitations: (documentID: string): Promise<{ items: PaperCitation[] }> => requestFrom<{ items: PaperCitation[] }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/citations`),
   listPaperCitedBy: (documentID: string): Promise<{ items: PaperCitation[] }> => requestFrom<{ items: PaperCitation[] }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/cited-by`),
-  getPaperInfoStatus: (documentID: string): Promise<{ paperInfo: PaperInfoStatus }> => requestFrom<{ paperInfo: PaperInfoStatus }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info`),
-  retryPaperExtraction: (documentID: string): Promise<{ paperInfo: PaperInfoStatus }> => requestFrom<{ paperInfo: PaperInfoStatus }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/extraction/retry`, { method: 'POST' }),
-  retryPaperCatalog: (documentID: string): Promise<{ paperInfo: PaperInfoStatus }> => requestFrom<{ paperInfo: PaperInfoStatus }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/catalog/retry`, { method: 'POST' }),
+  retryPaperExtraction: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/extraction/retry`, { method: 'POST' }),
+  retryPaperCatalog: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/catalog/retry`, { method: 'POST' }),
+  cancelPaperInfo: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/cancel`, { method: 'POST' }),
   listDocumentBases: (): Promise<{ items: DocumentBase[] }> => request<{ items: DocumentBase[] }>('/bases'),
   createDocumentBase: (payload: { name: string; description?: string }): Promise<{ documentBase: DocumentBase }> => request<{ documentBase: DocumentBase }>('/bases', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),

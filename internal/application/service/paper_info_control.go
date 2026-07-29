@@ -16,46 +16,34 @@ import (
 )
 
 // The methods in this file are part of paperInfoService's HTTP-facing control
-// plane. They deliberately store no task history: Asynq and dead letters are
-// the operational source of truth, while PaperInfoService remains the single
-// orchestrator instance for both workers and explicit user actions.
-func (s *paperInfoService) GetStatus(
-	ctx context.Context,
-	documentID string,
-) (types.PaperInfoStatus, error) {
-	document, metadata, err := s.loadPaperStatusSource(ctx, documentID)
-	if err != nil {
-		return types.PaperInfoStatus{}, err
-	}
-	status := types.PaperInfoStatus{
-		DocumentID:     document.ID,
-		MetadataSource: metadata.MetadataSource,
-		Extraction:     s.extractionState(ctx, document, metadata.MetadataSource),
-		Catalog:        s.catalogState(ctx, document, metadata.MetadataSource),
-	}
-	return status, nil
-}
+// plane. Processing state is deliberately read from the persistent span
+// timeline, rather than inferred from an Asynq queue snapshot.
 
 func (s *paperInfoService) RetryExtraction(
 	ctx context.Context,
 	documentID string,
-) (types.PaperInfoStatus, error) {
+) error {
 	document, _, err := s.loadPaperStatusSource(ctx, documentID)
 	if err != nil {
-		return types.PaperInfoStatus{}, err
+		return err
 	}
 	if document.Status == types.DocumentStatusDeleting {
-		return types.PaperInfoStatus{}, ErrPaperInfoDeleting
+		return ErrPaperInfoDeleting
 	}
 	if document.Status == types.DocumentStatusUnknown {
-		return types.PaperInfoStatus{}, ErrPaperInfoExtractionUnavailable
+		return ErrPaperInfoExtractionUnavailable
+	}
+	if active, err := s.paperStageActive(ctx, document.ID, types.ProcessingSpanMetadataExtract, types.TypePaperMetadataExtract); err != nil {
+		return err
+	} else if active {
+		return ErrPaperInfoAttemptActive
 	}
 	markdown, err := s.documents.GetMarkdown(ctx, document.ID)
 	if errors.Is(err, sql.ErrNoRows) {
-		return types.PaperInfoStatus{}, ErrPaperInfoExtractionUnavailable
+		return ErrPaperInfoExtractionUnavailable
 	}
 	if err != nil {
-		return types.PaperInfoStatus{}, err
+		return err
 	}
 	task, options, err := NewPaperMetadataExtractTask(
 		types.PaperMetadataExtractPayload{
@@ -67,45 +55,50 @@ func (s *paperInfoService) RetryExtraction(
 		s.cfg.PaperExtractionTaskMaxRetry,
 	)
 	if err != nil {
-		return types.PaperInfoStatus{}, fmt.Errorf("build paper metadata extraction task: %w", err)
+		return fmt.Errorf("build paper metadata extraction task: %w", err)
 	}
 	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
-		return types.PaperInfoStatus{}, err
+		return err
 	}
 	logger.Info(ctx, "paper metadata extraction retry queued", "document_id", document.ID)
-	return s.GetStatus(ctx, document.ID.String())
+	return nil
 }
 
 func (s *paperInfoService) RetryCatalogResolution(
 	ctx context.Context,
 	documentID string,
-) (types.PaperInfoStatus, error) {
+) error {
 	document, metadata, err := s.loadPaperStatusSource(ctx, documentID)
 	if err != nil {
-		return types.PaperInfoStatus{}, err
+		return err
 	}
 	if document.Status == types.DocumentStatusDeleting {
-		return types.PaperInfoStatus{}, ErrPaperInfoDeleting
+		return ErrPaperInfoDeleting
+	}
+	if active, err := s.paperStageActive(ctx, document.ID, types.ProcessingSpanCatalogSource, types.TypePaperCatalogResolve); err != nil {
+		return err
+	} else if active {
+		return ErrPaperInfoAttemptActive
 	}
 	if document.Status == types.DocumentStatusUnknown {
 		queued, err := s.enqueueUnknownReferenceCatalogRetries(ctx, document)
 		if err != nil {
-			return types.PaperInfoStatus{}, err
+			return err
 		}
 		if queued == 0 {
-			return types.PaperInfoStatus{}, ErrPaperInfoCatalogUnavailable
+			return ErrPaperInfoCatalogUnavailable
 		}
 		logger.Info(ctx, "unknown paper reference catalog retries queued", "document_id", document.ID, "queued_count", queued)
-		return s.GetStatus(ctx, document.ID.String())
+		return nil
 	}
 	markdownSHA256 := ""
 	if markdown, markdownErr := s.documents.GetMarkdown(ctx, document.ID); markdownErr == nil {
 		markdownSHA256 = markdown.SHA256
 	} else if !errors.Is(markdownErr, sql.ErrNoRows) {
-		return types.PaperInfoStatus{}, markdownErr
+		return markdownErr
 	}
 	if !hasUsablePaperLookupIdentity(document.DOI, metadata.Title) {
-		return types.PaperInfoStatus{}, ErrPaperInfoCatalogUnavailable
+		return ErrPaperInfoCatalogUnavailable
 	}
 	task, options, err := NewPaperCatalogResolveTask(
 		types.PaperCatalogResolvePayload{
@@ -117,13 +110,53 @@ func (s *paperInfoService) RetryCatalogResolution(
 		s.cfg.PaperCatalogTaskMaxRetry,
 	)
 	if err != nil {
-		return types.PaperInfoStatus{}, fmt.Errorf("build paper catalog resolution task: %w", err)
+		return fmt.Errorf("build paper catalog resolution task: %w", err)
 	}
 	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
-		return types.PaperInfoStatus{}, err
+		return err
 	}
 	logger.Info(ctx, "paper catalog resolution retry queued", "document_id", document.ID)
-	return s.GetStatus(ctx, document.ID.String())
+	return nil
+}
+
+// Cancel stops independent paper-information work. It intentionally leaves a
+// ready document ready: parsed Markdown and blocks remain available.
+func (s *paperInfoService) Cancel(ctx context.Context, documentID string) error {
+	document, _, err := s.loadPaperStatusSource(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if document.Status == types.DocumentStatusDeleting {
+		return ErrPaperInfoDeleting
+	}
+	if s.inspector != nil {
+		if _, _, err := s.inspector.CancelTasksForDocument(ctx, document.ID.String()); err != nil {
+			logger.Warn(ctx, "cancel paper information tasks failed", "document_id", document.ID, "error", err)
+		}
+	}
+	if s.spans != nil {
+		if err := s.spans.CancelDocument(context.WithoutCancel(ctx), document.ID, "USER_CANCELLED", "paper information processing cancelled by user"); err != nil {
+			return err
+		}
+	}
+	logger.Info(ctx, "paper information processing cancelled", "document_id", document.ID)
+	return nil
+}
+
+func (s *paperInfoService) paperStageActive(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, taskType string) (bool, error) {
+	if s.spans != nil {
+		active, err := s.spans.HasActive(ctx, documentID, kind)
+		if err != nil {
+			return false, err
+		}
+		if active {
+			return true, nil
+		}
+	}
+	if s.inspector == nil {
+		return false, nil
+	}
+	return s.inspector.HasQueuedTaskTypeForDocument(ctx, documentID.String(), taskType)
 }
 
 // enqueueUnknownReferenceCatalogRetries retries an unknown placeholder through
@@ -232,71 +265,6 @@ func (s *paperInfoService) loadPaperStatusSource(
 		return types.Document{}, nil, err
 	}
 	return document, metadata, nil
-}
-
-func (s *paperInfoService) extractionState(
-	ctx context.Context,
-	document types.Document,
-	source types.PaperMetadataSource,
-) types.PaperInfoStageStatus {
-	if queued, known := s.isQueued(ctx, document.ID.String(), types.TypePaperMetadataExtract); known {
-		if queued {
-			return types.PaperInfoStageStatus{State: types.PaperInfoStageQueued}
-		}
-	} else {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageUnknown}
-	}
-
-	if document.Status == types.DocumentStatusDeleting || document.Status == types.DocumentStatusUnknown {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageUnavailable}
-	}
-	if _, err := s.documents.GetMarkdown(ctx, document.ID); errors.Is(err, sql.ErrNoRows) {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageUnavailable}
-	} else if err != nil {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageUnknown}
-	}
-	if source == types.PaperMetadataSourceExtraction || source == types.PaperMetadataSourceCatalog {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageCompleted}
-	}
-	return types.PaperInfoStageStatus{State: types.PaperInfoStageIdle}
-}
-
-func (s *paperInfoService) catalogState(
-	ctx context.Context,
-	document types.Document,
-	source types.PaperMetadataSource,
-) types.PaperInfoStageStatus {
-	if queued, known := s.isQueued(ctx, document.ID.String(), types.TypePaperCatalogResolve); known {
-		if queued {
-			return types.PaperInfoStageStatus{State: types.PaperInfoStageQueued}
-		}
-	} else {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageUnknown}
-	}
-	if document.Status == types.DocumentStatusDeleting {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageUnavailable}
-	}
-	if source == types.PaperMetadataSourceCatalog {
-		return types.PaperInfoStageStatus{State: types.PaperInfoStageCompleted}
-	}
-	return types.PaperInfoStageStatus{State: types.PaperInfoStageIdle}
-}
-
-// isQueued returns known=false only when queue inspection fails. A nil/no-op
-// inspector is a valid Lite-mode observation: no task is queued there.
-func (s *paperInfoService) isQueued(
-	ctx context.Context,
-	documentID, taskType string,
-) (queued bool, known bool) {
-	if s.inspector == nil {
-		return false, true
-	}
-	queued, err := s.inspector.HasQueuedTaskTypeForDocument(ctx, documentID, taskType)
-	if err != nil {
-		logger.Warn(ctx, "inspect paper info task failed", "document_id", documentID, "task_type", taskType, "error", err)
-		return false, false
-	}
-	return queued, true
 }
 
 var _ interfaces.PaperInfoService = (*paperInfoService)(nil)

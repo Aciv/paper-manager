@@ -14,8 +14,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// PaperInfoHandler exposes observation and explicit retry controls for the
-// asynchronous extraction/catalog pipeline. It never mutates Document.Status.
+// PaperInfoHandler exposes explicit retry and cancellation controls for the
+// asynchronous extraction/catalog pipeline. Processing state is exposed by
+// the document processing-span endpoint, not this control API.
 type PaperInfoHandler struct {
 	info interfaces.PaperInfoService
 }
@@ -24,42 +25,43 @@ func NewPaperInfoHandler(info interfaces.PaperInfoService) *PaperInfoHandler {
 	return &PaperInfoHandler{info: info}
 }
 
-func (h *PaperInfoHandler) Status(c *gin.Context) {
-	if !validPaperDocumentParam(c, h.writeError) {
-		return
-	}
-	state, err := h.info.GetStatus(c.Request.Context(), c.Param("documentID"))
-	if err != nil {
-		h.handleServiceError(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"paperInfo": state})
-}
-
 func (h *PaperInfoHandler) RetryExtraction(c *gin.Context) {
 	if !validPaperDocumentParam(c, h.writeError) {
 		return
 	}
-	state, err := h.info.RetryExtraction(c.Request.Context(), c.Param("documentID"))
+	err := h.info.RetryExtraction(c.Request.Context(), c.Param("documentID"))
 	if err != nil {
 		h.handleServiceError(c, err)
 		return
 	}
-	logger.Info(c.Request.Context(), "paper metadata extraction retry accepted", "document_id", state.DocumentID)
-	c.JSON(http.StatusAccepted, gin.H{"paperInfo": state})
+	logger.Info(c.Request.Context(), "paper metadata extraction retry accepted", "document_id", c.Param("documentID"))
+	c.JSON(http.StatusAccepted, gin.H{"accepted": true})
 }
 
 func (h *PaperInfoHandler) RetryCatalog(c *gin.Context) {
 	if !validPaperDocumentParam(c, h.writeError) {
 		return
 	}
-	state, err := h.info.RetryCatalogResolution(c.Request.Context(), c.Param("documentID"))
+	err := h.info.RetryCatalogResolution(c.Request.Context(), c.Param("documentID"))
 	if err != nil {
 		h.handleServiceError(c, err)
 		return
 	}
-	logger.Info(c.Request.Context(), "paper catalog retry accepted", "document_id", state.DocumentID)
-	c.JSON(http.StatusAccepted, gin.H{"paperInfo": state})
+	logger.Info(c.Request.Context(), "paper catalog retry accepted", "document_id", c.Param("documentID"))
+	c.JSON(http.StatusAccepted, gin.H{"accepted": true})
+}
+
+func (h *PaperInfoHandler) Cancel(c *gin.Context) {
+	if !validPaperDocumentParam(c, h.writeError) {
+		return
+	}
+	err := h.info.Cancel(c.Request.Context(), c.Param("documentID"))
+	if err != nil {
+		h.handleServiceError(c, err)
+		return
+	}
+	logger.Info(c.Request.Context(), "paper information cancellation accepted", "document_id", c.Param("documentID"))
+	c.JSON(http.StatusAccepted, gin.H{"accepted": true})
 }
 
 func (h *PaperInfoHandler) handleServiceError(c *gin.Context, err error) {
@@ -72,6 +74,8 @@ func (h *PaperInfoHandler) handleServiceError(c *gin.Context, err error) {
 		h.writeError(c, apperrors.NewBadRequestError("paper information retry is unavailable"), err)
 	case errors.Is(err, appservice.ErrPaperInfoDeleting):
 		h.writeError(c, apperrors.NewConflictError("document is being deleted"), err)
+	case errors.Is(err, appservice.ErrPaperInfoAttemptActive):
+		h.writeError(c, apperrors.NewConflictError("paper information processing is still active"), err)
 	default:
 		h.writeError(c, apperrors.NewInternalServerError("operate paper information"), err)
 	}

@@ -7,6 +7,7 @@ import (
 	appservice "paperMaster/internal/application/service"
 	apperrors "paperMaster/internal/errors"
 	"paperMaster/internal/logger"
+	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
 
 	"github.com/gin-gonic/gin"
@@ -18,10 +19,44 @@ import (
 // progress, and parser controls can be added without growing file endpoints.
 type DocumentProcessHandler struct {
 	documents interfaces.DocumentService
+	spans     appservice.SpanTracker
 }
 
 func NewDocumentProcessHandler(documents interfaces.DocumentService) *DocumentProcessHandler {
 	return &DocumentProcessHandler{documents: documents}
+}
+
+// NewDocumentProcessHandlerWithSpanTracker is the production DI constructor.
+func NewDocumentProcessHandlerWithSpanTracker(documents interfaces.DocumentService, spans appservice.SpanTracker) *DocumentProcessHandler {
+	return &DocumentProcessHandler{documents: documents, spans: spans}
+}
+
+// Status returns user-safe persistent processing state for a document.
+func (h *DocumentProcessHandler) Status(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
+		return
+	}
+	document, err := h.documents.GetDocumentByID(c.Request.Context(), documentID.String())
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)
+		} else {
+			h.writeError(c, apperrors.NewInternalServerError("load document processing state"), err)
+		}
+		return
+	}
+	if h.spans == nil {
+		c.JSON(http.StatusOK, gin.H{"processing": types.DocumentProcessingView{DocumentID: document.ID, DocumentStatus: document.Status, Stages: []types.DocumentProcessingSpan{}}})
+		return
+	}
+	view, err := h.spans.GetView(c.Request.Context(), *document)
+	if err != nil {
+		h.writeError(c, apperrors.NewInternalServerError("load document processing state"), err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"processing": view})
 }
 
 // CancelDocumentParse cancels queued or active parsing work for a document.

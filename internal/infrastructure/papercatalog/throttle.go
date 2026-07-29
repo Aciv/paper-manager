@@ -71,9 +71,9 @@ func wrapProvider(provider interfaces.PaperCatalogProvider, cfg config.Config, t
 		spacing: cfg.PaperCatalogSpacingFor(provider.Name()), concurrency: cfg.PaperCatalogConcurrencyFor(provider.Name())}
 }
 
-// throttledProviderError deliberately implements the queue's retry contracts.
-// It converts a shared cooldown or exhausted global lease into an Asynq retry
-// scheduled no earlier than the provider's globally recorded deadline.
+// throttledProviderError deliberately implements the queue's retry contracts
+// for limiter infrastructure failures. Normal cooldown and lease contention
+// are waited in-process by Acquire; they are not task failures.
 type throttledProviderError struct {
 	provider   string
 	retryAfter time.Duration
@@ -96,37 +96,45 @@ type memoryProviderThrottle struct {
 }
 
 func (t *memoryProviderThrottle) Acquire(ctx context.Context, provider string, spacing time.Duration, max int) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, err
-	}
 	if max <= 0 {
 		max = 1
 	}
-	now := time.Now()
-	t.mu.Lock()
-	state := t.state[provider]
-	if state.next.After(now) {
-		delay := time.Until(state.next)
-		t.mu.Unlock()
-		return nil, &throttledProviderError{provider: provider, retryAfter: delay, reason: "cooldown active"}
-	}
-	if state.active >= max {
-		t.mu.Unlock()
-		return nil, &throttledProviderError{provider: provider, retryAfter: 250 * time.Millisecond, reason: "global concurrency lease unavailable"}
-	}
-	state.active++
-	state.next = now.Add(spacing)
-	t.state[provider] = state
-	t.mu.Unlock()
-	return func() {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		now := time.Now()
 		t.mu.Lock()
 		state := t.state[provider]
-		if state.active > 0 {
-			state.active--
+		var wait time.Duration
+		switch {
+		case state.next.After(now):
+			wait = time.Until(state.next)
+		case state.active >= max:
+			// Releases do not have a waiter channel because state is also
+			// shared by Cooldown. A short, context-aware poll avoids turning
+			// temporary contention into an Asynq retry while still yielding.
+			wait = 25 * time.Millisecond
+		default:
+			state.active++
+			state.next = now.Add(spacing)
+			t.state[provider] = state
+			t.mu.Unlock()
+			return func() {
+				t.mu.Lock()
+				state := t.state[provider]
+				if state.active > 0 {
+					state.active--
+				}
+				t.state[provider] = state
+				t.mu.Unlock()
+			}, nil
 		}
-		t.state[provider] = state
 		t.mu.Unlock()
-	}, nil
+		if err := waitForProviderThrottle(ctx, wait); err != nil {
+			return nil, err
+		}
+	}
 }
 func (t *memoryProviderThrottle) Cooldown(_ context.Context, provider string, delay time.Duration) error {
 	if delay <= 0 {
@@ -191,26 +199,52 @@ func (t *redisProviderThrottle) Acquire(ctx context.Context, provider string, sp
 		spacing = time.Millisecond
 	}
 	nextKey, activeKey := providerThrottleKeys(provider)
-	now := time.Now()
 	lease := 2 * time.Minute
-	result, err := t.client.Eval(ctx, acquireProviderLeaseScript, []string{nextKey, activeKey}, now.UnixMilli(), spacing.Milliseconds(), max, lease.Milliseconds()).Int64Slice()
-	if err != nil {
-		return nil, &throttledProviderError{provider: provider, retryAfter: time.Second, reason: "global limiter unavailable"}
-	}
-	if len(result) != 2 || result[0] != 1 {
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		now := time.Now()
+		result, err := t.client.Eval(ctx, acquireProviderLeaseScript, []string{nextKey, activeKey}, now.UnixMilli(), spacing.Milliseconds(), max, lease.Milliseconds()).Int64Slice()
+		if err != nil {
+			return nil, &throttledProviderError{provider: provider, retryAfter: time.Second, reason: "global limiter unavailable"}
+		}
+		if len(result) != 2 {
+			return nil, &throttledProviderError{provider: provider, retryAfter: time.Second, reason: "invalid global limiter response"}
+		}
+		if result[0] == 1 {
+			return func() {
+				_, _ = t.client.Eval(context.Background(), releaseProviderLeaseScript, []string{activeKey}).Result()
+			}, nil
+		}
+		if result[0] != 0 && result[0] != -1 {
+			return nil, &throttledProviderError{provider: provider, retryAfter: time.Second, reason: "rejected global limiter response"}
+		}
 		delay := 250 * time.Millisecond
-		if len(result) == 2 && result[1] > 0 {
+		if result[1] > 0 {
 			delay = time.Duration(result[1]) * time.Millisecond
 		}
-		reason := "global concurrency lease unavailable"
-		if len(result) > 0 && result[0] == 0 {
-			reason = "cooldown active"
+		if err := waitForProviderThrottle(ctx, delay); err != nil {
+			return nil, err
 		}
-		return nil, &throttledProviderError{provider: provider, retryAfter: delay, reason: reason}
 	}
-	return func() {
-		_, _ = t.client.Eval(context.Background(), releaseProviderLeaseScript, []string{activeKey}).Result()
-	}, nil
+}
+
+// waitForProviderThrottle waits without blocking a worker goroutine. It is
+// shared by the Redis and Lite implementations so task cancellation and the
+// Asynq timeout always interrupt limiter waits promptly.
+func waitForProviderThrottle(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		delay = time.Millisecond
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (t *redisProviderThrottle) Cooldown(ctx context.Context, provider string, delay time.Duration) error {

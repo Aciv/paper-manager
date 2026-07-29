@@ -38,7 +38,7 @@ const (
 // ProcessDocument is the Asynq entry point for recognition. The parser's
 // Markdown and source-map blocks are committed together, so readers never see
 // a ready Markdown revision paired with stale PDF coordinates.
-func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task) error {
+func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task) (processErr error) {
 	if task == nil {
 		return errors.New("document processing task is required")
 	}
@@ -77,6 +77,34 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 			return nil
 		}
 	}
+	attempt := payload.Attempt
+	if attempt < 1 {
+		attempt = 1
+	}
+	retryCount, _ := asynq.GetRetryCount(ctx)
+	var spanID uuid.UUID
+	if s.spans != nil {
+		var spanErr error
+		spanID, spanErr = s.spans.Begin(ctx, document.ID, attempt, types.ProcessingSpanRecognition, types.TaskScopeDocument, document.ID.String(), retryCount)
+		if spanErr != nil {
+			logger.Warn(ctx, "start recognition processing span failed", "document_id", document.ID, "error", spanErr)
+		}
+	}
+	defer func() {
+		if s.spans == nil {
+			return
+		}
+		if processErr != nil {
+			code, reason := spanFailure(processErr)
+			if err := s.spans.Fail(context.WithoutCancel(ctx), spanID, code, reason); err != nil {
+				logger.Warn(ctx, "mark recognition processing span failed", "document_id", document.ID, "error", err)
+			}
+			return
+		}
+		if err := s.spans.Succeed(context.WithoutCancel(ctx), spanID); err != nil {
+			logger.Warn(ctx, "finish recognition processing span failed", "document_id", document.ID, "error", err)
+		}
+	}()
 	if s.storage == nil || s.recognizer == nil {
 		return errors.New("document recognition dependencies are not configured")
 	}
@@ -483,6 +511,9 @@ func (s *documentService) CancelDocumentParse(ctx context.Context, id string) (*
 	switch existing.Status {
 	case types.DocumentStatusCancelled:
 		s.dequeueDocumentTasks(ctx, existing.ID.String())
+		if s.spans != nil {
+			_ = s.spans.CancelDocument(context.WithoutCancel(ctx), existing.ID, "USER_CANCELLED", "document parsing cancelled by user")
+		}
 		logger.Info(ctx, "document cancellation already applied", "document_id", existing.ID)
 		return existing, nil
 	case types.DocumentStatusReady, types.DocumentStatusFailed:
@@ -522,6 +553,11 @@ func (s *documentService) CancelDocumentParse(ctx context.Context, id string) (*
 	existing.Status = types.DocumentStatusCancelled
 	existing.ErrorMessage = &message
 	logger.Info(ctx, "document marked cancelled", "document_id", existing.ID)
+	if s.spans != nil {
+		if err := s.spans.CancelDocument(context.WithoutCancel(ctx), existing.ID, "USER_CANCELLED", message); err != nil {
+			logger.Warn(ctx, "cancel document processing spans failed", "document_id", existing.ID, "error", err)
+		}
+	}
 	s.dequeueDocumentTasks(ctx, existing.ID.String())
 	return existing, nil
 }
