@@ -3,6 +3,7 @@ package interfaces
 import (
 	"context"
 	"paperMaster/internal/types"
+	"time"
 )
 
 type TaskDeadLetterRepository interface {
@@ -17,4 +18,12 @@ type TaskDeadLetterRepository interface {
 	ListByTaskType(context.Context, string, string, int) ([]*types.TaskDeadLetter, string, error)
 	// DeleteByID removes one dead-letter row after the task has been handled.
 	DeleteByID(context.Context, int64) error
+	// LatestFailureAt returns the newest terminal failure for one task type and
+	// scope tuple. A nil timestamp means no matching dead letter exists.
+	LatestFailureAt(
+		ctx context.Context,
+		scope string,
+		scopeID string,
+		taskType string,
+	) (*time.Time, error)
 }

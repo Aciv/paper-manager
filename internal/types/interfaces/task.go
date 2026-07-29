@@ -3,15 +3,18 @@ package interfaces
 import (
 	"context"
 
-	"paperMaster/internal/types"
-
 	"github.com/hibiken/asynq"
 )
 
-// DocumentTaskEnqueuer schedules document recognition without coupling the
-// application service to a specific queue backend.
-type DocumentTaskEnqueuer interface {
-	EnqueueDocumentProcess(ctx context.Context, payload types.DocumentProcessPayload) error
+// TaskEnqueuer is the context-aware queue boundary used by application
+// services. *asynq.Client satisfies it directly; alternative implementations
+// may execute tasks synchronously without changing service constructors.
+type TaskEnqueuer interface {
+	EnqueueContext(
+		ctx context.Context,
+		task *asynq.Task,
+		opts ...asynq.Option,
+	) (*asynq.TaskInfo, error)
 }
 
 // TaskHandler is a interface for handling asynchronous tasks

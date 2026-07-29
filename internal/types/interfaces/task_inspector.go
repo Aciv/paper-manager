@@ -35,4 +35,14 @@ type TaskInspector interface {
 	// always returns false — inline executors never queue, so the
 	// span/updated_at checks remain authoritative there.
 	HasQueuedTasksForDocument(ctx context.Context, documentID string) (bool, error)
+
+	// HasQueuedTaskTypeForDocument reports whether one specific task type for
+	// documentID is pending, scheduled, retrying, or active. Recovery workers
+	// use this narrower probe so a catalog task cannot mask an orphaned
+	// document-recognition task (or vice versa).
+	HasQueuedTaskTypeForDocument(
+		ctx context.Context,
+		documentID string,
+		taskType string,
+	) (bool, error)
 }

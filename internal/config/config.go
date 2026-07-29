@@ -17,6 +17,10 @@ const (
 	defaultDocumentStaleThreshold       = time.Hour + 10*time.Minute
 	defaultPaperCatalogTimeout          = 10 * time.Second
 	defaultPaperCatalogConcurrency      = 4
+	defaultPaperExtractionTaskTimeout   = 2 * time.Minute
+	defaultPaperExtractionTaskMaxRetry  = 3
+	defaultPaperCatalogTaskTimeout      = 10 * time.Minute
+	defaultPaperCatalogTaskMaxRetry     = 5
 )
 
 // Config contains the infrastructure options selected at process startup.
@@ -46,6 +50,10 @@ type Config struct {
 	SemanticScholarAPIKey        string
 	OpenAlexAPIKey               string
 	CrossrefMailto               string
+	PaperExtractionTaskTimeout   time.Duration
+	PaperExtractionTaskMaxRetry  int
+	PaperCatalogTaskTimeout      time.Duration
+	PaperCatalogTaskMaxRetry     int
 }
 
 func Load() (Config, error) {
@@ -96,6 +104,36 @@ func Load() (Config, error) {
 	if len(paperCatalogProviders) == 0 {
 		return Config{}, fmt.Errorf("PAPER_CATALOG_PROVIDERS must contain at least one provider")
 	}
+	paperExtractionTaskTimeout, err := durationEnv(
+		"PAPER_EXTRACTION_TASK_TIMEOUT",
+		defaultPaperExtractionTaskTimeout,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	paperExtractionTaskMaxRetry, err := positiveIntEnv(
+		"PAPER_EXTRACTION_TASK_MAX_RETRY",
+		defaultPaperExtractionTaskMaxRetry,
+		20,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	paperCatalogTaskTimeout, err := durationEnv(
+		"PAPER_CATALOG_TASK_TIMEOUT",
+		defaultPaperCatalogTaskTimeout,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	paperCatalogTaskMaxRetry, err := positiveIntEnv(
+		"PAPER_CATALOG_TASK_MAX_RETRY",
+		defaultPaperCatalogTaskMaxRetry,
+		20,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		HTTPAddress:                  env("HTTP_ADDR", "127.0.0.1:8080"),
 		DatabaseDriver:               strings.ToLower(env("DB_DRIVER", "postgres")),
@@ -119,6 +157,10 @@ func Load() (Config, error) {
 		SemanticScholarAPIKey:        strings.TrimSpace(os.Getenv("SEMANTIC_SCHOLAR_API_KEY")),
 		OpenAlexAPIKey:               strings.TrimSpace(os.Getenv("OPENALEX_API_KEY")),
 		CrossrefMailto:               strings.TrimSpace(os.Getenv("CROSSREF_MAILTO")),
+		PaperExtractionTaskTimeout:   paperExtractionTaskTimeout,
+		PaperExtractionTaskMaxRetry:  paperExtractionTaskMaxRetry,
+		PaperCatalogTaskTimeout:      paperCatalogTaskTimeout,
+		PaperCatalogTaskMaxRetry:     paperCatalogTaskMaxRetry,
 	}, nil
 }
 

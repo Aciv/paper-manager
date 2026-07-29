@@ -14,7 +14,7 @@ type PaperInfoService interface {
 	ExtractMetadata(
 		ctx context.Context,
 		command types.PaperMetadataExtractCommand,
-	) error
+	) (catalogResolvable bool, err error)
 	// ResolveMetadata reloads canonical metadata and unresolved references,
 	// queries configured catalogs, ranks candidates, and applies selected data.
 	// Source-backed documents use a Markdown revision guard; unknown
@@ -22,20 +22,5 @@ type PaperInfoService interface {
 	ResolveMetadata(
 		ctx context.Context,
 		command types.PaperCatalogResolveCommand,
-	) error
-}
-
-// PaperInfoTaskEnqueuer schedules the two paper-information stages
-// without exposing a concrete queue client to application services.
-type PaperInfoTaskEnqueuer interface {
-	// EnqueueMetadataExtraction schedules Python candidate extraction.
-	EnqueueMetadataExtraction(
-		ctx context.Context,
-		payload types.PaperMetadataExtractPayload,
-	) error
-	// EnqueueCatalogResolution schedules external scholarly catalog lookup.
-	EnqueueCatalogResolution(
-		ctx context.Context,
-		payload types.PaperCatalogResolvePayload,
 	) error
 }

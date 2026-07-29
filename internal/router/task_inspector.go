@@ -74,7 +74,9 @@ var queuesScanned = []string{
 // deliberately narrow: we don't touch FAQ import / KB-level tasks
 // because the cancel API is per-Document.
 var taskTypesForDocumentCancel = map[string]struct{}{
-	types.TypeDocumentProcess: {},
+	types.TypeDocumentProcess:      {},
+	types.TypePaperMetadataExtract: {},
+	types.TypePaperCatalogResolve:  {},
 }
 
 // listPageSize caps each Redis LIST call. Asynq pages tasks, so we
@@ -133,7 +135,44 @@ func (a *asynqTaskInspector) HasQueuedTasksForDocument(
 	}
 	for _, queue := range queuesScanned {
 		for _, l := range listers {
-			if a.queueStateHasMatch(ctx, queue, documentID, l.state, l.list) {
+			if a.queueStateHasMatch(ctx, queue, documentID, "", l.state, l.list) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (a *asynqTaskInspector) HasQueuedTaskTypeForDocument(
+	ctx context.Context,
+	documentID string,
+	taskType string,
+) (bool, error) {
+	if a == nil || a.inspector == nil || documentID == "" {
+		return false, nil
+	}
+	if _, supported := taskTypesForDocumentCancel[taskType]; !supported {
+		return false, nil
+	}
+	listers := []struct {
+		state string
+		list  func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)
+	}{
+		{"pending", a.inspector.ListPendingTasks},
+		{"scheduled", a.inspector.ListScheduledTasks},
+		{"retry", a.inspector.ListRetryTasks},
+		{"active", a.inspector.ListActiveTasks},
+	}
+	for _, queue := range queuesScanned {
+		for _, lister := range listers {
+			if a.queueStateHasMatch(
+				ctx,
+				queue,
+				documentID,
+				taskType,
+				lister.state,
+				lister.list,
+			) {
 				return true, nil
 			}
 		}
@@ -147,7 +186,7 @@ func (a *asynqTaskInspector) HasQueuedTasksForDocument(
 // is logged and treated as "no match" (false); the caller's fail-safe
 // then errs toward recovering the row rather than preserving it forever.
 func (a *asynqTaskInspector) queueStateHasMatch(
-	ctx context.Context, queue, documentID, state string,
+	ctx context.Context, queue, documentID, taskType, state string,
 	list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error),
 ) bool {
 	page := 1
@@ -164,7 +203,7 @@ func (a *asynqTaskInspector) queueStateHasMatch(
 			return false
 		}
 		for _, t := range tasks {
-			if matchesDocument(t.Type, t.Payload, documentID) {
+			if matchesDocument(t.Type, t.Payload, documentID, taskType) {
 				return true
 			}
 		}
@@ -177,15 +216,23 @@ func (a *asynqTaskInspector) queueStateHasMatch(
 
 // matchesDocument returns true when the task type is one we cancel
 // AND its payload references the target Document ID.
-func matchesDocument(taskType string, payload []byte, DocumentID string) bool {
+func matchesDocument(
+	taskType string,
+	payload []byte,
+	documentID string,
+	requiredTaskType string,
+) bool {
 	if _, ok := taskTypesForDocumentCancel[taskType]; !ok {
+		return false
+	}
+	if requiredTaskType != "" && taskType != requiredTaskType {
 		return false
 	}
 	var probe DocumentIDProbe
 	if err := json.Unmarshal(payload, &probe); err != nil {
 		return false
 	}
-	return probe.DocumentID == DocumentID
+	return probe.DocumentID == documentID
 }
 
 func (a *asynqTaskInspector) deletePendingMatches(ctx context.Context, queue, DocumentID string) int {
@@ -203,7 +250,7 @@ func (a *asynqTaskInspector) deletePendingMatches(ctx context.Context, queue, Do
 			return deleted
 		}
 		for _, t := range tasks {
-			if !matchesDocument(t.Type, t.Payload, DocumentID) {
+			if !matchesDocument(t.Type, t.Payload, DocumentID, "") {
 				continue
 			}
 			if err := a.inspector.DeleteTask(queue, t.ID); err != nil {
@@ -234,7 +281,7 @@ func (a *asynqTaskInspector) deleteScheduledMatches(ctx context.Context, queue, 
 			return deleted
 		}
 		for _, t := range tasks {
-			if !matchesDocument(t.Type, t.Payload, DocumentID) {
+			if !matchesDocument(t.Type, t.Payload, DocumentID, "") {
 				continue
 			}
 			if err := a.inspector.DeleteTask(queue, t.ID); err != nil {
@@ -265,7 +312,7 @@ func (a *asynqTaskInspector) deleteRetryMatches(ctx context.Context, queue, Docu
 			return deleted
 		}
 		for _, t := range tasks {
-			if !matchesDocument(t.Type, t.Payload, DocumentID) {
+			if !matchesDocument(t.Type, t.Payload, DocumentID, "") {
 				continue
 			}
 			if err := a.inspector.DeleteTask(queue, t.ID); err != nil {
@@ -301,7 +348,7 @@ func (a *asynqTaskInspector) cancelActiveMatches(ctx context.Context, queue, Doc
 			return cancelled
 		}
 		for _, t := range tasks {
-			if !matchesDocument(t.Type, t.Payload, DocumentID) {
+			if !matchesDocument(t.Type, t.Payload, DocumentID, "") {
 				continue
 			}
 			if err := a.inspector.CancelProcessing(t.ID); err != nil {
@@ -337,6 +384,14 @@ func (noopTaskInspector) CancelTasksForDocument(
 // the housekeeping sweep's span/updated_at checks stay authoritative.
 func (noopTaskInspector) HasQueuedTasksForDocument(
 	ctx context.Context, documentID string,
+) (bool, error) {
+	return false, nil
+}
+
+func (noopTaskInspector) HasQueuedTaskTypeForDocument(
+	ctx context.Context,
+	documentID string,
+	taskType string,
 ) (bool, error) {
 	return false, nil
 }

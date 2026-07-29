@@ -41,15 +41,20 @@ func main() {
 	}
 
 	err := dependencies.Invoke(func(
-		cfg config.Config, router *gin.Engine, db *gorm.DB, housekeeping *service.DocumentHousekeepingService, worker *asynq.Server, taskClient *asynq.Client,
+		cfg config.Config,
+		router *gin.Engine,
+		db *gorm.DB,
+		documentHousekeeping *service.DocumentHousekeepingService,
+		worker *asynq.Server,
+		taskClient *asynq.Client,
 	) error {
 		defer repository.CloseDatabase(db)
 		defer worker.Shutdown()
 		defer taskClient.Close()
-		if err := housekeeping.Start(context.Background()); err != nil {
+		if err := documentHousekeeping.Start(context.Background()); err != nil {
 			logger.Warn(context.Background(), "start document housekeeping failed", "error", err)
 		}
-		defer housekeeping.Stop()
+		defer documentHousekeeping.Stop()
 
 		server := &http.Server{Handler: router, ReadHeaderTimeout: 5 * time.Second}
 		listener, err := listenWithRetry(cfg.HTTPAddress, 10, 300*time.Millisecond)

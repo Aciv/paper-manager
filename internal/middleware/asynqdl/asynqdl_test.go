@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"paperMaster/internal/types"
 
@@ -43,6 +44,15 @@ func (f *fakeRepo) ListByTaskType(context.Context, string, string, int) ([]*type
 }
 
 func (f *fakeRepo) DeleteByID(context.Context, int64) error { return nil }
+
+func (f *fakeRepo) LatestFailureAt(
+	context.Context,
+	string,
+	string,
+	string,
+) (*time.Time, error) {
+	return nil, nil
+}
 
 // captureRow returns the i'th row safely under the lock.
 func (f *fakeRepo) captureRow(i int) *types.TaskDeadLetter {
@@ -129,6 +139,22 @@ func TestMiddleware_SkipRetryIsFinalAttempt(t *testing.T) {
 	}
 	if repo.rowCount() != 1 {
 		t.Fatalf("SkipRetry must create a dead-letter record immediately, got %d rows", repo.rowCount())
+	}
+}
+
+func TestMiddleware_RevokeTaskDoesNotCreateDeadLetter(t *testing.T) {
+	repo := &fakeRepo{}
+	err := runMiddleware(
+		repo,
+		types.TypePaperCatalogResolve,
+		[]byte(`{"document_id":"doc-1"}`),
+		fmt.Errorf("stale revision: %w", asynq.RevokeTask),
+	)
+	if !errors.Is(err, asynq.RevokeTask) {
+		t.Fatalf("RevokeTask error was not preserved: %v", err)
+	}
+	if repo.rowCount() != 0 {
+		t.Fatalf("revoked task created %d dead letters, want 0", repo.rowCount())
 	}
 }
 

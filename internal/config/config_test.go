@@ -15,6 +15,10 @@ func TestLoadPaperCatalogDefaults(t *testing.T) {
 		"SEMANTIC_SCHOLAR_API_KEY",
 		"OPENALEX_API_KEY",
 		"CROSSREF_MAILTO",
+		"PAPER_EXTRACTION_TASK_TIMEOUT",
+		"PAPER_EXTRACTION_TASK_MAX_RETRY",
+		"PAPER_CATALOG_TASK_TIMEOUT",
+		"PAPER_CATALOG_TASK_MAX_RETRY",
 	} {
 		t.Setenv(key, "")
 	}
@@ -32,6 +36,12 @@ func TestLoadPaperCatalogDefaults(t *testing.T) {
 	if cfg.PaperCatalogConcurrency != 4 {
 		t.Fatalf("concurrency = %d, want 4", cfg.PaperCatalogConcurrency)
 	}
+	if cfg.PaperExtractionTaskTimeout != 2*time.Minute ||
+		cfg.PaperExtractionTaskMaxRetry != 3 ||
+		cfg.PaperCatalogTaskTimeout != 10*time.Minute ||
+		cfg.PaperCatalogTaskMaxRetry != 5 {
+		t.Fatalf("unexpected paper task defaults: %#v", cfg)
+	}
 }
 
 func TestLoadPaperCatalogConfiguration(t *testing.T) {
@@ -42,6 +52,10 @@ func TestLoadPaperCatalogConfiguration(t *testing.T) {
 	t.Setenv("SEMANTIC_SCHOLAR_API_KEY", "semantic-key")
 	t.Setenv("OPENALEX_API_KEY", "openalex-key")
 	t.Setenv("CROSSREF_MAILTO", "ops@example.test")
+	t.Setenv("PAPER_EXTRACTION_TASK_TIMEOUT", "45s")
+	t.Setenv("PAPER_EXTRACTION_TASK_MAX_RETRY", "4")
+	t.Setenv("PAPER_CATALOG_TASK_TIMEOUT", "3m")
+	t.Setenv("PAPER_CATALOG_TASK_MAX_RETRY", "7")
 
 	cfg, err := Load()
 	if err != nil {
@@ -55,7 +69,11 @@ func TestLoadPaperCatalogConfiguration(t *testing.T) {
 		cfg.PaperCatalogUserAgent != "papers-test/2.0" ||
 		cfg.PaperCatalogConcurrency != 2 ||
 		cfg.OpenAlexAPIKey != "openalex-key" ||
-		cfg.CrossrefMailto != "ops@example.test" {
+		cfg.CrossrefMailto != "ops@example.test" ||
+		cfg.PaperExtractionTaskTimeout != 45*time.Second ||
+		cfg.PaperExtractionTaskMaxRetry != 4 ||
+		cfg.PaperCatalogTaskTimeout != 3*time.Minute ||
+		cfg.PaperCatalogTaskMaxRetry != 7 {
 		t.Fatalf("unexpected catalog config: %#v", cfg)
 	}
 }

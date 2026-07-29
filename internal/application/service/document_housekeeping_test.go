@@ -23,6 +23,14 @@ func (s *documentQueueProbeStub) HasQueuedTasksForDocument(_ context.Context, do
 	return s.queued[documentID], s.errs[documentID]
 }
 
+func (s *documentQueueProbeStub) HasQueuedTaskTypeForDocument(
+	_ context.Context,
+	documentID string,
+	_ string,
+) (bool, error) {
+	return s.queued[documentID], s.errs[documentID]
+}
+
 func TestDocumentHousekeepingFilterOutQueued(t *testing.T) {
 	queuedDocument := types.Document{ID: uuid.New(), Status: types.DocumentStatusQueued}
 	orphanedDocument := types.Document{ID: uuid.New(), Status: types.DocumentStatusProcessing}

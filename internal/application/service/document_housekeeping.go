@@ -173,7 +173,11 @@ func (h *DocumentHousekeepingService) filterOutQueued(
 	}
 	kept = candidates[:0]
 	for _, document := range candidates {
-		queued, err := h.inspector.HasQueuedTasksForDocument(ctx, document.ID.String())
+		queued, err := h.inspector.HasQueuedTaskTypeForDocument(
+			ctx,
+			document.ID.String(),
+			types.TypeDocumentProcess,
+		)
 		if err != nil {
 			logger.Warn(ctx, "document housekeeping queue probe failed; treating as stale",
 				"document_id", document.ID, "error", err)

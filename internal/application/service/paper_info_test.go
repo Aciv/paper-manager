@@ -302,12 +302,15 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 		papers,
 	)
 
-	err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
+	resolvable, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
 		DocumentID:     documentID,
 		MarkdownSHA256: revision,
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !resolvable {
+		t.Fatal("expected extracted title to make catalog resolution usable")
 	}
 	if len(papers.updates) != 1 ||
 		papers.updates[0].update.Title == nil ||
@@ -369,7 +372,7 @@ func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
 		papers,
 	)
 
-	err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
+	_, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
 		DocumentID:     documentID,
 		MarkdownSHA256: revision,
 	})
@@ -553,6 +556,45 @@ func TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup(t *testing.T
 	}
 	if len(papers.updates) != 0 {
 		t.Fatalf("stale catalog lookup wrote metadata: %#v", papers.updates)
+	}
+}
+
+func TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup(t *testing.T) {
+	documentID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID:     documentID,
+		Status: types.DocumentStatusProcessing,
+		DOI:    "10.1000/original",
+	})
+	papers := newPaperInfoPaperServiceStub()
+	provider := &paperInfoProviderStub{
+		name: "crossref",
+		search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+			document := documents.documents[documentID]
+			document.DOI = "10.1000/replacement"
+			documents.documents[documentID] = document
+			return []types.PaperCatalogCandidate{
+				testCatalogCandidate("crossref", "10.1000/original", "Original", 1),
+			}, nil
+		},
+	}
+	service := NewPaperInfoService(
+		config.Config{PaperCatalogConcurrency: 1},
+		documents,
+		&paperInfoStorageStub{},
+		&paperInfoExtractorStub{},
+		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
+		papers,
+	)
+
+	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
+		DocumentID: documentID,
+	})
+	if !errors.Is(err, ErrStalePaperInfo) {
+		t.Fatalf("expected stale DOI error, got %v", err)
+	}
+	if len(papers.updates) != 0 {
+		t.Fatalf("stale DOI lookup wrote metadata: %#v", papers.updates)
 	}
 }
 

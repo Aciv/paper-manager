@@ -132,6 +132,12 @@ func Middleware(repo interfaces.TaskDeadLetterRepository) asynq.MiddlewareFunc {
 // in that case we conservatively report "final" so test setups that
 // invoke the middleware directly still exercise the insert path.
 func isFinalAttempt(ctx context.Context, taskErr error) bool {
+	// Revoked work represents cancellation or stale superseded input. Asynq
+	// removes it without archiving, so it must not create an application
+	// dead-letter row either.
+	if errors.Is(taskErr, asynq.RevokeTask) {
+		return false
+	}
 	// Asynq archives SkipRetry errors after the current invocation even when
 	// retry_count is still zero. Treat them as final here as well so the
 	// dead-letter row and document-status callback are not skipped.

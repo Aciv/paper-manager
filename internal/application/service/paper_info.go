@@ -94,16 +94,16 @@ func NewPaperInfoService(
 func (s *paperInfoService) ExtractMetadata(
 	ctx context.Context,
 	command types.PaperMetadataExtractCommand,
-) error {
+) (bool, error) {
 	if err := command.Validate(); err != nil {
-		return err
+		return false, err
 	}
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
 	logger.Info(ctx, "paper metadata extraction started")
 
 	markdown, blocks, err := s.loadExtractionSource(ctx, command)
 	if err != nil {
-		return err
+		return false, err
 	}
 	result, err := s.extractor.Extract(ctx, &types.PaperExtractionRequest{
 		DocumentID:     command.DocumentID,
@@ -112,19 +112,19 @@ func (s *paperInfoService) ExtractMetadata(
 		Blocks:         blocks,
 	})
 	if err != nil {
-		return err
+		return false, err
 	}
 	if result == nil {
-		return errors.New("paper metadata extractor returned nil result")
+		return false, errors.New("paper metadata extractor returned nil result")
 	}
 	if err := result.Validate(); err != nil {
-		return err
+		return false, err
 	}
 
 	update := extractionMetadataUpdate(result)
 	references := extractionCitationInputs(result.References)
 	if err := s.ensureCurrentRevision(ctx, command.DocumentID, command.MarkdownSHA256); err != nil {
-		return err
+		return false, err
 	}
 	updatedMetadata, err := s.papers.UpdateMetadata(
 		ctx,
@@ -133,10 +133,10 @@ func (s *paperInfoService) ExtractMetadata(
 	)
 	if err != nil {
 		logger.Error(ctx, "persist extracted paper metadata failed", "error", err)
-		return fmt.Errorf("persist extracted paper metadata: %w", err)
+		return false, fmt.Errorf("persist extracted paper metadata: %w", err)
 	}
 	if err := s.ensureCurrentRevision(ctx, command.DocumentID, command.MarkdownSHA256); err != nil {
-		return err
+		return false, err
 	}
 	if _, err := s.papers.ReplaceCitations(
 		ctx,
@@ -144,15 +144,24 @@ func (s *paperInfoService) ExtractMetadata(
 		references,
 	); err != nil {
 		logger.Error(ctx, "persist extracted paper references failed", "error", err)
-		return fmt.Errorf("persist extracted paper references: %w", err)
+		return false, fmt.Errorf("persist extracted paper references: %w", err)
 	}
+	document, err := s.documents.Get(ctx, command.DocumentID)
+	if err != nil {
+		return false, err
+	}
+	catalogResolvable := hasUsablePaperLookupIdentity(document.DOI, updatedMetadata.Title)
 	logger.Info(ctx, "paper metadata extraction persisted",
 		"author_count", len(result.Authors),
 		"reference_count", len(references),
-		"metadata_applied",
-		updatedMetadata.MetadataSource == types.PaperMetadataSourceExtraction,
+		"metadata_applied", updatedMetadata.MetadataSource == types.PaperMetadataSourceExtraction,
+		"catalog_resolvable", catalogResolvable,
 		"extractor", result.ExtractorName)
-	return nil
+	return catalogResolvable, nil
+}
+
+func hasUsablePaperLookupIdentity(doi, title string) bool {
+	return strings.TrimSpace(doi) != "" || strings.TrimSpace(title) != ""
 }
 
 // ResolveMetadata queries all configured providers for the source paper and
@@ -466,6 +475,15 @@ func (s *paperInfoService) ensureCatalogSourceCurrent(
 	if current.Status == types.DocumentStatusDeleting {
 		return fmt.Errorf(
 			"%w: document is being deleted",
+			ErrStalePaperInfo,
+		)
+	}
+	if !strings.EqualFold(
+		strings.TrimSpace(initialDocument.DOI),
+		strings.TrimSpace(current.DOI),
+	) {
+		return fmt.Errorf(
+			"%w: document DOI changed during catalog lookup",
 			ErrStalePaperInfo,
 		)
 	}

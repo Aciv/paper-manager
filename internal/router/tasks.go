@@ -2,9 +2,10 @@ package router
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
-
 	"os"
 	"strconv"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"paperMaster/internal/application/service"
 	"paperMaster/internal/common"
+	"paperMaster/internal/config"
 	"paperMaster/internal/logger"
 	"paperMaster/internal/middleware/asynqdl"
 	"paperMaster/internal/types"
@@ -19,16 +21,21 @@ import (
 
 	"github.com/hibiken/asynq"
 	"go.uber.org/dig"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type AsynqTaskParams struct {
 	// dig 简化参数引用,感觉功能上可以看成python的**wargs
 	dig.In
 
-	Server          *asynq.Server
-	DocumentService interfaces.DocumentService          `optional:"true"`
-	DeadLetterRepo  interfaces.TaskDeadLetterRepository `optional:"true"`
-	SpanTracker     service.SpanTracker                 `optional:"true"`
+	Server           *asynq.Server
+	Config           config.Config
+	DocumentService  interfaces.DocumentService          `optional:"true"`
+	PaperInfoService interfaces.PaperInfoService         `optional:"true"`
+	TaskEnqueuer     interfaces.TaskEnqueuer             `optional:"true"`
+	DeadLetterRepo   interfaces.TaskDeadLetterRepository `optional:"true"`
+	SpanTracker      service.SpanTracker                 `optional:"true"`
 }
 
 const defaultRedisOpTimeoutMs = 500
@@ -79,33 +86,12 @@ func NewAsyncqClient() (*asynq.Client, error) {
 	return client, nil
 }
 
-type asynqDocumentTaskEnqueuer struct{ client *asynq.Client }
+var _ interfaces.TaskEnqueuer = (*asynq.Client)(nil)
 
-// NewDocumentTaskEnqueuer adapts the shared Asynq client to the application
-// service's narrow enqueue contract.
-func NewDocumentTaskEnqueuer(client *asynq.Client) interfaces.DocumentTaskEnqueuer {
-	return &asynqDocumentTaskEnqueuer{client: client}
-}
-
-func (e *asynqDocumentTaskEnqueuer) EnqueueDocumentProcess(ctx context.Context, payload types.DocumentProcessPayload) error {
-	if e == nil || e.client == nil {
-		return fmt.Errorf("document task queue is not configured")
-	}
-	if strings.TrimSpace(payload.DocumentID) == "" {
-		return fmt.Errorf("document id is required for processing task")
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("encode document processing task: %w", err)
-	}
-	_, err = e.client.EnqueueContext(ctx, asynq.NewTask(types.TypeDocumentProcess, encoded),
-		asynq.Queue(types.QueueDefault), asynq.MaxRetry(3), asynq.Timeout(15*time.Minute))
-	if err != nil {
-		logger.Error(ctx, "enqueue document recognition failed", "document_id", payload.DocumentID, "error", err)
-		return fmt.Errorf("enqueue document recognition: %w", err)
-	}
-	logger.Info(ctx, "document recognition enqueued", "document_id", payload.DocumentID)
-	return nil
+// NewTaskEnqueuer exposes the concrete Asynq client through the generic queue
+// boundary while retaining the concrete client for lifecycle shutdown.
+func NewTaskEnqueuer(client *asynq.Client) interfaces.TaskEnqueuer {
+	return client
 }
 
 // wikiIngestRetryDelay is a fixed, short backoff for wiki ingest lock
@@ -126,6 +112,9 @@ func (e *asynqDocumentTaskEnqueuer) EnqueueDocumentProcess(ctx context.Context, 
 // progress for 7–10 minutes while the orphan lock expires AND the retry
 // schedule catches up.
 func asynqRetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
+	if delay := paperTaskRetryAfter(e); delay > 0 {
+		return delay
+	}
 	// if errors.Is(e, service.ErrWikiIngestConcurrent) {
 	// 	return wikiIngestRetryDelay
 	// }
@@ -211,6 +200,24 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	if params.DocumentService != nil {
 		mux.HandleFunc(types.TypeDocumentProcess, params.DocumentService.ProcessDocument)
 	}
+	if params.PaperInfoService != nil {
+		mux.HandleFunc(types.TypePaperMetadataExtract, func(ctx context.Context, task *asynq.Task) error {
+			return processPaperMetadataExtractTask(
+				ctx,
+				task,
+				params.PaperInfoService,
+				params.TaskEnqueuer,
+				params.Config,
+			)
+		})
+		mux.HandleFunc(types.TypePaperCatalogResolve, func(ctx context.Context, task *asynq.Task) error {
+			return processPaperCatalogResolveTask(
+				ctx,
+				task,
+				params.PaperInfoService,
+			)
+		})
+	}
 
 	go func() {
 		// Start the server
@@ -219,6 +226,224 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 		}
 	}()
 	return mux
+}
+
+func processPaperMetadataExtractTask(
+	ctx context.Context,
+	task *asynq.Task,
+	info interfaces.PaperInfoService,
+	enqueuer interfaces.TaskEnqueuer,
+	cfg config.Config,
+) error {
+	if task == nil {
+		return skipPaperTask(errors.New("paper metadata extraction task is required"))
+	}
+	var payload types.PaperMetadataExtractPayload
+	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+		return skipPaperTask(fmt.Errorf("decode paper metadata extraction payload: %w", err))
+	}
+	command, err := payload.Command()
+	if err != nil {
+		return skipPaperTask(err)
+	}
+	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
+	resolvable, err := info.ExtractMetadata(ctx, command)
+	if err != nil {
+		return classifyPaperTaskError(err)
+	}
+	if !resolvable {
+		logger.Info(ctx, "paper catalog resolution not queued",
+			"reason", "title and DOI are both unavailable")
+		return nil
+	}
+	if enqueuer == nil {
+		return errors.New("document task enqueuer is not configured")
+	}
+	// begin Catalog recognition
+	catalogTask, options, err := service.NewPaperCatalogResolveTask(
+		types.PaperCatalogResolvePayload{
+			RequestID:      payload.RequestID,
+			DocumentID:     payload.DocumentID,
+			MarkdownSHA256: payload.MarkdownSHA256,
+			Attempt:        payload.Attempt,
+		},
+		cfg.PaperCatalogTaskTimeout,
+		cfg.PaperCatalogTaskMaxRetry,
+	)
+	if err != nil {
+		return skipPaperTask(err)
+	}
+	if err := enqueueTask(
+		ctx,
+		enqueuer,
+		catalogTask,
+		options,
+		payload.DocumentID,
+	); err != nil {
+		// Extraction writes are idempotent. Returning this error makes Asynq
+		// retry the extraction task and therefore recover the lost handoff.
+		return err
+	}
+	return nil
+}
+
+func enqueueTask(
+	ctx context.Context,
+	enqueuer interfaces.TaskEnqueuer,
+	task *asynq.Task,
+	options []asynq.Option,
+	documentID string,
+) error {
+	if enqueuer == nil {
+		return errors.New("task enqueuer is not configured")
+	}
+	if task == nil {
+		return errors.New("task is required")
+	}
+	_, err := enqueuer.EnqueueContext(ctx, task, options...)
+	if errors.Is(err, asynq.ErrTaskIDConflict) ||
+		errors.Is(err, asynq.ErrDuplicateTask) {
+		logger.Debug(ctx, "task already queued",
+			"document_id", documentID,
+			"task_type", task.Type())
+		return nil
+	}
+	if err != nil {
+		logger.Error(ctx, "enqueue task failed",
+			"document_id", documentID,
+			"task_type", task.Type(),
+			"error", err)
+		return fmt.Errorf("enqueue %s: %w", task.Type(), err)
+	}
+	logger.Info(ctx, "task enqueued",
+		"document_id", documentID,
+		"task_type", task.Type())
+	return nil
+}
+
+func processPaperCatalogResolveTask(
+	ctx context.Context,
+	task *asynq.Task,
+	info interfaces.PaperInfoService,
+) error {
+	if task == nil {
+		return skipPaperTask(errors.New("paper catalog resolution task is required"))
+	}
+	var payload types.PaperCatalogResolvePayload
+	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+		return skipPaperTask(fmt.Errorf("decode paper catalog resolution payload: %w", err))
+	}
+	command, err := payload.Command()
+	if err != nil {
+		return skipPaperTask(err)
+	}
+	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
+	if err := info.ResolveMetadata(ctx, command); err != nil {
+		return classifyPaperTaskError(err)
+	}
+	return nil
+}
+
+func paperTaskContext(
+	ctx context.Context,
+	requestID string,
+	documentID string,
+	taskType string,
+) context.Context {
+	if strings.TrimSpace(requestID) != "" {
+		ctx = logger.WithRequestID(ctx, requestID)
+	}
+	return logger.WithAttrs(
+		ctx,
+		"document_id", documentID,
+		"task_type", taskType,
+	)
+}
+
+func classifyPaperTaskError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, context.Canceled) ||
+		errors.Is(err, sql.ErrNoRows) ||
+		errors.Is(err, service.ErrStalePaperInfo) {
+		return fmt.Errorf("%v: %w", err, asynq.RevokeTask)
+	}
+	if errors.Is(err, types.ErrInvalidPaperInfoTaskPayload) ||
+		errors.Is(err, types.ErrInvalidPaperExtraction) ||
+		errors.Is(err, types.ErrInvalidPaperCatalogData) ||
+		errors.Is(err, service.ErrInvalidPaperMetadata) ||
+		errors.Is(err, service.ErrPaperCatalogNoMatch) {
+		return skipPaperTask(err)
+	}
+
+	retryableExternal, classifiedExternal := externalTaskRetryability(err)
+	if classifiedExternal && !retryableExternal {
+		return skipPaperTask(err)
+	}
+	return err
+}
+
+func skipPaperTask(err error) error {
+	return fmt.Errorf("%v: %w", err, asynq.SkipRetry)
+}
+
+func externalTaskRetryability(err error) (retryable bool, classified bool) {
+	walkTaskErrors(err, func(item error) {
+		if retryClass, ok := item.(interface{ TaskRetryable() bool }); ok {
+			classified = true
+			retryable = retryable || retryClass.TaskRetryable()
+		}
+		switch status.Code(item) {
+		case codes.Canceled:
+			classified = true
+		case codes.InvalidArgument,
+			codes.NotFound,
+			codes.AlreadyExists,
+			codes.PermissionDenied,
+			codes.Unauthenticated,
+			codes.FailedPrecondition,
+			codes.OutOfRange,
+			codes.Unimplemented:
+			classified = true
+		case codes.DeadlineExceeded,
+			codes.ResourceExhausted,
+			codes.Aborted,
+			codes.Internal,
+			codes.Unavailable,
+			codes.DataLoss:
+			classified = true
+			retryable = true
+		}
+	})
+	return retryable, classified
+}
+
+func paperTaskRetryAfter(err error) time.Duration {
+	var retryAfter time.Duration
+	walkTaskErrors(err, func(item error) {
+		if delay, ok := item.(interface{ TaskRetryAfter() time.Duration }); ok {
+			if candidate := delay.TaskRetryAfter(); candidate > retryAfter {
+				retryAfter = candidate
+			}
+		}
+	})
+	return retryAfter
+}
+
+func walkTaskErrors(err error, visit func(error)) {
+	if err == nil {
+		return
+	}
+	visit(err)
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, nested := range wrapped.Unwrap() {
+			walkTaskErrors(nested, visit)
+		}
+	case interface{ Unwrap() error }:
+		walkTaskErrors(wrapped.Unwrap(), visit)
+	}
 }
 
 // deadLetterKnowledgePayload extracts only the field we need from any

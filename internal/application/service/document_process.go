@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
@@ -21,6 +22,16 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
+)
+
+const (
+	defaultDocumentProcessTaskTimeout  = 15 * time.Minute
+	defaultDocumentProcessTaskMaxRetry = 3
+
+	defaultPaperExtractionTaskTimeout  = 2 * time.Minute
+	defaultPaperExtractionTaskMaxRetry = 3
+	defaultPaperCatalogTaskTimeout     = 10 * time.Minute
+	defaultPaperCatalogTaskMaxRetry    = 5
 )
 
 // ProcessDocument is the Asynq entry point for recognition. The parser's
@@ -47,8 +58,12 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		return nil
 	}
 	if document.Status == types.DocumentStatusReady {
-		logger.Info(ctx, "skip duplicate document recognition task", "document_id", document.ID)
-		return nil
+		logger.Info(ctx, "document recognition already committed; ensuring paper info handoff", "document_id", document.ID)
+		markdown, err := s.repo.GetMarkdown(ctx, document.ID)
+		if err != nil {
+			return fmt.Errorf("load committed Markdown for paper info handoff: %w", err)
+		}
+		return s.enqueuePaperInfoAfterRecognition(ctx, document, markdown.SHA256)
 	}
 	if document.Status != types.DocumentStatusProcessing {
 		transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, document.ID, types.DocumentStatusProcessing, nil,
@@ -175,6 +190,45 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		logger.Info(ctx, "replaced document block image deleted", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey)
 	}
 	logger.Info(ctx, "document recognition completed", "document_id", document.ID, "block_count", len(blocks), "markdown_storage_key", storedMarkdown.Key)
+	if err := s.enqueuePaperInfoAfterRecognition(ctx, document, metadata.SHA256); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *documentService) enqueuePaperInfoAfterRecognition(
+	ctx context.Context,
+	document types.Document,
+	markdownSHA256 string,
+) error {
+	if s.taskEnqueuer == nil {
+		return nil
+	}
+	extractionPayload := types.PaperMetadataExtractPayload{
+		DocumentID:     document.ID.String(),
+		MarkdownSHA256: markdownSHA256,
+	}
+	task, options, err := NewPaperMetadataExtractTask(
+		extractionPayload,
+		s.extractionTaskTimeout,
+		s.extractionTaskMaxRetry,
+	)
+	if err != nil {
+		return fmt.Errorf("build paper metadata extraction task: %w", err)
+	}
+	if err := enqueueDocumentOwnedTask(
+		ctx,
+		s.taskEnqueuer,
+		task,
+		options,
+		document.ID.String(),
+	); err != nil {
+		return fmt.Errorf("enqueue paper metadata extraction: %w", err)
+	}
+	logger.Info(ctx, "paper info handoff completed",
+		"document_id", document.ID,
+		"markdown_sha256", markdownSHA256,
+		"next_task", types.TypePaperMetadataExtract)
 	return nil
 }
 
@@ -478,6 +532,114 @@ func (s *documentService) dequeueDocumentTasks(ctx context.Context, documentID s
 	if _, _, err := s.taskInspector.CancelTasksForDocument(ctx, documentID); err != nil {
 		logger.Warn(ctx, "dequeue document tasks failed", "document_id", documentID, "error", err)
 	}
+}
+
+// NewDocumentProcessTask validates and creates a document-recognition task.
+// The document service owns its queue, retry, and timeout policy; callers only
+// supply the durable payload.
+func NewDocumentProcessTask(
+	payload types.DocumentProcessPayload,
+) (*asynq.Task, []asynq.Option, error) {
+	if strings.TrimSpace(payload.DocumentID) == "" {
+		return nil, nil, errors.New("document id is required for processing task")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode document processing task: %w", err)
+	}
+	return asynq.NewTask(types.TypeDocumentProcess, encoded), []asynq.Option{
+		asynq.Queue(types.QueueDefault),
+		asynq.MaxRetry(defaultDocumentProcessTaskMaxRetry),
+		asynq.Timeout(defaultDocumentProcessTaskTimeout),
+	}, nil
+}
+
+// NewPaperMetadataExtractTask validates and creates an extraction task.
+// The paper-information service owns its queue, retry, timeout, and task-ID
+// policy; callers only provide the durable payload and optional overrides.
+func NewPaperMetadataExtractTask(
+	payload types.PaperMetadataExtractPayload,
+	timeout time.Duration,
+	maxRetry int,
+) (*asynq.Task, []asynq.Option, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if timeout <= 0 {
+		timeout = defaultPaperExtractionTaskTimeout
+	}
+	if maxRetry <= 0 {
+		maxRetry = defaultPaperExtractionTaskMaxRetry
+	}
+	task, err := newPaperInfoJSONTask(types.TypePaperMetadataExtract, payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode paper metadata extraction task: %w", err)
+	}
+	return task, []asynq.Option{
+		asynq.Queue(types.QueueDefault),
+		asynq.MaxRetry(maxRetry),
+		asynq.Timeout(timeout),
+		asynq.TaskID(paperInfoTaskID(
+			types.TypePaperMetadataExtract,
+			payload.DocumentID,
+			payload.MarkdownSHA256,
+		)),
+	}, nil
+}
+
+// NewPaperCatalogResolveTask validates and creates a catalog-resolution task.
+// Revision-bound work has a deterministic task ID; metadata-only lookups use a
+// short uniqueness window because no source revision is available for the ID.
+func NewPaperCatalogResolveTask(
+	payload types.PaperCatalogResolvePayload,
+	timeout time.Duration,
+	maxRetry int,
+) (*asynq.Task, []asynq.Option, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if timeout <= 0 {
+		timeout = defaultPaperCatalogTaskTimeout
+	}
+	if maxRetry <= 0 {
+		maxRetry = defaultPaperCatalogTaskMaxRetry
+	}
+	task, err := newPaperInfoJSONTask(types.TypePaperCatalogResolve, payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode paper catalog resolution task: %w", err)
+	}
+	options := []asynq.Option{
+		asynq.Queue(types.QueueLow),
+		asynq.MaxRetry(maxRetry),
+		asynq.Timeout(timeout),
+	}
+	if strings.TrimSpace(payload.MarkdownSHA256) != "" {
+		options = append(options, asynq.TaskID(paperInfoTaskID(
+			types.TypePaperCatalogResolve,
+			payload.DocumentID,
+			payload.MarkdownSHA256,
+		)))
+	} else {
+		options = append(options, asynq.Unique(time.Minute))
+	}
+	return task, options, nil
+}
+
+func newPaperInfoJSONTask(taskType string, payload any) (*asynq.Task, error) {
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, err
+	}
+	return asynq.NewTask(taskType, encoded), nil
+}
+
+func paperInfoTaskID(taskType, documentID, revision string) string {
+	stage := strings.NewReplacer(":", "-", "_", "-").Replace(taskType)
+	revision = strings.ToLower(strings.TrimSpace(revision))
+	if revision == "" {
+		return stage + "-" + strings.TrimSpace(documentID)
+	}
+	return stage + "-" + strings.TrimSpace(documentID) + "-" + revision
 }
 
 var _ interfaces.DocumentRecognizer

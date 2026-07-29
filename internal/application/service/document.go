@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	fileservice "paperMaster/internal/application/service/file"
@@ -19,19 +20,22 @@ import (
 	"paperMaster/internal/utils"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
 
 type documentService struct {
 	repo          interfaces.DocumentRepository
 	storage       interfaces.FileStorage
 	taskInspector interfaces.TaskInspector
-	taskEnqueuer  interfaces.DocumentTaskEnqueuer
+	taskEnqueuer  interfaces.TaskEnqueuer
 	recognizer    interfaces.DocumentRecognizer
 	// recognitionOutputDir is the trusted shared-volume root for directory
 	// recognizers. It is deliberately separate from upload storage: recognizer
 	// output is untrusted until ProcessDocument validates and copies it.
 	recognitionOutputDir     string
 	maxRecognitionOutputSize int64
+	extractionTaskTimeout    time.Duration
+	extractionTaskMaxRetry   int
 }
 
 // ErrDuplicateDOI indicates that a document with the same DOI already exists.
@@ -67,12 +71,15 @@ func NewDocumentServiceWithProcessing(
 	repo interfaces.DocumentRepository,
 	storage interfaces.FileStorage,
 	taskInspector interfaces.TaskInspector,
-	taskEnqueuer interfaces.DocumentTaskEnqueuer,
+	taskEnqueuer interfaces.TaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer,
 ) interfaces.DocumentService {
 	return &documentService{
-		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer, recognizer: recognizer,
-		recognitionOutputDir: cfg.RecognitionOutputDirectory, maxRecognitionOutputSize: cfg.MaxUploadSize,
+		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer,
+		recognizer: recognizer, recognitionOutputDir: cfg.RecognitionOutputDirectory,
+		maxRecognitionOutputSize: cfg.MaxUploadSize,
+		extractionTaskTimeout:    cfg.PaperExtractionTaskTimeout,
+		extractionTaskMaxRetry:   cfg.PaperExtractionTaskMaxRetry,
 	}
 }
 
@@ -125,13 +132,59 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 	if !transitioned {
 		return fmt.Errorf("document cannot be queued from its current status")
 	}
-	if err := s.taskEnqueuer.EnqueueDocumentProcess(ctx, types.DocumentProcessPayload{DocumentID: documentID.String()}); err != nil {
+	task, options, err := NewDocumentProcessTask(types.DocumentProcessPayload{
+		DocumentID: documentID.String(),
+	})
+	if err != nil {
+		return err
+	}
+	if err := enqueueDocumentOwnedTask(
+		ctx,
+		s.taskEnqueuer,
+		task,
+		options,
+		documentID.String(),
+	); err != nil {
 		message := "document recognition could not be queued: " + err.Error()
 		if updateErr := s.repo.UpdateStatus(context.WithoutCancel(ctx), documentID, types.DocumentStatusFailed, &message); updateErr != nil {
 			logger.Error(ctx, "record document queue failure failed", "document_id", documentID, "error", updateErr)
 		}
 		return err
 	}
+	return nil
+}
+
+func enqueueDocumentOwnedTask(
+	ctx context.Context,
+	enqueuer interfaces.TaskEnqueuer,
+	task *asynq.Task,
+	options []asynq.Option,
+	documentID string,
+) error {
+	if enqueuer == nil {
+		return errors.New("task queue is not configured")
+	}
+	if task == nil {
+		return errors.New("task is required")
+	}
+	_, err := enqueuer.EnqueueContext(ctx, task, options...)
+	if errors.Is(err, asynq.ErrTaskIDConflict) ||
+		errors.Is(err, asynq.ErrDuplicateTask) {
+		logger.Debug(ctx, "document task already queued",
+			"document_id", documentID,
+			"task_type", task.Type())
+		return nil
+	}
+	if err != nil {
+		logger.Error(ctx, "enqueue document task failed",
+			"document_id", documentID,
+			"task_type", task.Type(),
+			"error", err)
+		return fmt.Errorf("enqueue %s: %w", task.Type(), err)
+	}
+	logger.Info(ctx, "document task enqueued",
+		"document_id", documentID,
+		"task_type", task.Type())
 	return nil
 }
 
@@ -346,6 +399,11 @@ func (s *documentService) deleteDocumentRelations(
 		logger.Info(ctx, "document block image deleted", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey)
 	}
 
+	// Storage cleanup has succeeded and the row will remain deleting even if
+	// the final database delete fails. It is now safe to purge recognition,
+	// extraction, and catalog work without risking a restored document that
+	// has silently lost its processing task.
+	s.dequeueDocumentTasks(ctx, document.ID.String())
 	if err := s.repo.Delete(ctx, document.ID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		s.recordIncompleteDocumentDeletion(ctx, document, "stored files deleted; database deletion must be retried", err)
 		return err

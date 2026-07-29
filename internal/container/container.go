@@ -26,7 +26,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(repository.NewPaperCitationRepository))
 	must(dependencies.Provide(repository.NewDocumentBaseRepository))
 	must(dependencies.Provide(router.NewAsyncqClient))
-	must(dependencies.Provide(router.NewDocumentTaskEnqueuer))
+	must(dependencies.Provide(router.NewTaskEnqueuer))
 	must(dependencies.Provide(router.NewAsynqServer))
 	must(dependencies.Provide(router.NewTaskInspector))
 	must(dependencies.Provide(docrecognition.NewRecognizer))

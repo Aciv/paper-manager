@@ -32,6 +32,14 @@ func (*documentTaskInspectorStub) HasQueuedTasksForDocument(context.Context, str
 	return false, nil
 }
 
+func (*documentTaskInspectorStub) HasQueuedTaskTypeForDocument(
+	context.Context,
+	string,
+	string,
+) (bool, error) {
+	return false, nil
+}
+
 type documentStatusRepoStub struct {
 	document types.Document
 	markdown types.DocumentMarkdown
@@ -295,6 +303,40 @@ type recognitionStub struct {
 	onRead func()
 }
 
+type documentTaskEnqueuerStub struct {
+	documents   []types.DocumentProcessPayload
+	extractions []types.PaperMetadataExtractPayload
+	catalogs    []types.PaperCatalogResolvePayload
+	tasks       []*asynq.Task
+	extractErr  error
+	catalogErr  error
+}
+
+func (stub *documentTaskEnqueuerStub) EnqueueContext(
+	_ context.Context,
+	task *asynq.Task,
+	_ ...asynq.Option,
+) (*asynq.TaskInfo, error) {
+	stub.tasks = append(stub.tasks, task)
+	switch task.Type() {
+	case types.TypeDocumentProcess:
+		var payload types.DocumentProcessPayload
+		_ = json.Unmarshal(task.Payload(), &payload)
+		stub.documents = append(stub.documents, payload)
+	case types.TypePaperMetadataExtract:
+		var payload types.PaperMetadataExtractPayload
+		_ = json.Unmarshal(task.Payload(), &payload)
+		stub.extractions = append(stub.extractions, payload)
+		return nil, stub.extractErr
+	case types.TypePaperCatalogResolve:
+		var payload types.PaperCatalogResolvePayload
+		_ = json.Unmarshal(task.Payload(), &payload)
+		stub.catalogs = append(stub.catalogs, payload)
+		return nil, stub.catalogErr
+	}
+	return nil, nil
+}
+
 func (s *recognitionStub) Read(context.Context, *types.RecognitionRequest) (*types.RecognitionResult, error) {
 	if s.onRead != nil {
 		s.onRead()
@@ -316,7 +358,8 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	width, height, x0, y0, x1, y1 := 612.0, 792.0, 72.0, 72.0, 280.0, 108.0
 	repo := &documentStatusRepoStub{document: types.Document{
 		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf",
-		ContentType: "application/pdf", SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+		ContentType: "application/pdf", SizeBytes: source.Size, DOI: "10.1000/test",
+		Status: types.DocumentStatusQueued,
 	}}
 	recognizer := &recognitionStub{result: &types.RecognitionResult{
 		OutputMode: types.RecognitionOutputMarkdownBytes,
@@ -332,7 +375,11 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 				MarkdownCodepointStart: &start, MarkdownCodepointEnd: &end},
 		}},
 	}}
-	svc := &documentService{repo: repo, storage: storage, recognizer: recognizer}
+	documentTasks := &documentTaskEnqueuerStub{}
+	svc := &documentService{
+		repo: repo, storage: storage, recognizer: recognizer,
+		taskEnqueuer: documentTasks,
+	}
 	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
@@ -355,6 +402,48 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	}
 	if !strings.HasPrefix(repo.markdown.StorageKey, "markdown/") {
 		t.Fatalf("markdown storage key = %q, want markdown/ prefix", repo.markdown.StorageKey)
+	}
+	if len(documentTasks.extractions) != 1 {
+		t.Fatalf("paper extraction enqueue count = %d, want 1", len(documentTasks.extractions))
+	}
+	if documentTasks.extractions[0].DocumentID != documentID.String() ||
+		documentTasks.extractions[0].MarkdownSHA256 != repo.markdown.SHA256 {
+		t.Fatalf("paper extraction payload = %#v", documentTasks.extractions[0])
+	}
+	if len(documentTasks.catalogs) != 0 {
+		t.Fatalf("catalog must wait for extraction completion, payloads = %#v", documentTasks.catalogs)
+	}
+}
+
+func TestProcessDocumentReadyRetryRepairsPaperInfoHandoff(t *testing.T) {
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{
+		document: types.Document{
+			ID: documentID, Status: types.DocumentStatusReady,
+		},
+		markdown: types.DocumentMarkdown{
+			DocumentID: documentID,
+			StorageKey: "markdown/ready.md",
+			SHA256:     strings.Repeat("a", 64),
+		},
+	}
+	documentTasks := &documentTaskEnqueuerStub{}
+	svc := &documentService{repo: repo, taskEnqueuer: documentTasks}
+	payload, err := json.Marshal(types.DocumentProcessPayload{
+		DocumentID: documentID.String(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessDocument(
+		context.Background(),
+		asynq.NewTask(types.TypeDocumentProcess, payload),
+	); err != nil {
+		t.Fatalf("ProcessDocument() error = %v", err)
+	}
+	if len(documentTasks.extractions) != 1 ||
+		documentTasks.extractions[0].MarkdownSHA256 != repo.markdown.SHA256 {
+		t.Fatalf("recovered extraction payloads = %#v", documentTasks.extractions)
 	}
 }
 
@@ -426,9 +515,13 @@ func TestDeleteDocumentRemovesRenderedBlockImages(t *testing.T) {
 		document: types.Document{ID: documentID, StorageKey: source.Key, Status: types.DocumentStatusReady},
 		blocks:   []types.Block{{ID: uuid.New(), DocumentID: documentID, Type: "image", AssetKey: image.Key}},
 	}
-	svc := NewDocumentService(repo, storage)
+	inspector := &documentTaskInspectorStub{}
+	svc := NewDocumentServiceWithTaskInspector(repo, storage, inspector)
 	if err := svc.DeleteDocument(context.Background(), documentID.String()); err != nil {
 		t.Fatalf("DeleteDocument() error = %v", err)
+	}
+	if inspector.calledWith != documentID.String() {
+		t.Fatalf("queue cancellation document = %q, want %q", inspector.calledWith, documentID)
 	}
 	if _, err := storage.Open(context.Background(), image.Key); err == nil {
 		t.Fatalf("rendered block image %q remains after document deletion", image.Key)

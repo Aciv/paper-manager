@@ -53,6 +53,20 @@ func (err *ProviderError) Unwrap() error {
 	return err.Err
 }
 
+// TaskRetryable exposes transport classification without coupling the queue
+// layer to this concrete infrastructure package.
+func (err *ProviderError) TaskRetryable() bool {
+	return err != nil && err.Retryable
+}
+
+// TaskRetryAfter lets Asynq honor provider Retry-After responses.
+func (err *ProviderError) TaskRetryAfter() time.Duration {
+	if err == nil {
+		return 0
+	}
+	return err.RetryAfter
+}
+
 type httpAdapter struct {
 	provider  string
 	baseURL   *url.URL
