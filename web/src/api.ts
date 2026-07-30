@@ -48,6 +48,7 @@ export type ProcessingSpan = {
   kind: string;
   scope: string;
   scopeId?: string;
+  parentSpanId?: string;
   status: ProcessingSpanStatus;
   retryCount: number;
   errorCode?: string;
@@ -153,6 +154,7 @@ export const api = {
     { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
   ),
   cancelDocument: (id: string): Promise<{ document: Document }> => request<{ document: Document }>(`/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  retryDocument: (id: string): Promise<{ document: Document }> => request<{ document: Document }>(`/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
   getDocumentProcessing: (id: string): Promise<{ processing: DocumentProcessingView }> => request<{ processing: DocumentProcessingView }>(`/${encodeURIComponent(id)}/processing`),
   deleteDocument: (id: string): Promise<void> => request<void>(`/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listDocumentBlocks: (id: string, page?: number): Promise<{ items: Block[] }> => {

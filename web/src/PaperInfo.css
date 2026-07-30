@@ -24,6 +24,12 @@
   gap: 9px;
 }
 
+.paper-info-stages > div.processing-child {
+  margin-left: 1rem;
+  padding-left: .75rem;
+  border-left: 2px solid #c7d2fe;
+}
+
 .paper-stage {
   border-radius: 999px;
   padding: 3px 8px;

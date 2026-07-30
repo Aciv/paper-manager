@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from 'react';
+import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, Document, DocumentBase, DocumentPage, DocumentProcessingView, DocumentSearch, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
 import { PdfReader } from './PdfReader';
@@ -71,6 +71,7 @@ function App() {
   const [selectedBaseID, setSelectedBaseID] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
+	const processingPollDelay = useRef(2500);
 
   const pageCount = Math.max(1, Math.ceil(page.total / page.pageSize));
   const hasPreviousPage = page.page > 1;
@@ -112,6 +113,7 @@ function App() {
     setProcessing(undefined);
     setCitations([]);
     setCitedBy([]);
+		processingPollDelay.current = 2500;
     if (!selected) {
       setEditTitle('');
       setEditTags('');
@@ -135,10 +137,20 @@ function App() {
 
   useEffect(() => {
     if (!selected || !processing?.stages.some((stage) => stage.status === 'queued' || stage.status === 'running')) return;
-    const timer = window.setInterval(() => {
-      void api.getDocumentProcessing(selected.id).then(({ processing: view }) => setProcessing(view)).catch(() => undefined);
-    }, document.visibilityState === 'visible' ? 2500 : 8000);
-    return () => window.clearInterval(timer);
+		const visible = document.visibilityState === 'visible';
+		const delay = visible ? processingPollDelay.current : Math.max(processingPollDelay.current, 8000);
+		const timer = window.setTimeout(() => {
+			void api.getDocumentProcessing(selected.id).then(({ processing: view }) => {
+				processingPollDelay.current = Math.min(
+					visible ? processingPollDelay.current * 1.5 : processingPollDelay.current * 2,
+					visible ? 15000 : 60000,
+				);
+				setProcessing(view);
+			}).catch(() => {
+				processingPollDelay.current = Math.min(processingPollDelay.current * 2, visible ? 15000 : 60000);
+			});
+		}, delay);
+		return () => window.clearTimeout(timer);
   }, [selected?.id, processing?.stages]);
 
   async function submitSearch(event: FormEvent<HTMLFormElement>) {
@@ -228,6 +240,22 @@ function App() {
     }
   }
 
+  async function retrySelected() {
+    if (!selected || !window.confirm(`重新开始“${documentLabel(selected, paperMetadata)}”的解析？`)) return;
+    setBusy(true);
+		processingPollDelay.current = 2500;
+    try {
+      const { document: queued } = await api.retryDocument(selected.id);
+      setSelected(queued);
+      setMessage(`已提交重新解析：${documentLabel(queued, paperMetadata)}。`);
+      await load(filters);
+    } catch (error) {
+      setMessage(error instanceof Error ? `重新解析失败：${error.message}` : '重新解析失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function submitMetadataUpdate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!selected) return;
@@ -256,6 +284,7 @@ function App() {
   async function retryPaperInfo(stage: 'extraction' | 'catalog') {
     if (!selected) return;
     setBusy(true);
+		processingPollDelay.current = 2500;
     try {
       if (stage === 'extraction') {
         await api.retryPaperExtraction(selected.id);
@@ -415,7 +444,7 @@ function App() {
 
         <section className="document-detail-panel">
           {!selected ? <div className="empty-detail"><h3>未选择文档</h3><p>{selectedDescription}</p></div> : <>
-          <div className="panel-heading"><h3>文档详情</h3><div className="detail-actions">{['uploaded', 'queued', 'processing'].includes(selected.status) && <button className="warning" type="button" onClick={() => void cancelSelected()} disabled={busy}>取消解析</button>}<button className="danger" type="button" onClick={() => void deleteSelected()} disabled={busy}>删除文档</button></div></div>
+          <div className="panel-heading"><h3>文档详情</h3><div className="detail-actions">{['uploaded', 'queued', 'processing'].includes(selected.status) && <button className="warning" type="button" onClick={() => void cancelSelected()} disabled={busy}>取消解析</button>}{['failed', 'cancelled'].includes(selected.status) && <button type="button" onClick={() => void retrySelected()} disabled={busy || parseStages.some(isActiveSpan)}>重新解析</button>}<button className="danger" type="button" onClick={() => void deleteSelected()} disabled={busy}>删除文档</button></div></div>
             <dl className="document-details">
               <dt>正式标题</dt><dd>{paperMetadata?.title || '未设置（使用原始文件名展示）'}</dd>
               <dt>原始文件名</dt><dd>{selected.originalFilename}</dd>
@@ -444,13 +473,13 @@ function App() {
 			<section className="paper-info-panel">
 			  <div className="panel-heading"><h4>文档解析进度</h4><span>{processing?.latestAttempt ? `尝试 ${processing.latestAttempt}` : '尚未开始'}</span></div>
 			  <div className="paper-info-stages">
-				{parseStages.length ? parseStages.map((stage) => <div key={stage.id}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">暂无持久化解析记录。</p>}
+				{parseStages.length ? parseStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">暂无持久化解析记录。</p>}
 			  </div>
 			</section>
 			<section className="paper-info-panel">
 			  <div className="panel-heading"><h4>论文信息任务</h4><span>独立于文档解析状态</span></div>
 			  <div className="paper-info-stages">
-				{paperInfoStages.length ? paperInfoStages.map((stage) => <div key={stage.id}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">尚未产生论文信息处理 span。</p>}
+				{paperInfoStages.length ? paperInfoStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">尚未产生论文信息处理 span。</p>}
 				<div><strong>元数据提取</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('extraction')} disabled={busy || paperInfoActive}>重试提取</button></div>
 				<div><strong>论文库查询</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('catalog')} disabled={busy || paperInfoActive}>重试查询</button></div>
 			  </div>
