@@ -90,6 +90,8 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 			logger.Warn(ctx, "start recognition processing span failed", "document_id", document.ID, "error", spanErr)
 		}
 	}
+	stopHeartbeat := keepSpanAlive(ctx, s.spans, spanID)
+	defer stopHeartbeat()
 	defer func() {
 		if s.spans == nil {
 			return

@@ -240,6 +240,33 @@ func TestCancelDocumentParseRejectsFinishedDocument(t *testing.T) {
 	}
 }
 
+func TestRetryDocumentParseQueuesNewAttemptAfterFailure(t *testing.T) {
+	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), Status: types.DocumentStatusFailed}}
+	tasks := &documentTaskEnqueuerStub{}
+	svc := &documentService{repo: repo, taskEnqueuer: tasks}
+
+	document, err := svc.RetryDocumentParse(context.Background(), repo.document.ID.String())
+	if err != nil {
+		t.Fatalf("RetryDocumentParse() error = %v", err)
+	}
+	if document.Status != types.DocumentStatusQueued || repo.document.Status != types.DocumentStatusQueued {
+		t.Fatalf("retry status = %q, want queued", document.Status)
+	}
+	if len(tasks.documents) != 1 || tasks.documents[0].Attempt != 1 {
+		t.Fatalf("recognition retry task = %#v, want attempt 1", tasks.documents)
+	}
+}
+
+func TestRetryDocumentParseRejectsActiveDocument(t *testing.T) {
+	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), Status: types.DocumentStatusProcessing}}
+	svc := &documentService{repo: repo, taskEnqueuer: &documentTaskEnqueuerStub{}}
+
+	_, err := svc.RetryDocumentParse(context.Background(), repo.document.ID.String())
+	if !errors.Is(err, ErrDocumentParseFinished) {
+		t.Fatalf("RetryDocumentParse() error = %v, want ErrDocumentParseFinished", err)
+	}
+}
+
 func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {

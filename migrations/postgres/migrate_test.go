@@ -172,3 +172,15 @@ func TestDocumentProcessingSpanMigrationCreatesLifecycleTable(t *testing.T) {
 		}
 	}
 }
+
+func TestDocumentProcessingSpanParentsMigrationAddsCascadeLink(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS parent_span_id UUID NULL",
+		"REFERENCES document_processing_spans(id) ON DELETE CASCADE",
+		"idx_document_processing_spans_parent_active",
+	} {
+		if !strings.Contains(documentProcessingSpanParentsUp, fragment) {
+			t.Fatalf("processing span parent migration does not include %q", fragment)
+		}
+	}
+}

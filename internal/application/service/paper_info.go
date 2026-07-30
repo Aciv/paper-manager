@@ -23,6 +23,7 @@ import (
 	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
 
 const (
@@ -182,6 +183,9 @@ func (s *paperInfoService) ExtractMetadata(
 			}
 		}()
 	}
+	// running report
+	stopHeartbeat := keepSpanAlive(ctx, s.spans, spanID)
+	defer stopHeartbeat()
 
 	markdown, blocks, err := s.loadExtractionSource(ctx, command)
 	if err != nil {
@@ -269,17 +273,9 @@ func (s *paperInfoService) ResolveMetadata(
 	ctx = logger.WithAttrs(ctx, "catalog_scope", map[bool]string{true: "reference", false: "source"}[command.IsReference])
 	logger.Info(ctx, "paper catalog resolution started")
 	var spanID uuid.UUID
-	if s.spans != nil {
-		kind := types.ProcessingSpanCatalogSource
-		spanScope := types.ProcessingSpanScopeCatalogSource
-		spanScopeID := types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, command.DocumentID.String())
-		if command.IsReference {
-			kind = types.ProcessingSpanCatalogReference
-			spanScope = types.ProcessingSpanScopeCatalogReference
-			spanScopeID = types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, command.DocumentID.String())
-		}
+	if s.spans != nil && !command.IsReference {
 		var spanErr error
-		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, 1, kind, spanScope, spanScopeID, 0)
+		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, 1, types.ProcessingSpanCatalogSource, types.ProcessingSpanScopeCatalogSource, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, command.DocumentID.String()), 0)
 		if spanErr != nil {
 			logger.Warn(ctx, "start catalog resolution span failed", "error", spanErr)
 		}
@@ -292,6 +288,8 @@ func (s *paperInfoService) ResolveMetadata(
 			}
 		}()
 	}
+	stopHeartbeat := keepSpanAlive(ctx, s.spans, spanID)
+	defer stopHeartbeat()
 	document, err := s.documents.Get(ctx, command.DocumentID)
 	if err != nil {
 		return err
@@ -302,7 +300,7 @@ func (s *paperInfoService) ResolveMetadata(
 	if command.IsReference {
 		return s.resolveScheduledReference(ctx, document)
 	}
-	return s.resolveSourceMetadata(ctx, document, command.MarkdownSHA256)
+	return s.resolveSourceMetadata(ctx, document, command.MarkdownSHA256, spanID)
 }
 
 func paperAttempt(attempt int) int {
@@ -312,7 +310,7 @@ func paperAttempt(attempt int) int {
 	return attempt
 }
 
-func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, markdownSHA256 string) error {
+func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, markdownSHA256 string, spanID uuid.UUID) error {
 	// Unknown rows are bibliographic placeholders only. They have no source
 	// document of their own, so catalog work must always be rooted at the
 	// uploaded document that cited them (reference scope).
@@ -333,6 +331,7 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 		document.ID,
 		1,
 		types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, document.ID.String()),
+		spanID,
 	)
 	if err != nil {
 		return err
@@ -385,7 +384,7 @@ func (s *paperInfoService) DispatchReferences(
 // resolveScheduledReference claims exactly one provider for an unresolved
 // placeholder, then reports the result to the global scheduler. All source
 // documents that cite the placeholder are updated together when it resolves.
-func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited types.Document) error {
+func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited types.Document) (outputErr error) {
 	if cited.Status != types.DocumentStatusUnknown || s.referenceScheduler == nil {
 		return nil
 	}
@@ -421,6 +420,47 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
 		return context.Canceled
 	}
+	if err := s.ensureReferenceRunActive(ctx, owner.SourceDocumentID, owner.RunID); err != nil {
+		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
+		if errors.Is(err, context.Canceled) {
+			return asynq.RevokeTask
+		}
+		return err
+	}
+	var runSpanID, referenceSpanID uuid.UUID
+	if s.spans != nil {
+		var spanErr error
+		runSpanID, spanErr = s.spans.Begin(
+			ctx, owner.SourceDocumentID, paperAttempt(owner.Attempt),
+			types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun,
+			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String()), 0,
+		)
+		if spanErr != nil {
+			logger.Warn(ctx, "start reference run parent span failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", spanErr)
+		}
+		referenceSpanID, spanErr = s.spans.BeginChild(
+			ctx, runSpanID, cited.ID, paperAttempt(owner.Attempt),
+			types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeCatalogReference,
+			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String(), cited.ID.String()), 0,
+		)
+		if spanErr != nil {
+			logger.Warn(ctx, "start reference target span failed", "document_id", cited.ID, "reference_run_id", owner.RunID, "error", spanErr)
+		}
+	}
+	stopHeartbeat := keepSpanAlive(ctx, s.spans, referenceSpanID)
+	defer stopHeartbeat()
+	defer func() {
+		if s.spans == nil {
+			return
+		}
+		if outputErr != nil {
+			code, reason := spanFailure(outputErr)
+			_ = s.spans.Fail(context.WithoutCancel(ctx), referenceSpanID, code, reason)
+			return
+		}
+		_ = s.spans.Succeed(context.WithoutCancel(ctx), referenceSpanID)
+		_ = s.spans.Heartbeat(context.WithoutCancel(ctx), runSpanID)
+	}()
 	if s.referenceLimiter != nil {
 		release, acquireErr := s.referenceLimiter.AcquireReference(ctx, owner.SourceDocumentID.String())
 		if acquireErr != nil {
@@ -432,25 +472,25 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 	// get query
 	incoming, err := s.papers.ListCitedBy(ctx, cited.ID.String())
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
 	if len(incoming) == 0 {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeTerminalFailure, nil)
 	}
 	query := referenceLookupQuery(incoming[0].RawReference)
 	if err := query.Validate(); err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeTerminalFailure, nil)
 	}
 	provider, ok := s.catalogs.Get(claim.Provider.String())
 	if !ok {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
 	}
-	selected, found, err := s.selectCatalogCandidateFromProviders(ctx, query, cited.ID, 1, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String(), cited.ID.String()), []interfaces.PaperCatalogProvider{provider})
+	selected, found, err := s.selectCatalogCandidateFromProviders(ctx, query, cited.ID, paperAttempt(owner.Attempt), types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String(), cited.ID.String()), referenceSpanID, []interfaces.PaperCatalogProvider{provider})
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
 	if !found {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeNoMatch, nil)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeNoMatch, nil)
 	}
 	active, err := s.referenceScheduler.IsTargetActive(ctx, cited.ID)
 	if err != nil {
@@ -460,28 +500,35 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
 		return context.Canceled
 	}
+	if err := s.ensureReferenceRunActive(ctx, owner.SourceDocumentID, owner.RunID); err != nil {
+		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
+		if errors.Is(err, context.Canceled) {
+			return asynq.RevokeTask
+		}
+		return err
+	}
 
 	// dedup
 	resolvedID, err := s.findStoredCatalogDocument(ctx, selected, incoming[0].CitingDocumentID)
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
 	for _, citation := range incoming {
 		if resolvedID != uuid.Nil {
-			if _, err := s.papers.ResolveCitation(ctx, citation.CitingDocumentID.String(), resolvedID.String(), citation.RawReference); err != nil {
-				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+			if _, citationErr := s.papers.ResolveCitation(ctx, citation.CitingDocumentID.String(), resolvedID.String(), citation.RawReference); citationErr != nil {
+				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, citationErr)
 			}
 		}
 	}
 	if resolvedID == uuid.Nil {
-		if _, err := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); err != nil {
-			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+		if _, metadataErr := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); metadataErr != nil {
+			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, metadataErr)
 		}
 	}
-	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
+	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeMatched, nil)
 }
 
-func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uuid.UUID, provider types.PaperCatalogProvider, outcome types.PaperReferenceOutcome, cause error) error {
+func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uuid.UUID, provider types.PaperCatalogProvider, _ []types.PaperReferenceOwner, outcome types.PaperReferenceOutcome, cause error) error {
 	if cause != nil && outcome == types.PaperReferenceOutcomeRetryableFailure {
 		var retryable interface{ TaskRetryable() bool }
 		if errors.As(cause, &retryable) && retryable.TaskRetryable() {
@@ -514,11 +561,59 @@ func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uu
 			return err
 		}
 	}
+	if report.Completed || report.Cancelled {
+		s.finishReferenceRunParents(ctx, report.Owners)
+	}
 	// Provider failures have already been converted into scheduler-owned
 	// fallback work. Returning the original error here would make Asynq retry
 	// this same task as well, racing the next-provider task and causing the
 	// observed repeated 400/429 "flip-flop".
 	return nil
+}
+
+// finishReferenceRunParents closes a run root only after the scheduler says
+// every target still owned by that source/run has reached a terminal state.
+// This makes the root a real aggregate rather than a short-lived dispatch log.
+func (s *paperInfoService) finishReferenceRunParents(ctx context.Context, owners []types.PaperReferenceOwner) {
+	if s.spans == nil || s.referenceScheduler == nil {
+		return
+	}
+	seen := make(map[string]struct{}, len(owners))
+	for _, owner := range owners {
+		if owner.Cancelled || owner.SourceDocumentID == uuid.Nil || owner.RunID == uuid.Nil {
+			continue
+		}
+		key := owner.SourceDocumentID.String() + ":" + owner.RunID.String()
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		active, err := s.referenceScheduler.IsRunActive(ctx, owner.SourceDocumentID, owner.RunID)
+		if err != nil {
+			logger.Warn(ctx, "check reference run completion failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", err)
+			continue
+		}
+		if active {
+			continue
+		}
+		rootID, err := s.spans.Begin(ctx,
+			owner.SourceDocumentID,
+			paperAttempt(owner.Attempt),
+			types.ProcessingSpanCatalogReference,
+			types.ProcessingSpanScopeReferenceRun,
+			types.ComposeProcessingSpanScopeID(
+				types.ProcessingSpanCatalogReference,
+				owner.RunID.String(),
+			),
+			0)
+		if err != nil {
+			logger.Warn(ctx, "load reference run parent span failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", err)
+			continue
+		}
+		if err := s.spans.Succeed(context.WithoutCancel(ctx), rootID); err != nil {
+			logger.Warn(ctx, "finish reference run parent span failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", err)
+		}
+	}
 }
 
 func (s *paperInfoService) applySourceCatalogCandidate(
@@ -612,9 +707,8 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		return nil
 	}
 	runID := command.ReferenceRunID
-	var runSpanID uuid.UUID
 	if s.spans != nil {
-		if runSpanID, err = s.spans.Begin(ctx, document.ID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
+		if _, err = s.spans.Begin(ctx, document.ID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
 			return fmt.Errorf("start reference catalog run span: %w", err)
 		}
 	}
@@ -643,11 +737,6 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 			return enqueueErr
 		}
 		queued++
-	}
-	if s.spans != nil {
-		if err := s.spans.Succeed(context.WithoutCancel(ctx), runSpanID); err != nil {
-			logger.Warn(ctx, "finish reference catalog run dispatch span failed", "document_id", document.ID, "reference_run_id", runID, "error", err)
-		}
 	}
 	logger.Info(ctx, "scheduler-owned reference catalog tasks queued", "document_id", document.ID, "reference_run_id", runID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
 	return nil
@@ -940,8 +1029,9 @@ func (s *paperInfoService) selectCatalogCandidate(
 	documentID uuid.UUID,
 	attempt int,
 	spanScopeID types.ProcessingSpanScopeID,
+	parentSpanID uuid.UUID,
 ) (types.PaperCatalogCandidate, bool, error) {
-	return s.selectCatalogCandidateFromProviders(ctx, query, documentID, attempt, spanScopeID, s.catalogs.Providers())
+	return s.selectCatalogCandidateFromProviders(ctx, query, documentID, attempt, spanScopeID, parentSpanID, s.catalogs.Providers())
 }
 
 func (s *paperInfoService) selectCatalogCandidateFromProviders(
@@ -950,6 +1040,7 @@ func (s *paperInfoService) selectCatalogCandidateFromProviders(
 	documentID uuid.UUID,
 	attempt int,
 	spanScopeID types.ProcessingSpanScopeID,
+	parentSpanID uuid.UUID,
 	providers []interfaces.PaperCatalogProvider,
 ) (types.PaperCatalogCandidate, bool, error) {
 	if err := query.Validate(); err != nil {
@@ -971,16 +1062,14 @@ func (s *paperInfoService) selectCatalogCandidateFromProviders(
 			defer wait.Done()
 			var providerSpan uuid.UUID
 			if s.spans != nil {
-				providerSpan, _ = s.spans.Begin(
-					ctx,
-					documentID,
-					attempt,
-					types.ProcessingSpanCatalogProvider,
-					types.ProcessingSpanScopeProvider,
-					types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()),
-					0,
-				)
+				if parentSpanID != uuid.Nil {
+					providerSpan, _ = s.spans.BeginChild(ctx, parentSpanID, documentID, attempt, types.ProcessingSpanCatalogProvider, types.ProcessingSpanScopeProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()), 0)
+				} else {
+					providerSpan, _ = s.spans.Begin(ctx, documentID, attempt, types.ProcessingSpanCatalogProvider, types.ProcessingSpanScopeProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()), 0)
+				}
 			}
+			stopProviderHeartbeat := keepSpanAlive(ctx, s.spans, providerSpan)
+			defer stopProviderHeartbeat()
 			select {
 			// require sema
 			case semaphore <- struct{}{}:

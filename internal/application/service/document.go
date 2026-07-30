@@ -52,6 +52,7 @@ var (
 	ErrInvalidDocumentFilename = errors.New("invalid document filename")
 	ErrInvalidDocumentDOI      = errors.New("invalid document DOI")
 	ErrDocumentParseFinished   = errors.New("document parsing has already finished")
+	ErrDocumentParseActive     = errors.New("document parsing is still active")
 	ErrDocumentDeleting        = errors.New("document is being deleted")
 )
 
@@ -188,7 +189,7 @@ func multipartFileSHA256(file *multipart.FileHeader) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func (s *documentService) enqueueDocumentRecognition(ctx context.Context, documentID uuid.UUID) error {
+func (s *documentService) enqueueDocumentRecognition(ctx context.Context, documentID uuid.UUID, attempts ...int) error {
 	transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, documentID, types.DocumentStatusQueued, nil,
 		[]types.DocumentStatus{types.DocumentStatusUploaded, types.DocumentStatusFailed, types.DocumentStatusCancelled, types.DocumentStatusReady})
 	if err != nil {
@@ -197,9 +198,11 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 	if !transitioned {
 		return fmt.Errorf("document cannot be queued from its current status")
 	}
-	task, options, err := NewDocumentProcessTask(types.DocumentProcessPayload{
-		DocumentID: documentID.String(),
-	})
+	attempt := 1
+	if len(attempts) > 0 && attempts[0] > 0 {
+		attempt = attempts[0]
+	}
+	task, options, err := NewDocumentProcessTask(types.DocumentProcessPayload{DocumentID: documentID.String(), Attempt: attempt})
 	if err != nil {
 		return err
 	}
@@ -217,6 +220,48 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 		return err
 	}
 	return nil
+}
+
+// RetryDocumentParse starts a distinct recognition attempt only after the
+// previous parse ended. It intentionally does not touch paper-info work:
+// those timelines are independent of source document parsing.
+func (s *documentService) RetryDocumentParse(ctx context.Context, id string) (*types.Document, error) {
+	document, err := s.GetDocumentByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if document.Status == types.DocumentStatusDeleting {
+		return nil, ErrDocumentDeleting
+	}
+	if s.spans != nil {
+		active, spanErr := s.spans.HasActive(ctx, document.ID, types.ProcessingSpanRecognition)
+		if spanErr != nil {
+			return nil, fmt.Errorf("check active document processing span: %w", spanErr)
+		}
+		if active {
+			return nil, ErrDocumentParseActive
+		}
+	}
+	if document.Status != types.DocumentStatusFailed && document.Status != types.DocumentStatusCancelled {
+		return nil, ErrDocumentParseFinished
+	}
+	attempt := 1
+	if s.spans != nil {
+		view, viewErr := s.spans.GetView(ctx, *document)
+		if viewErr != nil {
+			return nil, fmt.Errorf("load document processing timeline: %w", viewErr)
+		}
+		attempt = view.LatestAttempt + 1
+	}
+	if err := s.enqueueDocumentRecognition(ctx, document.ID, attempt); err != nil {
+		return nil, err
+	}
+	queued, err := s.GetDocumentByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	logger.Info(ctx, "document recognition retry queued", "document_id", queued.ID, "attempt", attempt)
+	return queued, nil
 }
 
 // enqueueManagedTask submits a task built by an application service. A

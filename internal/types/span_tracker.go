@@ -113,21 +113,26 @@ func SplitProcessingSpanScopeID(value ProcessingSpanScopeID) []string {
 // DocumentProcessingSpan is one idempotent stage in a document attempt.
 // The unique tuple makes queue retries update the same durable timeline row.
 type DocumentProcessingSpan struct {
-	ID          uuid.UUID             `gorm:"type:uuid;primaryKey" json:"id"`
-	DocumentID  uuid.UUID             `gorm:"column:document_id;type:uuid;not null;index" json:"documentId"`
-	Attempt     int                   `gorm:"not null;default:1" json:"attempt"`
-	Kind        ProcessingSpanKind    `gorm:"type:text;not null" json:"kind"`
-	Scope       ProcessingSpanScope   `gorm:"type:text;not null;default:'document'" json:"scope"`
-	ScopeID     ProcessingSpanScopeID `gorm:"type:text;not null;default:''" json:"scopeId,omitempty"`
-	Status      ProcessingSpanStatus  `gorm:"type:text;not null" json:"status"`
-	RetryCount  int                   `gorm:"not null;default:0" json:"retryCount"`
-	ErrorCode   string                `gorm:"type:text;not null;default:''" json:"errorCode,omitempty"`
-	ErrorReason string                `gorm:"type:text;not null;default:''" json:"errorReason,omitempty"`
-	Attributes  JSON                  `gorm:"type:jsonb;not null;default:'{}'" json:"attributes,omitempty"`
-	StartedAt   time.Time             `gorm:"not null" json:"startedAt"`
-	FinishedAt  *time.Time            `json:"finishedAt,omitempty"`
-	CreatedAt   time.Time             `json:"createdAt"`
-	UpdatedAt   time.Time             `json:"updatedAt"`
+	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
+	DocumentID uuid.UUID `gorm:"column:document_id;type:uuid;not null;index" json:"documentId"`
+	// ParentSpanID links a fine-grained operation (for example, one provider
+	// request) to the durable stage that scheduled it. A child may belong to a
+	// different document: reference placeholders are shared by several source
+	// papers, while their run root belongs to the source document.
+	ParentSpanID *uuid.UUID            `gorm:"column:parent_span_id;type:uuid;index" json:"parentSpanId,omitempty"`
+	Attempt      int                   `gorm:"not null;default:1" json:"attempt"`
+	Kind         ProcessingSpanKind    `gorm:"type:text;not null" json:"kind"`
+	Scope        ProcessingSpanScope   `gorm:"type:text;not null;default:'document'" json:"scope"`
+	ScopeID      ProcessingSpanScopeID `gorm:"type:text;not null;default:''" json:"scopeId,omitempty"`
+	Status       ProcessingSpanStatus  `gorm:"type:text;not null" json:"status"`
+	RetryCount   int                   `gorm:"not null;default:0" json:"retryCount"`
+	ErrorCode    string                `gorm:"type:text;not null;default:''" json:"errorCode,omitempty"`
+	ErrorReason  string                `gorm:"type:text;not null;default:''" json:"errorReason,omitempty"`
+	Attributes   JSON                  `gorm:"type:jsonb;not null;default:'{}'" json:"attributes,omitempty"`
+	StartedAt    time.Time             `gorm:"not null" json:"startedAt"`
+	FinishedAt   *time.Time            `json:"finishedAt,omitempty"`
+	CreatedAt    time.Time             `json:"createdAt"`
+	UpdatedAt    time.Time             `json:"updatedAt"`
 }
 
 // TableName pins the GORM model to the document_processing_spans table instead

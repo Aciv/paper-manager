@@ -97,6 +97,7 @@ func ServerProcess(router gin.IRoutes, processHandler *handler.DocumentProcessHa
 		return
 	}
 	router.POST("/api/document/:id/cancel", processHandler.CancelDocumentParse)
+	router.POST("/api/document/:id/retry", processHandler.RetryDocumentParse)
 	router.GET("/api/document/:id/processing", processHandler.Status)
 }
 

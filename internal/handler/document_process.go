@@ -93,6 +93,33 @@ func (h *DocumentProcessHandler) CancelDocumentParse(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"document": document})
 }
 
+// RetryDocumentParse queues a new recognition attempt after a terminal parse.
+func (h *DocumentProcessHandler) RetryDocumentParse(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
+		return
+	}
+	document, err := h.documents.RetryDocumentParse(c.Request.Context(), documentID.String())
+	if err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)
+		case errors.Is(err, appservice.ErrDocumentParseActive):
+			h.writeError(c, apperrors.NewConflictError("document parsing is still active"), err)
+		case errors.Is(err, appservice.ErrDocumentParseFinished):
+			h.writeError(c, apperrors.NewBadRequestError("document parsing is not retryable"), err)
+		case errors.Is(err, appservice.ErrDocumentDeleting):
+			h.writeError(c, apperrors.NewBadRequestError("document is being deleted"), err)
+		default:
+			h.writeError(c, apperrors.NewInternalServerError("retry document parsing"), err)
+		}
+		return
+	}
+	logger.Info(c.Request.Context(), "document recognition retry accepted", "document_id", document.ID)
+	c.JSON(http.StatusAccepted, gin.H{"document": document})
+}
+
 // writeError delegates serialization to the common error middleware while
 // retaining process-specific diagnostics in the request log.
 func (h *DocumentProcessHandler) writeError(c *gin.Context, serverErr *apperrors.ServerError, cause error) {

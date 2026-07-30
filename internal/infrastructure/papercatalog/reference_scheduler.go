@@ -202,19 +202,19 @@ func applyReport(job types.PaperReferenceJob, provider types.PaperCatalogProvide
 	job.UpdatedAt = time.Now().UTC()
 	if outcome == types.PaperReferenceOutcomeCancelled || job.Cancelled {
 		job.Cancelled = true
-		return job, types.PaperReferenceReport{Cancelled: true}, nil
+		return job, types.PaperReferenceReport{Cancelled: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
 	}
 	if outcome == types.PaperReferenceOutcomeMatched || outcome == types.PaperReferenceOutcomeTerminalFailure {
 		job.Completed = true
-		return job, types.PaperReferenceReport{Completed: true}, nil
+		return job, types.PaperReferenceReport{Completed: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
 	}
 	for _, tried := range job.TriedProviders {
 		if tried == provider {
-			return job, types.PaperReferenceReport{Requeue: true}, nil
+			return job, types.PaperReferenceReport{Requeue: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
 		}
 	}
 	job.TriedProviders = append(job.TriedProviders, provider)
-	return job, types.PaperReferenceReport{Requeue: true}, nil
+	return job, types.PaperReferenceReport{Requeue: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
 }
 
 type memoryReferenceScheduler struct {

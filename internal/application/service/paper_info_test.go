@@ -126,6 +126,7 @@ func (r *paperInfoRegistryStub) Providers() []interfaces.PaperCatalogProvider {
 
 type paperInfoSpanStart struct {
 	documentID uuid.UUID
+	parentID   uuid.UUID
 	attempt    int
 	kind       types.ProcessingSpanKind
 	scope      types.ProcessingSpanScope
@@ -146,9 +147,20 @@ func (s *paperInfoSpanStub) Begin(
 	scopeID types.ProcessingSpanScopeID,
 	_ int,
 ) (uuid.UUID, error) {
+	return s.record(uuid.Nil, documentID, attempt, kind, scope, scopeID)
+}
+
+func (s *paperInfoSpanStub) record(
+	parentID, documentID uuid.UUID,
+	attempt int,
+	kind types.ProcessingSpanKind,
+	scope types.ProcessingSpanScope,
+	scopeID types.ProcessingSpanScopeID,
+) (uuid.UUID, error) {
 	s.mu.Lock()
 	s.starts = append(s.starts, paperInfoSpanStart{
 		documentID: documentID,
+		parentID:   parentID,
 		attempt:    attempt,
 		kind:       kind,
 		scope:      scope,
@@ -157,7 +169,22 @@ func (s *paperInfoSpanStub) Begin(
 	s.mu.Unlock()
 	return uuid.New(), nil
 }
-func (*paperInfoSpanStub) Succeed(context.Context, uuid.UUID) error { return nil }
+func (s *paperInfoSpanStub) BeginChild(
+	ctx context.Context,
+	parentSpanID uuid.UUID,
+	documentID uuid.UUID,
+	attempt int,
+	kind types.ProcessingSpanKind,
+	scope types.ProcessingSpanScope,
+	scopeID types.ProcessingSpanScopeID,
+	retryCount int,
+) (uuid.UUID, error) {
+	_ = ctx
+	_ = retryCount
+	return s.record(parentSpanID, documentID, attempt, kind, scope, scopeID)
+}
+func (*paperInfoSpanStub) Heartbeat(context.Context, uuid.UUID) error { return nil }
+func (*paperInfoSpanStub) Succeed(context.Context, uuid.UUID) error   { return nil }
 func (*paperInfoSpanStub) Fail(context.Context, uuid.UUID, string, string) error {
 	return nil
 }
@@ -571,6 +598,7 @@ func TestProviderSpansDistinguishConcurrentReferenceTargets(t *testing.T) {
 			sourceID,
 			1,
 			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, targetID.String()),
+			uuid.Nil,
 		); err != nil {
 			t.Fatalf("selectCatalogCandidate() error = %v", err)
 		}

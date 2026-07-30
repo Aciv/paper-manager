@@ -214,9 +214,8 @@ func (s *paperInfoService) enqueueUnknownReferenceCatalogRetries(
 			continue
 		}
 		runID := uuid.New()
-		var runSpanID uuid.UUID
 		if s.spans != nil {
-			if runSpanID, err = s.spans.Begin(ctx, source.ID, paperAttempt(attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
+			if _, err = s.spans.Begin(ctx, source.ID, paperAttempt(attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
 				return queued, fmt.Errorf("start unknown reference retry span: %w", err)
 			}
 		}
@@ -241,11 +240,6 @@ func (s *paperInfoService) enqueueUnknownReferenceCatalogRetries(
 			}
 			if err := enqueueManagedTask(ctx, s.tasks, task, options, placeholder.ID.String()); err != nil {
 				return queued, err
-			}
-		}
-		if s.spans != nil {
-			if err := s.spans.Succeed(context.WithoutCancel(ctx), runSpanID); err != nil {
-				logger.Warn(ctx, "finish unknown reference retry run dispatch span failed", "document_id", source.ID, "reference_run_id", runID, "error", err)
 			}
 		}
 		queued++

@@ -77,6 +77,9 @@ type DocumentService interface {
 	// CancelDocumentParse cancels a queued or active document parse. It is
 	// idempotent for already-cancelled documents and best-effort dequeues work.
 	CancelDocumentParse(ctx context.Context, id string) (*types.Document, error)
+	// RetryDocumentParse queues a new recognition attempt after a failed or
+	// cancelled attempt. Active parsing must be cancelled rather than retried.
+	RetryDocumentParse(ctx context.Context, id string) (*types.Document, error)
 	// SearchDocument performs paginated ID and DOI searches.
 	SearchDocument(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
 	// GetDocumentFile opens the stored object and returns its original filename.

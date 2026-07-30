@@ -20,6 +20,13 @@ type SpanTracker interface {
 	// document, attempt, kind, scope, and scope ID tuple. Asynq retries reuse
 	// the same tuple so one logical operation remains one timeline entry.
 	Begin(ctx context.Context, documentID uuid.UUID, attempt int, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID, retryCount int) (uuid.UUID, error)
+	// BeginChild is Begin with an explicit durable parent. It preserves one
+	// processing tree across document boundaries for shared references.
+	BeginChild(ctx context.Context, parentSpanID uuid.UUID, documentID uuid.UUID, attempt int, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID, retryCount int) (uuid.UUID, error)
+	// Heartbeat records that an active operation remains alive without changing
+	// its status. Long parser and provider calls use it to keep parent timelines
+	// fresh while their external I/O is in progress.
+	Heartbeat(ctx context.Context, spanID uuid.UUID) error
 	// Succeed marks one span as successfully completed.
 	Succeed(ctx context.Context, spanID uuid.UUID) error
 	// Fail marks one span as failed with a short user-safe code and reason.
@@ -54,6 +61,8 @@ type DocumentProcessingSpanRepository interface {
 	// unique attempt/kind/scope tuple. Queue retries call this method so they
 	// continue one durable timeline entry rather than creating duplicate spans.
 	UpsertRunning(ctx context.Context, span types.DocumentProcessingSpan) (types.DocumentProcessingSpan, error)
+	// Heartbeat refreshes updated_at only while a span remains active.
+	Heartbeat(ctx context.Context, id uuid.UUID) error
 	// Finish changes one span identified by id to a terminal status and stores a
 	// short, user-safe error code and reason when it did not succeed.
 	Finish(ctx context.Context, id uuid.UUID, status types.ProcessingSpanStatus, code, reason string) error
@@ -61,8 +70,10 @@ type DocumentProcessingSpanRepository interface {
 	// document attempt. It is used after cancellation or dead-letter exhaustion
 	// so descendant stages cannot remain displayed as running.
 	FinishAttempt(ctx context.Context, documentID uuid.UUID, attempt int, status types.ProcessingSpanStatus, code, reason string) error
-	// ListLatestAttempt returns all stage rows for the document's most recent
-	// attempt, ordered for construction of the document processing API view.
+	// ListLatestAttempt returns the latest row for every durable stage tuple of
+	// a document. Recognition attempts and paper-info attempts are independent,
+	// so it must not discard a completed parse merely because a later metadata
+	// retry used a newer attempt number.
 	ListLatestAttempt(ctx context.Context, documentID uuid.UUID) ([]types.DocumentProcessingSpan, error)
 	// HasActive reports whether the document has queued or running spans of any
 	// requested kind. An empty kinds list checks all kinds and supports retry

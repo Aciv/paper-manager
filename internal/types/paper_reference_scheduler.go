@@ -107,6 +107,9 @@ type PaperReferenceReport struct {
 	Requeue   bool
 	Completed bool
 	Cancelled bool
+	// Owners is the post-report ownership snapshot. It lets services close a
+	// run root only after the scheduler has evaluated every target in that run.
+	Owners []PaperReferenceOwner
 }
 
 // PaperReferenceProgress is the compact, source-document-scoped projection
