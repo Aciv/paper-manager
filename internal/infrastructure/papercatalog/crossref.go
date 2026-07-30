@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	CrossrefProvider = "crossref"
+	// CrossrefProvider is retained as a package compatibility alias. New code
+	// should use types.PaperCatalogProviderCrossref.
+	CrossrefProvider = string(types.PaperCatalogProviderCrossref)
 	crossrefBaseURL  = "https://api.crossref.org"
 )
 

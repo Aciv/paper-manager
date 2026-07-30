@@ -40,25 +40,47 @@ func (status PaperCatalogStatus) IsValid() bool {
 	}
 }
 
-// PaperCatalogResolveCommand is the typed application command decoded from a
-// queue payload. The service reloads paper_metadata and paper_citations using
-// DocumentID; no transient extraction result identifier is persisted.
-// MarkdownSHA256 is optional for lookup based only on durable DOI/title/URL
-// metadata. When supplied, it guards a query derived from parsed Markdown
-// against a concurrent reparse.
+// PaperCatalogResolveCommand is the typed command for exactly one stored
+// document. Source tasks use the configured provider fan-out. Reference tasks
+// claim a provider and fallback state from PaperReferenceScheduler instead of
+// carrying either concern in the Asynq payload.
 type PaperCatalogResolveCommand struct {
-	RequestID       string
-	DocumentID      uuid.UUID
-	MarkdownSHA256  string
-	Attempt         int
-	Scope           PaperCatalogScope
-	CitedDocumentID uuid.UUID
+	RequestID   string
+	DocumentID  uuid.UUID
+	IsReference bool
+	// MarkdownSHA256 is an in-process optional revision guard retained for
+	// direct service callers. It is intentionally never serialized into the
+	// catalog task payload.
+	MarkdownSHA256 string
+	Attempt        int
 }
 
-// Validate verifies identifiers and revision information on the command.
-func (command PaperCatalogResolveCommand) Validate() error {
+// PaperReferenceDispatchCommand is the typed request to build a bounded,
+// provider-partitioned bibliography lookup run from persisted citations. It is
+// intentionally separate from PaperCatalogResolveCommand: dispatch schedules
+// work, whereas catalog resolution executes one source or provider batch.
+type PaperReferenceDispatchCommand struct {
+	RequestID      string
+	DocumentID     uuid.UUID
+	MarkdownSHA256 string
+	Attempt        int
+	ReferenceRunID uuid.UUID
+}
+
+// Validate verifies that the dispatcher has one durable source revision and
+// a stable run ID for idempotent queueing and cancellation.
+func (command PaperReferenceDispatchCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
+	}
+	if err := validateSHA256("markdown_sha256", command.MarkdownSHA256); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidPaperCatalogData, err)
+	}
+	if command.Attempt < 0 {
+		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperCatalogData)
+	}
+	if command.ReferenceRunID == uuid.Nil {
+		return fmt.Errorf("%w: reference_run_id is required", ErrInvalidPaperCatalogData)
 	}
 	if strings.TrimSpace(command.MarkdownSHA256) != "" {
 		if err := validateSHA256("markdown_sha256", command.MarkdownSHA256); err != nil {
@@ -68,17 +90,13 @@ func (command PaperCatalogResolveCommand) Validate() error {
 	if command.Attempt < 0 {
 		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperCatalogData)
 	}
-	if command.Scope == "" {
-		command.Scope = PaperCatalogScopeSource
-	}
-	if command.Scope != PaperCatalogScopeSource && command.Scope != PaperCatalogScopeReference {
-		return fmt.Errorf("%w: unsupported catalog scope %q", ErrInvalidPaperCatalogData, command.Scope)
-	}
-	if command.Scope == PaperCatalogScopeReference && command.CitedDocumentID == uuid.Nil {
-		return fmt.Errorf("%w: cited_document_id is required for reference scope", ErrInvalidPaperCatalogData)
-	}
-	if command.Scope == PaperCatalogScopeSource && command.CitedDocumentID != uuid.Nil {
-		return fmt.Errorf("%w: cited_document_id is only valid for reference scope", ErrInvalidPaperCatalogData)
+	return nil
+}
+
+// Validate verifies the one target document identity.
+func (command PaperCatalogResolveCommand) Validate() error {
+	if command.DocumentID == uuid.Nil {
+		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
 	}
 	return nil
 }

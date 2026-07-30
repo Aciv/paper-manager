@@ -18,8 +18,9 @@ import (
 // processing. It is separate from DocumentHandler so retry, reparse, task
 // progress, and parser controls can be added without growing file endpoints.
 type DocumentProcessHandler struct {
-	documents interfaces.DocumentService
-	spans     appservice.SpanTracker
+	documents  interfaces.DocumentService
+	spans      interfaces.SpanTracker
+	references interfaces.PaperReferenceScheduler
 }
 
 func NewDocumentProcessHandler(documents interfaces.DocumentService) *DocumentProcessHandler {
@@ -27,8 +28,8 @@ func NewDocumentProcessHandler(documents interfaces.DocumentService) *DocumentPr
 }
 
 // NewDocumentProcessHandlerWithSpanTracker is the production DI constructor.
-func NewDocumentProcessHandlerWithSpanTracker(documents interfaces.DocumentService, spans appservice.SpanTracker) *DocumentProcessHandler {
-	return &DocumentProcessHandler{documents: documents, spans: spans}
+func NewDocumentProcessHandlerWithSpanTracker(documents interfaces.DocumentService, spans interfaces.SpanTracker, references interfaces.PaperReferenceScheduler) *DocumentProcessHandler {
+	return &DocumentProcessHandler{documents: documents, spans: spans, references: references}
 }
 
 // Status returns user-safe persistent processing state for a document.
@@ -55,6 +56,14 @@ func (h *DocumentProcessHandler) Status(c *gin.Context) {
 	if err != nil {
 		h.writeError(c, apperrors.NewInternalServerError("load document processing state"), err)
 		return
+	}
+	if h.references != nil {
+		progress, progressErr := h.references.Progress(c.Request.Context(), document.ID)
+		if progressErr != nil {
+			logger.Warn(c.Request.Context(), "load reference scheduler progress failed", "document_id", document.ID, "error", progressErr)
+		} else {
+			view.ReferenceProgress = &progress
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"processing": view})
 }

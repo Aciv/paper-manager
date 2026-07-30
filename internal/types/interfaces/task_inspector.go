@@ -20,6 +20,17 @@ type TaskInspector interface {
 	// truth, this just prevents wasted work.
 	CancelTasksForDocument(ctx context.Context, documentID string) (deleted int, cancelled int, err error)
 
+	// CancelReferenceTasksForRun removes only reference-dispatch and
+	// reference-catalog tasks carrying the exact durable run ID, then signals
+	// matching active workers. It never touches recognition, metadata
+	// extraction, or source-catalog work.
+	CancelReferenceTasksForRun(ctx context.Context, documentID, referenceRunID string) (deleted int, cancelled int, err error)
+
+	// CancelReferenceTasksForDocuments removes scheduler-owned reference catalog
+	// tasks for the listed target placeholders. The ownership/run information is
+	// intentionally held by PaperReferenceScheduler rather than task JSON.
+	CancelReferenceTasksForDocuments(ctx context.Context, documentIDs []string) (deleted int, cancelled int, err error)
+
 	// HasQueuedTasksForDocument reports whether any pending / scheduled
 	// / retry / active task referencing the given document ID still
 	// lives in the queue backend. It is the read-only counterpart of

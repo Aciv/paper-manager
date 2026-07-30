@@ -16,7 +16,9 @@ import (
 	"paperMaster/internal/utils"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // BuiltinRecognizer delegates PDF recognition to the repository's bundled
@@ -100,6 +102,9 @@ func (r *BuiltinRecognizer) Read(ctx context.Context, request *types.Recognition
 	response, err := r.client.Recognize(ctx, rpcRequest)
 	if err != nil {
 		logger.Error(ctx, "builtin document recognition call failed", "document_id", request.DocumentID, "error", err)
+		if status.Code(err) == codes.Unavailable {
+			return nil, fmt.Errorf("%w: %v", types.ErrRecognitionServiceUnavailable, err)
+		}
 		return nil, fmt.Errorf("recognize document through builtin parser: %w", err)
 	}
 	if response == nil {

@@ -60,6 +60,12 @@ export type DocumentProcessingView = {
   documentStatus: DocumentStatus;
   latestAttempt: number;
   stages: ProcessingSpan[];
+  referenceProgress?: {
+    queued: number;
+    running: number;
+    completed: number;
+    cancelled: number;
+  };
 };
 
 export type DocumentBase = {

@@ -454,6 +454,7 @@ function App() {
 				<div><strong>元数据提取</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('extraction')} disabled={busy || paperInfoActive}>重试提取</button></div>
 				<div><strong>论文库查询</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('catalog')} disabled={busy || paperInfoActive}>重试查询</button></div>
 			  </div>
+			  {processing?.referenceProgress && <p className="hint">引用查询：排队 {processing.referenceProgress.queued} · 运行 {processing.referenceProgress.running} · 完成 {processing.referenceProgress.completed} · 已取消 {processing.referenceProgress.cancelled}</p>}
 			  {paperInfoActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消论文信息任务</button>}
 			  <p className="hint">状态来自持久化处理 span；元数据来源来自已落库的论文信息。历史失败请查看 Asynq 死信记录。</p>
 			</section>

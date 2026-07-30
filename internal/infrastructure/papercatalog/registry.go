@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"paperMaster/internal/config"
+	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
 )
 
@@ -54,31 +55,31 @@ func NewRegistryFromConfig(cfg config.Config) (interfaces.PaperCatalogRegistry, 
 	throttle := newProviderThrottle()
 	providers := make([]interfaces.PaperCatalogProvider, 0, len(cfg.PaperCatalogProviders))
 	for _, configuredName := range cfg.PaperCatalogProviders {
-		name := strings.ToLower(strings.TrimSpace(configuredName))
+		name := types.NormalizePaperCatalogProvider(configuredName)
 		var (
 			provider interfaces.PaperCatalogProvider
 			err      error
 		)
 		switch name {
-		case SemanticScholarProvider:
+		case types.PaperCatalogProviderSemanticScholar:
 			provider, err = NewSemanticScholarProvider(
-				newClient(name),
+				newClient(name.String()),
 				cfg.SemanticScholarAPIKey,
 				cfg.PaperCatalogUserAgent,
 			)
-		case OpenAlexProvider:
+		case types.PaperCatalogProviderOpenAlex:
 			provider, err = NewOpenAlexProvider(
-				newClient(name),
+				newClient(name.String()),
 				cfg.OpenAlexAPIKey,
 				cfg.PaperCatalogUserAgent,
 			)
-		case ArXivProvider:
+		case types.PaperCatalogProviderArXiv:
 			provider, err = NewArXivProvider(
-				newClient(name), cfg.PaperCatalogUserAgent, 0,
+				newClient(name.String()), cfg.PaperCatalogUserAgent, 0,
 			)
-		case CrossrefProvider:
+		case types.PaperCatalogProviderCrossref:
 			provider, err = NewCrossrefProvider(
-				newClient(name),
+				newClient(name.String()),
 				cfg.CrossrefMailto,
 				cfg.PaperCatalogUserAgent,
 			)

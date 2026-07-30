@@ -11,28 +11,17 @@ import (
 	"github.com/google/uuid"
 )
 
-// SpanTracker records user-safe lifecycle state for background document work.
-// It deliberately stores bounded error codes/reasons rather than raw provider
-// responses or parser output.
-type SpanTracker interface {
-	Begin(ctx context.Context, documentID uuid.UUID, attempt int, kind types.ProcessingSpanKind, scope, scopeID string, retryCount int) (uuid.UUID, error)
-	Succeed(ctx context.Context, spanID uuid.UUID) error
-	Fail(ctx context.Context, spanID uuid.UUID, code, reason string) error
-	CancelDocument(ctx context.Context, documentID uuid.UUID, code, reason string) error
-	GetView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error)
-	HasActive(ctx context.Context, documentID uuid.UUID, kinds ...types.ProcessingSpanKind) (bool, error)
-	FinalizeAttempt(ctx context.Context, documentID string, attempt int, status string, cause error, code, reason string)
-}
-
 type spanTracker struct {
 	repo interfaces.DocumentProcessingSpanRepository
 }
 
-func NewSpanTracker(repo interfaces.DocumentProcessingSpanRepository) SpanTracker {
+// NewSpanTracker creates the durable application implementation of
+// interfaces.SpanTracker.
+func NewSpanTracker(repo interfaces.DocumentProcessingSpanRepository) interfaces.SpanTracker {
 	return &spanTracker{repo: repo}
 }
 
-func (s *spanTracker) Begin(ctx context.Context, documentID uuid.UUID, attempt int, kind types.ProcessingSpanKind, scope, scopeID string, retryCount int) (uuid.UUID, error) {
+func (s *spanTracker) Begin(ctx context.Context, documentID uuid.UUID, attempt int, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID, retryCount int) (uuid.UUID, error) {
 	if s == nil || s.repo == nil || documentID == uuid.Nil {
 		return uuid.Nil, nil
 	}
@@ -69,6 +58,53 @@ func (s *spanTracker) CancelDocument(ctx context.Context, documentID uuid.UUID, 
 		return nil
 	}
 	return s.repo.CancelActive(ctx, documentID, code, safeSpanReason(reason))
+}
+
+func (s *spanTracker) CancelReferenceRuns(ctx context.Context, documentID uuid.UUID, code, reason string) ([]uuid.UUID, error) {
+	if s == nil || s.repo == nil || documentID == uuid.Nil {
+		return nil, nil
+	}
+	values, err := s.repo.ListActiveScopeIDs(ctx, documentID, types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceBatch)
+	if err != nil {
+		return nil, err
+	}
+	runs := make([]uuid.UUID, 0, len(values))
+	seen := make(map[uuid.UUID]struct{}, len(values))
+	for _, value := range values {
+		parts := types.SplitProcessingSpanScopeID(value)
+		if len(parts) < 3 || parts[0] != string(types.ProcessingSpanCatalogReference) {
+			continue
+		}
+		runID, parseErr := uuid.Parse(parts[1])
+		if parseErr != nil || runID == uuid.Nil {
+			continue
+		}
+		if _, duplicate := seen[runID]; duplicate {
+			continue
+		}
+		seen[runID] = struct{}{}
+		if err := s.repo.ForceCancelScope(ctx, documentID, types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), code, safeSpanReason(reason)); err != nil {
+			return runs, err
+		}
+		batchPrefix := types.ProcessingSpanScopeID(types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()).String() + ":")
+		if err := s.repo.CancelActiveScopePrefix(ctx, documentID, types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceBatch, batchPrefix, code, safeSpanReason(reason)); err != nil {
+			return runs, err
+		}
+		providerPrefix := types.ProcessingSpanScopeID(types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, string(types.ProcessingSpanCatalogReference), runID.String()).String() + ":")
+		if err := s.repo.CancelActiveScopePrefix(ctx, documentID, types.ProcessingSpanCatalogProvider, types.ProcessingSpanScopeProvider, providerPrefix, code, safeSpanReason(reason)); err != nil {
+			return runs, err
+		}
+		runs = append(runs, runID)
+	}
+	return runs, nil
+}
+
+func (s *spanTracker) ReferenceRunActive(ctx context.Context, documentID, runID uuid.UUID) (bool, error) {
+	if s == nil || s.repo == nil || documentID == uuid.Nil || runID == uuid.Nil {
+		return false, nil
+	}
+	cancelled, err := s.repo.IsScopeCancelled(ctx, documentID, types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()))
+	return !cancelled, err
 }
 
 func (s *spanTracker) GetView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error) {
@@ -129,4 +165,4 @@ func spanFailure(err error) (string, string) {
 	return "TASK_FAILED", safeSpanReason(fmt.Sprint(err))
 }
 
-var _ SpanTracker = (*spanTracker)(nil)
+var _ interfaces.SpanTracker = (*spanTracker)(nil)

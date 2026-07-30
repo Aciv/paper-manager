@@ -85,7 +85,7 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	var spanID uuid.UUID
 	if s.spans != nil {
 		var spanErr error
-		spanID, spanErr = s.spans.Begin(ctx, document.ID, attempt, types.ProcessingSpanRecognition, types.TaskScopeDocument, document.ID.String(), retryCount)
+		spanID, spanErr = s.spans.Begin(ctx, document.ID, attempt, types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, document.ID.String()), retryCount)
 		if spanErr != nil {
 			logger.Warn(ctx, "start recognition processing span failed", "document_id", document.ID, "error", spanErr)
 		}
@@ -137,6 +137,9 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	if err != nil {
 		if errors.Is(err, types.ErrUnsupportedRecognitionContentType) {
 			return s.failUnsupportedDocumentRecognition(ctx, document.ID, err)
+		}
+		if errors.Is(err, types.ErrRecognitionServiceUnavailable) {
+			return s.failUnavailableDocumentRecognition(ctx, document.ID, err)
 		}
 		return fmt.Errorf("recognize document: %w", err)
 	}
@@ -423,6 +426,26 @@ func (s *documentService) failUnsupportedDocumentRecognition(ctx context.Context
 	return fmt.Errorf("unsupported document recognition: %w", asynq.SkipRetry)
 }
 
+// failUnavailableDocumentRecognition records a disconnected recognizer as a
+// terminal document failure. A connection-refused gRPC call cannot make
+// progress within the queued task; automatic retries hide the outage behind a
+// processing state. Operators can restore Python and use the normal
+// document retry action, which creates a fresh recognition task.
+func (s *documentService) failUnavailableDocumentRecognition(ctx context.Context, documentID uuid.UUID, cause error) error {
+	message := "document recognition service is unavailable"
+	updated, err := s.repo.UpdateStatusIfCurrent(ctx, documentID, types.DocumentStatusFailed, &message,
+		[]types.DocumentStatus{types.DocumentStatusProcessing})
+	if err != nil {
+		return fmt.Errorf("mark unavailable document recognition failed: %w", err)
+	}
+	if !updated {
+		logger.Info(ctx, "unavailable document recognition status already changed", "document_id", documentID)
+		return nil
+	}
+	logger.Error(ctx, "document recognition service is unavailable", "document_id", documentID, "error", cause)
+	return fmt.Errorf("document recognition service unavailable: %w", asynq.SkipRetry)
+}
+
 // persistBlocks converts parser-owned source-map entries into durable blocks.
 // Images are stored before the database transaction because FileStorage may be
 // remote; on every later failure ProcessDocument deletes these uncommitted
@@ -625,21 +648,65 @@ func NewPaperMetadataExtractTask(
 	}, nil
 }
 
-// NewPaperCatalogResolveTask validates and creates a catalog-resolution task.
-// Source work uses the default queue so it precedes bibliography expansion;
-// reference work uses the low-priority queue. Initial revision-bound work has
-// a deterministic task ID. Explicit retries
-// carry a positive Attempt and get a fresh ID; Asynq retries retain the same
-// payload and therefore the same ID. Metadata-only lookups use a short
-// uniqueness window because no source revision is available for the ID.
+// NewPaperReferenceDispatchTask validates and creates the lightweight
+// bibliography dispatcher. The dispatcher is low priority: it only reads
+// durable citation rows and emits provider batches, while source catalog work
+// remains on the default queue.
+func NewPaperReferenceDispatchTask(
+	payload types.PaperReferenceDispatchPayload,
+	timeout time.Duration,
+	maxRetry int,
+) (*asynq.Task, []asynq.Option, error) {
+	if strings.TrimSpace(payload.ReferenceRunID) == "" {
+		documentID, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse reference dispatcher document id: %w", err)
+		}
+		if documentID == uuid.Nil {
+			return nil, nil, errors.New("reference dispatcher document id must be non-zero")
+		}
+		payload.ReferenceRunID = paperReferenceRunID(
+			documentID,
+			payload.MarkdownSHA256,
+			payload.Attempt,
+		).String()
+	}
+	if err := payload.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if timeout <= 0 {
+		timeout = defaultPaperCatalogTaskTimeout
+	}
+	if maxRetry <= 0 {
+		maxRetry = defaultPaperCatalogTaskMaxRetry
+	}
+	task, err := newPaperInfoJSONTask(types.TypePaperReferenceDispatch, payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode paper reference dispatch task: %w", err)
+	}
+	return task, []asynq.Option{
+		asynq.Queue(types.QueueLow),
+		asynq.MaxRetry(maxRetry),
+		asynq.Timeout(timeout),
+		asynq.TaskID(paperInfoTaskID(
+			types.TypePaperReferenceDispatch,
+			payload.DocumentID,
+			payload.MarkdownSHA256,
+			payload.Attempt,
+			payload.ReferenceRunID,
+		)),
+	}, nil
+}
+
+// NewPaperCatalogResolveTask creates one single-document catalog task. Source
+// work remains on the default queue; scheduler-owned reference work is low
+// priority. Provider assignment and fallback state intentionally stay out of
+// the payload and are claimed at execution time.
 func NewPaperCatalogResolveTask(
 	payload types.PaperCatalogResolvePayload,
 	timeout time.Duration,
 	maxRetry int,
 ) (*asynq.Task, []asynq.Option, error) {
-	if payload.Scope == "" {
-		payload.Scope = types.PaperCatalogScopeSource
-	}
 	if err := payload.Validate(); err != nil {
 		return nil, nil, err
 	}
@@ -654,7 +721,7 @@ func NewPaperCatalogResolveTask(
 		return nil, nil, fmt.Errorf("encode paper catalog resolution task: %w", err)
 	}
 	queue := types.QueueDefault
-	if payload.Scope == types.PaperCatalogScopeReference {
+	if payload.IsReference {
 		queue = types.QueueLow
 	}
 	options := []asynq.Option{
@@ -662,18 +729,13 @@ func NewPaperCatalogResolveTask(
 		asynq.MaxRetry(maxRetry),
 		asynq.Timeout(timeout),
 	}
-	if strings.TrimSpace(payload.MarkdownSHA256) != "" {
-		options = append(options, asynq.TaskID(paperInfoTaskID(
-			types.TypePaperCatalogResolve,
-			payload.DocumentID,
-			payload.MarkdownSHA256,
-			payload.Attempt,
-			string(payload.Scope),
-			payload.CitedDocumentID,
-		)))
-	} else {
-		options = append(options, asynq.Unique(time.Minute))
+	stage := "source"
+	if payload.IsReference {
+		stage = "reference"
 	}
+	options = append(options, asynq.TaskID(paperInfoTaskID(
+		types.TypePaperCatalogResolve, payload.DocumentID, "", 0, stage,
+	)))
 	return task, options, nil
 }
 

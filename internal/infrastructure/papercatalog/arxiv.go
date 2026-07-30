@@ -18,7 +18,9 @@ import (
 )
 
 const (
-	ArXivProvider       = "arxiv"
+	// ArXivProvider is retained as a package compatibility alias. New code
+	// should use types.PaperCatalogProviderArXiv, the central provider identity.
+	ArXivProvider       = string(types.PaperCatalogProviderArXiv)
 	arXivBaseURL        = "https://export.arxiv.org"
 	arXivRequestSpacing = 3 * time.Second
 )

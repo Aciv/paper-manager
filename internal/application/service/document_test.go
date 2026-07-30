@@ -28,6 +28,13 @@ func (s *documentTaskInspectorStub) CancelTasksForDocument(_ context.Context, do
 	return 1, 0, nil
 }
 
+func (*documentTaskInspectorStub) CancelReferenceTasksForRun(context.Context, string, string) (int, int, error) {
+	return 0, 0, nil
+}
+func (*documentTaskInspectorStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
+	return 0, 0, nil
+}
+
 func (*documentTaskInspectorStub) HasQueuedTasksForDocument(context.Context, string) (bool, error) {
 	return false, nil
 }
@@ -666,5 +673,39 @@ func TestProcessDocumentMarksUnsupportedRecognitionFailedWithoutRetry(t *testing
 	}
 	if repo.document.Status != types.DocumentStatusFailed {
 		t.Fatalf("document status = %q, want failed", repo.document.Status)
+	}
+}
+
+func TestProcessDocumentMarksUnavailableRecognizerFailedWithoutRetry(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	source, err := storage.SaveBytes(context.Background(), "paper.pdf", []byte("%PDF-1.7\nsource"))
+	if err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+	}}
+	svc := &documentService{
+		repo: repo, storage: storage,
+		recognizer: &recognitionStub{err: types.ErrRecognitionServiceUnavailable},
+	}
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	err = svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload))
+	if !errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("ProcessDocument() error = %v, want SkipRetry", err)
+	}
+	if repo.document.Status != types.DocumentStatusFailed {
+		t.Fatalf("document status = %q, want failed", repo.document.Status)
+	}
+	if repo.document.ErrorMessage == nil || *repo.document.ErrorMessage != "document recognition service is unavailable" {
+		t.Fatalf("document error message = %v", repo.document.ErrorMessage)
 	}
 }

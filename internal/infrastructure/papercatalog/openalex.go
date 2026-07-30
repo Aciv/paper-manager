@@ -16,7 +16,9 @@ import (
 )
 
 const (
-	OpenAlexProvider = "openalex"
+	// OpenAlexProvider is retained as a package compatibility alias. New code
+	// should use types.PaperCatalogProviderOpenAlex.
+	OpenAlexProvider = string(types.PaperCatalogProviderOpenAlex)
 	openAlexBaseURL  = "https://api.openalex.org"
 	openAlexFields   = "id,doi,display_name,publication_date,publication_year,language,authorships,primary_location,topics,abstract_inverted_index"
 )

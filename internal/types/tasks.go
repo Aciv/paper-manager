@@ -18,7 +18,11 @@ const (
 const (
 	TypeDocumentProcess      = "document:process"       // 文档处理任务
 	TypePaperMetadataExtract = "paper:metadata_extract" // 从 Markdown 和版面块提取论文元数据候选
-	TypePaperCatalogResolve  = "paper:catalog_resolve"  // 查询外部论文库并解析规范元数据
+	// TypePaperReferenceDispatch reads persisted bibliography entries and
+	// schedules provider-owned catalog batches. It performs no provider HTTP
+	// request itself.
+	TypePaperReferenceDispatch = "paper:reference_dispatch"
+	TypePaperCatalogResolve    = "paper:catalog_resolve" // 查询外部论文库并解析规范元数据
 	//TypeKnowledgePostProcess = "knowledge:postprocess"
 	//TypeManualProcess        = "knowledge:manual"
 	//TypeKnowledgeListDelete  = "knowledge:list_delete"

@@ -20,10 +20,12 @@ var (
 // resolution matches it to a stored paper. RawReference preserves the exact
 // extraction text that produced the edge.
 type PaperCitation struct {
+	// source document
 	CitingDocumentID uuid.UUID `gorm:"column:citing_document_id;type:uuid;primaryKey" json:"citingDocumentId"`
-	CitedDocumentID  uuid.UUID `gorm:"column:cited_document_id;type:uuid;primaryKey" json:"citedDocumentId"`
-	RawReference     string    `gorm:"column:raw_reference;type:text;not null" json:"rawReference"`
-	CreatedAt        time.Time `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
+	// cite document
+	CitedDocumentID uuid.UUID `gorm:"column:cited_document_id;type:uuid;primaryKey" json:"citedDocumentId"`
+	RawReference    string    `gorm:"column:raw_reference;type:text;not null" json:"rawReference"`
+	CreatedAt       time.Time `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
 }
 
 // PaperCitationInput is a paper-domain write request. A nil CitedDocumentID

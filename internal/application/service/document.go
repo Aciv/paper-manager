@@ -31,7 +31,7 @@ type documentService struct {
 	taskInspector interfaces.TaskInspector
 	taskEnqueuer  interfaces.TaskEnqueuer
 	recognizer    interfaces.DocumentRecognizer
-	spans         SpanTracker
+	spans         interfaces.SpanTracker
 	// recognitionOutputDir is the trusted shared-volume root for directory
 	// recognizers. It is deliberately separate from upload storage: recognizer
 	// output is untrusted until ProcessDocument validates and copies it.
@@ -93,7 +93,7 @@ func NewDocumentServiceWithProcessingAndSpanTracker(
 	taskInspector interfaces.TaskInspector,
 	taskEnqueuer interfaces.TaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer,
-	spans SpanTracker,
+	spans interfaces.SpanTracker,
 ) interfaces.DocumentService {
 	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, spans)
 }
@@ -101,7 +101,7 @@ func NewDocumentServiceWithProcessingAndSpanTracker(
 func newDocumentServiceWithProcessing(
 	cfg config.Config, repo interfaces.DocumentRepository, storage interfaces.FileStorage,
 	taskInspector interfaces.TaskInspector, taskEnqueuer interfaces.TaskEnqueuer,
-	recognizer interfaces.DocumentRecognizer, spans SpanTracker,
+	recognizer interfaces.DocumentRecognizer, spans interfaces.SpanTracker,
 ) interfaces.DocumentService {
 	return &documentService{
 		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer,

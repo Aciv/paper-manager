@@ -55,7 +55,9 @@ func NewTaskInspector() interfaces.TaskInspector {
 // so a single struct covers Document / ImageMultimodal / PostProcess /
 // Question / Summary / Extract / Manual.
 type DocumentIDProbe struct {
-	DocumentID string `json:"document_id,omitempty"`
+	DocumentID     string `json:"document_id,omitempty"`
+	ReferenceRunID string `json:"reference_run_id,omitempty"`
+	IsReference    bool   `json:"is_reference,omitempty"`
 }
 
 // queuesScanned is the fixed set of queue names this codebase enqueues
@@ -74,9 +76,10 @@ var queuesScanned = []string{
 // deliberately narrow: we don't touch FAQ import / KB-level tasks
 // because the cancel API is per-Document.
 var taskTypesForDocumentCancel = map[string]struct{}{
-	types.TypeDocumentProcess:      {},
-	types.TypePaperMetadataExtract: {},
-	types.TypePaperCatalogResolve:  {},
+	types.TypeDocumentProcess:        {},
+	types.TypePaperMetadataExtract:   {},
+	types.TypePaperReferenceDispatch: {},
+	types.TypePaperCatalogResolve:    {},
 }
 
 // listPageSize caps each Redis LIST call. Asynq pages tasks, so we
@@ -111,6 +114,100 @@ func (a *asynqTaskInspector) CancelTasksForDocument(
 		"active_cancel_signaled", cancelled,
 	)
 	return deleted, cancelled, nil
+}
+
+func (a *asynqTaskInspector) CancelReferenceTasksForRun(ctx context.Context, documentID, referenceRunID string) (int, int, error) {
+	if a == nil || a.inspector == nil || documentID == "" || referenceRunID == "" {
+		return 0, 0, nil
+	}
+	deleted, cancelled := 0, 0
+	for _, queue := range queuesScanned {
+		for _, taskType := range []string{types.TypePaperReferenceDispatch, types.TypePaperCatalogResolve} {
+			deleted += a.deleteMatches(ctx, queue, documentID, taskType, referenceRunID, "pending", a.inspector.ListPendingTasks)
+			deleted += a.deleteMatches(ctx, queue, documentID, taskType, referenceRunID, "scheduled", a.inspector.ListScheduledTasks)
+			deleted += a.deleteMatches(ctx, queue, documentID, taskType, referenceRunID, "retry", a.inspector.ListRetryTasks)
+		}
+		cancelled += a.cancelActiveReferenceMatches(ctx, queue, documentID, referenceRunID)
+	}
+	logger.Info(ctx, "reference catalog run queue cancellation completed", "document_id", documentID, "reference_run_id", referenceRunID, "deleted_from_queue", deleted, "active_cancel_signaled", cancelled)
+	return deleted, cancelled, nil
+}
+
+// CancelReferenceTasksForDocuments removes only the new single-document
+// scheduler-owned reference tasks. Run ownership is looked up by the caller
+// before this best-effort queue sweep, so no run ID needs to leak into JSON.
+func (a *asynqTaskInspector) CancelReferenceTasksForDocuments(ctx context.Context, documentIDs []string) (int, int, error) {
+	if a == nil || a.inspector == nil || len(documentIDs) == 0 {
+		return 0, 0, nil
+	}
+	targets := make(map[string]struct{}, len(documentIDs))
+	for _, id := range documentIDs {
+		if id != "" {
+			targets[id] = struct{}{}
+		}
+	}
+	deleted, cancelled := 0, 0
+	for _, queue := range queuesScanned {
+		for _, state := range []struct {
+			list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)
+			name string
+		}{
+			{a.inspector.ListPendingTasks, "pending"}, {a.inspector.ListScheduledTasks, "scheduled"}, {a.inspector.ListRetryTasks, "retry"},
+		} {
+			page := 1
+			for {
+				tasks, err := state.list(queue, asynq.PageSize(listPageSize), asynq.Page(page))
+				if err != nil {
+					if !errors.Is(err, asynq.ErrQueueNotFound) {
+						logger.Warn(ctx, "list scheduler-owned reference tasks failed", "queue", queue, "state", state.name, "error", err)
+					}
+					break
+				}
+				for _, task := range tasks {
+					if matchesSchedulerReferenceTask(task.Type, task.Payload, targets) {
+						if err := a.inspector.DeleteTask(queue, task.ID); err == nil {
+							deleted++
+						}
+					}
+				}
+				if len(tasks) < listPageSize {
+					break
+				}
+				page++
+			}
+		}
+		page := 1
+		for {
+			tasks, err := a.inspector.ListActiveTasks(queue, asynq.PageSize(listPageSize), asynq.Page(page))
+			if err != nil {
+				break
+			}
+			for _, task := range tasks {
+				if matchesSchedulerReferenceTask(task.Type, task.Payload, targets) {
+					if err := a.inspector.CancelProcessing(task.ID); err == nil {
+						cancelled++
+					}
+				}
+			}
+			if len(tasks) < listPageSize {
+				break
+			}
+			page++
+		}
+	}
+	return deleted, cancelled, nil
+}
+
+func matchesSchedulerReferenceTask(taskType string, payload []byte, targets map[string]struct{}) bool {
+	if taskType != types.TypePaperCatalogResolve {
+		return false
+	}
+	var probe DocumentIDProbe
+	if json.Unmarshal(payload, &probe) != nil || !probe.IsReference {
+		return false
+	}
+	_, ok := targets[probe.DocumentID]
+	return ok
 }
 
 // HasQueuedTasksForDocument reports whether any pending / scheduled /
@@ -233,6 +330,71 @@ func matchesDocument(
 		return false
 	}
 	return probe.DocumentID == documentID
+}
+
+func matchesReferenceRun(taskType string, payload []byte, documentID, runID string) bool {
+	if taskType != types.TypePaperCatalogResolve && taskType != types.TypePaperReferenceDispatch {
+		return false
+	}
+	var probe DocumentIDProbe
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return false
+	}
+	return probe.DocumentID == documentID && probe.ReferenceRunID == runID
+}
+
+func (a *asynqTaskInspector) deleteMatches(ctx context.Context, queue, documentID, taskType, runID, state string, list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)) int {
+	deleted, page := 0, 1
+	for {
+		tasks, err := list(queue, asynq.PageSize(listPageSize), asynq.Page(page))
+		if err != nil {
+			if !errors.Is(err, asynq.ErrQueueNotFound) {
+				logger.Warn(ctx, "list reference catalog tasks failed", "queue", queue, "state", state, "error", err)
+			}
+			return deleted
+		}
+		for _, task := range tasks {
+			if !matchesReferenceRun(task.Type, task.Payload, documentID, runID) {
+				continue
+			}
+			if err := a.inspector.DeleteTask(queue, task.ID); err != nil {
+				logger.Warn(ctx, "delete reference catalog task failed", "queue", queue, "task_id", task.ID, "error", err)
+				continue
+			}
+			deleted++
+		}
+		if len(tasks) < listPageSize {
+			return deleted
+		}
+		page++
+	}
+}
+
+func (a *asynqTaskInspector) cancelActiveReferenceMatches(ctx context.Context, queue, documentID, runID string) int {
+	cancelled, page := 0, 1
+	for {
+		tasks, err := a.inspector.ListActiveTasks(queue, asynq.PageSize(listPageSize), asynq.Page(page))
+		if err != nil {
+			if !errors.Is(err, asynq.ErrQueueNotFound) {
+				logger.Warn(ctx, "list active reference catalog tasks failed", "queue", queue, "error", err)
+			}
+			return cancelled
+		}
+		for _, task := range tasks {
+			if !matchesReferenceRun(task.Type, task.Payload, documentID, runID) {
+				continue
+			}
+			if err := a.inspector.CancelProcessing(task.ID); err != nil {
+				logger.Warn(ctx, "cancel active reference catalog task failed", "queue", queue, "task_id", task.ID, "error", err)
+				continue
+			}
+			cancelled++
+		}
+		if len(tasks) < listPageSize {
+			return cancelled
+		}
+		page++
+	}
 }
 
 func (a *asynqTaskInspector) deletePendingMatches(ctx context.Context, queue, DocumentID string) int {
@@ -376,6 +538,13 @@ func NewNoopTaskInspector() interfaces.TaskInspector { return noopTaskInspector{
 func (noopTaskInspector) CancelTasksForDocument(
 	ctx context.Context, documentID string,
 ) (int, int, error) {
+	return 0, 0, nil
+}
+
+func (noopTaskInspector) CancelReferenceTasksForRun(context.Context, string, string) (int, int, error) {
+	return 0, 0, nil
+}
+func (noopTaskInspector) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
 	return 0, 0, nil
 }
 

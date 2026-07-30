@@ -2,6 +2,7 @@ package docrecognition
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	papersv1 "paperMaster/gen/papers/v1"
@@ -9,12 +10,31 @@ import (
 
 	"github.com/google/uuid"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 type builtinParserClientStub struct {
 	received *papersv1.RecognitionRequest
 	result   *papersv1.RecognitionResult
 	err      error
+}
+
+func TestBuiltinRecognizerClassifiesUnavailableService(t *testing.T) {
+	recognizer := NewBuiltinRecognizerWithClient(&builtinParserClientStub{
+		err: status.Error(codes.Unavailable, "connection refused"),
+	})
+	_, err := recognizer.Read(context.Background(), &types.RecognitionRequest{
+		DocumentID:       uuid.New(),
+		OriginalFilename: "paper.pdf",
+		ContentType:      "application/pdf",
+		SizeBytes:        4,
+		InputMode:        types.RecognitionInputBytes,
+		Content:          []byte("%PDF"),
+	})
+	if !errors.Is(err, types.ErrRecognitionServiceUnavailable) {
+		t.Fatalf("Read() error = %v, want ErrRecognitionServiceUnavailable", err)
+	}
 }
 
 func (s *builtinParserClientStub) Recognize(_ context.Context, request *papersv1.RecognitionRequest, _ ...grpc.CallOption) (*papersv1.RecognitionResult, error) {

@@ -19,6 +19,13 @@ func (*documentQueueProbeStub) CancelTasksForDocument(context.Context, string) (
 	return 0, 0, nil
 }
 
+func (*documentQueueProbeStub) CancelReferenceTasksForRun(context.Context, string, string) (int, int, error) {
+	return 0, 0, nil
+}
+func (*documentQueueProbeStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
+	return 0, 0, nil
+}
+
 func (s *documentQueueProbeStub) HasQueuedTasksForDocument(_ context.Context, documentID string) (bool, error) {
 	return s.queued[documentID], s.errs[documentID]
 }

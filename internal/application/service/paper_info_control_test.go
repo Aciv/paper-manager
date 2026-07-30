@@ -8,6 +8,7 @@ import (
 
 	"paperMaster/internal/config"
 	"paperMaster/internal/types"
+	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -33,6 +34,12 @@ func (q *paperInfoQueueStub) EnqueueContext(
 type paperInfoInspectorStub struct{ queued map[string]bool }
 
 func (*paperInfoInspectorStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
+	return 0, 0, nil
+}
+func (*paperInfoInspectorStub) CancelReferenceTasksForRun(context.Context, string, string) (int, int, error) {
+	return 0, 0, nil
+}
+func (*paperInfoInspectorStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
 	return 0, 0, nil
 }
 func (*paperInfoInspectorStub) HasQueuedTasksForDocument(context.Context, string) (bool, error) {
@@ -63,12 +70,12 @@ func TestPaperInfoControlRetries(t *testing.T) {
 	}
 	queue := &paperInfoQueueStub{}
 	inspector := &paperInfoInspectorStub{queued: map[string]bool{}}
-	controls := NewPaperInfoService(
+	controls := newPaperInfoServiceForTest(
 		config.Config{},
 		documents,
 		nil,
 		nil,
-		nil,
+		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}},
 		papers,
 		queue,
 		inspector,
@@ -92,8 +99,8 @@ func TestPaperInfoControlRetries(t *testing.T) {
 	if err := json.Unmarshal(queue.tasks[1].Payload(), &catalog); err != nil {
 		t.Fatal(err)
 	}
-	if extraction.Attempt <= 0 || catalog.Attempt <= 0 || extraction.Attempt == catalog.Attempt {
-		t.Fatalf("manual retry attempts = extraction:%d catalog:%d, want distinct positive values", extraction.Attempt, catalog.Attempt)
+	if extraction.Attempt <= 0 || catalog.DocumentID != documentID.String() || catalog.IsReference {
+		t.Fatalf("manual retries = extraction:%#v catalog:%#v", extraction, catalog)
 	}
 }
 
@@ -132,12 +139,12 @@ func TestPaperInfoControlAllowsUnknownCitationCatalogRetry(t *testing.T) {
 		CitingDocumentID: citingID, CitedDocumentID: placeholderID, RawReference: "A referenced paper.",
 	}}
 	queue := &paperInfoQueueStub{}
-	controls := NewPaperInfoService(
+	controls := newPaperInfoServiceForTest(
 		config.Config{},
 		documents,
 		nil,
 		nil,
-		nil,
+		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}},
 		papers,
 		queue,
 		&paperInfoInspectorStub{queued: map[string]bool{}},
@@ -154,8 +161,8 @@ func TestPaperInfoControlAllowsUnknownCitationCatalogRetry(t *testing.T) {
 	if err := json.Unmarshal(queue.tasks[0].Payload(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.Scope != types.PaperCatalogScopeReference || payload.DocumentID != citingID.String() || payload.CitedDocumentID != placeholderID.String() {
-		t.Fatalf("unknown retry payload = %#v, want reference scope rooted at citing document", payload)
+	if !payload.IsReference || payload.DocumentID != placeholderID.String() {
+		t.Fatalf("unknown retry payload = %#v, want single reference target", payload)
 	}
 }
 
@@ -177,28 +184,23 @@ func TestPaperInfoControlFansOutUnknownRetryAcrossIncomingCitations(t *testing.T
 		CitingDocumentID: secondSourceID, CitedDocumentID: placeholderID, RawReference: "Second reference.",
 	}}
 	queue := &paperInfoQueueStub{}
-	controls := NewPaperInfoService(
-		config.Config{}, documents, nil, nil, nil, papers, queue,
+	controls := newPaperInfoServiceForTest(
+		config.Config{}, documents, nil, nil, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}}, papers, queue,
 		&paperInfoInspectorStub{queued: map[string]bool{}}, nil,
 	)
 	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
 		t.Fatalf("RetryCatalogResolution() error = %v", err)
 	}
-	if len(queue.tasks) != 2 {
-		t.Fatalf("unknown retry queued %d tasks, want 2", len(queue.tasks))
+	if len(queue.tasks) != 1 {
+		t.Fatalf("unknown retry queued %d tasks, want one deduplicated target", len(queue.tasks))
 	}
-	seenSources := make(map[string]bool, 2)
 	for _, task := range queue.tasks {
 		var payload types.PaperCatalogResolvePayload
 		if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload.Scope != types.PaperCatalogScopeReference || payload.CitedDocumentID != placeholderID.String() {
+		if !payload.IsReference || payload.DocumentID != placeholderID.String() {
 			t.Fatalf("unknown retry payload = %#v, want reference task", payload)
 		}
-		seenSources[payload.DocumentID] = true
-	}
-	if !seenSources[firstSourceID.String()] || !seenSources[secondSourceID.String()] {
-		t.Fatalf("unknown retry sources = %#v, want both incoming citations", seenSources)
 	}
 }

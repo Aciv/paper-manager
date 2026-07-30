@@ -27,10 +27,10 @@ func (r *documentProcessingSpanRepository) UpsertRunning(ctx context.Context, sp
 		span.Attempt = 1
 	}
 	if span.Scope == "" {
-		span.Scope = types.TaskScopeDocument
+		span.Scope = types.ProcessingSpanScopeDocument
 	}
 	if span.ScopeID == "" {
-		span.ScopeID = span.DocumentID.String()
+		span.ScopeID = types.ComposeProcessingSpanScopeID(span.Kind, span.DocumentID.String())
 	}
 	if len(span.Attributes) == 0 {
 		span.Attributes = types.JSON(`{}`)
@@ -96,6 +96,58 @@ func (r *documentProcessingSpanRepository) CancelActive(ctx context.Context, doc
 	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND status IN ?", documentID, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).Updates(map[string]interface{}{"status": types.ProcessingSpanCancelled, "error_code": code, "error_reason": reason, "finished_at": now}).Error
 	if err != nil {
 		logger.Error(ctx, "cancel processing spans failed", "document_id", documentID, "error", err)
+	}
+	return err
+}
+
+func (r *documentProcessingSpanRepository) HasActiveScope(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND kind = ? AND scope = ? AND scope_id = ? AND status IN ?", documentID, kind, scope, scopeID, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).Count(&count).Error
+	return count > 0, err
+}
+
+func (r *documentProcessingSpanRepository) ListActiveScopeIDs(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope) ([]types.ProcessingSpanScopeID, error) {
+	var ids []string
+	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND kind = ? AND scope = ? AND status IN ?", documentID, kind, scope, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).Distinct("scope_id").Pluck("scope_id", &ids).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make([]types.ProcessingSpanScopeID, len(ids))
+	for index, id := range ids {
+		result[index] = types.ProcessingSpanScopeID(id)
+	}
+	return result, nil
+}
+
+func (r *documentProcessingSpanRepository) CancelActiveScope(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID, code, reason string) error {
+	now := time.Now().UTC()
+	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND kind = ? AND scope = ? AND scope_id = ? AND status IN ?", documentID, kind, scope, scopeID, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).Updates(map[string]interface{}{"status": types.ProcessingSpanCancelled, "error_code": code, "error_reason": reason, "finished_at": now}).Error
+	if err != nil {
+		logger.Error(ctx, "cancel scoped processing spans failed", "document_id", documentID, "scope", scope, "scope_id", scopeID, "error", err)
+	}
+	return err
+}
+
+func (r *documentProcessingSpanRepository) CancelActiveScopePrefix(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, prefix types.ProcessingSpanScopeID, code, reason string) error {
+	now := time.Now().UTC()
+	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND kind = ? AND scope = ? AND scope_id LIKE ? AND status IN ?", documentID, kind, scope, prefix+"%", []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).Updates(map[string]interface{}{"status": types.ProcessingSpanCancelled, "error_code": code, "error_reason": reason, "finished_at": now}).Error
+	if err != nil {
+		logger.Error(ctx, "cancel prefixed processing spans failed", "document_id", documentID, "scope", scope, "prefix", prefix, "error", err)
+	}
+	return err
+}
+
+func (r *documentProcessingSpanRepository) IsScopeCancelled(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID) (bool, error) {
+	var count int64
+	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND kind = ? AND scope = ? AND scope_id = ? AND status = ?", documentID, kind, scope, scopeID, types.ProcessingSpanCancelled).Count(&count).Error
+	return count > 0, err
+}
+
+func (r *documentProcessingSpanRepository) ForceCancelScope(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID, code, reason string) error {
+	now := time.Now().UTC()
+	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND kind = ? AND scope = ? AND scope_id = ?", documentID, kind, scope, scopeID).Updates(map[string]interface{}{"status": types.ProcessingSpanCancelled, "error_code": code, "error_reason": reason, "finished_at": now}).Error
+	if err != nil {
+		logger.Error(ctx, "force cancel processing span failed", "document_id", documentID, "scope", scope, "scope_id", scopeID, "error", err)
 	}
 	return err
 }

@@ -35,7 +35,7 @@ type AsynqTaskParams struct {
 	PaperInfoService interfaces.PaperInfoService         `optional:"true"`
 	TaskEnqueuer     interfaces.TaskEnqueuer             `optional:"true"`
 	DeadLetterRepo   interfaces.TaskDeadLetterRepository `optional:"true"`
-	SpanTracker      service.SpanTracker                 `optional:"true"`
+	SpanTracker      interfaces.SpanTracker              `optional:"true"`
 }
 
 const defaultRedisOpTimeoutMs = 500
@@ -217,6 +217,9 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 				params.PaperInfoService,
 			)
 		})
+		mux.HandleFunc(types.TypePaperReferenceDispatch, func(ctx context.Context, task *asynq.Task) error {
+			return processPaperReferenceDispatchTask(ctx, task, params.PaperInfoService)
+		})
 	}
 
 	go func() {
@@ -251,17 +254,36 @@ func processPaperMetadataExtractTask(
 	if err != nil {
 		return classifyPaperTaskError(err)
 	}
-	if !resolvable {
-		logger.Info(ctx, "paper catalog resolution not queued",
-			"reason", "title and DOI are both unavailable")
-		return nil
-	}
 	if enqueuer == nil {
 		return errors.New("document task enqueuer is not configured")
 	}
-	// begin Catalog recognition
-	catalogTask, options, err := service.NewPaperCatalogResolveTask(
-		types.PaperCatalogResolvePayload{
+	// Source catalog lookup and bibliography dispatch are independent peers.
+	// Both are enqueued only after extraction has committed the metadata and
+	// citation snapshot; the dispatcher never waits for a source match.
+	if resolvable {
+		catalogTask, options, buildErr := service.NewPaperCatalogResolveTask(
+			types.PaperCatalogResolvePayload{
+				RequestID:  payload.RequestID,
+				DocumentID: payload.DocumentID,
+			},
+			cfg.PaperCatalogTaskTimeout,
+			cfg.PaperCatalogTaskMaxRetry,
+		)
+		if buildErr != nil {
+			return skipPaperTask(buildErr)
+		}
+		if err := enqueueTask(ctx, enqueuer, catalogTask, options, payload.DocumentID); err != nil {
+			// Extraction writes are idempotent. Returning this error makes Asynq
+			// retry the extraction task and therefore recover the lost handoff.
+			return err
+		}
+	} else {
+		logger.Info(ctx, "source paper catalog resolution not queued",
+			"reason", "title and DOI are both unavailable")
+	}
+
+	dispatchTask, options, err := service.NewPaperReferenceDispatchTask(
+		types.PaperReferenceDispatchPayload{
 			RequestID:      payload.RequestID,
 			DocumentID:     payload.DocumentID,
 			MarkdownSHA256: payload.MarkdownSHA256,
@@ -273,15 +295,7 @@ func processPaperMetadataExtractTask(
 	if err != nil {
 		return skipPaperTask(err)
 	}
-	if err := enqueueTask(
-		ctx,
-		enqueuer,
-		catalogTask,
-		options,
-		payload.DocumentID,
-	); err != nil {
-		// Extraction writes are idempotent. Returning this error makes Asynq
-		// retry the extraction task and therefore recover the lost handoff.
+	if err := enqueueTask(ctx, enqueuer, dispatchTask, options, payload.DocumentID); err != nil {
 		return err
 	}
 	return nil
@@ -338,6 +352,29 @@ func processPaperCatalogResolveTask(
 	}
 	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
 	if err := info.ResolveMetadata(ctx, command); err != nil {
+		return classifyPaperTaskError(err)
+	}
+	return nil
+}
+
+func processPaperReferenceDispatchTask(
+	ctx context.Context,
+	task *asynq.Task,
+	info interfaces.PaperInfoService,
+) error {
+	if task == nil {
+		return skipPaperTask(errors.New("paper reference dispatch task is required"))
+	}
+	var payload types.PaperReferenceDispatchPayload
+	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+		return skipPaperTask(fmt.Errorf("decode paper reference dispatch payload: %w", err))
+	}
+	command, err := payload.Command()
+	if err != nil {
+		return skipPaperTask(err)
+	}
+	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
+	if err := info.DispatchReferences(ctx, command); err != nil {
 		return classifyPaperTaskError(err)
 	}
 	return nil
@@ -494,7 +531,7 @@ type deadLetterDocumentListDeletePayload struct {
 // errors are logged and swallowed. The dead-letter record is the source of
 // truth — this is purely a UX shortcut so users don't wait for the
 // housekeeping cron's next sweep.
-func newDeadLetterDocumentFailer(documents interfaces.DocumentService, tracker service.SpanTracker) asynqdl.OnDeadLetter {
+func newDeadLetterDocumentFailer(documents interfaces.DocumentService, tracker interfaces.SpanTracker) asynqdl.OnDeadLetter {
 	if documents == nil {
 		return nil
 	}

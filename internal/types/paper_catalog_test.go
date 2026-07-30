@@ -67,8 +67,7 @@ func TestPaperCatalogCandidateValidate(t *testing.T) {
 
 func TestPaperCatalogResolveCommandValidate(t *testing.T) {
 	command := PaperCatalogResolveCommand{
-		DocumentID:     uuid.New(),
-		MarkdownSHA256: validTestSHA256(),
+		DocumentID: uuid.New(),
 	}
 	if err := command.Validate(); err != nil {
 		t.Fatalf("valid catalog command rejected: %v", err)

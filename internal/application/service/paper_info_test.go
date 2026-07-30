@@ -16,11 +16,40 @@ import (
 	"time"
 
 	"paperMaster/internal/config"
+	"paperMaster/internal/infrastructure/papercatalog"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
 )
+
+// newPaperInfoServiceForTest keeps test setup concise while still injecting
+// the same infrastructure memory scheduler used by Lite mode. Production
+// constructors must receive their scheduler from DI explicitly.
+func newPaperInfoServiceForTest(
+	cfg config.Config,
+	documents interfaces.DocumentRepository,
+	storage interfaces.FileStorage,
+	extractor interfaces.PaperMetadataExtractor,
+	catalogs interfaces.PaperCatalogRegistry,
+	papers interfaces.PaperService,
+	tasks interfaces.TaskEnqueuer,
+	inspector interfaces.TaskInspector,
+	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
+) interfaces.PaperInfoService {
+	schedulerCfg := cfg
+	if len(schedulerCfg.PaperCatalogProviders) == 0 && catalogs != nil {
+		for _, provider := range catalogs.Providers() {
+			schedulerCfg.PaperCatalogProviders = append(
+				schedulerCfg.PaperCatalogProviders, provider.Name(),
+			)
+		}
+	}
+	return NewPaperInfoService(
+		cfg, documents, storage, extractor, catalogs, papers, tasks, inspector,
+		referenceLimiter, papercatalog.NewMemoryReferenceScheduler(schedulerCfg),
+	)
+}
 
 type paperInfoStorageStub struct {
 	content map[string][]byte
@@ -99,8 +128,8 @@ type paperInfoSpanStart struct {
 	documentID uuid.UUID
 	attempt    int
 	kind       types.ProcessingSpanKind
-	scope      string
-	scopeID    string
+	scope      types.ProcessingSpanScope
+	scopeID    types.ProcessingSpanScopeID
 }
 
 type paperInfoSpanStub struct {
@@ -113,7 +142,8 @@ func (s *paperInfoSpanStub) Begin(
 	documentID uuid.UUID,
 	attempt int,
 	kind types.ProcessingSpanKind,
-	scope, scopeID string,
+	scope types.ProcessingSpanScope,
+	scopeID types.ProcessingSpanScopeID,
 	_ int,
 ) (uuid.UUID, error) {
 	s.mu.Lock()
@@ -133,6 +163,12 @@ func (*paperInfoSpanStub) Fail(context.Context, uuid.UUID, string, string) error
 }
 func (*paperInfoSpanStub) CancelDocument(context.Context, uuid.UUID, string, string) error {
 	return nil
+}
+func (*paperInfoSpanStub) CancelReferenceRuns(context.Context, uuid.UUID, string, string) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (*paperInfoSpanStub) ReferenceRunActive(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
+	return true, nil
 }
 func (*paperInfoSpanStub) GetView(context.Context, types.Document) (types.DocumentProcessingView, error) {
 	return types.DocumentProcessingView{}, nil
@@ -342,7 +378,7 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 2},
 		documents,
 		&paperInfoStorageStub{content: map[string][]byte{"markdown/test.md": markdown}},
@@ -415,7 +451,7 @@ func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{content: map[string][]byte{"markdown/original.md": markdown}},
@@ -479,7 +515,7 @@ func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
 		provider("crossref", testCatalogCandidate("crossref", "10.1000/exact", "Exact DOI title", 0.1)),
 		provider("openalex", testCatalogCandidate("openalex", "", "A Reliable Paper", 1)),
 	}}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 2},
 		documents,
 		&paperInfoStorageStub{},
@@ -534,7 +570,7 @@ func TestProviderSpansDistinguishConcurrentReferenceTargets(t *testing.T) {
 			query,
 			sourceID,
 			1,
-			providerSpanScopeID(types.PaperCatalogScopeReference, sourceID, targetID),
+			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, targetID.String()),
 		); err != nil {
 			t.Fatalf("selectCatalogCandidate() error = %v", err)
 		}
@@ -543,13 +579,13 @@ func TestProviderSpansDistinguishConcurrentReferenceTargets(t *testing.T) {
 		t.Fatalf("provider span starts = %d, want 2", len(spans.starts))
 	}
 	first, second := spans.starts[0], spans.starts[1]
-	if first.scope != "provider" || second.scope != "provider" || first.scopeID == second.scopeID {
+	if first.scope != types.ProcessingSpanScopeProvider || second.scope != types.ProcessingSpanScopeProvider || first.scopeID == second.scopeID {
 		t.Fatalf("provider span scopes = %#v, %#v; reference targets must not share a span key", first, second)
 	}
-	if want := "reference:" + firstReferenceID.String() + ":openalex"; first.scopeID != want {
+	if want := types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, firstReferenceID.String()).String(), types.PaperCatalogProviderOpenAlex.String()); first.scopeID != want {
 		t.Fatalf("first provider scope id = %q, want %q", first.scopeID, want)
 	}
-	if want := "reference:" + secondReferenceID.String() + ":openalex"; second.scopeID != want {
+	if want := types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, secondReferenceID.String()).String(), types.PaperCatalogProviderOpenAlex.String()); second.scopeID != want {
 		t.Fatalf("second provider scope id = %q, want %q", second.scopeID, want)
 	}
 }
@@ -599,7 +635,7 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -621,8 +657,7 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 	// Reference resolution is independent low-priority work. The source task
 	// must not synchronously inspect an entire bibliography.
 	err = service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: documentID, MarkdownSHA256: revision,
-		Scope: types.PaperCatalogScopeReference, CitedDocumentID: placeholderID,
+		DocumentID: placeholderID, IsReference: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -634,7 +669,7 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 	}
 }
 
-func TestPaperInfoResolveSourceQueuesBoundedDeduplicatedReferences(t *testing.T) {
+func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *testing.T) {
 	documentID := uuid.New()
 	first := uuid.New()
 	second := uuid.New()
@@ -652,14 +687,24 @@ func TestPaperInfoResolveSourceQueuesBoundedDeduplicatedReferences(t *testing.T)
 		{CitingDocumentID: documentID, CitedDocumentID: second, RawReference: "Grace. 2023. Two. doi:10.1000/two"},
 	}
 	queue := &paperInfoQueueStub{}
-	service := NewPaperInfoService(config.Config{PaperCatalogConcurrency: 1, PaperReferenceCatalogMaxPerDocument: 2}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1, PaperReferenceCatalogMaxPerDocument: 2}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
 		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/source", "Source Paper", 1)}, nil
 	}}}}, papers, queue, nil, nil)
 	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID, MarkdownSHA256: revision}); err != nil {
 		t.Fatal(err)
 	}
+	if len(queue.tasks) != 0 {
+		t.Fatalf("source catalog task queued reference work = %d, want 0", len(queue.tasks))
+	}
+	if err := service.DispatchReferences(context.Background(), types.PaperReferenceDispatchCommand{
+		DocumentID:     documentID,
+		MarkdownSHA256: revision,
+		ReferenceRunID: paperReferenceRunID(documentID, revision, 0),
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if len(queue.tasks) != 2 {
-		t.Fatalf("reference tasks = %d, want two distinct bounded tasks", len(queue.tasks))
+		t.Fatalf("reference tasks = %d, want two deduplicated targets", len(queue.tasks))
 	}
 	seen := map[string]bool{}
 	for _, task := range queue.tasks {
@@ -667,13 +712,21 @@ func TestPaperInfoResolveSourceQueuesBoundedDeduplicatedReferences(t *testing.T)
 		if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 			t.Fatal(err)
 		}
-		if payload.Scope != types.PaperCatalogScopeReference || payload.CitedDocumentID == "" {
+		if !payload.IsReference {
 			t.Fatalf("reference task payload = %#v", payload)
 		}
-		seen[payload.CitedDocumentID] = true
+		seen[payload.DocumentID] = true
 	}
 	if !seen[first.String()] || !seen[second.String()] || seen[duplicate.String()] {
 		t.Fatalf("deduplicated references = %#v", seen)
+	}
+}
+
+func TestPaperInfoReferenceTaskCarriesOnlyTarget(t *testing.T) {
+	payload := types.PaperCatalogResolvePayload{DocumentID: uuid.NewString(), IsReference: true}
+	command, err := payload.Command()
+	if err != nil || !command.IsReference || command.DocumentID.String() != payload.DocumentID {
+		t.Fatalf("single-target reference command = %#v, err=%v", command, err)
 	}
 }
 
@@ -689,7 +742,7 @@ func TestPaperInfoResolveSourceBackfillsBlankDOIWithoutOverwritingConflict(t *te
 	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
 		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1)}, nil
 	}}
-	service := NewPaperInfoService(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
 	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
 		t.Fatal(err)
 	}
@@ -721,7 +774,7 @@ func TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup(t *testing.T
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -764,7 +817,7 @@ func TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup(t *testing.T) {
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -817,7 +870,7 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -830,9 +883,7 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID:      citingID,
-		Scope:           types.PaperCatalogScopeReference,
-		CitedDocumentID: unknownID,
+		DocumentID: unknownID, IsReference: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -850,7 +901,7 @@ func TestPaperInfoResolveUnknownSourceScopeIsUnavailable(t *testing.T) {
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID: unknownID, Status: types.DocumentStatusUnknown,
 	})
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -903,7 +954,7 @@ func TestPaperInfoResolveUnknownReferenceRepointsCitationToStoredPaper(t *testin
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -916,9 +967,7 @@ func TestPaperInfoResolveUnknownReferenceRepointsCitationToStoredPaper(t *testin
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID:      citingID,
-		Scope:           types.PaperCatalogScopeReference,
-		CitedDocumentID: unknownID,
+		DocumentID: unknownID, IsReference: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -960,7 +1009,7 @@ func TestPaperInfoResolveMetadataAllowsProcessingDocumentWithoutMarkdown(t *test
 			}, nil
 		},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -993,7 +1042,7 @@ func TestPaperInfoResolveMetadataRejectsDeletingDocument(t *testing.T) {
 		ID:     documentID,
 		Status: types.DocumentStatusDeleting,
 	})
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -1110,7 +1159,7 @@ func TestFindStoredCatalogDocumentFallsBackToNormalizedTitle(t *testing.T) {
 		Title:      "Reliable Document Understanding: A Study",
 		Authors:    []types.PaperAuthor{{Name: "Ada Lovelace"}},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
@@ -1152,7 +1201,7 @@ func TestFindStoredCatalogDocumentRejectsTitleWithDifferentAuthors(t *testing.T)
 		Title:      "A Shared Paper Title",
 		Authors:    []types.PaperAuthor{{Name: "Grace Hopper"}},
 	}
-	service := NewPaperInfoService(
+	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},

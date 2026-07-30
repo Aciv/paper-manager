@@ -48,13 +48,33 @@ func TestPaperMetadataExtractPayloadRejectsInvalidFields(t *testing.T) {
 	}
 }
 
+func TestPaperReferenceDispatchPayloadCommand(t *testing.T) {
+	documentID, runID := uuid.New(), uuid.New()
+	payload := PaperReferenceDispatchPayload{
+		RequestID:      " request-1 ",
+		DocumentID:     documentID.String(),
+		MarkdownSHA256: strings.ToUpper(validTestSHA256()),
+		Attempt:        2,
+		ReferenceRunID: runID.String(),
+	}
+	command, err := payload.Command()
+	if err != nil {
+		t.Fatalf("convert valid reference dispatcher payload: %v", err)
+	}
+	if command.DocumentID != documentID || command.ReferenceRunID != runID || command.RequestID != "request-1" || command.MarkdownSHA256 != validTestSHA256() {
+		t.Fatalf("dispatcher command = %#v", command)
+	}
+	if err := command.Validate(); err != nil {
+		t.Fatalf("converted dispatcher command is invalid: %v", err)
+	}
+	if err := (PaperReferenceDispatchPayload{DocumentID: documentID.String(), MarkdownSHA256: validTestSHA256()}).Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
+		t.Fatalf("dispatcher payload without run id error = %v", err)
+	}
+}
+
 func TestPaperCatalogResolvePayloadCommand(t *testing.T) {
 	documentID := uuid.New()
-	payload := PaperCatalogResolvePayload{
-		DocumentID:     documentID.String(),
-		MarkdownSHA256: validTestSHA256(),
-		Attempt:        1,
-	}
+	payload := PaperCatalogResolvePayload{DocumentID: documentID.String()}
 
 	command, err := payload.Command()
 	if err != nil {
@@ -68,11 +88,8 @@ func TestPaperCatalogResolvePayloadCommand(t *testing.T) {
 	}
 }
 
-func TestPaperCatalogResolvePayloadRejectsInvalidRevision(t *testing.T) {
-	payload := PaperCatalogResolvePayload{
-		DocumentID:     uuid.NewString(),
-		MarkdownSHA256: "invalid",
-	}
+func TestPaperCatalogResolvePayloadRejectsInvalidDocumentID(t *testing.T) {
+	payload := PaperCatalogResolvePayload{DocumentID: "invalid"}
 	if err := payload.Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
 		t.Fatalf("expected ErrInvalidPaperInfoTaskPayload, got %v", err)
 	}
@@ -84,26 +101,19 @@ func TestPaperCatalogResolvePayloadAllowsUnknownWithoutRevision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("source-free catalog payload rejected: %v", err)
 	}
-	if command.MarkdownSHA256 != "" {
-		t.Fatalf("unexpected Markdown revision %q", command.MarkdownSHA256)
+	if command.IsReference {
+		t.Fatal("source payload unexpectedly marked reference")
 	}
 }
 
-func TestPaperCatalogResolvePayloadReferenceScope(t *testing.T) {
+func TestPaperCatalogResolvePayloadReferenceTarget(t *testing.T) {
 	documentID := uuid.New()
-	citedID := uuid.New()
-	payload := PaperCatalogResolvePayload{
-		DocumentID: documentID.String(), Scope: PaperCatalogScopeReference,
-		CitedDocumentID: citedID.String(), MarkdownSHA256: validTestSHA256(),
-	}
+	payload := PaperCatalogResolvePayload{DocumentID: documentID.String(), IsReference: true}
 	command, err := payload.Command()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if command.Scope != PaperCatalogScopeReference || command.CitedDocumentID != citedID {
+	if !command.IsReference || command.DocumentID != documentID {
 		t.Fatalf("reference command = %#v", command)
-	}
-	if err := (PaperCatalogResolvePayload{DocumentID: documentID.String(), Scope: PaperCatalogScopeReference}).Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
-		t.Fatalf("reference payload without cited ID error = %v", err)
 	}
 }

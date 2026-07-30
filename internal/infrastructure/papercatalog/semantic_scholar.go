@@ -17,7 +17,9 @@ import (
 )
 
 const (
-	SemanticScholarProvider = "semantic_scholar"
+	// SemanticScholarProvider is retained as a package compatibility alias.
+	// New code should use types.PaperCatalogProviderSemanticScholar.
+	SemanticScholarProvider = string(types.PaperCatalogProviderSemanticScholar)
 	semanticScholarBaseURL  = "https://api.semanticscholar.org"
 	semanticScholarFields   = "title,abstract,authors,externalIds,url,venue,year,publicationDate,journal,fieldsOfStudy"
 )

@@ -23,6 +23,13 @@ type PaperInfoService interface {
 		ctx context.Context,
 		command types.PaperCatalogResolveCommand,
 	) error
+	// DispatchReferences reloads persisted citations for one Markdown revision,
+	// deduplicates and partitions unresolved placeholders, then queues
+	// provider-owned catalog-resolution batches. It does not call providers.
+	DispatchReferences(
+		ctx context.Context,
+		command types.PaperReferenceDispatchCommand,
+	) error
 	// RetryExtraction enqueues extraction for the current durable Markdown
 	// revision. It rejects source-free placeholders, unparsed documents, and
 	// active span attempts.

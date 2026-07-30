@@ -13,6 +13,12 @@ import (
 // The document task treats it as terminal rather than wasting retry attempts.
 var ErrUnsupportedRecognitionContentType = errors.New("document recognizer does not support content type")
 
+// ErrRecognitionServiceUnavailable marks a recognizer transport with no
+// reachable service. The document workflow records this as a terminal,
+// user-visible failure instead of leaving the document in processing while a
+// disconnected local parser consumes automatic retry attempts.
+var ErrRecognitionServiceUnavailable = errors.New("document recognition service is unavailable")
+
 // RecognitionInputMode describes how a worker supplies a source document to
 // an external recognition service. Bytes are passed directly in-process;
 // file-path and URL modes let the service fetch the source by reference.

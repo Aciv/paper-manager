@@ -30,3 +30,21 @@ func TestMatchesDocumentUsesDocumentIDPayloadField(t *testing.T) {
 		t.Fatal("task-type-specific probe selected the wrong paper task")
 	}
 }
+
+func TestMatchesReferenceRunScopesCancellationToOneRun(t *testing.T) {
+	const documentID = "39a2d54f-412a-4c6c-84e1-9a9ea5034c6d"
+	const runID = "6e7db7c8-ee58-4ca9-9974-42db08b06b99"
+	payload := []byte(`{"document_id":"` + documentID + `","reference_run_id":"` + runID + `"}`)
+	if !matchesReferenceRun("paper:catalog_resolve", payload, documentID, runID) {
+		t.Fatal("reference batch with matching run id was not selected")
+	}
+	if !matchesReferenceRun("paper:reference_dispatch", payload, documentID, runID) {
+		t.Fatal("reference dispatcher with matching run id was not selected")
+	}
+	if matchesReferenceRun("paper:catalog_resolve", payload, documentID, "other-run") {
+		t.Fatal("reference batch for a different run was selected")
+	}
+	if matchesReferenceRun("paper:metadata_extract", payload, documentID, runID) {
+		t.Fatal("metadata extraction was selected for reference-run cancellation")
+	}
+}

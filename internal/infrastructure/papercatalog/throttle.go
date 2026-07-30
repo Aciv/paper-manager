@@ -43,9 +43,24 @@ func (p *rateLimitedProvider) Search(ctx context.Context, query types.PaperLooku
 	defer release()
 	candidates, err := p.provider.Search(ctx, query)
 	if err != nil {
+		cooldown := time.Duration(0)
 		var retryAfter interface{ TaskRetryAfter() time.Duration }
 		if errors.As(err, &retryAfter) && retryAfter.TaskRetryAfter() > 0 {
-			_ = p.throttle.Cooldown(context.WithoutCancel(ctx), p.Name(), retryAfter.TaskRetryAfter())
+			cooldown = retryAfter.TaskRetryAfter()
+		}
+		var providerErr *ProviderError
+		if cooldown <= 0 && errors.As(err, &providerErr) && providerErr.StatusCode == 429 {
+			// Public APIs frequently omit Retry-After. Keep this provider out
+			// of the shared rotation for a conservative multiple of its normal
+			// spacing instead of immediately feeding every waiting worker into
+			// another 429.
+			cooldown = 3 * p.spacing
+			if cooldown < time.Second {
+				cooldown = time.Second
+			}
+		}
+		if cooldown > 0 {
+			_ = p.throttle.Cooldown(context.WithoutCancel(ctx), p.Name(), cooldown)
 		}
 	}
 	return candidates, err

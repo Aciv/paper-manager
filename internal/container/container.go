@@ -35,6 +35,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(paperextraction.NewExtractor))
 	must(dependencies.Provide(papercatalog.NewRegistryFromConfig))
 	must(dependencies.Provide(papercatalog.NewReferenceCatalogLimiter))
+	must(dependencies.Provide(papercatalog.NewReferenceScheduler))
 	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessingAndSpanTracker))
 	must(dependencies.Provide(appservice.NewPaperService))
 	must(dependencies.Provide(appservice.NewPaperInfoServiceWithSpanTracker))

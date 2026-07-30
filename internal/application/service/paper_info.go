@@ -9,9 +9,11 @@ import (
 	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -73,21 +75,23 @@ var (
 // paperInfoService coordinates durable document state, Python extraction,
 // external catalogs, and the canonical PaperService boundary.
 type paperInfoService struct {
-	cfg              config.Config
-	documents        interfaces.DocumentRepository
-	storage          interfaces.FileStorage
-	extractor        interfaces.PaperMetadataExtractor
-	catalogs         interfaces.PaperCatalogRegistry
-	papers           interfaces.PaperService
-	tasks            interfaces.TaskEnqueuer
-	inspector        interfaces.TaskInspector
-	referenceLimiter interfaces.PaperReferenceCatalogLimiter
-	spans            SpanTracker
-	maxConcurrency   int
+	cfg                config.Config
+	documents          interfaces.DocumentRepository
+	storage            interfaces.FileStorage
+	extractor          interfaces.PaperMetadataExtractor
+	catalogs           interfaces.PaperCatalogRegistry
+	papers             interfaces.PaperService
+	tasks              interfaces.TaskEnqueuer
+	inspector          interfaces.TaskInspector
+	referenceLimiter   interfaces.PaperReferenceCatalogLimiter
+	referenceScheduler interfaces.PaperReferenceScheduler
+	spans              interfaces.SpanTracker
+	maxConcurrency     int
 }
 
 // NewPaperInfoService creates the application-level paper information
-// orchestrator. Queue decoding and retry policy remain in the router layer.
+// orchestrator. The reference scheduler is an explicit infrastructure
+// dependency; queue decoding and retry policy remain in the router layer.
 func NewPaperInfoService(
 	cfg config.Config,
 	documents interfaces.DocumentRepository,
@@ -98,12 +102,15 @@ func NewPaperInfoService(
 	tasks interfaces.TaskEnqueuer,
 	inspector interfaces.TaskInspector,
 	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
+	referenceScheduler interfaces.PaperReferenceScheduler,
 ) interfaces.PaperInfoService {
-	return newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, nil)
+	svc := newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, nil).(*paperInfoService)
+	svc.referenceScheduler = referenceScheduler
+	return svc
 }
 
-// NewPaperInfoServiceWithSpanTracker is the production DI constructor. The
-// base constructor is retained for focused tests and callers without spans.
+// NewPaperInfoServiceWithSpanTracker is the production DI constructor with
+// persistent processing-span support.
 func NewPaperInfoServiceWithSpanTracker(
 	cfg config.Config,
 	documents interfaces.DocumentRepository,
@@ -114,16 +121,19 @@ func NewPaperInfoServiceWithSpanTracker(
 	tasks interfaces.TaskEnqueuer,
 	inspector interfaces.TaskInspector,
 	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
-	spans SpanTracker,
+	referenceScheduler interfaces.PaperReferenceScheduler,
+	spans interfaces.SpanTracker,
 ) interfaces.PaperInfoService {
-	return newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, spans)
+	svc := newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, spans).(*paperInfoService)
+	svc.referenceScheduler = referenceScheduler
+	return svc
 }
 
 func newPaperInfoService(
 	cfg config.Config, documents interfaces.DocumentRepository, storage interfaces.FileStorage,
 	extractor interfaces.PaperMetadataExtractor, catalogs interfaces.PaperCatalogRegistry,
 	papers interfaces.PaperService, tasks interfaces.TaskEnqueuer, inspector interfaces.TaskInspector,
-	referenceLimiter interfaces.PaperReferenceCatalogLimiter, spans SpanTracker,
+	referenceLimiter interfaces.PaperReferenceCatalogLimiter, spans interfaces.SpanTracker,
 ) interfaces.PaperInfoService {
 	concurrency := cfg.PaperCatalogConcurrency
 	if concurrency <= 0 {
@@ -159,7 +169,7 @@ func (s *paperInfoService) ExtractMetadata(
 	var spanID uuid.UUID
 	if s.spans != nil {
 		var spanErr error
-		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.TaskScopeDocument, command.DocumentID.String(), 0)
+		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanMetadataExtract, command.DocumentID.String()), 0)
 		if spanErr != nil {
 			logger.Warn(ctx, "start metadata extraction span failed", "error", spanErr)
 		}
@@ -237,9 +247,17 @@ func hasUsablePaperLookupIdentity(doi, title string) bool {
 	return strings.TrimSpace(doi) != "" || strings.TrimSpace(title) != ""
 }
 
-// ResolveMetadata queries all configured providers for the source paper and
-// each unresolved citation. Provider calls for one query are concurrent but
-// bounded; provider order remains the deterministic tie breaker.
+// paperReferenceRunID deterministically identifies one bibliography dispatch
+// for a document revision and user-initiated attempt. Re-running the same
+// Asynq task therefore emits the same provider batch task IDs instead of
+// creating duplicate reference work.
+func paperReferenceRunID(documentID uuid.UUID, markdownSHA256 string, attempt int) uuid.UUID {
+	key := documentID.String() + "\x00" + strings.ToLower(strings.TrimSpace(markdownSHA256)) + "\x00" + strconv.Itoa(attempt)
+	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("paper-reference-run\x00"+key))
+}
+
+// ResolveMetadata performs one source-paper or one scheduler-owned reference
+// lookup. The task never carries provider assignment or bibliography batches.
 func (s *paperInfoService) ResolveMetadata(
 	ctx context.Context,
 	command types.PaperCatalogResolveCommand,
@@ -247,23 +265,21 @@ func (s *paperInfoService) ResolveMetadata(
 	if err := command.Validate(); err != nil {
 		return err
 	}
-	if command.Scope == "" {
-		command.Scope = types.PaperCatalogScopeSource
-	}
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
-	ctx = logger.WithAttrs(ctx, "catalog_scope", command.Scope)
-	if command.Scope == types.PaperCatalogScopeReference {
-		ctx = logger.WithAttrs(ctx, "cited_document_id", command.CitedDocumentID)
-	}
+	ctx = logger.WithAttrs(ctx, "catalog_scope", map[bool]string{true: "reference", false: "source"}[command.IsReference])
 	logger.Info(ctx, "paper catalog resolution started")
 	var spanID uuid.UUID
 	if s.spans != nil {
 		kind := types.ProcessingSpanCatalogSource
-		if command.Scope == types.PaperCatalogScopeReference {
+		spanScope := types.ProcessingSpanScopeCatalogSource
+		spanScopeID := types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, command.DocumentID.String())
+		if command.IsReference {
 			kind = types.ProcessingSpanCatalogReference
+			spanScope = types.ProcessingSpanScopeCatalogReference
+			spanScopeID = types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, command.DocumentID.String())
 		}
 		var spanErr error
-		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), kind, string(command.Scope), command.CitedDocumentID.String(), 0)
+		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, 1, kind, spanScope, spanScopeID, 0)
 		if spanErr != nil {
 			logger.Warn(ctx, "start catalog resolution span failed", "error", spanErr)
 		}
@@ -280,17 +296,13 @@ func (s *paperInfoService) ResolveMetadata(
 	if err != nil {
 		return err
 	}
-	if err := s.ensureCatalogSourceCurrent(
-		ctx,
-		document,
-		command.MarkdownSHA256,
-	); err != nil {
-		return err
+	if document.Status == types.DocumentStatusDeleting {
+		return fmt.Errorf("%w: document is being deleted", ErrStalePaperInfo)
 	}
-	if command.Scope == types.PaperCatalogScopeReference {
-		return s.resolveReferenceMetadata(ctx, document, command)
+	if command.IsReference {
+		return s.resolveScheduledReference(ctx, document)
 	}
-	return s.resolveSourceMetadata(ctx, document, command)
+	return s.resolveSourceMetadata(ctx, document, command.MarkdownSHA256)
 }
 
 func paperAttempt(attempt int) int {
@@ -300,14 +312,14 @@ func paperAttempt(attempt int) int {
 	return attempt
 }
 
-func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, command types.PaperCatalogResolveCommand) error {
+func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, markdownSHA256 string) error {
 	// Unknown rows are bibliographic placeholders only. They have no source
 	// document of their own, so catalog work must always be rooted at the
 	// uploaded document that cited them (reference scope).
 	if document.Status == types.DocumentStatusUnknown {
 		return ErrPaperInfoCatalogUnavailable
 	}
-	metadata, err := s.papers.GetMetadata(ctx, command.DocumentID.String())
+	metadata, err := s.papers.GetMetadata(ctx, document.ID.String())
 	if err != nil {
 		return err
 	}
@@ -319,8 +331,8 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 		ctx,
 		query,
 		document.ID,
-		paperAttempt(command.Attempt),
-		providerSpanScopeID(types.PaperCatalogScopeSource, document.ID, uuid.Nil),
+		1,
+		types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, document.ID.String()),
 	)
 	if err != nil {
 		return err
@@ -328,7 +340,7 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 	if !found {
 		return ErrPaperCatalogNoMatch
 	}
-	if err := s.ensureCatalogSourceCurrent(ctx, document, command.MarkdownSHA256); err != nil {
+	if err := s.ensureCatalogSourceCurrent(ctx, document, markdownSHA256); err != nil {
 		return err
 	}
 	applied, err := s.applySourceCatalogCandidate(ctx, document, selected)
@@ -338,74 +350,174 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 	if !applied {
 		return ErrPaperCatalogNoMatch
 	}
-	if err := s.enqueueReferenceCatalogTasks(ctx, document, command); err != nil {
-		return err
-	}
 	logger.Info(ctx, "paper catalog source match applied", "provider", selected.Provider, "provider_id", selected.ProviderID, "match_score", selected.MatchScore)
 	return nil
 }
 
-func (s *paperInfoService) resolveReferenceMetadata(ctx context.Context, source types.Document, command types.PaperCatalogResolveCommand) error {
-	if s.referenceLimiter != nil {
-		release, err := s.referenceLimiter.AcquireReference(ctx, source.ID.String())
+// DispatchReferences turns the citation snapshot persisted by metadata
+// extraction into bounded provider batches. It deliberately does not depend on
+// source-paper catalog success: a missing source match must not suppress valid
+// bibliography resolution, and this dispatcher never makes provider calls.
+func (s *paperInfoService) DispatchReferences(
+	ctx context.Context,
+	command types.PaperReferenceDispatchCommand,
+) error {
+	if err := command.Validate(); err != nil {
+		return err
+	}
+	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
+	ctx = logger.WithAttrs(ctx, "reference_run_id", command.ReferenceRunID)
+	logger.Info(ctx, "paper reference dispatch started")
+
+	document, err := s.documents.Get(ctx, command.DocumentID)
+	if err != nil {
+		return err
+	}
+	if document.Status == types.DocumentStatusUnknown {
+		return ErrPaperInfoCatalogUnavailable
+	}
+	if err := s.ensureCatalogSourceCurrent(ctx, document, command.MarkdownSHA256); err != nil {
+		return err
+	}
+	return s.enqueueReferenceCatalogTasks(ctx, document, command)
+}
+
+// resolveScheduledReference claims exactly one provider for an unresolved
+// placeholder, then reports the result to the global scheduler. All source
+// documents that cite the placeholder are updated together when it resolves.
+func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited types.Document) error {
+	if cited.Status != types.DocumentStatusUnknown || s.referenceScheduler == nil {
+		return nil
+	}
+	claim, err := s.referenceScheduler.Claim(ctx, cited.ID)
+	if err != nil {
+		// Direct service callers (not queue workers) can ask to resolve one
+		// unknown placeholder. Rebuild the minimum scheduler ownership from an
+		// incoming citation so the same single-target path remains reusable.
+		incoming, incomingErr := s.papers.ListCitedBy(ctx, cited.ID.String())
+		if incomingErr != nil || len(incoming) == 0 {
+			return err
+		}
+		owner := incoming[0].CitingDocumentID
+		if _, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
+			TargetDocumentID: cited.ID,
+			Owners: []types.PaperReferenceOwner{{
+				SourceDocumentID: owner,
+				RunID:            uuid.New(),
+			}},
+		}); registerErr != nil {
+			return registerErr
+		}
+		claim, err = s.referenceScheduler.Claim(ctx, cited.ID)
 		if err != nil {
 			return err
 		}
-		defer release()
 	}
-	citations, err := s.papers.ListCitations(ctx, source.ID.String())
-	if err != nil {
-		return err
-	}
-	var citation *types.PaperCitation
-	for index := range citations {
-		if citations[index].CitedDocumentID == command.CitedDocumentID {
-			citation = &citations[index]
-			break
-		}
-	}
-	if citation == nil {
-		return ErrStalePaperInfo
-	}
-	cited, err := s.documents.Get(ctx, command.CitedDocumentID)
-	if err != nil {
-		return err
-	}
-	if cited.Status != types.DocumentStatusUnknown {
+	if !claim.Ready() {
 		return nil
 	}
-	query := referenceLookupQuery(citation.RawReference)
-	if err := query.Validate(); err != nil {
-		return ErrPaperCatalogNoMatch
+	owner, activeOwner := claim.Job.ActiveOwner()
+	if !activeOwner {
+		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
+		return context.Canceled
 	}
-	selected, found, err := s.selectCatalogCandidate(
-		ctx,
-		query,
-		source.ID,
-		paperAttempt(command.Attempt),
-		providerSpanScopeID(types.PaperCatalogScopeReference, source.ID, command.CitedDocumentID),
-	)
+	if s.referenceLimiter != nil {
+		release, acquireErr := s.referenceLimiter.AcquireReference(ctx, owner.SourceDocumentID.String())
+		if acquireErr != nil {
+			return acquireErr
+		}
+		defer release()
+	}
+
+	// get query
+	incoming, err := s.papers.ListCitedBy(ctx, cited.ID.String())
 	if err != nil {
-		return err
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+	}
+	if len(incoming) == 0 {
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
+	}
+	query := referenceLookupQuery(incoming[0].RawReference)
+	if err := query.Validate(); err != nil {
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
+	}
+	provider, ok := s.catalogs.Get(claim.Provider.String())
+	if !ok {
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
+	}
+	selected, found, err := s.selectCatalogCandidateFromProviders(ctx, query, cited.ID, 1, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String(), cited.ID.String()), []interfaces.PaperCatalogProvider{provider})
+	if err != nil {
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
 	if !found {
-		return ErrPaperCatalogNoMatch
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeNoMatch, nil)
 	}
-	if err := s.ensureCatalogSourceCurrent(ctx, source, command.MarkdownSHA256); err != nil {
-		return err
-	}
-	resolvedID, err := s.findStoredCatalogDocument(ctx, selected, source.ID)
+	active, err := s.referenceScheduler.IsTargetActive(ctx, cited.ID)
 	if err != nil {
 		return err
 	}
-	if resolvedID != uuid.Nil {
-		if _, err := s.papers.ResolveCitation(ctx, source.ID.String(), resolvedID.String(), citation.RawReference); err != nil {
-			return fmt.Errorf("resolve paper citation: %w", err)
-		}
-	} else if _, err := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); err != nil {
-		return fmt.Errorf("persist unresolved citation metadata: %w", err)
+	if !active {
+		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
+		return context.Canceled
 	}
-	logger.Info(ctx, "paper catalog reference match applied", "cited_document_id", cited.ID, "provider", selected.Provider, "provider_id", selected.ProviderID, "match_score", selected.MatchScore)
+
+	// dedup
+	resolvedID, err := s.findStoredCatalogDocument(ctx, selected, incoming[0].CitingDocumentID)
+	if err != nil {
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+	}
+	for _, citation := range incoming {
+		if resolvedID != uuid.Nil {
+			if _, err := s.papers.ResolveCitation(ctx, citation.CitingDocumentID.String(), resolvedID.String(), citation.RawReference); err != nil {
+				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+			}
+		}
+	}
+	if resolvedID == uuid.Nil {
+		if _, err := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); err != nil {
+			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+		}
+	}
+	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
+}
+
+func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uuid.UUID, provider types.PaperCatalogProvider, outcome types.PaperReferenceOutcome, cause error) error {
+	if cause != nil && outcome == types.PaperReferenceOutcomeRetryableFailure {
+		var retryable interface{ TaskRetryable() bool }
+		if errors.As(cause, &retryable) && retryable.TaskRetryable() {
+			delay := 3 * s.cfg.PaperCatalogSpacingFor(provider.String())
+			var retryAfter interface{ TaskRetryAfter() time.Duration }
+			if errors.As(cause, &retryAfter) && retryAfter.TaskRetryAfter() > 0 {
+				delay = retryAfter.TaskRetryAfter()
+			}
+			if delay < time.Second {
+				delay = time.Second
+			}
+			if err := s.referenceScheduler.Cooldown(context.WithoutCancel(ctx), provider, delay); err != nil {
+				logger.Warn(ctx, "reference scheduler provider cooldown update failed", "provider", provider, "error", err)
+			}
+		}
+	}
+	report, err := s.referenceScheduler.Report(context.WithoutCancel(ctx), target, provider, outcome)
+	if err != nil {
+		return err
+	}
+	if cause != nil {
+		logger.Warn(ctx, "reference catalog provider attempt failed", "document_id", target, "provider", provider, "error", cause)
+	}
+	if report.Requeue {
+		task, options, err := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{DocumentID: target.String(), IsReference: true}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+		if err != nil {
+			return err
+		}
+		if err := enqueueManagedTask(ctx, s.tasks, task, options, target.String()); err != nil {
+			return err
+		}
+	}
+	// Provider failures have already been converted into scheduler-owned
+	// fallback work. Returning the original error here would make Asynq retry
+	// this same task as well, racing the next-provider task and causing the
+	// observed repeated 400/429 "flip-flop".
 	return nil
 }
 
@@ -448,17 +560,15 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 	return true, nil
 }
 
-// enqueueReferenceCatalogTasks creates bounded, independent low-priority
-// work after the source-paper lookup commits. A large bibliography therefore
-// cannot hold the source task open or monopolise provider calls. Each task
-// reloads the citation by placeholder ID; raw reference text never enters
-// Redis. Equivalent references are deduplicated before enqueueing.
+// enqueueReferenceCatalogTasks registers each unique unresolved placeholder
+// with the global scheduler, then queues one small catalog task per accepted
+// target. Provider choice is deferred until that task actually executes.
 func (s *paperInfoService) enqueueReferenceCatalogTasks(
 	ctx context.Context,
 	document types.Document,
-	command types.PaperCatalogResolveCommand,
+	command types.PaperReferenceDispatchCommand,
 ) error {
-	if s.tasks == nil {
+	if s.tasks == nil || s.referenceScheduler == nil {
 		return nil
 	}
 	citations, err := s.papers.ListCitations(ctx, document.ID.String())
@@ -470,9 +580,9 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		limit = defaultReferenceCatalogMaxPerDocument
 	}
 	seen := make(map[string]struct{}, len(citations))
-	queued := 0
+	candidates := make([]uuid.UUID, 0, len(citations))
 	for _, citation := range citations {
-		if queued >= limit {
+		if len(candidates) >= limit {
 			break
 		}
 		if err := ctx.Err(); err != nil {
@@ -496,20 +606,50 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 			continue
 		}
 		seen[key] = struct{}{}
-		task, options, err := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{
-			RequestID: command.RequestID, DocumentID: document.ID.String(),
-			MarkdownSHA256: command.MarkdownSHA256, Attempt: command.Attempt,
-			Scope: types.PaperCatalogScopeReference, CitedDocumentID: cited.ID.String(),
-		}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
-		if err != nil {
-			return fmt.Errorf("build reference catalog task: %w", err)
+		candidates = append(candidates, cited.ID)
+	}
+	if len(candidates) == 0 {
+		return nil
+	}
+	runID := command.ReferenceRunID
+	var runSpanID uuid.UUID
+	if s.spans != nil {
+		if runSpanID, err = s.spans.Begin(ctx, document.ID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
+			return fmt.Errorf("start reference catalog run span: %w", err)
 		}
-		if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
-			return err
+	}
+	queued := 0
+	for _, citedID := range candidates {
+		shouldQueue, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
+			TargetDocumentID: citedID,
+			Owners: []types.PaperReferenceOwner{{
+				SourceDocumentID: document.ID,
+				RunID:            runID,
+				Attempt:          command.Attempt,
+				RequestID:        command.RequestID,
+			}},
+		})
+		if registerErr != nil {
+			return registerErr
+		}
+		if !shouldQueue {
+			continue
+		}
+		task, options, buildErr := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{RequestID: command.RequestID, DocumentID: citedID.String(), IsReference: true}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+		if buildErr != nil {
+			return fmt.Errorf("build reference catalog task: %w", buildErr)
+		}
+		if enqueueErr := enqueueManagedTask(ctx, s.tasks, task, options, citedID.String()); enqueueErr != nil {
+			return enqueueErr
 		}
 		queued++
 	}
-	logger.Info(ctx, "reference catalog tasks queued", "document_id", document.ID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
+	if s.spans != nil {
+		if err := s.spans.Succeed(context.WithoutCancel(ctx), runSpanID); err != nil {
+			logger.Warn(ctx, "finish reference catalog run dispatch span failed", "document_id", document.ID, "reference_run_id", runID, "error", err)
+		}
+	}
+	logger.Info(ctx, "scheduler-owned reference catalog tasks queued", "document_id", document.ID, "reference_run_id", runID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
 	return nil
 }
 
@@ -686,6 +826,20 @@ func (s *paperInfoService) ensureCatalogSourceCurrent(
 	return nil
 }
 
+func (s *paperInfoService) ensureReferenceRunActive(ctx context.Context, documentID, runID uuid.UUID) error {
+	if runID == uuid.Nil || s.spans == nil {
+		return nil
+	}
+	active, err := s.spans.ReferenceRunActive(ctx, documentID, runID)
+	if err != nil {
+		return err
+	}
+	if !active {
+		return context.Canceled
+	}
+	return nil
+}
+
 func extractionMetadataUpdate(
 	result *types.PaperExtractionResult,
 ) types.PaperMetadataUpdate {
@@ -780,32 +934,27 @@ type providerSearchResult struct {
 	err        error
 }
 
-// providerSpanScopeID distinguishes catalog provider calls for separate
-// references in one source document. Provider span rows are upserted by their
-// scope tuple; using only provider.Name() previously made concurrent reference
-// tasks overwrite each other's running/succeeded/failed state.
-func providerSpanScopeID(
-	scope types.PaperCatalogScope,
-	sourceDocumentID, citedDocumentID uuid.UUID,
-) string {
-	targetID := sourceDocumentID
-	if scope == types.PaperCatalogScopeReference && citedDocumentID != uuid.Nil {
-		targetID = citedDocumentID
-	}
-	return string(scope) + ":" + targetID.String()
-}
-
 func (s *paperInfoService) selectCatalogCandidate(
 	ctx context.Context,
 	query types.PaperLookupQuery,
 	documentID uuid.UUID,
 	attempt int,
-	spanScopeID string,
+	spanScopeID types.ProcessingSpanScopeID,
+) (types.PaperCatalogCandidate, bool, error) {
+	return s.selectCatalogCandidateFromProviders(ctx, query, documentID, attempt, spanScopeID, s.catalogs.Providers())
+}
+
+func (s *paperInfoService) selectCatalogCandidateFromProviders(
+	ctx context.Context,
+	query types.PaperLookupQuery,
+	documentID uuid.UUID,
+	attempt int,
+	spanScopeID types.ProcessingSpanScopeID,
+	providers []interfaces.PaperCatalogProvider,
 ) (types.PaperCatalogCandidate, bool, error) {
 	if err := query.Validate(); err != nil {
 		return types.PaperCatalogCandidate{}, false, err
 	}
-	providers := s.catalogs.Providers()
 	if len(providers) == 0 {
 		return types.PaperCatalogCandidate{}, false, errors.New("no paper catalog providers configured")
 	}
@@ -827,8 +976,8 @@ func (s *paperInfoService) selectCatalogCandidate(
 					documentID,
 					attempt,
 					types.ProcessingSpanCatalogProvider,
-					"provider",
-					spanScopeID+":"+provider.Name(),
+					types.ProcessingSpanScopeProvider,
+					types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()),
 					0,
 				)
 			}

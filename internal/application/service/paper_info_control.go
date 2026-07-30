@@ -91,20 +91,12 @@ func (s *paperInfoService) RetryCatalogResolution(
 		logger.Info(ctx, "unknown paper reference catalog retries queued", "document_id", document.ID, "queued_count", queued)
 		return nil
 	}
-	markdownSHA256 := ""
-	if markdown, markdownErr := s.documents.GetMarkdown(ctx, document.ID); markdownErr == nil {
-		markdownSHA256 = markdown.SHA256
-	} else if !errors.Is(markdownErr, sql.ErrNoRows) {
-		return markdownErr
-	}
 	if !hasUsablePaperLookupIdentity(document.DOI, metadata.Title) {
 		return ErrPaperInfoCatalogUnavailable
 	}
 	task, options, err := NewPaperCatalogResolveTask(
 		types.PaperCatalogResolvePayload{
-			DocumentID:     document.ID.String(),
-			MarkdownSHA256: markdownSHA256,
-			Attempt:        nextPaperInfoManualAttempt(),
+			DocumentID: document.ID.String(),
 		},
 		s.cfg.PaperCatalogTaskTimeout,
 		s.cfg.PaperCatalogTaskMaxRetry,
@@ -119,8 +111,9 @@ func (s *paperInfoService) RetryCatalogResolution(
 	return nil
 }
 
-// Cancel stops independent paper-information work. It intentionally leaves a
-// ready document ready: parsed Markdown and blocks remain available.
+// Cancel stops only active reference-catalog runs. Metadata extraction and
+// source-paper lookup deliberately run to their terminal state, and the ready
+// document remains ready throughout.
 func (s *paperInfoService) Cancel(ctx context.Context, documentID string) error {
 	document, _, err := s.loadPaperStatusSource(ctx, documentID)
 	if err != nil {
@@ -129,17 +122,37 @@ func (s *paperInfoService) Cancel(ctx context.Context, documentID string) error 
 	if document.Status == types.DocumentStatusDeleting {
 		return ErrPaperInfoDeleting
 	}
-	if s.inspector != nil {
-		if _, _, err := s.inspector.CancelTasksForDocument(ctx, document.ID.String()); err != nil {
-			logger.Warn(ctx, "cancel paper information tasks failed", "document_id", document.ID, "error", err)
+	if s.spans == nil {
+		return ErrPaperInfoCatalogUnavailable
+	}
+	runs, err := s.spans.CancelReferenceRuns(context.WithoutCancel(ctx), document.ID, "USER_CANCELLED", "reference catalog run cancelled by user")
+	if err != nil {
+		return err
+	}
+	for _, runID := range runs {
+		if s.referenceScheduler != nil {
+			targets, cancelErr := s.referenceScheduler.CancelRun(context.WithoutCancel(ctx), document.ID, runID)
+			if cancelErr != nil {
+				return cancelErr
+			}
+			if s.inspector != nil && len(targets) > 0 {
+				ids := make([]string, 0, len(targets))
+				for _, target := range targets {
+					ids = append(ids, target.String())
+				}
+				if _, _, cancelErr := s.inspector.CancelReferenceTasksForDocuments(ctx, ids); cancelErr != nil {
+					logger.Warn(ctx, "cancel scheduler-owned reference tasks failed", "document_id", document.ID, "reference_run_id", runID, "error", cancelErr)
+				}
+			}
+		}
+		if s.inspector == nil {
+			continue
+		}
+		if _, _, err := s.inspector.CancelReferenceTasksForRun(ctx, document.ID.String(), runID.String()); err != nil {
+			logger.Warn(ctx, "cancel reference catalog run tasks failed", "document_id", document.ID, "reference_run_id", runID, "error", err)
 		}
 	}
-	if s.spans != nil {
-		if err := s.spans.CancelDocument(context.WithoutCancel(ctx), document.ID, "USER_CANCELLED", "paper information processing cancelled by user"); err != nil {
-			return err
-		}
-	}
-	logger.Info(ctx, "paper information processing cancelled", "document_id", document.ID)
+	logger.Info(ctx, "reference catalog runs cancelled", "document_id", document.ID, "run_count", len(runs))
 	return nil
 }
 
@@ -200,28 +213,40 @@ func (s *paperInfoService) enqueueUnknownReferenceCatalogRetries(
 		if source.Status == types.DocumentStatusDeleting || source.Status == types.DocumentStatusUnknown {
 			continue
 		}
-		markdownSHA256 := ""
-		if markdown, err := s.documents.GetMarkdown(ctx, source.ID); err == nil {
-			markdownSHA256 = markdown.SHA256
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return queued, err
+		runID := uuid.New()
+		var runSpanID uuid.UUID
+		if s.spans != nil {
+			if runSpanID, err = s.spans.Begin(ctx, source.ID, paperAttempt(attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
+				return queued, fmt.Errorf("start unknown reference retry span: %w", err)
+			}
 		}
-		task, options, err := NewPaperCatalogResolveTask(
-			types.PaperCatalogResolvePayload{
-				DocumentID:      source.ID.String(),
-				MarkdownSHA256:  markdownSHA256,
-				Attempt:         attempt,
-				Scope:           types.PaperCatalogScopeReference,
-				CitedDocumentID: placeholder.ID.String(),
-			},
-			s.cfg.PaperCatalogTaskTimeout,
-			s.cfg.PaperCatalogTaskMaxRetry,
-		)
+		if s.referenceScheduler == nil {
+			return queued, ErrPaperInfoCatalogUnavailable
+		}
+		shouldQueue, err := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
+			TargetDocumentID: placeholder.ID,
+			Owners: []types.PaperReferenceOwner{{
+				SourceDocumentID: source.ID,
+				RunID:            runID,
+				Attempt:          attempt,
+			}},
+		})
 		if err != nil {
-			return queued, fmt.Errorf("build unknown reference catalog task: %w", err)
-		}
-		if err := enqueueManagedTask(ctx, s.tasks, task, options, source.ID.String()); err != nil {
 			return queued, err
+		}
+		if shouldQueue {
+			task, options, err := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{DocumentID: placeholder.ID.String(), IsReference: true}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+			if err != nil {
+				return queued, err
+			}
+			if err := enqueueManagedTask(ctx, s.tasks, task, options, placeholder.ID.String()); err != nil {
+				return queued, err
+			}
+		}
+		if s.spans != nil {
+			if err := s.spans.Succeed(context.WithoutCancel(ctx), runSpanID); err != nil {
+				logger.Warn(ctx, "finish unknown reference retry run dispatch span failed", "document_id", source.ID, "reference_run_id", runID, "error", err)
+			}
 		}
 		queued++
 	}

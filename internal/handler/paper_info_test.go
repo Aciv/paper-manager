@@ -32,6 +32,13 @@ func (*paperInfoControlHandlerStub) ResolveMetadata(
 	return nil
 }
 
+func (*paperInfoControlHandlerStub) DispatchReferences(
+	context.Context,
+	types.PaperReferenceDispatchCommand,
+) error {
+	return nil
+}
+
 func (s *paperInfoControlHandlerStub) RetryExtraction(context.Context, string) error {
 	s.extractions++
 	return nil
