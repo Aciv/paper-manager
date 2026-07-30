@@ -267,6 +267,35 @@ func TestRetryDocumentParseRejectsActiveDocument(t *testing.T) {
 	}
 }
 
+func TestProcessDocumentRunsFixedPipelineAndQueuesReferences(t *testing.T) {
+	documentID, processID := uuid.New(), uuid.New()
+	repo := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, Status: types.DocumentStatusReady},
+		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/parsed.md", SHA256: strings.Repeat("a", 64)},
+	}
+	paperInfo := &documentPaperInfoStub{}
+	tasks := &documentTaskEnqueuerStub{}
+	svc := &documentService{repo: repo, paperInfo: paperInfo, taskEnqueuer: tasks, spans: NewSpanTracker(&spanRepositoryStub{})}
+	payload, err := json.Marshal(types.DocumentProcessPayload{
+		DocumentID: documentID.String(), ProcessID: processID.String(), Attempt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
+		t.Fatalf("ProcessDocument() error = %v", err)
+	}
+	if len(paperInfo.extract) != 1 || len(paperInfo.source) != 1 || len(paperInfo.references) != 0 {
+		t.Fatalf("direct pipeline calls = extract:%d source:%d references:%d", len(paperInfo.extract), len(paperInfo.source), len(paperInfo.references))
+	}
+	if len(tasks.tasks) != 1 || tasks.tasks[0].Type() != types.TypePaperReferenceDispatch {
+		t.Fatalf("reference dispatch tasks = %#v, want one %q task", tasks.tasks, types.TypePaperReferenceDispatch)
+	}
+	if len(paperInfo.parents) != 2 || paperInfo.parents[0] != processID || paperInfo.parents[1] != processID {
+		t.Fatalf("pipeline parent span was not propagated through context: %#v", paperInfo.parents)
+	}
+}
+
 func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -352,7 +381,33 @@ type documentTaskEnqueuerStub struct {
 	tasks       []*asynq.Task
 	extractErr  error
 	catalogErr  error
+	onEnqueue   func(*asynq.Task)
 }
+
+type documentPaperInfoStub struct {
+	extract    []types.PaperMetadataExtractCommand
+	source     []types.PaperCatalogResolveCommand
+	references []types.PaperReferenceDispatchCommand
+	parents    []uuid.UUID
+}
+
+func (stub *documentPaperInfoStub) ExtractMetadata(ctx context.Context, command types.PaperMetadataExtractCommand) (bool, error) {
+	stub.extract = append(stub.extract, command)
+	stub.parents = append(stub.parents, documentProcessSpanID(ctx))
+	return true, nil
+}
+func (stub *documentPaperInfoStub) ResolveMetadata(ctx context.Context, command types.PaperCatalogResolveCommand) error {
+	stub.source = append(stub.source, command)
+	stub.parents = append(stub.parents, documentProcessSpanID(ctx))
+	return nil
+}
+func (stub *documentPaperInfoStub) DispatchReferences(context.Context, types.PaperReferenceDispatchCommand) error {
+	return nil
+}
+func (*documentPaperInfoStub) RetryExtraction(context.Context, string) error          { return nil }
+func (*documentPaperInfoStub) RetryCatalogResolution(context.Context, string) error   { return nil }
+func (*documentPaperInfoStub) RetryReferenceResolution(context.Context, string) error { return nil }
+func (*documentPaperInfoStub) Cancel(context.Context, string) error                   { return nil }
 
 func (stub *documentTaskEnqueuerStub) EnqueueContext(
 	_ context.Context,
@@ -360,6 +415,9 @@ func (stub *documentTaskEnqueuerStub) EnqueueContext(
 	_ ...asynq.Option,
 ) (*asynq.TaskInfo, error) {
 	stub.tasks = append(stub.tasks, task)
+	if stub.onEnqueue != nil {
+		stub.onEnqueue(task)
+	}
 	switch task.Type() {
 	case types.TypeDocumentProcess:
 		var payload types.DocumentProcessPayload
@@ -445,15 +503,8 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	if !strings.HasPrefix(repo.markdown.StorageKey, "markdown/") {
 		t.Fatalf("markdown storage key = %q, want markdown/ prefix", repo.markdown.StorageKey)
 	}
-	if len(documentTasks.extractions) != 1 {
-		t.Fatalf("paper extraction enqueue count = %d, want 1", len(documentTasks.extractions))
-	}
-	if documentTasks.extractions[0].DocumentID != documentID.String() ||
-		documentTasks.extractions[0].MarkdownSHA256 != repo.markdown.SHA256 {
-		t.Fatalf("paper extraction payload = %#v", documentTasks.extractions[0])
-	}
-	if len(documentTasks.catalogs) != 0 {
-		t.Fatalf("catalog must wait for extraction completion, payloads = %#v", documentTasks.catalogs)
+	if len(documentTasks.extractions) != 0 || len(documentTasks.catalogs) != 0 {
+		t.Fatalf("recognition worker must not orchestrate paper work: extractions=%#v catalogs=%#v", documentTasks.extractions, documentTasks.catalogs)
 	}
 }
 
@@ -483,9 +534,8 @@ func TestProcessDocumentReadyRetryRepairsPaperInfoHandoff(t *testing.T) {
 	); err != nil {
 		t.Fatalf("ProcessDocument() error = %v", err)
 	}
-	if len(documentTasks.extractions) != 1 ||
-		documentTasks.extractions[0].MarkdownSHA256 != repo.markdown.SHA256 {
-		t.Fatalf("recovered extraction payloads = %#v", documentTasks.extractions)
+	if len(documentTasks.extractions) != 0 {
+		t.Fatalf("legacy ready process must not orchestrate paper work: %#v", documentTasks.extractions)
 	}
 }
 

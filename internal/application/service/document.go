@@ -10,8 +10,8 @@ import (
 	"io"
 	"mime/multipart"
 	"path/filepath"
+	"strconv"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	fileservice "paperMaster/internal/application/service/file"
@@ -31,14 +31,13 @@ type documentService struct {
 	taskInspector interfaces.TaskInspector
 	taskEnqueuer  interfaces.TaskEnqueuer
 	recognizer    interfaces.DocumentRecognizer
+	paperInfo     interfaces.PaperInfoService
 	spans         interfaces.SpanTracker
 	// recognitionOutputDir is the trusted shared-volume root for directory
 	// recognizers. It is deliberately separate from upload storage: recognizer
 	// output is untrusted until ProcessDocument validates and copies it.
 	recognitionOutputDir     string
 	maxRecognitionOutputSize int64
-	extractionTaskTimeout    time.Duration
-	extractionTaskMaxRetry   int
 }
 
 // Upload conflict sentinels are aliases so handlers do not depend on storage
@@ -82,7 +81,7 @@ func NewDocumentServiceWithProcessing(
 	taskEnqueuer interfaces.TaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer,
 ) interfaces.DocumentService {
-	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, nil)
+	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, nil, nil)
 }
 
 // NewDocumentServiceWithProcessingAndSpanTracker is the DI constructor used
@@ -94,22 +93,21 @@ func NewDocumentServiceWithProcessingAndSpanTracker(
 	taskInspector interfaces.TaskInspector,
 	taskEnqueuer interfaces.TaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer,
+	paperInfo interfaces.PaperInfoService,
 	spans interfaces.SpanTracker,
 ) interfaces.DocumentService {
-	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, spans)
+	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, paperInfo, spans)
 }
 
 func newDocumentServiceWithProcessing(
 	cfg config.Config, repo interfaces.DocumentRepository, storage interfaces.FileStorage,
 	taskInspector interfaces.TaskInspector, taskEnqueuer interfaces.TaskEnqueuer,
-	recognizer interfaces.DocumentRecognizer, spans interfaces.SpanTracker,
+	recognizer interfaces.DocumentRecognizer, paperInfo interfaces.PaperInfoService, spans interfaces.SpanTracker,
 ) interfaces.DocumentService {
 	return &documentService{
 		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer,
-		recognizer: recognizer, spans: spans, recognitionOutputDir: cfg.RecognitionOutputDirectory,
+		recognizer: recognizer, paperInfo: paperInfo, spans: spans, recognitionOutputDir: cfg.RecognitionOutputDirectory,
 		maxRecognitionOutputSize: cfg.MaxUploadSize,
-		extractionTaskTimeout:    cfg.PaperExtractionTaskTimeout,
-		extractionTaskMaxRetry:   cfg.PaperExtractionTaskMaxRetry,
 	}
 }
 
@@ -189,6 +187,9 @@ func multipartFileSHA256(file *multipart.FileHeader) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+// enqueueDocumentRecognition starts a durable pipeline root and queues its
+// direct ProcessDocument execution. Recognition is its first idempotent stage;
+// later stages reuse committed Markdown when the document is already ready.
 func (s *documentService) enqueueDocumentRecognition(ctx context.Context, documentID uuid.UUID, attempts ...int) error {
 	transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, documentID, types.DocumentStatusQueued, nil,
 		[]types.DocumentStatus{types.DocumentStatusUploaded, types.DocumentStatusFailed, types.DocumentStatusCancelled, types.DocumentStatusReady})
@@ -202,7 +203,30 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 	if len(attempts) > 0 && attempts[0] > 0 {
 		attempt = attempts[0]
 	}
-	task, options, err := NewDocumentProcessTask(types.DocumentProcessPayload{DocumentID: documentID.String(), Attempt: attempt})
+	if err := s.startDocumentProcess(ctx, documentID, attempt); err != nil {
+		message := "document recognition could not be queued: " + err.Error()
+		if updateErr := s.repo.UpdateStatus(context.WithoutCancel(ctx), documentID, types.DocumentStatusFailed, &message); updateErr != nil {
+			logger.Error(ctx, "record document queue failure failed", "document_id", documentID, "error", updateErr)
+		}
+		return err
+	}
+	return nil
+}
+
+func (s *documentService) startDocumentProcess(ctx context.Context, documentID uuid.UUID, attempt int) error {
+	processID := uuid.New()
+	if s.spans != nil {
+		var spanErr error
+		processID, spanErr = s.spans.Begin(ctx, documentID, attempt,
+			types.ProcessingSpanPipeline, types.ProcessingSpanScopeProcess,
+			types.ComposeProcessingSpanScopeID(types.ProcessingSpanPipeline, documentID.String(), strconv.Itoa(attempt)), 0)
+		if spanErr != nil {
+			return fmt.Errorf("start document process root: %w", spanErr)
+		}
+	}
+	task, options, err := NewDocumentProcessTask(types.DocumentProcessPayload{
+		DocumentID: documentID.String(), ProcessID: processID.String(), Attempt: attempt,
+	})
 	if err != nil {
 		return err
 	}
@@ -213,13 +237,62 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 		options,
 		documentID.String(),
 	); err != nil {
-		message := "document recognition could not be queued: " + err.Error()
-		if updateErr := s.repo.UpdateStatus(context.WithoutCancel(ctx), documentID, types.DocumentStatusFailed, &message); updateErr != nil {
-			logger.Error(ctx, "record document queue failure failed", "document_id", documentID, "error", updateErr)
-		}
+		_ = s.finishDocumentProcess(context.WithoutCancel(ctx), processID, types.ProcessingSpanFailed, "QUEUE_ERROR", "document process could not be queued")
 		return err
 	}
+	logger.Info(ctx, "document process started", "document_id", documentID, "process_id", processID, "attempt", attempt)
 	return nil
+}
+
+// RetryDocumentProcess resumes the direct document pipeline through one clear
+// control surface. A ready document retains its expensive recognized output
+// and starts at metadata extraction; a failed/cancelled document starts at
+// recognition.
+func (s *documentService) RetryDocumentProcess(ctx context.Context, id string) (*types.Document, error) {
+	document, err := s.GetDocumentByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if document.Status == types.DocumentStatusDeleting {
+		return nil, ErrDocumentDeleting
+	}
+	attempt := 1
+	if s.spans != nil {
+		view, viewErr := s.spans.GetView(ctx, *document)
+		if viewErr != nil {
+			return nil, fmt.Errorf("load document process timeline: %w", viewErr)
+		}
+		for _, stage := range view.Stages {
+			if stage.Kind == types.ProcessingSpanPipeline {
+				if stage.Status.Active() {
+					return nil, ErrDocumentParseActive
+				}
+				if stage.Attempt >= attempt {
+					attempt = stage.Attempt + 1
+				}
+			}
+		}
+	}
+	if document.Status != types.DocumentStatusReady {
+		if document.Status != types.DocumentStatusFailed && document.Status != types.DocumentStatusCancelled {
+			return nil, ErrDocumentParseFinished
+		}
+		queued, err := s.repo.UpdateStatusIfCurrent(ctx, document.ID, types.DocumentStatusQueued, nil,
+			[]types.DocumentStatus{types.DocumentStatusFailed, types.DocumentStatusCancelled})
+		if err != nil {
+			return nil, fmt.Errorf("mark document queued for process retry: %w", err)
+		}
+		if !queued {
+			return nil, ErrDocumentParseActive
+		}
+		document.Status = types.DocumentStatusQueued
+		document.ErrorMessage = nil
+	}
+	if err := s.startDocumentProcess(ctx, document.ID, attempt); err != nil {
+		return nil, err
+	}
+	logger.Info(ctx, "document process retry started", "document_id", document.ID, "attempt", attempt)
+	return document, nil
 }
 
 // RetryDocumentParse starts a distinct recognition attempt only after the

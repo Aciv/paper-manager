@@ -93,14 +93,15 @@ func (h *DocumentProcessHandler) CancelDocumentParse(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"document": document})
 }
 
-// RetryDocumentParse queues a new recognition attempt after a terminal parse.
+// RetryDocumentParse resumes the persistent document pipeline. Ready documents
+// reuse their current Markdown; terminal parse failures start recognition.
 func (h *DocumentProcessHandler) RetryDocumentParse(c *gin.Context) {
 	documentID, err := uuid.Parse(c.Param("id"))
 	if err != nil {
 		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
 		return
 	}
-	document, err := h.documents.RetryDocumentParse(c.Request.Context(), documentID.String())
+	document, err := h.documents.RetryDocumentProcess(c.Request.Context(), documentID.String())
 	if err != nil {
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
@@ -116,7 +117,7 @@ func (h *DocumentProcessHandler) RetryDocumentParse(c *gin.Context) {
 		}
 		return
 	}
-	logger.Info(c.Request.Context(), "document recognition retry accepted", "document_id", document.ID)
+	logger.Info(c.Request.Context(), "document process retry accepted", "document_id", document.ID)
 	c.JSON(http.StatusAccepted, gin.H{"document": document})
 }
 

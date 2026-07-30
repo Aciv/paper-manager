@@ -16,7 +16,12 @@ const (
 )
 
 const (
-	TypeDocumentProcess      = "document:process"       // 文档处理任务
+	// TypeDocumentProcess executes the fixed DocumentService-owned pipeline:
+	// recognition, metadata extraction, source lookup, then reference lookup.
+	TypeDocumentProcess = "document:process"
+	// TypeDocumentRecognize performs only file recognition and persists the
+	// resulting Markdown/Blocks revision.
+	TypeDocumentRecognize    = "document:recognize"
 	TypePaperMetadataExtract = "paper:metadata_extract" // 从 Markdown 和版面块提取论文元数据候选
 	// TypePaperReferenceDispatch reads persisted bibliography entries and
 	// schedules provider-owned catalog batches. It performs no provider HTTP
@@ -34,6 +39,10 @@ type DocumentProcessPayload struct {
 	// DocumentID identifies the document being parsed. It is also the key used
 	// by cancellation and dead-letter handling.
 	DocumentID string `json:"document_id"`
+	// ProcessID is the durable root processing-span ID. It links every direct
+	// operation in one pipeline run; empty is accepted only for legacy queued
+	// recognition tasks.
+	ProcessID string `json:"process_id,omitempty"`
 	// DocumentBaseID optionally groups documents under one document base for
 	// dead-letter scope queries.
 	DocumentBaseID   string   `json:"document_base_id,omitempty"`

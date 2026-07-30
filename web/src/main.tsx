@@ -32,6 +32,7 @@ function processingStateLabel(state: ProcessingSpanStatus) {
 
 function processingKindLabel(kind: string) {
   const labels: Record<string, string> = {
+    pipeline: '处理流程',
     recognition: '文档识别',
     metadata_extraction: '元数据提取',
     catalog_source: '源论文查询',
@@ -77,8 +78,10 @@ function App() {
   const hasPreviousPage = page.page > 1;
   const hasNextPage = page.page < pageCount;
   const parseStages = processing?.stages.filter((stage) => stage.kind === 'recognition') ?? [];
-  const paperInfoStages = processing?.stages.filter((stage) => stage.kind !== 'recognition') ?? [];
+  const pipelineStages = processing?.stages.filter((stage) => stage.kind === 'pipeline') ?? [];
+  const paperInfoStages = processing?.stages.filter((stage) => stage.kind !== 'recognition' && stage.kind !== 'pipeline') ?? [];
   const paperInfoActive = paperInfoStages.some(isActiveSpan);
+  const pipelineActive = pipelineStages.some(isActiveSpan);
 
   async function load(nextFilters = filters) {
     setBusy(true);
@@ -281,19 +284,15 @@ function App() {
     }
   }
 
-  async function retryPaperInfo(stage: 'extraction' | 'catalog') {
+  async function retryPaperInfo() {
     if (!selected) return;
     setBusy(true);
 		processingPollDelay.current = 2500;
     try {
-      if (stage === 'extraction') {
-        await api.retryPaperExtraction(selected.id);
-      } else {
-        await api.retryPaperCatalog(selected.id);
-      }
+		await api.retryDocument(selected.id);
 	  const { processing: view } = await api.getDocumentProcessing(selected.id);
 	  setProcessing(view);
-      setMessage(stage === 'extraction' ? '已提交论文元数据提取重试。' : '已提交论文库查询重试。');
+		setMessage('已提交文档处理流程重试；已完成的文件识别将复用当前 Markdown。');
     } catch (error) {
       setMessage(error instanceof Error ? `论文任务重试失败：${error.message}` : '论文任务重试失败。');
     } finally {
@@ -302,7 +301,7 @@ function App() {
   }
 
   async function cancelPaperInfo() {
-    if (!selected || !window.confirm('取消当前论文信息提取与查询任务？已解析的文档内容不会被删除。')) return;
+    if (!selected || !window.confirm('取消当前引用论文查询任务？已解析文档、元数据提取和源论文查询不会被删除。')) return;
     setBusy(true);
     try {
       await api.cancelPaperInfo(selected.id);
@@ -444,7 +443,7 @@ function App() {
 
         <section className="document-detail-panel">
           {!selected ? <div className="empty-detail"><h3>未选择文档</h3><p>{selectedDescription}</p></div> : <>
-          <div className="panel-heading"><h3>文档详情</h3><div className="detail-actions">{['uploaded', 'queued', 'processing'].includes(selected.status) && <button className="warning" type="button" onClick={() => void cancelSelected()} disabled={busy}>取消解析</button>}{['failed', 'cancelled'].includes(selected.status) && <button type="button" onClick={() => void retrySelected()} disabled={busy || parseStages.some(isActiveSpan)}>重新解析</button>}<button className="danger" type="button" onClick={() => void deleteSelected()} disabled={busy}>删除文档</button></div></div>
+          <div className="panel-heading"><h3>文档详情</h3><div className="detail-actions">{['uploaded', 'queued', 'processing'].includes(selected.status) && <button className="warning" type="button" onClick={() => void cancelSelected()} disabled={busy}>取消解析</button>}{['failed', 'cancelled'].includes(selected.status) && <button type="button" onClick={() => void retrySelected()} disabled={busy || pipelineActive}>重新解析</button>}<button className="danger" type="button" onClick={() => void deleteSelected()} disabled={busy}>删除文档</button></div></div>
             <dl className="document-details">
               <dt>正式标题</dt><dd>{paperMetadata?.title || '未设置（使用原始文件名展示）'}</dd>
               <dt>原始文件名</dt><dd>{selected.originalFilename}</dd>
@@ -471,17 +470,17 @@ function App() {
               <button type="submit" disabled={busy || (editOriginalFilename === selected.originalFilename && editDoi === (selected.doi ?? '') && editTitle === (paperMetadata?.title ?? '') && editTags === (paperMetadata?.tags.join(', ') ?? ''))}>保存修改</button>
             </form>
 			<section className="paper-info-panel">
-			  <div className="panel-heading"><h4>文档解析进度</h4><span>{processing?.latestAttempt ? `尝试 ${processing.latestAttempt}` : '尚未开始'}</span></div>
+			  <div className="panel-heading"><h4>文档处理流程</h4><span>{processing?.latestAttempt ? `尝试 ${processing.latestAttempt}` : '尚未开始'}</span></div>
+			  {pipelineStages.length ? <div className="paper-info-stages">{pipelineStages.map((stage) => <div key={stage.id}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || ''}</small></div>)}</div> : null}
 			  <div className="paper-info-stages">
 				{parseStages.length ? parseStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">暂无持久化解析记录。</p>}
 			  </div>
 			</section>
-			<section className="paper-info-panel">
-			  <div className="panel-heading"><h4>论文信息任务</h4><span>独立于文档解析状态</span></div>
+				<section className="paper-info-panel">
+				  <div className="panel-heading"><h4>论文信息任务</h4><span>由统一处理流程编排</span></div>
 			  <div className="paper-info-stages">
 				{paperInfoStages.length ? paperInfoStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">尚未产生论文信息处理 span。</p>}
-				<div><strong>元数据提取</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('extraction')} disabled={busy || paperInfoActive}>重试提取</button></div>
-				<div><strong>论文库查询</strong><span className="paper-stage">按 span 状态</span><button type="button" onClick={() => void retryPaperInfo('catalog')} disabled={busy || paperInfoActive}>重试查询</button></div>
+				<div><strong>统一处理流程</strong><span className="paper-stage">按持久流程控制</span><button type="button" onClick={() => void retryPaperInfo()} disabled={busy || paperInfoActive || pipelineActive}>重试流程</button></div>
 			  </div>
 			  {processing?.referenceProgress && <p className="hint">引用查询：排队 {processing.referenceProgress.queued} · 运行 {processing.referenceProgress.running} · 完成 {processing.referenceProgress.completed} · 已取消 {processing.referenceProgress.cancelled}</p>}
 			  {paperInfoActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消论文信息任务</button>}

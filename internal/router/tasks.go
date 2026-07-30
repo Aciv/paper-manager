@@ -35,7 +35,6 @@ type AsynqTaskParams struct {
 	PaperInfoService interfaces.PaperInfoService         `optional:"true"`
 	TaskEnqueuer     interfaces.TaskEnqueuer             `optional:"true"`
 	DeadLetterRepo   interfaces.TaskDeadLetterRepository `optional:"true"`
-	SpanTracker      interfaces.SpanTracker              `optional:"true"`
 }
 
 const defaultRedisOpTimeoutMs = 500
@@ -185,7 +184,7 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	// a permanently-failing task left its parent knowledge stranded in
 	// "processing" until housekeeping cron caught it minutes later — the
 	// UI signal users actually see.
-	knowledgeFailer := newDeadLetterDocumentFailer(params.DocumentService, params.SpanTracker)
+	knowledgeFailer := newDeadLetterDocumentFailer(params.DocumentService)
 	mux.Use(asynqdl.MiddlewareWithCallback(params.DeadLetterRepo, knowledgeFailer))
 
 	// Install Langfuse middleware BEFORE handler registration so every task
@@ -199,23 +198,14 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	// Register document processing handler
 	if params.DocumentService != nil {
 		mux.HandleFunc(types.TypeDocumentProcess, params.DocumentService.ProcessDocument)
+		mux.HandleFunc(types.TypeDocumentRecognize, params.DocumentService.RecognizeDocument)
 	}
 	if params.PaperInfoService != nil {
 		mux.HandleFunc(types.TypePaperMetadataExtract, func(ctx context.Context, task *asynq.Task) error {
-			return processPaperMetadataExtractTask(
-				ctx,
-				task,
-				params.PaperInfoService,
-				params.TaskEnqueuer,
-				params.Config,
-			)
+			return processPaperMetadataExtractTask(ctx, task, params.PaperInfoService)
 		})
 		mux.HandleFunc(types.TypePaperCatalogResolve, func(ctx context.Context, task *asynq.Task) error {
-			return processPaperCatalogResolveTask(
-				ctx,
-				task,
-				params.PaperInfoService,
-			)
+			return processPaperCatalogResolveTask(ctx, task, params.PaperInfoService)
 		})
 		mux.HandleFunc(types.TypePaperReferenceDispatch, func(ctx context.Context, task *asynq.Task) error {
 			return processPaperReferenceDispatchTask(ctx, task, params.PaperInfoService)
@@ -235,8 +225,6 @@ func processPaperMetadataExtractTask(
 	ctx context.Context,
 	task *asynq.Task,
 	info interfaces.PaperInfoService,
-	enqueuer interfaces.TaskEnqueuer,
-	cfg config.Config,
 ) error {
 	if task == nil {
 		return skipPaperTask(errors.New("paper metadata extraction task is required"))
@@ -250,53 +238,9 @@ func processPaperMetadataExtractTask(
 		return skipPaperTask(err)
 	}
 	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
-	resolvable, err := info.ExtractMetadata(ctx, command)
+	_, err = info.ExtractMetadata(ctx, command)
 	if err != nil {
 		return classifyPaperTaskError(err)
-	}
-	if enqueuer == nil {
-		return errors.New("document task enqueuer is not configured")
-	}
-	// Source catalog lookup and bibliography dispatch are independent peers.
-	// Both are enqueued only after extraction has committed the metadata and
-	// citation snapshot; the dispatcher never waits for a source match.
-	if resolvable {
-		catalogTask, options, buildErr := service.NewPaperCatalogResolveTask(
-			types.PaperCatalogResolvePayload{
-				RequestID:  payload.RequestID,
-				DocumentID: payload.DocumentID,
-			},
-			cfg.PaperCatalogTaskTimeout,
-			cfg.PaperCatalogTaskMaxRetry,
-		)
-		if buildErr != nil {
-			return skipPaperTask(buildErr)
-		}
-		if err := enqueueTask(ctx, enqueuer, catalogTask, options, payload.DocumentID); err != nil {
-			// Extraction writes are idempotent. Returning this error makes Asynq
-			// retry the extraction task and therefore recover the lost handoff.
-			return err
-		}
-	} else {
-		logger.Info(ctx, "source paper catalog resolution not queued",
-			"reason", "title and DOI are both unavailable")
-	}
-
-	dispatchTask, options, err := service.NewPaperReferenceDispatchTask(
-		types.PaperReferenceDispatchPayload{
-			RequestID:      payload.RequestID,
-			DocumentID:     payload.DocumentID,
-			MarkdownSHA256: payload.MarkdownSHA256,
-			Attempt:        payload.Attempt,
-		},
-		cfg.PaperCatalogTaskTimeout,
-		cfg.PaperCatalogTaskMaxRetry,
-	)
-	if err != nil {
-		return skipPaperTask(err)
-	}
-	if err := enqueueTask(ctx, enqueuer, dispatchTask, options, payload.DocumentID); err != nil {
-		return err
 	}
 	return nil
 }
@@ -513,7 +457,11 @@ type deadLetterDocumentPayload struct {
 // Question/Summary generation are NOT included: they run after parse_status
 // has already become "completed" and have their own status fields.
 var taskTypesAffectingKnowledgeStatus = map[string]struct{}{
-	types.TypeDocumentProcess: {},
+	types.TypeDocumentProcess:        {},
+	types.TypeDocumentRecognize:      {},
+	types.TypePaperMetadataExtract:   {},
+	types.TypePaperCatalogResolve:    {},
+	types.TypePaperReferenceDispatch: {},
 	// types.TypeKnowledgePostProcess: {},
 	// types.TypeManualProcess:        {},
 }
@@ -531,7 +479,7 @@ type deadLetterDocumentListDeletePayload struct {
 // errors are logged and swallowed. The dead-letter record is the source of
 // truth — this is purely a UX shortcut so users don't wait for the
 // housekeeping cron's next sweep.
-func newDeadLetterDocumentFailer(documents interfaces.DocumentService, tracker interfaces.SpanTracker) asynqdl.OnDeadLetter {
+func newDeadLetterDocumentFailer(documents interfaces.DocumentService) asynqdl.OnDeadLetter {
 	if documents == nil {
 		return nil
 	}
@@ -564,9 +512,9 @@ func newDeadLetterDocumentFailer(documents interfaces.DocumentService, tracker i
 				return
 			}
 		}
-		if tracker != nil && probe.Attempt > 0 {
-			tracker.FinalizeAttempt(ctx, probe.DocumentID, probe.Attempt, "failed", nil, "TASK_DEAD_LETTER", errMsg)
-		}
+		// ProcessDocument owns the root span and closes it from its deferred
+		// result handler. This callback only supplies the durable document
+		// failure state when its direct Asynq task exhausts retries.
 		logger.Info(ctx, "dead-letter callback marked document failed", "document_id", probe.DocumentID, "task_type", t.Type())
 	}
 }

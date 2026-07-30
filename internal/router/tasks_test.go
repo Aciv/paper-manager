@@ -59,6 +59,9 @@ func (*paperInfoServiceStub) RetryExtraction(context.Context, string) error {
 func (*paperInfoServiceStub) RetryCatalogResolution(context.Context, string) error {
 	return nil
 }
+func (*paperInfoServiceStub) RetryReferenceResolution(context.Context, string) error {
+	return nil
+}
 
 func (*paperInfoServiceStub) Cancel(context.Context, string) error {
 	return nil
@@ -89,9 +92,10 @@ func TestTaskConstructorsUseAllDocumentTaskTypes(t *testing.T) {
 		PaperCatalogTaskMaxRetry:    4,
 	}
 	documentID := uuid.NewString()
+	processID := uuid.NewString()
 	revision := strings.Repeat("b", 64)
 	documentTask, documentOptions, err := appservice.NewDocumentProcessTask(
-		types.DocumentProcessPayload{DocumentID: documentID},
+		types.DocumentProcessPayload{DocumentID: documentID, ProcessID: processID},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -140,28 +144,40 @@ func TestTaskConstructorsUseAllDocumentTaskTypes(t *testing.T) {
 			t.Fatalf("enqueue task %d: %v", index, err)
 		}
 	}
-	if len(client.tasks) != 4 {
-		t.Fatalf("enqueued task count = %d, want 4", len(client.tasks))
+	recognitionTask, recognitionOptions, err := appservice.NewDocumentRecognitionTask(
+		types.DocumentProcessPayload{DocumentID: documentID, ProcessID: processID},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.EnqueueContext(context.Background(), recognitionTask, recognitionOptions...); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.tasks) != 5 {
+		t.Fatalf("enqueued task count = %d, want 5", len(client.tasks))
 	}
 	if client.tasks[0].Type() != types.TypeDocumentProcess ||
 		client.tasks[1].Type() != types.TypePaperMetadataExtract ||
 		client.tasks[2].Type() != types.TypePaperCatalogResolve ||
-		client.tasks[3].Type() != types.TypePaperReferenceDispatch {
-		t.Fatalf("task types = %q, %q, %q, %q",
+		client.tasks[3].Type() != types.TypePaperReferenceDispatch ||
+		client.tasks[4].Type() != types.TypeDocumentRecognize {
+		t.Fatalf("task types = %q, %q, %q, %q, %q",
 			client.tasks[0].Type(),
 			client.tasks[1].Type(),
 			client.tasks[2].Type(),
-			client.tasks[3].Type())
+			client.tasks[3].Type(),
+			client.tasks[4].Type())
 	}
-	if client.optionCount[0] != 3 ||
+	if client.optionCount[0] != 4 ||
 		client.optionCount[1] != 4 ||
 		client.optionCount[2] != 4 ||
-		client.optionCount[3] != 4 {
-		t.Fatalf("option counts = %#v, want process=3 and paper stages=4", client.optionCount)
+		client.optionCount[3] != 4 ||
+		client.optionCount[4] != 4 {
+		t.Fatalf("option counts = %#v, want all task factories to provide retry, timeout, queue, and stable IDs", client.optionCount)
 	}
 }
 
-func TestProcessPaperMetadataExtractTaskChainsCatalogForTitleOrDOI(t *testing.T) {
+func TestProcessPaperMetadataExtractTaskDoesNotChooseNextStage(t *testing.T) {
 	documentID := uuid.NewString()
 	revision := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	payload := types.PaperMetadataExtractPayload{
@@ -175,57 +191,31 @@ func TestProcessPaperMetadataExtractTaskChainsCatalogForTitleOrDOI(t *testing.T)
 		mustJSON(t, payload),
 	)
 	info := &paperInfoServiceStub{resolvable: true}
-	enqueuer := &documentTaskClientStub{}
 	if err := processPaperMetadataExtractTask(
 		context.Background(),
 		task,
 		info,
-		enqueuer,
-		config.Config{},
 	); err != nil {
 		t.Fatalf("processPaperMetadataExtractTask() error = %v", err)
 	}
 	if len(info.extractCommands) != 1 {
 		t.Fatalf("extract command count = %d, want 1", len(info.extractCommands))
 	}
-	if len(enqueuer.tasks) != 2 {
-		t.Fatalf("handoff enqueue count = %d, want 2", len(enqueuer.tasks))
-	}
-	var got types.PaperCatalogResolvePayload
-	if err := json.Unmarshal(enqueuer.tasks[0].Payload(), &got); err != nil {
-		t.Fatal(err)
-	}
-	if got.DocumentID != documentID || got.IsReference {
-		t.Fatalf("catalog payload = %#v", got)
-	}
-	var dispatch types.PaperReferenceDispatchPayload
-	if err := json.Unmarshal(enqueuer.tasks[1].Payload(), &dispatch); err != nil {
-		t.Fatal(err)
-	}
-	if dispatch.DocumentID != documentID || dispatch.MarkdownSHA256 != revision || dispatch.Attempt != 2 || dispatch.ReferenceRunID == "" {
-		t.Fatalf("reference dispatch payload = %#v", dispatch)
-	}
 }
 
-func TestProcessPaperMetadataExtractTaskSkipsCatalogWithoutIdentity(t *testing.T) {
+func TestProcessPaperMetadataExtractTaskDoesNotDispatchWithoutIdentity(t *testing.T) {
 	payload := types.PaperMetadataExtractPayload{
 		DocumentID:     uuid.NewString(),
 		MarkdownSHA256: strings.Repeat("a", 64),
 	}
 	info := &paperInfoServiceStub{resolvable: false}
-	enqueuer := &documentTaskClientStub{}
 	err := processPaperMetadataExtractTask(
 		context.Background(),
 		asynq.NewTask(types.TypePaperMetadataExtract, mustJSON(t, payload)),
 		info,
-		enqueuer,
-		config.Config{},
 	)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if len(enqueuer.tasks) != 1 || enqueuer.tasks[0].Type() != types.TypePaperReferenceDispatch {
-		t.Fatalf("tasks = %#v, want one reference dispatcher", enqueuer.tasks)
 	}
 }
 
@@ -276,19 +266,13 @@ func TestProcessPaperMetadataExtractTaskDoesNotQueueCatalogWhenExtractionFails(t
 		resolvable: true,
 		extractErr: errors.New("extractor unavailable"),
 	}
-	enqueuer := &documentTaskClientStub{}
 	err := processPaperMetadataExtractTask(
 		context.Background(),
 		asynq.NewTask(types.TypePaperMetadataExtract, mustJSON(t, payload)),
 		info,
-		enqueuer,
-		config.Config{},
 	)
 	if err == nil {
 		t.Fatal("processPaperMetadataExtractTask() error = nil, want retryable extraction error")
-	}
-	if len(enqueuer.tasks) != 0 {
-		t.Fatalf("catalog queued before extraction success: %#v", enqueuer.tasks)
 	}
 }
 

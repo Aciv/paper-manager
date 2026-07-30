@@ -15,6 +15,7 @@ import (
 type paperInfoControlHandlerStub struct {
 	extractions   int
 	catalogs      int
+	references    int
 	cancellations int
 }
 
@@ -47,6 +48,10 @@ func (s *paperInfoControlHandlerStub) RetryCatalogResolution(context.Context, st
 	s.catalogs++
 	return nil
 }
+func (s *paperInfoControlHandlerStub) RetryReferenceResolution(context.Context, string) error {
+	s.references++
+	return nil
+}
 func (s *paperInfoControlHandlerStub) Cancel(context.Context, string) error {
 	s.cancellations++
 	return nil
@@ -60,11 +65,13 @@ func TestPaperInfoHandlerExposesRetryAndCancellationControls(t *testing.T) {
 	engine := gin.New()
 	engine.POST("/api/paper/:documentID/info/extraction/retry", handler.RetryExtraction)
 	engine.POST("/api/paper/:documentID/info/catalog/retry", handler.RetryCatalog)
+	engine.POST("/api/paper/:documentID/info/reference/retry", handler.RetryReference)
 	engine.POST("/api/paper/:documentID/info/cancel", handler.Cancel)
 
 	for _, request := range []struct{ method, path string }{
 		{http.MethodPost, "/api/paper/" + documentID.String() + "/info/extraction/retry"},
 		{http.MethodPost, "/api/paper/" + documentID.String() + "/info/catalog/retry"},
+		{http.MethodPost, "/api/paper/" + documentID.String() + "/info/reference/retry"},
 		{http.MethodPost, "/api/paper/" + documentID.String() + "/info/cancel"},
 	} {
 		recorder := httptest.NewRecorder()
@@ -74,7 +81,7 @@ func TestPaperInfoHandlerExposesRetryAndCancellationControls(t *testing.T) {
 			t.Fatalf("%s %s status=%d body=%s", request.method, request.path, recorder.Code, recorder.Body.String())
 		}
 	}
-	if controls.extractions != 1 || controls.catalogs != 1 || controls.cancellations != 1 {
-		t.Fatalf("control calls = extraction:%d catalog:%d cancellation:%d", controls.extractions, controls.catalogs, controls.cancellations)
+	if controls.extractions != 1 || controls.catalogs != 1 || controls.references != 1 || controls.cancellations != 1 {
+		t.Fatalf("control calls = extraction:%d catalog:%d reference:%d cancellation:%d", controls.extractions, controls.catalogs, controls.references, controls.cancellations)
 	}
 }

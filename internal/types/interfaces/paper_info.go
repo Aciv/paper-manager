@@ -34,10 +34,12 @@ type PaperInfoService interface {
 	// revision. It rejects source-free placeholders, unparsed documents, and
 	// active span attempts.
 	RetryExtraction(ctx context.Context, documentID string) error
-	// RetryCatalogResolution enqueues catalog lookup from current metadata or an
-	// unresolved incoming reference. It rejects deleting documents, active span
-	// attempts, and empty lookup identities.
+	// RetryCatalogResolution enqueues only source-paper catalog lookup from the
+	// uploaded document's current metadata.
 	RetryCatalogResolution(ctx context.Context, documentID string) error
+	// RetryReferenceResolution requeues only the citation dispatcher for the
+	// source document's current Markdown revision.
+	RetryReferenceResolution(ctx context.Context, documentID string) error
 	// Cancel stops queued/active paper-information work without changing a
 	// ready document's parse lifecycle state.
 	Cancel(ctx context.Context, documentID string) error

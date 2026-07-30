@@ -26,7 +26,10 @@ import (
 )
 
 const (
-	defaultDocumentProcessTaskTimeout  = 15 * time.Minute
+	// ProcessDocument performs recognition, extraction, and source lookup, then
+	// hands bibliography work to its independent dispatch task.
+	defaultDocumentProcessTaskTimeout  = 30 * time.Minute
+	defaultDocumentRecognitionTimeout  = 15 * time.Minute
 	defaultDocumentProcessTaskMaxRetry = 3
 
 	defaultPaperExtractionTaskTimeout  = 2 * time.Minute
@@ -35,10 +38,171 @@ const (
 	defaultPaperCatalogTaskMaxRetry    = 5
 )
 
-// ProcessDocument is the Asynq entry point for recognition. The parser's
+// documentProcessSpanContextKey carries the active ProcessDocument root only
+// while the fixed chain is executing. It deliberately never enters a paper
+// task payload, a document row, or reference-scheduler state.
+type documentProcessSpanContextKey struct{}
+
+func withDocumentProcessSpan(ctx context.Context, processID uuid.UUID) context.Context {
+	if processID == uuid.Nil {
+		return ctx
+	}
+	return context.WithValue(ctx, documentProcessSpanContextKey{}, processID)
+}
+
+func documentProcessSpanID(ctx context.Context) uuid.UUID {
+	processID, _ := ctx.Value(documentProcessSpanContextKey{}).(uuid.UUID)
+	return processID
+}
+
+// ProcessDocument runs the fixed document pipeline through source lookup in
+// one Asynq execution. It then durably hands off the bibliography branch to a
+// separate task; a returned error lets Asynq retry this task from idempotent
+// checkpoints.
+func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task) (processErr error) {
+	if task == nil {
+		return errors.New("document process task is required")
+	}
+	var payload types.DocumentProcessPayload
+	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+		return fmt.Errorf("decode document process payload: %w", err)
+	}
+	documentID, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
+	if err != nil {
+		return fmt.Errorf("invalid document id in process payload: %w", err)
+	}
+	processID, err := uuid.Parse(strings.TrimSpace(payload.ProcessID))
+	if err != nil || processID == uuid.Nil {
+		// Legacy queued payloads predate the root span. They still receive the
+		// same direct recognition behaviour but cannot run paper stages safely.
+		return s.recognizeDocument(ctx, payload)
+	}
+	ctx = logger.WithAttrs(ctx, "document_id", documentID, "process_id", processID)
+	ctx = withDocumentProcessSpan(ctx, processID)
+	if s.spans != nil {
+		stopHeartbeat := keepSpanAlive(ctx, s.spans, processID)
+		defer stopHeartbeat()
+		defer func() {
+			if processErr != nil {
+				code, reason := spanFailure(processErr)
+				_ = s.spans.Fail(context.WithoutCancel(ctx), processID, code, reason)
+				return
+			}
+			_ = s.spans.Succeed(context.WithoutCancel(ctx), processID)
+		}()
+	}
+
+	document, aborted, err := s.loadProcessDocument(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if aborted {
+		return nil
+	}
+	if document.Status != types.DocumentStatusReady {
+		if err := s.recognizeDocument(ctx, payload); err != nil {
+			return err
+		}
+	}
+
+	document, aborted, err = s.loadProcessDocument(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if aborted {
+		return nil
+	}
+	if s.paperInfo == nil {
+		return errors.New("paper information service is not configured")
+	}
+	markdown, err := s.repo.GetMarkdown(ctx, documentID)
+	if err != nil {
+		return fmt.Errorf("load parsed Markdown for document process: %w", err)
+	}
+
+	extraction := types.PaperMetadataExtractCommand{
+		RequestID: payload.RequestID, DocumentID: documentID,
+		MarkdownSHA256: markdown.SHA256, Attempt: payload.Attempt,
+	}
+	if _, err := s.paperInfo.ExtractMetadata(ctx, extraction); err != nil {
+		return err
+	}
+	if _, aborted, err := s.loadProcessDocument(ctx, documentID); err != nil {
+		return err
+	} else if aborted {
+		return nil
+	}
+
+	if err := s.paperInfo.ResolveMetadata(ctx, types.PaperCatalogResolveCommand{
+		RequestID: payload.RequestID, DocumentID: documentID,
+		MarkdownSHA256: markdown.SHA256, Attempt: payload.Attempt,
+	}); err != nil {
+		return err
+	}
+	if _, aborted, err := s.loadProcessDocument(ctx, documentID); err != nil {
+		return err
+	} else if aborted {
+		return nil
+	}
+	return s.enqueueReferenceDispatch(ctx, payload, documentID, markdown.SHA256)
+}
+
+// enqueueReferenceDispatch hands the bibliography branch to its own Asynq
+// task. The document process is complete once this durable handoff succeeds;
+// reference providers then use their scheduler, cooldowns, fallback, and
+// reference-specific spans independently of the document parsing root.
+func (s *documentService) enqueueReferenceDispatch(
+	ctx context.Context,
+	payload types.DocumentProcessPayload,
+	documentID uuid.UUID,
+	markdownSHA256 string,
+) error {
+	if s.taskEnqueuer == nil {
+		return errors.New("document task enqueuer is not configured")
+	}
+	dispatchPayload := types.PaperReferenceDispatchPayload{
+		RequestID:      payload.RequestID,
+		DocumentID:     documentID.String(),
+		MarkdownSHA256: markdownSHA256,
+		Attempt:        payload.Attempt,
+		ReferenceRunID: paperReferenceRunID(documentID, markdownSHA256, payload.Attempt).String(),
+	}
+	task, options, err := NewPaperReferenceDispatchTask(dispatchPayload, 0, 0)
+	if err != nil {
+		return fmt.Errorf("build paper reference dispatch task: %w", err)
+	}
+	if err := enqueueManagedTask(ctx, s.taskEnqueuer, task, options, documentID.String()); err != nil {
+		return fmt.Errorf("enqueue paper reference dispatch: %w", err)
+	}
+	logger.Info(ctx, "paper reference dispatch handed off", "document_id", documentID, "reference_run_id", dispatchPayload.ReferenceRunID)
+	return nil
+}
+
+// loadProcessDocument is the durable cancellation/deletion checkpoint between
+// direct pipeline stages. External calls may take minutes; reloading here
+// prevents a late stage from mutating a document the user already stopped.
+func (s *documentService) loadProcessDocument(
+	ctx context.Context, documentID uuid.UUID,
+) (types.Document, bool, error) {
+	document, err := s.repo.Get(ctx, documentID)
+	if err != nil {
+		return types.Document{}, false, err
+	}
+	aborted := document.Status == types.DocumentStatusCancelled ||
+		document.Status == types.DocumentStatusDeleting
+	if aborted {
+		logger.Info(ctx, "stop document process after cancellation or deletion",
+			"document_id", document.ID,
+			"status", document.Status,
+		)
+	}
+	return document, aborted, nil
+}
+
+// RecognizeDocument is the dedicated recognition worker. The parser's
 // Markdown and source-map blocks are committed together, so readers never see
 // a ready Markdown revision paired with stale PDF coordinates.
-func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task) (processErr error) {
+func (s *documentService) RecognizeDocument(ctx context.Context, task *asynq.Task) (processErr error) {
 	if task == nil {
 		return errors.New("document processing task is required")
 	}
@@ -46,10 +210,17 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		return fmt.Errorf("decode document processing payload: %w", err)
 	}
+	return s.recognizeDocument(ctx, payload)
+}
+
+// recognizeDocument owns only file recognition and parsed-output persistence.
+// ProcessDocument calls it directly; the standalone handler reuses it.
+func (s *documentService) recognizeDocument(ctx context.Context, payload types.DocumentProcessPayload) (processErr error) {
 	documentID, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
 	if err != nil {
 		return fmt.Errorf("invalid document id in processing payload: %w", err)
 	}
+	processID, _ := uuid.Parse(strings.TrimSpace(payload.ProcessID))
 	document, err := s.repo.Get(ctx, documentID)
 	if err != nil {
 		return err
@@ -59,12 +230,8 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		return nil
 	}
 	if document.Status == types.DocumentStatusReady {
-		logger.Info(ctx, "document recognition already committed; ensuring paper info handoff", "document_id", document.ID)
-		markdown, err := s.repo.GetMarkdown(ctx, document.ID)
-		if err != nil {
-			return fmt.Errorf("load committed Markdown for paper info handoff: %w", err)
-		}
-		return s.enqueuePaperInfoAfterRecognition(ctx, document, markdown.SHA256)
+		logger.Info(ctx, "document recognition already committed", "document_id", document.ID)
+		return nil
 	}
 	if document.Status != types.DocumentStatusProcessing {
 		transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, document.ID, types.DocumentStatusProcessing, nil,
@@ -85,7 +252,11 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	var spanID uuid.UUID
 	if s.spans != nil {
 		var spanErr error
-		spanID, spanErr = s.spans.Begin(ctx, document.ID, attempt, types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, document.ID.String()), retryCount)
+		if processID != uuid.Nil {
+			spanID, spanErr = s.spans.BeginChild(ctx, processID, document.ID, attempt, types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, processID.String()), retryCount)
+		} else {
+			spanID, spanErr = s.spans.Begin(ctx, document.ID, attempt, types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, document.ID.String()), retryCount)
+		}
 		if spanErr != nil {
 			logger.Warn(ctx, "start recognition processing span failed", "document_id", document.ID, "error", spanErr)
 		}
@@ -224,45 +395,26 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		logger.Info(ctx, "replaced document block image deleted", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey)
 	}
 	logger.Info(ctx, "document recognition completed", "document_id", document.ID, "block_count", len(blocks), "markdown_storage_key", storedMarkdown.Key)
-	if err := s.enqueuePaperInfoAfterRecognition(ctx, document, metadata.SHA256); err != nil {
-		return err
-	}
 	return nil
 }
 
-func (s *documentService) enqueuePaperInfoAfterRecognition(
-	ctx context.Context,
-	document types.Document,
-	markdownSHA256 string,
-) error {
-	if s.taskEnqueuer == nil {
+func (s *documentService) finishDocumentProcess(ctx context.Context, processID uuid.UUID, status types.ProcessingSpanStatus, code, reason string) error {
+	if s.spans == nil || processID == uuid.Nil {
 		return nil
 	}
-	extractionPayload := types.PaperMetadataExtractPayload{
-		DocumentID:     document.ID.String(),
-		MarkdownSHA256: markdownSHA256,
+	var err error
+	switch status {
+	case types.ProcessingSpanSucceeded:
+		err = s.spans.Succeed(context.WithoutCancel(ctx), processID)
+	case types.ProcessingSpanCancelled:
+		err = s.spans.Fail(context.WithoutCancel(ctx), processID, code, reason)
+	default:
+		err = s.spans.Fail(context.WithoutCancel(ctx), processID, code, reason)
 	}
-	task, options, err := NewPaperMetadataExtractTask(
-		extractionPayload,
-		s.extractionTaskTimeout,
-		s.extractionTaskMaxRetry,
-	)
 	if err != nil {
-		return fmt.Errorf("build paper metadata extraction task: %w", err)
+		return fmt.Errorf("finish document process: %w", err)
 	}
-	if err := enqueueManagedTask(
-		ctx,
-		s.taskEnqueuer,
-		task,
-		options,
-		document.ID.String(),
-	); err != nil {
-		return fmt.Errorf("enqueue paper metadata extraction: %w", err)
-	}
-	logger.Info(ctx, "paper info handoff completed",
-		"document_id", document.ID,
-		"markdown_sha256", markdownSHA256,
-		"next_task", types.TypePaperMetadataExtract)
+	logger.Info(ctx, "document process completed", "process_id", processID, "status", status)
 	return nil
 }
 
@@ -596,9 +748,9 @@ func (s *documentService) dequeueDocumentTasks(ctx context.Context, documentID s
 	}
 }
 
-// NewDocumentProcessTask validates and creates a document-recognition task.
-// The document service owns its queue, retry, and timeout policy; callers only
-// supply the durable payload.
+// NewDocumentProcessTask validates and creates the direct fixed-pipeline task.
+// It invokes recognition, extraction, source lookup, and bibliography lookup
+// in order; the operation that fails returns its error for normal Asynq retry.
 func NewDocumentProcessTask(
 	payload types.DocumentProcessPayload,
 ) (*asynq.Task, []asynq.Option, error) {
@@ -609,11 +761,39 @@ func NewDocumentProcessTask(
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode document processing task: %w", err)
 	}
-	return asynq.NewTask(types.TypeDocumentProcess, encoded), []asynq.Option{
+	options := []asynq.Option{
 		asynq.Queue(types.QueueDefault),
 		asynq.MaxRetry(defaultDocumentProcessTaskMaxRetry),
 		asynq.Timeout(defaultDocumentProcessTaskTimeout),
-	}, nil
+	}
+	if strings.TrimSpace(payload.ProcessID) != "" {
+		options = append(options, asynq.TaskID(paperInfoTaskID(
+			types.TypeDocumentProcess, payload.DocumentID, "", payload.Attempt, payload.ProcessID,
+		)))
+	}
+	return asynq.NewTask(types.TypeDocumentProcess, encoded), options, nil
+}
+
+// NewDocumentRecognitionTask creates the dedicated recognition worker task.
+func NewDocumentRecognitionTask(payload types.DocumentProcessPayload) (*asynq.Task, []asynq.Option, error) {
+	if strings.TrimSpace(payload.DocumentID) == "" {
+		return nil, nil, errors.New("document id is required for recognition task")
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode document recognition task: %w", err)
+	}
+	options := []asynq.Option{
+		asynq.Queue(types.QueueDefault),
+		asynq.MaxRetry(defaultDocumentProcessTaskMaxRetry),
+		asynq.Timeout(defaultDocumentRecognitionTimeout),
+	}
+	if strings.TrimSpace(payload.ProcessID) != "" {
+		options = append(options, asynq.TaskID(paperInfoTaskID(
+			types.TypeDocumentRecognize, payload.DocumentID, "", payload.Attempt, payload.ProcessID,
+		)))
+	}
+	return asynq.NewTask(types.TypeDocumentRecognize, encoded), options, nil
 }
 
 // NewPaperMetadataExtractTask validates and creates an extraction task.
@@ -736,7 +916,7 @@ func NewPaperCatalogResolveTask(
 		stage = "reference"
 	}
 	options = append(options, asynq.TaskID(paperInfoTaskID(
-		types.TypePaperCatalogResolve, payload.DocumentID, "", 0, stage,
+		types.TypePaperCatalogResolve, payload.DocumentID, "", payload.Attempt, stage,
 	)))
 	return task, options, nil
 }

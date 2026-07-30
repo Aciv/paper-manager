@@ -177,8 +177,6 @@ export const api = {
   },
   listPaperCitations: (documentID: string): Promise<{ items: PaperCitation[] }> => requestFrom<{ items: PaperCitation[] }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/citations`),
   listPaperCitedBy: (documentID: string): Promise<{ items: PaperCitation[] }> => requestFrom<{ items: PaperCitation[] }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/cited-by`),
-  retryPaperExtraction: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/extraction/retry`, { method: 'POST' }),
-  retryPaperCatalog: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/catalog/retry`, { method: 'POST' }),
   cancelPaperInfo: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/cancel`, { method: 'POST' }),
   listDocumentBases: (): Promise<{ items: DocumentBase[] }> => request<{ items: DocumentBase[] }>('/bases'),
   createDocumentBase: (payload: { name: string; description?: string }): Promise<{ documentBase: DocumentBase }> => request<{ documentBase: DocumentBase }>('/bases', {

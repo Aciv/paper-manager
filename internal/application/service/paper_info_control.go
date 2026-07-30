@@ -75,21 +75,15 @@ func (s *paperInfoService) RetryCatalogResolution(
 	if document.Status == types.DocumentStatusDeleting {
 		return ErrPaperInfoDeleting
 	}
+	// Unknown placeholders do not own source-paper metadata. Their bibliography
+	// work is retried through RetryReferenceResolution on the citing document.
+	if document.Status == types.DocumentStatusUnknown {
+		return ErrPaperInfoCatalogUnavailable
+	}
 	if active, err := s.paperStageActive(ctx, document.ID, types.ProcessingSpanCatalogSource, types.TypePaperCatalogResolve); err != nil {
 		return err
 	} else if active {
 		return ErrPaperInfoAttemptActive
-	}
-	if document.Status == types.DocumentStatusUnknown {
-		queued, err := s.enqueueUnknownReferenceCatalogRetries(ctx, document)
-		if err != nil {
-			return err
-		}
-		if queued == 0 {
-			return ErrPaperInfoCatalogUnavailable
-		}
-		logger.Info(ctx, "unknown paper reference catalog retries queued", "document_id", document.ID, "queued_count", queued)
-		return nil
 	}
 	if !hasUsablePaperLookupIdentity(document.DOI, metadata.Title) {
 		return ErrPaperInfoCatalogUnavailable
@@ -108,6 +102,49 @@ func (s *paperInfoService) RetryCatalogResolution(
 		return err
 	}
 	logger.Info(ctx, "paper catalog resolution retry queued", "document_id", document.ID)
+	return nil
+}
+
+// RetryReferenceResolution retries only the bibliography dispatcher for a
+// source document. The dispatcher reloads citations, registers scheduler jobs,
+// and queues provider-owned catalog tasks; it does not repeat extraction or
+// source-paper lookup.
+func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documentID string) error {
+	document, _, err := s.loadPaperStatusSource(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if document.Status == types.DocumentStatusDeleting {
+		return ErrPaperInfoDeleting
+	}
+	if document.Status == types.DocumentStatusUnknown {
+		return ErrPaperInfoCatalogUnavailable
+	}
+	if active, err := s.paperStageActive(ctx, document.ID, types.ProcessingSpanCatalogReference, types.TypePaperReferenceDispatch); err != nil {
+		return err
+	} else if active {
+		return ErrPaperInfoAttemptActive
+	}
+	markdown, err := s.documents.GetMarkdown(ctx, document.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrPaperInfoCatalogUnavailable
+	}
+	if err != nil {
+		return err
+	}
+	payload := types.PaperReferenceDispatchPayload{
+		DocumentID:     document.ID.String(),
+		MarkdownSHA256: markdown.SHA256,
+		Attempt:        nextPaperInfoManualAttempt(),
+	}
+	task, options, err := NewPaperReferenceDispatchTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+	if err != nil {
+		return fmt.Errorf("build paper reference dispatch task: %w", err)
+	}
+	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
+		return err
+	}
+	logger.Info(ctx, "paper reference resolution retry queued", "document_id", document.ID)
 	return nil
 }
 
@@ -170,81 +207,6 @@ func (s *paperInfoService) paperStageActive(ctx context.Context, documentID uuid
 		return false, nil
 	}
 	return s.inspector.HasQueuedTaskTypeForDocument(ctx, documentID.String(), taskType)
-}
-
-// enqueueUnknownReferenceCatalogRetries retries an unknown placeholder through
-// each source document that cites it. A placeholder has no Markdown/file of
-// its own, so source-scope work would have no durable query context and must
-// never be queued for it.
-func (s *paperInfoService) enqueueUnknownReferenceCatalogRetries(
-	ctx context.Context,
-	placeholder types.Document,
-) (int, error) {
-	if s.tasks == nil {
-		return 0, errors.New("task queue is not configured")
-	}
-	incoming, err := s.papers.ListCitedBy(ctx, placeholder.ID.String())
-	if err != nil {
-		return 0, fmt.Errorf("list incoming references: %w", err)
-	}
-	attempt := nextPaperInfoManualAttempt()
-	seen := make(map[string]struct{}, len(incoming))
-	queued := 0
-	for _, citation := range incoming {
-		if err := ctx.Err(); err != nil {
-			return queued, err
-		}
-		if citation.CitingDocumentID == uuid.Nil || citation.CitingDocumentID == placeholder.ID {
-			continue
-		}
-		key := citation.CitingDocumentID.String() + "\x00" + citation.RawReference
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		seen[key] = struct{}{}
-
-		source, err := s.documents.Get(ctx, citation.CitingDocumentID)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return queued, err
-		}
-		if source.Status == types.DocumentStatusDeleting || source.Status == types.DocumentStatusUnknown {
-			continue
-		}
-		runID := uuid.New()
-		if s.spans != nil {
-			if _, err = s.spans.Begin(ctx, source.ID, paperAttempt(attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
-				return queued, fmt.Errorf("start unknown reference retry span: %w", err)
-			}
-		}
-		if s.referenceScheduler == nil {
-			return queued, ErrPaperInfoCatalogUnavailable
-		}
-		shouldQueue, err := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
-			TargetDocumentID: placeholder.ID,
-			Owners: []types.PaperReferenceOwner{{
-				SourceDocumentID: source.ID,
-				RunID:            runID,
-				Attempt:          attempt,
-			}},
-		})
-		if err != nil {
-			return queued, err
-		}
-		if shouldQueue {
-			task, options, err := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{DocumentID: placeholder.ID.String(), IsReference: true}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
-			if err != nil {
-				return queued, err
-			}
-			if err := enqueueManagedTask(ctx, s.tasks, task, options, placeholder.ID.String()); err != nil {
-				return queued, err
-			}
-		}
-		queued++
-	}
-	return queued, nil
 }
 
 // nextPaperInfoManualAttempt yields a positive, process-monotonic ID for an

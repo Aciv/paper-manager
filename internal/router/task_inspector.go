@@ -77,6 +77,7 @@ var queuesScanned = []string{
 // because the cancel API is per-Document.
 var taskTypesForDocumentCancel = map[string]struct{}{
 	types.TypeDocumentProcess:        {},
+	types.TypeDocumentRecognize:      {},
 	types.TypePaperMetadataExtract:   {},
 	types.TypePaperReferenceDispatch: {},
 	types.TypePaperCatalogResolve:    {},

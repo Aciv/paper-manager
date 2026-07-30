@@ -80,6 +80,10 @@ type DocumentService interface {
 	// RetryDocumentParse queues a new recognition attempt after a failed or
 	// cancelled attempt. Active parsing must be cancelled rather than retried.
 	RetryDocumentParse(ctx context.Context, id string) (*types.Document, error)
+	// RetryDocumentProcess starts a new persistent pipeline. Ready documents
+	// reuse their committed Markdown and restart at paper extraction; failed or
+	// cancelled documents restart from recognition.
+	RetryDocumentProcess(ctx context.Context, id string) (*types.Document, error)
 	// SearchDocument performs paginated ID and DOI searches.
 	SearchDocument(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
 	// GetDocumentFile opens the stored object and returns its original filename.
@@ -95,6 +99,9 @@ type DocumentService interface {
 	// DeleteDocumentList removes multiple documents sequentially.
 	DeleteDocumentList(ctx context.Context, ids []string) error
 
-	// ProcessDocument handles an asynchronous document-processing task.
+	// ProcessDocument advances one persistent document pipeline. It chooses and
+	// queues the next incomplete stage but never performs recognition itself.
 	ProcessDocument(ctx context.Context, task *asynq.Task) error
+	// RecognizeDocument performs only the asynchronous recognition stage.
+	RecognizeDocument(ctx context.Context, task *asynq.Task) error
 }

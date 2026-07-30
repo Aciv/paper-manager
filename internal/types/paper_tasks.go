@@ -59,6 +59,9 @@ type PaperCatalogResolvePayload struct {
 	RequestID string `json:"request_id,omitempty"`
 	// DocumentID identifies exactly one document to query.
 	DocumentID string `json:"document_id"`
+	// Attempt is the owning pipeline attempt for source work. Reference work
+	// obtains its attempt from the scheduler owner.
+	Attempt int `json:"attempt,omitempty"`
 	// IsReference selects scheduler-owned reference lookup instead of the
 	// independent source-paper provider fan-out.
 	IsReference bool `json:"is_reference,omitempty"`
@@ -140,6 +143,7 @@ func (p PaperCatalogResolvePayload) Command() (PaperCatalogResolveCommand, error
 		RequestID:   strings.TrimSpace(p.RequestID),
 		DocumentID:  documentID,
 		IsReference: p.IsReference,
+		Attempt:     p.Attempt,
 	}, nil
 }
 

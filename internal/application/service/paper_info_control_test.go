@@ -126,7 +126,7 @@ func TestEnqueueManagedTaskReturnsTaskIDConflict(t *testing.T) {
 	}
 }
 
-func TestPaperInfoControlAllowsUnknownCitationCatalogRetry(t *testing.T) {
+func TestPaperInfoControlRejectsUnknownSourceCatalogRetry(t *testing.T) {
 	ctx := context.Background()
 	placeholderID := uuid.New()
 	citingID := uuid.New()
@@ -151,22 +151,41 @@ func TestPaperInfoControlAllowsUnknownCitationCatalogRetry(t *testing.T) {
 		nil,
 	)
 
-	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
-		t.Fatalf("RetryCatalogResolution() error = %v", err)
+	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); !errors.Is(err, ErrPaperInfoCatalogUnavailable) {
+		t.Fatalf("RetryCatalogResolution() error = %v, want ErrPaperInfoCatalogUnavailable", err)
 	}
-	if len(queue.tasks) != 1 || queue.tasks[0].Type() != types.TypePaperCatalogResolve {
-		t.Fatalf("queued tasks = %#v", queue.tasks)
-	}
-	var payload types.PaperCatalogResolvePayload
-	if err := json.Unmarshal(queue.tasks[0].Payload(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	if !payload.IsReference || payload.DocumentID != placeholderID.String() {
-		t.Fatalf("unknown retry payload = %#v, want single reference target", payload)
+	if len(queue.tasks) != 0 {
+		t.Fatalf("unknown source retry queued tasks = %#v", queue.tasks)
 	}
 }
 
-func TestPaperInfoControlFansOutUnknownRetryAcrossIncomingCitations(t *testing.T) {
+func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
+	ctx := context.Background()
+	documentID := uuid.New()
+	revision := testMarkdownSHA([]byte("# Paper\n"))
+	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, Status: types.DocumentStatusReady})
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/paper.md", SHA256: revision}
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID}
+	queue := &paperInfoQueueStub{}
+	controls := newPaperInfoServiceForTest(config.Config{}, documents, nil, nil, nil, papers, queue, &paperInfoInspectorStub{queued: map[string]bool{}}, nil)
+
+	if err := controls.RetryReferenceResolution(ctx, documentID.String()); err != nil {
+		t.Fatalf("RetryReferenceResolution() error = %v", err)
+	}
+	if len(queue.tasks) != 1 || queue.tasks[0].Type() != types.TypePaperReferenceDispatch {
+		t.Fatalf("queued tasks = %#v, want one reference dispatch task", queue.tasks)
+	}
+	var payload types.PaperReferenceDispatchPayload
+	if err := json.Unmarshal(queue.tasks[0].Payload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.DocumentID != documentID.String() || payload.MarkdownSHA256 != revision || payload.ReferenceRunID == "" {
+		t.Fatalf("reference retry payload = %#v", payload)
+	}
+}
+
+func TestPaperInfoControlRejectsUnknownReferenceAsSourceRetry(t *testing.T) {
 	ctx := context.Background()
 	placeholderID := uuid.New()
 	firstSourceID := uuid.New()
@@ -188,19 +207,10 @@ func TestPaperInfoControlFansOutUnknownRetryAcrossIncomingCitations(t *testing.T
 		config.Config{}, documents, nil, nil, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}}, papers, queue,
 		&paperInfoInspectorStub{queued: map[string]bool{}}, nil,
 	)
-	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); err != nil {
-		t.Fatalf("RetryCatalogResolution() error = %v", err)
+	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); !errors.Is(err, ErrPaperInfoCatalogUnavailable) {
+		t.Fatalf("RetryCatalogResolution() error = %v, want ErrPaperInfoCatalogUnavailable", err)
 	}
-	if len(queue.tasks) != 1 {
-		t.Fatalf("unknown retry queued %d tasks, want one deduplicated target", len(queue.tasks))
-	}
-	for _, task := range queue.tasks {
-		var payload types.PaperCatalogResolvePayload
-		if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-			t.Fatal(err)
-		}
-		if !payload.IsReference || payload.DocumentID != placeholderID.String() {
-			t.Fatalf("unknown retry payload = %#v, want reference task", payload)
-		}
+	if len(queue.tasks) != 0 {
+		t.Fatalf("unknown source retry queued tasks = %#v", queue.tasks)
 	}
 }

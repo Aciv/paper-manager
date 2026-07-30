@@ -30,6 +30,10 @@ func (s ProcessingSpanStatus) Active() bool {
 type ProcessingSpanKind string
 
 const (
+	// ProcessingSpanPipeline is the persistent root of one DocumentService
+	// controlled workflow through source-catalog handoff. The bibliography
+	// dispatch branch owns an independent reference-run span after handoff.
+	ProcessingSpanPipeline         ProcessingSpanKind = "pipeline"
 	ProcessingSpanRecognition      ProcessingSpanKind = "recognition"
 	ProcessingSpanMetadataExtract  ProcessingSpanKind = "metadata_extraction"
 	ProcessingSpanCatalogSource    ProcessingSpanKind = "catalog_source"
@@ -43,6 +47,8 @@ const (
 type ProcessingSpanScope string
 
 const (
+	// ProcessingSpanScopeProcess owns one persistent process root.
+	ProcessingSpanScopeProcess ProcessingSpanScope = "process"
 	// ProcessingSpanScopeDocument owns one document-level pipeline stage.
 	ProcessingSpanScopeDocument ProcessingSpanScope = "document"
 	// ProcessingSpanScopeCatalogSource owns source-paper catalog resolution.

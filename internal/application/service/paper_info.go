@@ -170,7 +170,11 @@ func (s *paperInfoService) ExtractMetadata(
 	var spanID uuid.UUID
 	if s.spans != nil {
 		var spanErr error
-		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanMetadataExtract, command.DocumentID.String()), 0)
+		if processID := documentProcessSpanID(ctx); processID != uuid.Nil {
+			spanID, spanErr = s.spans.BeginChild(ctx, processID, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanMetadataExtract, processID.String()), 0)
+		} else {
+			spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanMetadataExtract, command.DocumentID.String()), 0)
+		}
 		if spanErr != nil {
 			logger.Warn(ctx, "start metadata extraction span failed", "error", spanErr)
 		}
@@ -275,7 +279,11 @@ func (s *paperInfoService) ResolveMetadata(
 	var spanID uuid.UUID
 	if s.spans != nil && !command.IsReference {
 		var spanErr error
-		spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, 1, types.ProcessingSpanCatalogSource, types.ProcessingSpanScopeCatalogSource, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, command.DocumentID.String()), 0)
+		if processID := documentProcessSpanID(ctx); processID != uuid.Nil {
+			spanID, spanErr = s.spans.BeginChild(ctx, processID, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogSource, types.ProcessingSpanScopeCatalogSource, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, processID.String()), 0)
+		} else {
+			spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogSource, types.ProcessingSpanScopeCatalogSource, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, command.DocumentID.String()), 0)
+		}
 		if spanErr != nil {
 			logger.Warn(ctx, "start catalog resolution span failed", "error", spanErr)
 		}
@@ -300,7 +308,7 @@ func (s *paperInfoService) ResolveMetadata(
 	if command.IsReference {
 		return s.resolveScheduledReference(ctx, document)
 	}
-	return s.resolveSourceMetadata(ctx, document, command.MarkdownSHA256, spanID)
+	return s.resolveSourceMetadata(ctx, document, command, spanID)
 }
 
 func paperAttempt(attempt int) int {
@@ -310,7 +318,7 @@ func paperAttempt(attempt int) int {
 	return attempt
 }
 
-func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, markdownSHA256 string, spanID uuid.UUID) error {
+func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, command types.PaperCatalogResolveCommand, spanID uuid.UUID) error {
 	// Unknown rows are bibliographic placeholders only. They have no source
 	// document of their own, so catalog work must always be rooted at the
 	// uploaded document that cited them (reference scope).
@@ -323,13 +331,14 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 	}
 	query := metadataLookupQuery(document, metadata)
 	if err := query.Validate(); err != nil {
-		return ErrPaperCatalogNoMatch
+		logger.Info(ctx, "source catalog lookup skipped", "document_id", document.ID, "reason", "title and DOI are unavailable")
+		return nil
 	}
 	selected, found, err := s.selectCatalogCandidate(
 		ctx,
 		query,
 		document.ID,
-		1,
+		paperAttempt(command.Attempt),
 		types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, document.ID.String()),
 		spanID,
 	)
@@ -337,9 +346,10 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 		return err
 	}
 	if !found {
-		return ErrPaperCatalogNoMatch
+		logger.Info(ctx, "source catalog lookup completed without match", "document_id", document.ID)
+		return nil
 	}
-	if err := s.ensureCatalogSourceCurrent(ctx, document, markdownSHA256); err != nil {
+	if err := s.ensureCatalogSourceCurrent(ctx, document, command.MarkdownSHA256); err != nil {
 		return err
 	}
 	applied, err := s.applySourceCatalogCandidate(ctx, document, selected)
@@ -347,7 +357,8 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 		return err
 	}
 	if !applied {
-		return ErrPaperCatalogNoMatch
+		logger.Info(ctx, "source catalog candidate not applied", "document_id", document.ID)
+		return nil
 	}
 	logger.Info(ctx, "paper catalog source match applied", "provider", selected.Provider, "provider_id", selected.ProviderID, "match_score", selected.MatchScore)
 	return nil
@@ -703,14 +714,23 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		seen[key] = struct{}{}
 		candidates = append(candidates, cited.ID)
 	}
-	if len(candidates) == 0 {
-		return nil
-	}
 	runID := command.ReferenceRunID
+	var runSpanID uuid.UUID
 	if s.spans != nil {
-		if _, err = s.spans.Begin(ctx, document.ID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0); err != nil {
+		runSpanID, err = s.spans.Begin(ctx, document.ID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0)
+		if err != nil {
 			return fmt.Errorf("start reference catalog run span: %w", err)
 		}
+		if runSpanID == uuid.Nil {
+			return errors.New("start reference catalog run span returned empty id")
+		}
+	}
+	if len(candidates) == 0 {
+		if runSpanID != uuid.Nil {
+			_ = s.spans.Succeed(context.WithoutCancel(ctx), runSpanID)
+		}
+		logger.Info(ctx, "reference dispatch completed without unresolved citations", "document_id", document.ID, "reference_run_id", runID)
+		return nil
 	}
 	queued := 0
 	for _, citedID := range candidates {
