@@ -64,10 +64,12 @@ const MaxDocumentSearchPage = 10000
 
 // DocumentSearch describes source-document lookup. Bibliographic title and
 // tag filtering belongs to PaperSearch and PaperMetadataRepository.
+// A zero-value Status means "all statuses".
 type DocumentSearch struct {
 	ID         *uuid.UUID
 	DOI        string
 	FileSHA256 string
+	Status     DocumentStatus
 	Page       int
 	PageSize   int
 }

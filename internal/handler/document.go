@@ -149,7 +149,7 @@ func (h *DocumentHandler) UpdateDocument(c *gin.Context) {
 // Search returns documents by exact ID, DOI, or all source documents.
 func (h *DocumentHandler) Search(c *gin.Context) {
 	if strings.TrimSpace(c.Query("title")) != "" || len(c.QueryArray("tag")) > 0 {
-		h.writeError(c, apperrors.NewBadRequestError("document search only supports id and doi"), nil)
+		h.writeError(c, apperrors.NewBadRequestError("document search only supports id, doi, and status"), nil)
 		return
 	}
 	search := types.DocumentSearch{
@@ -172,6 +172,9 @@ func (h *DocumentHandler) Search(c *gin.Context) {
 			return
 		}
 		search.ID = &id
+	}
+	if rawStatus := strings.TrimSpace(c.Query("status")); rawStatus != "" {
+		search.Status = types.DocumentStatus(rawStatus)
 	}
 	result, err := h.documents.SearchDocument(c.Request.Context(), search)
 	if err != nil {

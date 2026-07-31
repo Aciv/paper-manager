@@ -82,6 +82,12 @@ function App() {
   const paperInfoStages = processing?.stages.filter((stage) => stage.kind !== 'recognition' && stage.kind !== 'pipeline') ?? [];
   const paperInfoActive = paperInfoStages.some(isActiveSpan);
   const pipelineActive = pipelineStages.some(isActiveSpan);
+  const documentStatus = processing?.documentStatus ?? selected?.status ?? 'uploaded';
+
+  function applyProcessingView(view: DocumentProcessingView) {
+    setProcessing(view);
+    setSelected((prev) => (prev ? { ...prev, status: view.documentStatus } : prev));
+  }
 
   async function load(nextFilters = filters) {
     setBusy(true);
@@ -132,7 +138,7 @@ function App() {
       api.listPaperCitations(selected.id),
       api.listPaperCitedBy(selected.id),
     ]).then(([{ processing: view }, { items: outgoing }, { items: incoming }]) => {
-      setProcessing(view);
+      applyProcessingView(view);
       setCitations(outgoing);
       setCitedBy(incoming);
     }).catch((error) => setMessage(error instanceof Error ? `加载论文任务或引用失败：${error.message}` : '加载论文任务或引用失败。'));
@@ -148,13 +154,29 @@ function App() {
 					visible ? processingPollDelay.current * 1.5 : processingPollDelay.current * 2,
 					visible ? 15000 : 60000,
 				);
-				setProcessing(view);
+				applyProcessingView(view);
 			}).catch(() => {
 				processingPollDelay.current = Math.min(processingPollDelay.current * 2, visible ? 15000 : 60000);
 			});
 		}, delay);
 		return () => window.clearTimeout(timer);
   }, [selected?.id, processing?.stages]);
+
+  // Poll document list periodically while any document is in a transient state,
+  // so status badges in the list stay current without a manual refresh.
+  useEffect(() => {
+    const hasActive = page.items.some((item) => ['uploaded', 'queued', 'processing'].includes(item.status));
+    if (!hasActive) return;
+    const timer = window.setTimeout(() => {
+      api.searchDocuments(filters)
+        .then((result) => {
+          setPage(result);
+          setSelected((current) => result.items.find((item) => item.id === current?.id) ?? current);
+        })
+        .catch(() => {});
+    }, 10000);
+    return () => window.clearTimeout(timer);
+  }, [page.items, filters]);
 
   async function submitSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -291,7 +313,7 @@ function App() {
     try {
 		await api.retryDocument(selected.id);
 	  const { processing: view } = await api.getDocumentProcessing(selected.id);
-	  setProcessing(view);
+	  applyProcessingView(view);
 		setMessage('已提交文档处理流程重试；已完成的文件识别将复用当前 Markdown。');
     } catch (error) {
       setMessage(error instanceof Error ? `论文任务重试失败：${error.message}` : '论文任务重试失败。');
@@ -306,7 +328,7 @@ function App() {
     try {
       await api.cancelPaperInfo(selected.id);
       const { processing: view } = await api.getDocumentProcessing(selected.id);
-      setProcessing(view);
+      applyProcessingView(view);
       setMessage('已取消论文信息处理。');
     } catch (error) {
       setMessage(error instanceof Error ? `取消论文任务失败：${error.message}` : '取消论文任务失败。');
@@ -360,7 +382,7 @@ function App() {
   const selectedDescription = useMemo(() => {
 	if (!selected) return '选择左侧列表中的文档，可查看其 ID、DOI、状态及删除操作。';
 	if (selected.errorMessage) return selected.errorMessage;
-	if (selected.contentType === 'application/pdf' && selected.status === 'ready') return '可在下方切换文本选择和解析 Block 选择模式。';
+	if (selected.contentType === 'application/pdf' && documentStatus === 'ready') return '可在下方切换文本选择和解析 Block 选择模式。';
 	if (selected.contentType === 'application/pdf') return 'PDF 解析完成后可在下方阅读原文并选择解析 Block。';
 	return '该文件可管理和解析；PDF 阅读器仅对 PDF 文件显示。';
   }, [selected]);
@@ -443,7 +465,7 @@ function App() {
 
         <section className="document-detail-panel">
           {!selected ? <div className="empty-detail"><h3>未选择文档</h3><p>{selectedDescription}</p></div> : <>
-          <div className="panel-heading"><h3>文档详情</h3><div className="detail-actions">{['uploaded', 'queued', 'processing'].includes(selected.status) && <button className="warning" type="button" onClick={() => void cancelSelected()} disabled={busy}>取消解析</button>}{['failed', 'cancelled'].includes(selected.status) && <button type="button" onClick={() => void retrySelected()} disabled={busy || pipelineActive}>重新解析</button>}<button className="danger" type="button" onClick={() => void deleteSelected()} disabled={busy}>删除文档</button></div></div>
+          <div className="panel-heading"><h3>文档详情</h3><div className="detail-actions">{['uploaded', 'queued', 'processing'].includes(documentStatus) && <button className="warning" type="button" onClick={() => void cancelSelected()} disabled={busy}>取消解析</button>}{['failed', 'cancelled'].includes(documentStatus) && <button type="button" onClick={() => void retrySelected()} disabled={busy || pipelineActive}>重新解析</button>}<button className="danger" type="button" onClick={() => void deleteSelected()} disabled={busy}>删除文档</button></div></div>
             <dl className="document-details">
               <dt>正式标题</dt><dd>{paperMetadata?.title || '未设置（使用原始文件名展示）'}</dd>
               <dt>原始文件名</dt><dd>{selected.originalFilename}</dd>
@@ -453,7 +475,7 @@ function App() {
 			  <dt>论文信息来源</dt><dd>{paperMetadata?.metadataSource ?? '加载中'}</dd>
               <dt>类型</dt><dd>{selected.contentType}</dd>
               <dt>大小</dt><dd>{formatBytes(selected.sizeBytes)}</dd>
-              <dt>状态</dt><dd><span className={`status status-${selected.status}`}>{selected.status}</span></dd>
+              <dt>状态</dt><dd><span className={`status status-${documentStatus}`}>{documentStatus}</span></dd>
               <dt>创建时间</dt><dd>{formatDate(selected.createdAt)}</dd>
               <dt>更新时间</dt><dd>{formatDate(selected.updatedAt)}</dd>
             </dl>
@@ -493,7 +515,7 @@ function App() {
 				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><code>{citation.citingDocumentId}</code><p>{citation.rawReference}</p></li>)}</ol>}</div>
 			  </div>
 			</section>
-            <p className={selected.status === 'failed' ? 'detail-error' : 'hint'}>{selectedDescription}</p>
+            <p className={documentStatus === 'failed' ? 'detail-error' : 'hint'}>{selectedDescription}</p>
 			{selected.contentType === 'application/pdf' && <PdfReader document={selected} onMessage={setMessage} />}
           </>}
         </section>

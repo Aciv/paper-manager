@@ -140,8 +140,10 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 		pageSize = types.DocumentPageSize
 	}
 
-	query := r.db.WithContext(ctx).Model(&types.Document{}).
-		Where("documents.status <> ?", types.DocumentStatusUnknown)
+	// <> 是不等于
+	//query := r.db.WithContext(ctx).Model(&types.Document{}).
+	//	Where("documents.status <> ?", types.DocumentStatusUnknown)
+	query := r.db.WithContext(ctx).Model(&types.Document{})
 	if search.ID != nil {
 		query = query.Where("documents.id = ?", *search.ID)
 	}
@@ -150,6 +152,9 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	}
 	if search.FileSHA256 != "" {
 		query = query.Where("documents.file_sha256 = ?", strings.ToLower(strings.TrimSpace(search.FileSHA256)))
+	}
+	if search.Status != "" {
+		query = query.Where("documents.status = ?", search.Status)
 	}
 
 	result := types.DocumentPage{Page: page, PageSize: pageSize, Items: []types.Document{}}

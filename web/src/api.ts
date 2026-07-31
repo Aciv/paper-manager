@@ -87,6 +87,7 @@ export type DocumentPage = {
 export type DocumentSearch = {
   id?: string;
   doi?: string;
+  status?: DocumentStatus;
   page?: number;
 };
 
@@ -140,6 +141,7 @@ export const api = {
     const query = new URLSearchParams();
     if (search.id) query.set('id', search.id);
     if (search.doi) query.set('doi', search.doi);
+    if (search.status) query.set('status', search.status);
     query.set('page', String(search.page ?? 1));
     return request<DocumentPage>(`/search?${query.toString()}`);
   },
