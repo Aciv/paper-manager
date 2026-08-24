@@ -2,7 +2,6 @@ package types
 
 import (
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -11,10 +10,9 @@ import (
 func TestPaperMetadataExtractPayloadCommand(t *testing.T) {
 	documentID := uuid.New()
 	payload := PaperMetadataExtractPayload{
-		RequestID:      " request-1 ",
-		DocumentID:     documentID.String(),
-		MarkdownSHA256: strings.ToUpper(validTestSHA256()),
-		Attempt:        2,
+		RequestID:  " request-1 ",
+		DocumentID: documentID.String(),
+		Attempt:    2,
 	}
 
 	command, err := payload.Command()
@@ -27,9 +25,6 @@ func TestPaperMetadataExtractPayloadCommand(t *testing.T) {
 	if command.RequestID != "request-1" {
 		t.Fatalf("RequestID = %q, want trimmed value", command.RequestID)
 	}
-	if command.MarkdownSHA256 != validTestSHA256() {
-		t.Fatalf("MarkdownSHA256 = %q, want normalized lowercase", command.MarkdownSHA256)
-	}
 	if err := command.Validate(); err != nil {
 		t.Fatalf("converted extraction command is invalid: %v", err)
 	}
@@ -37,9 +32,8 @@ func TestPaperMetadataExtractPayloadCommand(t *testing.T) {
 
 func TestPaperMetadataExtractPayloadRejectsInvalidFields(t *testing.T) {
 	tests := []PaperMetadataExtractPayload{
-		{DocumentID: "not-a-uuid", MarkdownSHA256: validTestSHA256()},
-		{DocumentID: uuid.NewString(), MarkdownSHA256: "short"},
-		{DocumentID: uuid.NewString(), MarkdownSHA256: validTestSHA256(), Attempt: -1},
+		{DocumentID: "not-a-uuid"},
+		{DocumentID: uuid.NewString(), Attempt: -1},
 	}
 	for index, payload := range tests {
 		if err := payload.Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
@@ -53,7 +47,6 @@ func TestPaperReferenceDispatchPayloadCommand(t *testing.T) {
 	payload := PaperReferenceDispatchPayload{
 		RequestID:      " request-1 ",
 		DocumentID:     documentID.String(),
-		MarkdownSHA256: strings.ToUpper(validTestSHA256()),
 		Attempt:        2,
 		ReferenceRunID: runID.String(),
 	}
@@ -61,13 +54,13 @@ func TestPaperReferenceDispatchPayloadCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("convert valid reference dispatcher payload: %v", err)
 	}
-	if command.DocumentID != documentID || command.ReferenceRunID != runID || command.RequestID != "request-1" || command.MarkdownSHA256 != validTestSHA256() {
+	if command.DocumentID != documentID || command.ReferenceRunID != runID || command.RequestID != "request-1" {
 		t.Fatalf("dispatcher command = %#v", command)
 	}
 	if err := command.Validate(); err != nil {
 		t.Fatalf("converted dispatcher command is invalid: %v", err)
 	}
-	if err := (PaperReferenceDispatchPayload{DocumentID: documentID.String(), MarkdownSHA256: validTestSHA256()}).Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
+	if err := (PaperReferenceDispatchPayload{DocumentID: documentID.String()}).Validate(); !errors.Is(err, ErrInvalidPaperInfoTaskPayload) {
 		t.Fatalf("dispatcher payload without run id error = %v", err)
 	}
 }

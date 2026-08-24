@@ -271,7 +271,7 @@ func TestProcessDocumentRunsFixedPipelineAndQueuesReferences(t *testing.T) {
 	documentID, processID := uuid.New(), uuid.New()
 	repo := &documentStatusRepoStub{
 		document: types.Document{ID: documentID, Status: types.DocumentStatusReady},
-		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/parsed.md", SHA256: strings.Repeat("a", 64)},
+		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/parsed.md"},
 	}
 	paperInfo := &documentPaperInfoStub{}
 	tasks := &documentTaskEnqueuerStub{}
@@ -517,7 +517,6 @@ func TestProcessDocumentReadyRetryRepairsPaperInfoHandoff(t *testing.T) {
 		markdown: types.DocumentMarkdown{
 			DocumentID: documentID,
 			StorageKey: "markdown/ready.md",
-			SHA256:     strings.Repeat("a", 64),
 		},
 	}
 	documentTasks := &documentTaskEnqueuerStub{}

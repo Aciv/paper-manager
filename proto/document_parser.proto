@@ -30,7 +30,6 @@ message RecognitionResult {
   string markdown_filename = 2;
   string content_type = 3;
   int64 size_bytes = 4;
-  string sha256 = 5;
   string language = 6;
   int32 page_count = 7;
   string parser_name = 8;
@@ -61,7 +60,6 @@ message RecognitionBlock {
 
 message PaperExtractionRequest {
   string document_id = 1;
-  string markdown_sha256 = 2;
   bytes markdown = 3;
   // Compact source-map data only: no database IDs, storage keys, URLs, or
   // image bytes cross this RPC.

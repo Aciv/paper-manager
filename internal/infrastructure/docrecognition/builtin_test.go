@@ -49,7 +49,6 @@ func TestBuiltinRecognizerMapsByteRequestAndResponse(t *testing.T) {
 		MarkdownFilename: "paper.md",
 		ContentType:      "text/markdown",
 		SizeBytes:        int64(len(markdown)),
-		Sha256:           "abc123",
 		Language:         "en",
 		PageCount:        3,
 		ParserName:       "pymupdf4llm",

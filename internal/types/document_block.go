@@ -31,11 +31,6 @@ type Block struct {
 	// opening this object.
 	AssetKey string `gorm:"column:asset_key;type:text;not null;default:''" json:"-"`
 
-	// MarkdownSHA256 identifies the exact Markdown revision to which the
-	// source offsets below belong. Reprocessing replaces the blocks together
-	// with the Markdown manifest, so a stale source map is never reused.
-	MarkdownSHA256 string `gorm:"column:markdown_sha256;type:varchar(64);not null;default:''" json:"markdownSha256,omitempty"`
-
 	// Location is omitted for legacy blocks that predate PDF source mapping.
 	// GORM embeds its typed fields into document_blocks, while the API exposes
 	// them as one coherent `location` object.

@@ -6,8 +6,6 @@ authorized source, converts it to Markdown, and returns only parser output.
 from __future__ import annotations
 
 import argparse
-import hmac
-import hashlib
 import logging
 import math
 import os
@@ -101,7 +99,6 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                 markdown_filename=f"{stem}.md",
                 content_type="text/markdown",
                 size_bytes=len(markdown),
-                sha256=hashlib.sha256(markdown).hexdigest(),
                 page_count=len(page_text),
                 parser_name=self.parser_name,
                 parser_version=getattr(pymupdf4llm, "__version__", ""),
@@ -331,17 +328,6 @@ def _decode_extraction_request(request) -> tuple[str, tuple[SourceBlock, ...]]:
         markdown = request.markdown.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("markdown must be valid UTF-8") from exc
-
-    expected_sha = request.markdown_sha256.strip().lower()
-    if len(expected_sha) != 64:
-        raise ValueError("markdown_sha256 must contain 64 hexadecimal characters")
-    try:
-        bytes.fromhex(expected_sha)
-    except ValueError as exc:
-        raise ValueError("markdown_sha256 must be hexadecimal") from exc
-    actual_sha = hashlib.sha256(request.markdown).hexdigest()
-    if not hmac.compare_digest(expected_sha, actual_sha):
-        raise ValueError("markdown_sha256 does not match markdown")
 
     if len(request.blocks) > MAX_EXTRACTION_BLOCKS:
         raise ValueError("block count exceeds extraction limit")

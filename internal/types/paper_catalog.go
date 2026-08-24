@@ -48,11 +48,7 @@ type PaperCatalogResolveCommand struct {
 	RequestID   string
 	DocumentID  uuid.UUID
 	IsReference bool
-	// MarkdownSHA256 is an in-process optional revision guard retained for
-	// direct service callers. It is intentionally never serialized into the
-	// catalog task payload.
-	MarkdownSHA256 string
-	Attempt        int
+	Attempt     int
 }
 
 // PaperReferenceDispatchCommand is the typed request to build a bounded,
@@ -62,33 +58,21 @@ type PaperCatalogResolveCommand struct {
 type PaperReferenceDispatchCommand struct {
 	RequestID      string
 	DocumentID     uuid.UUID
-	MarkdownSHA256 string
 	Attempt        int
 	ReferenceRunID uuid.UUID
 }
 
-// Validate verifies that the dispatcher has one durable source revision and
-// a stable run ID for idempotent queueing and cancellation.
+// Validate verifies that the dispatcher has a stable run ID for idempotent
+// queueing and cancellation.
 func (command PaperReferenceDispatchCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
-	}
-	if err := validateSHA256("markdown_sha256", command.MarkdownSHA256); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidPaperCatalogData, err)
 	}
 	if command.Attempt < 0 {
 		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperCatalogData)
 	}
 	if command.ReferenceRunID == uuid.Nil {
 		return fmt.Errorf("%w: reference_run_id is required", ErrInvalidPaperCatalogData)
-	}
-	if strings.TrimSpace(command.MarkdownSHA256) != "" {
-		if err := validateSHA256("markdown_sha256", command.MarkdownSHA256); err != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidPaperCatalogData, err)
-		}
-	}
-	if command.Attempt < 0 {
-		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperCatalogData)
 	}
 	return nil
 }

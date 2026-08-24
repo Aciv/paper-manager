@@ -200,7 +200,7 @@ func (r *documentRepository) ReplaceParsedOutput(
 		}
 		if err := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "document_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"storage_key", "filename", "content_type", "size_bytes", "sha256", "parser_name", "parser_version", "input_mode", "language", "page_count", "metadata", "updated_at"}),
+			DoUpdates: clause.AssignmentColumns([]string{"storage_key", "filename", "content_type", "size_bytes", "parser_name", "parser_version", "input_mode", "language", "page_count", "metadata", "updated_at"}),
 		}).Create(&markdown).Error; err != nil {
 			return err
 		}

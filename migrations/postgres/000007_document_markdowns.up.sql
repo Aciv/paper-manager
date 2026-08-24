@@ -7,7 +7,6 @@ CREATE TABLE IF NOT EXISTS document_markdowns (
     filename TEXT NOT NULL,
     content_type TEXT NOT NULL DEFAULT 'text/markdown',
     size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
-    sha256 VARCHAR(64) NOT NULL DEFAULT '',
     parser_name TEXT NOT NULL DEFAULT '',
     parser_version TEXT NOT NULL DEFAULT '',
     input_mode TEXT NOT NULL DEFAULT '',

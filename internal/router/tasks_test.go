@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"strings"
 	"testing"
 	"time"
 
@@ -93,7 +92,6 @@ func TestTaskConstructorsUseAllDocumentTaskTypes(t *testing.T) {
 	}
 	documentID := uuid.NewString()
 	processID := uuid.NewString()
-	revision := strings.Repeat("b", 64)
 	documentTask, documentOptions, err := appservice.NewDocumentProcessTask(
 		types.DocumentProcessPayload{DocumentID: documentID, ProcessID: processID},
 	)
@@ -102,8 +100,7 @@ func TestTaskConstructorsUseAllDocumentTaskTypes(t *testing.T) {
 	}
 	extractionTask, extractionOptions, err := appservice.NewPaperMetadataExtractTask(
 		types.PaperMetadataExtractPayload{
-			DocumentID:     documentID,
-			MarkdownSHA256: revision,
+			DocumentID: documentID,
 		},
 		cfg.PaperExtractionTaskTimeout,
 		cfg.PaperExtractionTaskMaxRetry,
@@ -120,7 +117,7 @@ func TestTaskConstructorsUseAllDocumentTaskTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	dispatchTask, dispatchOptions, err := appservice.NewPaperReferenceDispatchTask(
-		types.PaperReferenceDispatchPayload{DocumentID: documentID, MarkdownSHA256: revision},
+		types.PaperReferenceDispatchPayload{DocumentID: documentID},
 		cfg.PaperCatalogTaskTimeout,
 		cfg.PaperCatalogTaskMaxRetry,
 	)
@@ -179,12 +176,10 @@ func TestTaskConstructorsUseAllDocumentTaskTypes(t *testing.T) {
 
 func TestProcessPaperMetadataExtractTaskDoesNotChooseNextStage(t *testing.T) {
 	documentID := uuid.NewString()
-	revision := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	payload := types.PaperMetadataExtractPayload{
-		RequestID:      "request-1",
-		DocumentID:     documentID,
-		MarkdownSHA256: revision,
-		Attempt:        2,
+		RequestID:  "request-1",
+		DocumentID: documentID,
+		Attempt:    2,
 	}
 	task := asynq.NewTask(
 		types.TypePaperMetadataExtract,
@@ -205,8 +200,7 @@ func TestProcessPaperMetadataExtractTaskDoesNotChooseNextStage(t *testing.T) {
 
 func TestProcessPaperMetadataExtractTaskDoesNotDispatchWithoutIdentity(t *testing.T) {
 	payload := types.PaperMetadataExtractPayload{
-		DocumentID:     uuid.NewString(),
-		MarkdownSHA256: strings.Repeat("a", 64),
+		DocumentID: uuid.NewString(),
 	}
 	info := &paperInfoServiceStub{resolvable: false}
 	err := processPaperMetadataExtractTask(
@@ -221,9 +215,8 @@ func TestProcessPaperMetadataExtractTaskDoesNotDispatchWithoutIdentity(t *testin
 
 func TestProcessPaperReferenceDispatchTaskDelegatesToService(t *testing.T) {
 	documentID := uuid.New()
-	revision := strings.Repeat("c", 64)
 	task, _, err := appservice.NewPaperReferenceDispatchTask(
-		types.PaperReferenceDispatchPayload{DocumentID: documentID.String(), MarkdownSHA256: revision},
+		types.PaperReferenceDispatchPayload{DocumentID: documentID.String()},
 		time.Minute,
 		1,
 	)
@@ -238,7 +231,7 @@ func TestProcessPaperReferenceDispatchTaskDelegatesToService(t *testing.T) {
 		t.Fatalf("dispatch commands = %#v", info.dispatchCommands)
 	}
 	second, _, err := appservice.NewPaperReferenceDispatchTask(
-		types.PaperReferenceDispatchPayload{DocumentID: documentID.String(), MarkdownSHA256: revision},
+		types.PaperReferenceDispatchPayload{DocumentID: documentID.String()},
 		time.Minute,
 		1,
 	)
@@ -259,8 +252,7 @@ func TestProcessPaperReferenceDispatchTaskDelegatesToService(t *testing.T) {
 
 func TestProcessPaperMetadataExtractTaskDoesNotQueueCatalogWhenExtractionFails(t *testing.T) {
 	payload := types.PaperMetadataExtractPayload{
-		DocumentID:     uuid.NewString(),
-		MarkdownSHA256: strings.Repeat("a", 64),
+		DocumentID: uuid.NewString(),
 	}
 	info := &paperInfoServiceStub{
 		resolvable: true,

@@ -149,7 +149,6 @@ type RecognitionResult struct {
 	MarkdownFilename string                 `protobuf:"bytes,2,opt,name=markdown_filename,json=markdownFilename,proto3" json:"markdown_filename,omitempty"`
 	ContentType      string                 `protobuf:"bytes,3,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
 	SizeBytes        int64                  `protobuf:"varint,4,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
-	Sha256           string                 `protobuf:"bytes,5,opt,name=sha256,proto3" json:"sha256,omitempty"`
 	Language         string                 `protobuf:"bytes,6,opt,name=language,proto3" json:"language,omitempty"`
 	PageCount        int32                  `protobuf:"varint,7,opt,name=page_count,json=pageCount,proto3" json:"page_count,omitempty"`
 	ParserName       string                 `protobuf:"bytes,8,opt,name=parser_name,json=parserName,proto3" json:"parser_name,omitempty"`
@@ -215,13 +214,6 @@ func (x *RecognitionResult) GetSizeBytes() int64 {
 		return x.SizeBytes
 	}
 	return 0
-}
-
-func (x *RecognitionResult) GetSha256() string {
-	if x != nil {
-		return x.Sha256
-	}
-	return ""
 }
 
 func (x *RecognitionResult) GetLanguage() string {
@@ -412,10 +404,9 @@ func (x *RecognitionBlock) GetImageContentType() string {
 }
 
 type PaperExtractionRequest struct {
-	state          protoimpl.MessageState `protogen:"open.v1"`
-	DocumentId     string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
-	MarkdownSha256 string                 `protobuf:"bytes,2,opt,name=markdown_sha256,json=markdownSha256,proto3" json:"markdown_sha256,omitempty"`
-	Markdown       []byte                 `protobuf:"bytes,3,opt,name=markdown,proto3" json:"markdown,omitempty"`
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	Markdown   []byte                 `protobuf:"bytes,3,opt,name=markdown,proto3" json:"markdown,omitempty"`
 	// Compact source-map data only: no database IDs, storage keys, URLs, or
 	// image bytes cross this RPC.
 	Blocks        []*PaperSourceBlock `protobuf:"bytes,4,rep,name=blocks,proto3" json:"blocks,omitempty"`
@@ -456,13 +447,6 @@ func (*PaperExtractionRequest) Descriptor() ([]byte, []int) {
 func (x *PaperExtractionRequest) GetDocumentId() string {
 	if x != nil {
 		return x.DocumentId
-	}
-	return ""
-}
-
-func (x *PaperExtractionRequest) GetMarkdownSha256() string {
-	if x != nil {
-		return x.MarkdownSha256
 	}
 	return ""
 }
@@ -885,14 +869,13 @@ const file_document_parser_proto_rawDesc = "" +
 	"\tfile_path\x18\x05 \x01(\tH\x00R\bfilePath\x12\x1f\n" +
 	"\n" +
 	"source_url\x18\x06 \x01(\tH\x00R\tsourceUrlB\b\n" +
-	"\x06source\"\xee\x02\n" +
+	"\x06source\"\xd6\x02\n" +
 	"\x11RecognitionResult\x12\x1a\n" +
 	"\bmarkdown\x18\x01 \x01(\fR\bmarkdown\x12+\n" +
 	"\x11markdown_filename\x18\x02 \x01(\tR\x10markdownFilename\x12!\n" +
 	"\fcontent_type\x18\x03 \x01(\tR\vcontentType\x12\x1d\n" +
 	"\n" +
-	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\x12\x16\n" +
-	"\x06sha256\x18\x05 \x01(\tR\x06sha256\x12\x1a\n" +
+	"size_bytes\x18\x04 \x01(\x03R\tsizeBytes\x12\x1a\n" +
 	"\blanguage\x18\x06 \x01(\tR\blanguage\x12\x1d\n" +
 	"\n" +
 	"page_count\x18\a \x01(\x05R\tpageCount\x12\x1f\n" +
@@ -920,11 +903,10 @@ const file_document_parser_proto_rawDesc = "" +
 	"\x16markdown_codepoint_end\x18\f \x01(\x05R\x14markdownCodepointEnd\x12\x1d\n" +
 	"\n" +
 	"image_data\x18\r \x01(\fR\timageData\x12,\n" +
-	"\x12image_content_type\x18\x0e \x01(\tR\x10imageContentType\"\xb3\x01\n" +
+	"\x12image_content_type\x18\x0e \x01(\tR\x10imageContentType\"\x8a\x01\n" +
 	"\x16PaperExtractionRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
-	"documentId\x12'\n" +
-	"\x0fmarkdown_sha256\x18\x02 \x01(\tR\x0emarkdownSha256\x12\x1a\n" +
+	"documentId\x12\x1a\n" +
 	"\bmarkdown\x18\x03 \x01(\fR\bmarkdown\x123\n" +
 	"\x06blocks\x18\x04 \x03(\v2\x1b.papers.v1.PaperSourceBlockR\x06blocks\"\x90\x01\n" +
 	"\x10PaperSourceBlock\x12\x18\n" +

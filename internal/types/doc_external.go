@@ -105,13 +105,11 @@ const (
 )
 
 // RecognitionMetadata describes the generated Markdown document independently
-// of how its bytes were delivered. SHA256 is optional but lets callers verify
-// a copied directory result or detect whether reprocessing changed Markdown.
+// of how its bytes were delivered.
 type RecognitionMetadata struct {
 	MarkdownFilename string `json:"markdown_filename"`
 	ContentType      string `json:"content_type"`
 	SizeBytes        int64  `json:"size_bytes"`
-	SHA256           string `json:"sha256,omitempty"`
 	Language         string `json:"language,omitempty"`
 	PageCount        int    `json:"page_count,omitempty"`
 	ParserName       string `json:"parser_name,omitempty"`

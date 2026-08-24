@@ -3,7 +3,6 @@
 -- a reparse replaces those legacy rows with fully located PDF blocks.
 
 ALTER TABLE document_blocks
-    ADD COLUMN IF NOT EXISTS markdown_sha256 VARCHAR(64) NOT NULL DEFAULT '',
     ADD COLUMN IF NOT EXISTS page_width DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS page_height DOUBLE PRECISION,
     ADD COLUMN IF NOT EXISTS bbox_x0 DOUBLE PRECISION,

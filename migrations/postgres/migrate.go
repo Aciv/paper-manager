@@ -57,6 +57,9 @@ var documentProcessingSpansUp string
 //go:embed 000015_document_processing_span_parents.up.sql
 var documentProcessingSpanParentsUp string
 
+//go:embed 000016_remove_markdown_sha256.up.sql
+var removeMarkdownSHA256Up string
+
 type migration struct {
 	version int64
 	up      string
@@ -79,6 +82,7 @@ var migrations = []migration{
 	{version: 13, up: documentFileHashUp},
 	{version: 14, up: documentProcessingSpansUp},
 	{version: 15, up: documentProcessingSpanParentsUp},
+	{version: 16, up: removeMarkdownSHA256Up},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

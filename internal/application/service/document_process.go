@@ -3,9 +3,7 @@ package service
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -115,14 +113,13 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	if s.paperInfo == nil {
 		return errors.New("paper information service is not configured")
 	}
-	markdown, err := s.repo.GetMarkdown(ctx, documentID)
-	if err != nil {
+	if _, err := s.repo.GetMarkdown(ctx, documentID); err != nil {
 		return fmt.Errorf("load parsed Markdown for document process: %w", err)
 	}
 
 	extraction := types.PaperMetadataExtractCommand{
 		RequestID: payload.RequestID, DocumentID: documentID,
-		MarkdownSHA256: markdown.SHA256, Attempt: payload.Attempt,
+		Attempt: payload.Attempt,
 	}
 	if _, err := s.paperInfo.ExtractMetadata(ctx, extraction); err != nil {
 		return err
@@ -135,7 +132,7 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 
 	if err := s.paperInfo.ResolveMetadata(ctx, types.PaperCatalogResolveCommand{
 		RequestID: payload.RequestID, DocumentID: documentID,
-		MarkdownSHA256: markdown.SHA256, Attempt: payload.Attempt,
+		Attempt: payload.Attempt,
 	}); err != nil {
 		return err
 	}
@@ -144,7 +141,7 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	} else if aborted {
 		return nil
 	}
-	return s.enqueueReferenceDispatch(ctx, payload, documentID, markdown.SHA256)
+	return s.enqueueReferenceDispatch(ctx, payload, documentID)
 }
 
 // enqueueReferenceDispatch hands the bibliography branch to its own Asynq
@@ -155,7 +152,6 @@ func (s *documentService) enqueueReferenceDispatch(
 	ctx context.Context,
 	payload types.DocumentProcessPayload,
 	documentID uuid.UUID,
-	markdownSHA256 string,
 ) error {
 	if s.taskEnqueuer == nil {
 		return errors.New("document task enqueuer is not configured")
@@ -163,9 +159,8 @@ func (s *documentService) enqueueReferenceDispatch(
 	dispatchPayload := types.PaperReferenceDispatchPayload{
 		RequestID:      payload.RequestID,
 		DocumentID:     documentID.String(),
-		MarkdownSHA256: markdownSHA256,
 		Attempt:        payload.Attempt,
-		ReferenceRunID: paperReferenceRunID(documentID, markdownSHA256, payload.Attempt).String(),
+		ReferenceRunID: paperReferenceRunID(documentID, payload.Attempt).String(),
 	}
 	task, options, err := NewPaperReferenceDispatchTask(dispatchPayload, 0, 0)
 	if err != nil {
@@ -346,7 +341,7 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 	if err != nil {
 		return fmt.Errorf("load previous document blocks: %w", err)
 	}
-	blocks, imageKeys, err := s.persistBlocks(ctx, document.ID, metadata.SHA256, result.Blocks)
+	blocks, imageKeys, err := s.persistBlocks(ctx, document.ID, result.Blocks)
 	if err != nil {
 		return fmt.Errorf("store recognized block images: %w", err)
 	}
@@ -363,7 +358,7 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 	}
 	markdown := types.DocumentMarkdown{
 		DocumentID: document.ID, StorageKey: storedMarkdown.Key, Filename: storedMarkdown.Filename,
-		ContentType: metadata.ContentType, SizeBytes: storedMarkdown.Size, SHA256: metadata.SHA256,
+		ContentType: metadata.ContentType, SizeBytes: storedMarkdown.Size,
 		ParserName: metadata.ParserName, ParserVersion: metadata.ParserVersion,
 		InputMode: string(types.RecognitionInputBytes), Language: metadata.Language,
 		PageCount: metadata.PageCount, Metadata: types.JSON(`{}`),
@@ -465,12 +460,6 @@ func (s *documentService) readRecognitionMarkdown(result *types.RecognitionResul
 		return nil, metadata, fmt.Errorf("recognizer Markdown size does not match metadata")
 	}
 	metadata.SizeBytes = int64(len(markdown))
-	sum := sha256.Sum256(markdown)
-	actualSHA256 := hex.EncodeToString(sum[:])
-	if metadata.SHA256 != "" && !strings.EqualFold(metadata.SHA256, actualSHA256) {
-		return nil, metadata, fmt.Errorf("recognizer Markdown checksum does not match metadata")
-	}
-	metadata.SHA256 = actualSHA256
 	return markdown, metadata, nil
 }
 
@@ -605,7 +594,7 @@ func (s *documentService) failUnavailableDocumentRecognition(ctx context.Context
 // remote; on every later failure ProcessDocument deletes these uncommitted
 // objects. The database sees only a protected URL plus a private storage key.
 func (s *documentService) persistBlocks(
-	ctx context.Context, documentID uuid.UUID, markdownSHA256 string, recognized []types.RecognitionBlock,
+	ctx context.Context, documentID uuid.UUID, recognized []types.RecognitionBlock,
 ) ([]types.Block, []string, error) {
 	blocks := make([]types.Block, 0, len(recognized))
 	imageKeys := make([]string, 0)
@@ -623,7 +612,7 @@ func (s *documentService) persistBlocks(
 		location := block.Location
 		persisted := types.Block{
 			ID: uuid.New(), DocumentID: documentID, Ordinal: block.Ordinal, Type: blockType,
-			Text: block.Text, MarkdownSHA256: markdownSHA256, Location: &location,
+			Text: block.Text, Location: &location,
 		}
 		if blockType == "image" || blockType == "table" {
 			if !strings.EqualFold(strings.TrimSpace(block.ImageContentType), "image/png") || len(block.ImageData) == 0 {
@@ -768,7 +757,7 @@ func NewDocumentProcessTask(
 	}
 	if strings.TrimSpace(payload.ProcessID) != "" {
 		options = append(options, asynq.TaskID(paperInfoTaskID(
-			types.TypeDocumentProcess, payload.DocumentID, "", payload.Attempt, payload.ProcessID,
+			types.TypeDocumentProcess, payload.DocumentID, payload.Attempt, payload.ProcessID,
 		)))
 	}
 	return asynq.NewTask(types.TypeDocumentProcess, encoded), options, nil
@@ -790,7 +779,7 @@ func NewDocumentRecognitionTask(payload types.DocumentProcessPayload) (*asynq.Ta
 	}
 	if strings.TrimSpace(payload.ProcessID) != "" {
 		options = append(options, asynq.TaskID(paperInfoTaskID(
-			types.TypeDocumentRecognize, payload.DocumentID, "", payload.Attempt, payload.ProcessID,
+			types.TypeDocumentRecognize, payload.DocumentID, payload.Attempt, payload.ProcessID,
 		)))
 	}
 	return asynq.NewTask(types.TypeDocumentRecognize, encoded), options, nil
@@ -824,7 +813,6 @@ func NewPaperMetadataExtractTask(
 		asynq.TaskID(paperInfoTaskID(
 			types.TypePaperMetadataExtract,
 			payload.DocumentID,
-			payload.MarkdownSHA256,
 			payload.Attempt,
 		)),
 	}, nil
@@ -849,7 +837,6 @@ func NewPaperReferenceDispatchTask(
 		}
 		payload.ReferenceRunID = paperReferenceRunID(
 			documentID,
-			payload.MarkdownSHA256,
 			payload.Attempt,
 		).String()
 	}
@@ -873,7 +860,6 @@ func NewPaperReferenceDispatchTask(
 		asynq.TaskID(paperInfoTaskID(
 			types.TypePaperReferenceDispatch,
 			payload.DocumentID,
-			payload.MarkdownSHA256,
 			payload.Attempt,
 			payload.ReferenceRunID,
 		)),
@@ -916,7 +902,7 @@ func NewPaperCatalogResolveTask(
 		stage = "reference"
 	}
 	options = append(options, asynq.TaskID(paperInfoTaskID(
-		types.TypePaperCatalogResolve, payload.DocumentID, "", payload.Attempt, stage,
+		types.TypePaperCatalogResolve, payload.DocumentID, payload.Attempt, stage,
 	)))
 	return task, options, nil
 }
@@ -929,13 +915,9 @@ func newPaperInfoJSONTask(taskType string, payload any) (*asynq.Task, error) {
 	return asynq.NewTask(taskType, encoded), nil
 }
 
-func paperInfoTaskID(taskType, documentID, revision string, attempt int, parts ...string) string {
+func paperInfoTaskID(taskType, documentID string, attempt int, parts ...string) string {
 	stage := strings.NewReplacer(":", "-", "_", "-").Replace(taskType)
-	revision = strings.ToLower(strings.TrimSpace(revision))
 	base := stage + "-" + strings.TrimSpace(documentID)
-	if revision != "" {
-		base += "-" + revision
-	}
 	if attempt > 0 {
 		base += "-attempt-" + strconv.Itoa(attempt)
 	}

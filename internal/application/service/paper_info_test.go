@@ -3,8 +3,6 @@ package service
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -49,6 +47,30 @@ func newPaperInfoServiceForTest(
 		cfg, documents, storage, extractor, catalogs, papers, tasks, inspector,
 		referenceLimiter, papercatalog.NewMemoryReferenceScheduler(schedulerCfg),
 	)
+}
+
+// registerReferenceJobForTest mirrors the production dispatcher boundary:
+// reference workers may claim only jobs that were registered beforehand.
+func registerReferenceJobForTest(
+	t *testing.T,
+	service interfaces.PaperInfoService,
+	targetDocumentID uuid.UUID,
+	sourceDocumentID uuid.UUID,
+) {
+	t.Helper()
+	implementation, ok := service.(*paperInfoService)
+	if !ok || implementation.referenceScheduler == nil {
+		t.Fatal("paper info service has no reference scheduler")
+	}
+	if _, err := implementation.referenceScheduler.Register(context.Background(), types.PaperReferenceJob{
+		TargetDocumentID: targetDocumentID,
+		Owners: []types.PaperReferenceOwner{{
+			SourceDocumentID: sourceDocumentID,
+			RunID:            uuid.New(),
+		}},
+	}); err != nil {
+		t.Fatalf("register reference job: %v", err)
+	}
 }
 
 type paperInfoStorageStub struct {
@@ -363,7 +385,6 @@ func (s *paperInfoPaperServiceStub) ResolveCitation(
 func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# A Reliable Paper\n\nAda Lovelace\n")
-	revision := testMarkdownSHA(markdown)
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID:     documentID,
 		Status: types.DocumentStatusReady,
@@ -371,15 +392,13 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 	documents.markdowns[documentID] = types.DocumentMarkdown{
 		DocumentID: documentID,
 		StorageKey: "markdown/test.md",
-		SHA256:     revision,
 	}
 	documents.blocks[documentID] = []types.Block{{
-		ID:             uuid.New(),
-		DocumentID:     documentID,
-		Ordinal:        0,
-		Type:           "title",
-		Text:           "A Reliable Paper",
-		MarkdownSHA256: revision,
+		ID:         uuid.New(),
+		DocumentID: documentID,
+		Ordinal:    0,
+		Type:       "title",
+		Text:       "A Reliable Paper",
 	}}
 	papers := newPaperInfoPaperServiceStub()
 	extractor := &paperInfoExtractorStub{
@@ -418,8 +437,7 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 	)
 
 	resolvable, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
-		DocumentID:     documentID,
-		MarkdownSHA256: revision,
+		DocumentID: documentID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -450,10 +468,9 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 	}
 }
 
-func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
+func TestPaperInfoExtractMetadataRejectsStatusChangedDuringRPC(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# Original\n")
-	revision := testMarkdownSHA(markdown)
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID:     documentID,
 		Status: types.DocumentStatusReady,
@@ -461,14 +478,13 @@ func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
 	documents.markdowns[documentID] = types.DocumentMarkdown{
 		DocumentID: documentID,
 		StorageKey: "markdown/original.md",
-		SHA256:     revision,
 	}
 	papers := newPaperInfoPaperServiceStub()
 	extractor := &paperInfoExtractorStub{
 		extract: func(*types.PaperExtractionRequest) (*types.PaperExtractionResult, error) {
-			changed := documents.markdowns[documentID]
-			changed.SHA256 = testMarkdownSHA([]byte("# Reparsed\n"))
-			documents.markdowns[documentID] = changed
+			document := documents.documents[documentID]
+			document.Status = types.DocumentStatusCancelled
+			documents.documents[documentID] = document
 			return &types.PaperExtractionResult{
 				Title: &types.PaperTextCandidate{
 					Value:      "Stale title",
@@ -491,8 +507,7 @@ func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
 	)
 
 	_, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
-		DocumentID:     documentID,
-		MarkdownSHA256: revision,
+		DocumentID: documentID,
 	})
 	if !errors.Is(err, ErrStalePaperInfo) {
 		t.Fatalf("expected stale revision error, got %v", err)
@@ -505,8 +520,7 @@ func TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC(t *testing.T) {
 
 func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
 	documentID := uuid.New()
-	revision := testMarkdownSHA([]byte("# Paper\n"))
-	documents := readyPaperInfoDocumentRepo(documentID, revision)
+	documents := readyPaperInfoDocumentRepo(documentID)
 	documents.documents[documentID] = types.Document{
 		ID:     documentID,
 		DOI:    "10.1000/exact",
@@ -555,8 +569,7 @@ func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID:     documentID,
-		MarkdownSHA256: revision,
+		DocumentID: documentID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -622,8 +635,7 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 	documentID := uuid.New()
 	placeholderID := uuid.New()
 	resolvedID := uuid.New()
-	revision := testMarkdownSHA([]byte("# Source\n"))
-	documents := readyPaperInfoDocumentRepo(documentID, revision)
+	documents := readyPaperInfoDocumentRepo(documentID)
 	documents.documents[placeholderID] = types.Document{
 		ID:     placeholderID,
 		Status: types.DocumentStatusUnknown,
@@ -676,14 +688,14 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID:     documentID,
-		MarkdownSHA256: revision,
+		DocumentID: documentID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Reference resolution is independent low-priority work. The source task
 	// must not synchronously inspect an entire bibliography.
+	registerReferenceJobForTest(t, service, placeholderID, documentID)
 	err = service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
 		DocumentID: placeholderID, IsReference: true,
 	})
@@ -702,8 +714,7 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 	first := uuid.New()
 	second := uuid.New()
 	duplicate := uuid.New()
-	revision := testMarkdownSHA([]byte("# Source\n"))
-	documents := readyPaperInfoDocumentRepo(documentID, revision)
+	documents := readyPaperInfoDocumentRepo(documentID)
 	for _, id := range []uuid.UUID{first, second, duplicate} {
 		documents.documents[id] = types.Document{ID: id, Status: types.DocumentStatusUnknown}
 	}
@@ -718,7 +729,7 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1, PaperReferenceCatalogMaxPerDocument: 2}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
 		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/source", "Source Paper", 1)}, nil
 	}}}}, papers, queue, nil, nil)
-	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID, MarkdownSHA256: revision}); err != nil {
+	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
 		t.Fatal(err)
 	}
 	if len(queue.tasks) != 0 {
@@ -726,8 +737,7 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 	}
 	if err := service.DispatchReferences(context.Background(), types.PaperReferenceDispatchCommand{
 		DocumentID:     documentID,
-		MarkdownSHA256: revision,
-		ReferenceRunID: paperReferenceRunID(documentID, revision, 0),
+		ReferenceRunID: paperReferenceRunID(documentID, 0),
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -782,10 +792,9 @@ func TestPaperInfoResolveSourceBackfillsBlankDOIWithoutOverwritingConflict(t *te
 	}
 }
 
-func TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup(t *testing.T) {
+func TestPaperInfoResolveMetadataRejectsStatusChangedDuringLookup(t *testing.T) {
 	documentID := uuid.New()
-	revision := testMarkdownSHA([]byte("# Original\n"))
-	documents := readyPaperInfoDocumentRepo(documentID, revision)
+	documents := readyPaperInfoDocumentRepo(documentID)
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{
 		DocumentID: documentID,
@@ -794,9 +803,9 @@ func TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup(t *testing.T
 	provider := &paperInfoProviderStub{
 		name: "crossref",
 		search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-			manifest := documents.markdowns[documentID]
-			manifest.SHA256 = testMarkdownSHA([]byte("# New\n"))
-			documents.markdowns[documentID] = manifest
+			document := documents.documents[documentID]
+			document.Status = types.DocumentStatusDeleting
+			documents.documents[documentID] = document
 			return []types.PaperCatalogCandidate{
 				testCatalogCandidate("crossref", "10.1000/new", "Original", 1),
 			}, nil
@@ -815,8 +824,7 @@ func TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup(t *testing.T
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID:     documentID,
-		MarkdownSHA256: revision,
+		DocumentID: documentID,
 	})
 	if !errors.Is(err, ErrStalePaperInfo) {
 		t.Fatalf("expected stale revision error, got %v", err)
@@ -910,6 +918,7 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 		nil,
 	)
 
+	registerReferenceJobForTest(t, service, unknownID, citingID)
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
 		DocumentID: unknownID, IsReference: true,
 	})
@@ -921,6 +930,35 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 		papers.updates[0].update.Title == nil ||
 		*papers.updates[0].update.Title != "Source-Free Paper" {
 		t.Fatalf("unknown paper metadata was not populated: %#v", papers.updates)
+	}
+}
+
+func TestPaperInfoResolveUnknownReferenceRequiresRegisteredJob(t *testing.T) {
+	unknownID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: unknownID, Status: types.DocumentStatusUnknown,
+	})
+	papers := newPaperInfoPaperServiceStub()
+	service := newPaperInfoServiceForTest(
+		config.Config{PaperCatalogConcurrency: 1},
+		documents,
+		&paperInfoStorageStub{},
+		&paperInfoExtractorStub{},
+		&paperInfoRegistryStub{},
+		papers,
+		nil,
+		nil,
+		nil,
+	)
+
+	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
+		DocumentID: unknownID, IsReference: true,
+	})
+	if err == nil {
+		t.Fatal("unregistered reference job unexpectedly resolved")
+	}
+	if len(papers.updates) != 0 {
+		t.Fatalf("unregistered reference job updated metadata: %#v", papers.updates)
 	}
 }
 
@@ -994,6 +1032,7 @@ func TestPaperInfoResolveUnknownReferenceRepointsCitationToStoredPaper(t *testin
 		nil,
 	)
 
+	registerReferenceJobForTest(t, service, unknownID, citingID)
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
 		DocumentID: unknownID, IsReference: true,
 	})
@@ -1257,17 +1296,13 @@ func TestFindStoredCatalogDocumentRejectsTitleWithDifferentAuthors(t *testing.T)
 	}
 }
 
-func readyPaperInfoDocumentRepo(
-	documentID uuid.UUID,
-	revision string,
-) *paperDocumentRepoStub {
+func readyPaperInfoDocumentRepo(documentID uuid.UUID) *paperDocumentRepoStub {
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID:     documentID,
 		Status: types.DocumentStatusReady,
 	})
 	documents.markdowns[documentID] = types.DocumentMarkdown{
 		DocumentID: documentID,
-		SHA256:     revision,
 	}
 	return documents
 }
@@ -1285,9 +1320,4 @@ func testCatalogCandidate(
 		Tags:          []string{},
 		ProviderScore: providerScore,
 	}
-}
-
-func testMarkdownSHA(content []byte) string {
-	sum := sha256.Sum256(content)
-	return hex.EncodeToString(sum[:])
 }

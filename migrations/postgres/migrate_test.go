@@ -102,7 +102,6 @@ func TestDocumentMarkdownMigrationCreatesDurableSourceManifest(t *testing.T) {
 
 func TestDocumentBlockSourceMapMigrationAddsTypedPDFLocation(t *testing.T) {
 	for _, fragment := range []string{
-		"markdown_sha256 VARCHAR(64)",
 		"page_width DOUBLE PRECISION",
 		"bbox_x0 DOUBLE PRECISION",
 		"markdown_codepoint_start INTEGER",
@@ -110,6 +109,17 @@ func TestDocumentBlockSourceMapMigrationAddsTypedPDFLocation(t *testing.T) {
 	} {
 		if !strings.Contains(documentBlockSourceMapUp, fragment) {
 			t.Fatalf("document block source-map migration does not include %q", fragment)
+		}
+	}
+}
+
+func TestRemoveMarkdownSHA256MigrationDropsDerivedRevisionColumns(t *testing.T) {
+	for _, fragment := range []string{
+		"ALTER TABLE document_markdowns DROP COLUMN IF EXISTS sha256",
+		"ALTER TABLE document_blocks DROP COLUMN IF EXISTS markdown_sha256",
+	} {
+		if !strings.Contains(removeMarkdownSHA256Up, fragment) {
+			t.Fatalf("remove markdown SHA-256 migration does not include %q", fragment)
 		}
 	}
 }

@@ -56,14 +56,10 @@ func (s *paperInfoInspectorStub) HasQueuedTaskTypeForDocument(
 func TestPaperInfoControlRetries(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()
-	markdown := []byte("# Paper\n")
-	revision := testMarkdownSHA(markdown)
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID: documentID, Status: types.DocumentStatusReady, DOI: "10.1000/example",
 	})
-	documents.markdowns[documentID] = types.DocumentMarkdown{
-		DocumentID: documentID, StorageKey: "markdown/paper.md", SHA256: revision,
-	}
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/paper.md"}
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{
 		DocumentID: documentID, MetadataSource: types.PaperMetadataSourceExtraction,
@@ -105,9 +101,9 @@ func TestPaperInfoControlRetries(t *testing.T) {
 }
 
 func TestPaperInfoTaskIDUsesManualAttempt(t *testing.T) {
-	base := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", "revision", 0)
-	firstRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", "revision", 1)
-	secondRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", "revision", 2)
+	base := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", 0)
+	firstRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", 1)
+	secondRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", 2)
 	if base == firstRetry || firstRetry == secondRetry {
 		t.Fatalf("task IDs must distinguish manual attempts: %q, %q, %q", base, firstRetry, secondRetry)
 	}
@@ -162,9 +158,8 @@ func TestPaperInfoControlRejectsUnknownSourceCatalogRetry(t *testing.T) {
 func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()
-	revision := testMarkdownSHA([]byte("# Paper\n"))
 	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, Status: types.DocumentStatusReady})
-	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/paper.md", SHA256: revision}
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/paper.md"}
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID}
 	queue := &paperInfoQueueStub{}
@@ -180,7 +175,7 @@ func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
 	if err := json.Unmarshal(queue.tasks[0].Payload(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.DocumentID != documentID.String() || payload.MarkdownSHA256 != revision || payload.ReferenceRunID == "" {
+	if payload.DocumentID != documentID.String() || payload.ReferenceRunID == "" {
 		t.Fatalf("reference retry payload = %#v", payload)
 	}
 }

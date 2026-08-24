@@ -2,8 +2,6 @@ package paperextraction
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -33,7 +31,6 @@ func (stub *extractorClientStub) Extract(
 
 func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 	markdown := []byte("# **Mapped Paper**\n\n### **Ada Lovelace**\n")
-	sum := sha256.Sum256(markdown)
 	location := completeTestLocation(len([]rune(string(markdown))))
 	client := &extractorClientStub{
 		result: &papersv1.PaperExtractionResult{
@@ -60,9 +57,8 @@ func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 	documentID := uuid.New()
 
 	result, err := extractor.Extract(context.Background(), &types.PaperExtractionRequest{
-		DocumentID:     documentID,
-		MarkdownSHA256: hex.EncodeToString(sum[:]),
-		Markdown:       markdown,
+		DocumentID: documentID,
+		Markdown:   markdown,
 		Blocks: []types.PaperSourceBlock{{
 			Ordinal:  0,
 			Type:     "title",
@@ -92,9 +88,7 @@ func TestGRPCExtractorRejectsInvalidRequestBeforeRPC(t *testing.T) {
 	extractor := NewGRPCExtractorWithClient(client)
 
 	_, err := extractor.Extract(context.Background(), &types.PaperExtractionRequest{
-		DocumentID:     uuid.New(),
-		MarkdownSHA256: "not-a-sha",
-		Markdown:       []byte("# Paper"),
+		DocumentID: uuid.New(),
 	})
 	if !errors.Is(err, types.ErrInvalidPaperExtraction) {
 		t.Fatalf("expected invalid extraction error, got %v", err)
@@ -106,7 +100,6 @@ func TestGRPCExtractorRejectsInvalidRequestBeforeRPC(t *testing.T) {
 
 func TestGRPCExtractorRejectsInvalidResponse(t *testing.T) {
 	markdown := []byte("# Paper")
-	sum := sha256.Sum256(markdown)
 	client := &extractorClientStub{result: &papersv1.PaperExtractionResult{
 		Title: &papersv1.PaperTextCandidate{
 			Value:      "Paper",
@@ -117,9 +110,8 @@ func TestGRPCExtractorRejectsInvalidResponse(t *testing.T) {
 	extractor := NewGRPCExtractorWithClient(client)
 
 	_, err := extractor.Extract(context.Background(), &types.PaperExtractionRequest{
-		DocumentID:     uuid.New(),
-		MarkdownSHA256: hex.EncodeToString(sum[:]),
-		Markdown:       markdown,
+		DocumentID: uuid.New(),
+		Markdown:   markdown,
 	})
 	if !errors.Is(err, types.ErrInvalidPaperExtraction) {
 		t.Fatalf("expected invalid extraction response error, got %v", err)

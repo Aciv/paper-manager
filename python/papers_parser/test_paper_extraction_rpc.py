@@ -1,7 +1,6 @@
 """Focused tests for the paper extraction gRPC transport."""
 from __future__ import annotations
 
-import hashlib
 import unittest
 from uuid import uuid4
 
@@ -36,7 +35,6 @@ RPC extraction.
         title_end = title_start + len("RPC Paper")
         request = document_parser_pb2.PaperExtractionRequest(
             document_id=str(uuid4()),
-            markdown_sha256=hashlib.sha256(markdown).hexdigest(),
             markdown=markdown,
             blocks=[
                 document_parser_pb2.PaperSourceBlock(
@@ -67,20 +65,15 @@ RPC extraction.
         self.assertEqual(list(response.references), ["[1] Raw reference."])
         self.assertEqual(response.extractor_name, "markdown-rules")
 
-    def test_rejects_stale_markdown_revision(self) -> None:
+    def test_accepts_request_without_markdown_checksum(self) -> None:
         request = document_parser_pb2.PaperExtractionRequest(
             document_id=str(uuid4()),
-            markdown_sha256="0" * 64,
             markdown=b"# Paper",
         )
-
-        with self.assertRaisesRegex(
-            ValueError,
-            "markdown_sha256 does not match markdown",
-        ):
-            _decode_extraction_request(request)
+        markdown, blocks = _decode_extraction_request(request)
+        self.assertEqual(markdown, "# Paper")
+        self.assertEqual(blocks, ())
 
 
 if __name__ == "__main__":
     unittest.main()
-

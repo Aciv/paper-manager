@@ -2,8 +2,6 @@ package docrecognition
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -119,8 +117,6 @@ func (r *BuiltinRecognizer) Read(ctx context.Context, request *types.Recognition
 	if response.ContentType != "" && response.ContentType != "text/markdown" {
 		return nil, fmt.Errorf("builtin parser returned unsupported content type %q", response.ContentType)
 	}
-	sum := sha256.Sum256(response.Markdown)
-	sha := hex.EncodeToString(sum[:])
 	filename := markdownFilename(request.OriginalFilename)
 	if candidate := filepath.Base(strings.TrimSpace(response.MarkdownFilename)); candidate != "" && candidate != "." && candidate != ".." {
 		if safeName, err := utils.SafeFileName(candidate); err == nil && strings.EqualFold(filepath.Ext(safeName), ".md") {
@@ -134,7 +130,6 @@ func (r *BuiltinRecognizer) Read(ctx context.Context, request *types.Recognition
 			MarkdownFilename: filename,
 			ContentType:      "text/markdown",
 			SizeBytes:        response.SizeBytes,
-			SHA256:           sha,
 			Language:         response.Language,
 			PageCount:        int(response.PageCount),
 			ParserName:       response.ParserName,

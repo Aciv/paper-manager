@@ -38,7 +38,7 @@ func (s *paperInfoService) RetryExtraction(
 	} else if active {
 		return ErrPaperInfoAttemptActive
 	}
-	markdown, err := s.documents.GetMarkdown(ctx, document.ID)
+	_, err = s.documents.GetMarkdown(ctx, document.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPaperInfoExtractionUnavailable
 	}
@@ -47,9 +47,8 @@ func (s *paperInfoService) RetryExtraction(
 	}
 	task, options, err := NewPaperMetadataExtractTask(
 		types.PaperMetadataExtractPayload{
-			DocumentID:     document.ID.String(),
-			MarkdownSHA256: markdown.SHA256,
-			Attempt:        nextPaperInfoManualAttempt(),
+			DocumentID: document.ID.String(),
+			Attempt:    nextPaperInfoManualAttempt(),
 		},
 		s.cfg.PaperExtractionTaskTimeout,
 		s.cfg.PaperExtractionTaskMaxRetry,
@@ -125,7 +124,7 @@ func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documen
 	} else if active {
 		return ErrPaperInfoAttemptActive
 	}
-	markdown, err := s.documents.GetMarkdown(ctx, document.ID)
+	_, err = s.documents.GetMarkdown(ctx, document.ID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrPaperInfoCatalogUnavailable
 	}
@@ -133,9 +132,8 @@ func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documen
 		return err
 	}
 	payload := types.PaperReferenceDispatchPayload{
-		DocumentID:     document.ID.String(),
-		MarkdownSHA256: markdown.SHA256,
-		Attempt:        nextPaperInfoManualAttempt(),
+		DocumentID: document.ID.String(),
+		Attempt:    nextPaperInfoManualAttempt(),
 	}
 	task, options, err := NewPaperReferenceDispatchTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
 	if err != nil {

@@ -1,8 +1,6 @@
 package types
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -47,19 +45,15 @@ func (status PaperExtractionStatus) IsValid() bool {
 // PaperMetadataExtractCommand is the typed application command decoded from a
 // queue payload. It carries identifiers only; the service reloads source data.
 type PaperMetadataExtractCommand struct {
-	RequestID      string
-	DocumentID     uuid.UUID
-	MarkdownSHA256 string
-	Attempt        int
+	RequestID  string
+	DocumentID uuid.UUID
+	Attempt    int
 }
 
-// Validate verifies identifiers and revision information on the command.
+// Validate verifies identifiers and attempt information on the command.
 func (command PaperMetadataExtractCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperExtraction)
-	}
-	if err := validateSHA256("markdown_sha256", command.MarkdownSHA256); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidPaperExtraction, err)
 	}
 	if command.Attempt < 0 {
 		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperExtraction)
@@ -130,14 +124,12 @@ func (candidate PaperTextCandidate) Validate() error {
 // PaperExtractionRequest is the runtime-only request sent to Python. Markdown
 // and Blocks are loaded by the worker and must never be serialized into Asynq.
 type PaperExtractionRequest struct {
-	DocumentID     uuid.UUID          `json:"document_id"`
-	MarkdownSHA256 string             `json:"markdown_sha256"`
-	Markdown       []byte             `json:"-"`
-	Blocks         []PaperSourceBlock `json:"blocks,omitempty"`
+	DocumentID uuid.UUID          `json:"document_id"`
+	Markdown   []byte             `json:"-"`
+	Blocks     []PaperSourceBlock `json:"blocks,omitempty"`
 }
 
-// Validate checks request bounds, UTF-8, and that MarkdownSHA256 describes the
-// exact supplied Markdown bytes.
+// Validate checks request bounds and UTF-8.
 func (request PaperExtractionRequest) Validate() error {
 	if request.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperExtraction)
@@ -150,13 +142,6 @@ func (request PaperExtractionRequest) Validate() error {
 	}
 	if !utf8.Valid(request.Markdown) {
 		return fmt.Errorf("%w: Markdown must be valid UTF-8", ErrInvalidPaperExtraction)
-	}
-	if err := validateSHA256("markdown_sha256", request.MarkdownSHA256); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidPaperExtraction, err)
-	}
-	sum := sha256.Sum256(request.Markdown)
-	if !strings.EqualFold(strings.TrimSpace(request.MarkdownSHA256), hex.EncodeToString(sum[:])) {
-		return fmt.Errorf("%w: Markdown SHA-256 does not match content", ErrInvalidPaperExtraction)
 	}
 	if len(request.Blocks) > MaxPaperExtractionBlocks {
 		return fmt.Errorf("%w: block count exceeds %d", ErrInvalidPaperExtraction, MaxPaperExtractionBlocks)
@@ -271,17 +256,6 @@ func (result PaperExtractionResult) Validate() error {
 		if strings.TrimSpace(reference) == "" {
 			return fmt.Errorf("%w: reference %d is empty", ErrInvalidPaperExtraction, index)
 		}
-	}
-	return nil
-}
-
-func validateSHA256(fieldName, value string) error {
-	clean := strings.TrimSpace(value)
-	if len(clean) != sha256.Size*2 {
-		return fmt.Errorf("%s must contain 64 hexadecimal characters", fieldName)
-	}
-	if _, err := hex.DecodeString(clean); err != nil {
-		return fmt.Errorf("%s must be hexadecimal", fieldName)
 	}
 	return nil
 }

@@ -4,9 +4,7 @@ package docrecognition
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/csv"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -47,7 +45,6 @@ func (r *DefaultRecognizer) Read(ctx context.Context, request *types.Recognition
 		logger.Error(ctx, "default document recognition failed", "document_id", request.DocumentID, "error", err)
 		return nil, err
 	}
-	sum := sha256.Sum256(markdown)
 	result := &types.RecognitionResult{
 		OutputMode: types.RecognitionOutputMarkdownBytes,
 		Markdown:   markdown,
@@ -55,7 +52,6 @@ func (r *DefaultRecognizer) Read(ctx context.Context, request *types.Recognition
 			MarkdownFilename: markdownFilename(request.OriginalFilename),
 			ContentType:      "text/markdown",
 			SizeBytes:        int64(len(markdown)),
-			SHA256:           hex.EncodeToString(sum[:]),
 			ParserName:       DriverDefault,
 		},
 	}

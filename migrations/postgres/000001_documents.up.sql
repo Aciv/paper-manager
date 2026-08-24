@@ -26,7 +26,6 @@ CREATE TABLE IF NOT EXISTS document_blocks (
     type TEXT NOT NULL,
     text TEXT NOT NULL,
     url TEXT NOT NULL DEFAULT '',
-    markdown_sha256 VARCHAR(64) NOT NULL DEFAULT '',
     page_number INTEGER NOT NULL CHECK (page_number >= 1),
     page_width DOUBLE PRECISION NOT NULL CHECK (page_width > 0),
     page_height DOUBLE PRECISION NOT NULL CHECK (page_height > 0),

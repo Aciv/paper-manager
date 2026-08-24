@@ -17,7 +17,6 @@ type DocumentMarkdown struct {
 	Filename      string    `gorm:"column:filename;type:text;not null" json:"filename"`
 	ContentType   string    `gorm:"column:content_type;type:text;not null;default:text/markdown" json:"contentType"`
 	SizeBytes     int64     `gorm:"column:size_bytes;not null;check:size_bytes >= 0" json:"sizeBytes"`
-	SHA256        string    `gorm:"column:sha256;type:varchar(64);not null;default:''" json:"sha256,omitempty"`
 	ParserName    string    `gorm:"column:parser_name;type:text;not null;default:''" json:"parserName,omitempty"`
 	ParserVersion string    `gorm:"column:parser_version;type:text;not null;default:''" json:"parserVersion,omitempty"`
 	InputMode     string    `gorm:"column:input_mode;type:text;not null;default:''" json:"inputMode,omitempty"`

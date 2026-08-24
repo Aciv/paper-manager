@@ -141,10 +141,9 @@ func mapExtractionRequest(
 		rpcBlocks = append(rpcBlocks, rpcBlock)
 	}
 	return &papersv1.PaperExtractionRequest{
-		DocumentId:     request.DocumentID.String(),
-		MarkdownSha256: request.MarkdownSHA256,
-		Markdown:       append([]byte(nil), request.Markdown...),
-		Blocks:         rpcBlocks,
+		DocumentId: request.DocumentID.String(),
+		Markdown:   append([]byte(nil), request.Markdown...),
+		Blocks:     rpcBlocks,
 	}, nil
 }
 

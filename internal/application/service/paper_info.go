@@ -39,14 +39,14 @@ const (
 )
 
 var (
-	// ErrStalePaperInfo means the source document was deleted, changed identity,
-	// or its supplied Markdown revision changed while paper-info work was running.
-	ErrStalePaperInfo = errors.New("paper info source revision is stale")
+	// ErrStalePaperInfo means the source document was deleted or changed state
+	// while paper-info work was running.
+	ErrStalePaperInfo = errors.New("paper info source state is stale")
 	// ErrPaperCatalogNoMatch means providers were reachable but no candidate
 	// was sufficiently similar to safely overwrite canonical paper data.
 	ErrPaperCatalogNoMatch = errors.New("no satisfactory paper catalog match")
-	// ErrPaperInfoExtractionUnavailable means there is no current Markdown
-	// revision to submit to the Python extractor.
+	// ErrPaperInfoExtractionUnavailable means there is no parsed Markdown to
+	// submit to the Python extractor.
 	ErrPaperInfoExtractionUnavailable = errors.New("paper metadata extraction is unavailable")
 	// ErrPaperInfoCatalogUnavailable means durable metadata/reference evidence
 	// cannot form a safe external catalog query.
@@ -58,11 +58,13 @@ var (
 	ErrPaperInfoAttemptActive = errors.New("paper information attempt is still active")
 
 	// paperInfoManualAttempt distinguishes operator-initiated retries from an
-	// initial revision-bound task and from Asynq's retries of that task.
+	// initial task and from Asynq's retries of that task.
 	paperInfoManualAttempt atomic.Int64
 )
 
 var (
+	// (?i) capitalization ignore, \b word boundary, afrond isn't digit...
+	// {4,9} 4 to 9 digit
 	doiPattern       = regexp.MustCompile(`(?i)\b10\.[0-9]{4,9}/[-._;()/:a-z0-9]+`)
 	urlPattern       = regexp.MustCompile(`(?i)https?://[^\s<>()]+`)
 	yearTitlePattern = regexp.MustCompile(
@@ -155,9 +157,9 @@ func newPaperInfoService(
 	}
 }
 
-// ExtractMetadata loads exactly the Markdown revision named by command, asks
+// ExtractMetadata loads the current parsed Markdown, asks
 // Python for bibliographic candidates, and replaces the current extraction
-// snapshot. Revision checks are repeated immediately before each write.
+// snapshot. Document-state checks are repeated immediately before each write.
 func (s *paperInfoService) ExtractMetadata(
 	ctx context.Context,
 	command types.PaperMetadataExtractCommand,
@@ -197,10 +199,9 @@ func (s *paperInfoService) ExtractMetadata(
 		return false, err
 	}
 	result, err := s.extractor.Extract(ctx, &types.PaperExtractionRequest{
-		DocumentID:     command.DocumentID,
-		MarkdownSHA256: command.MarkdownSHA256,
-		Markdown:       markdown,
-		Blocks:         blocks,
+		DocumentID: command.DocumentID,
+		Markdown:   markdown,
+		Blocks:     blocks,
 	})
 	if err != nil {
 		return false, err
@@ -214,7 +215,7 @@ func (s *paperInfoService) ExtractMetadata(
 
 	update := extractionMetadataUpdate(result)
 	references := extractionCitationInputs(result.References)
-	if err := s.ensureCurrentRevision(ctx, command.DocumentID, command.MarkdownSHA256); err != nil {
+	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
 		return false, err
 	}
 	updatedMetadata, err := s.papers.UpdateMetadata(
@@ -226,7 +227,7 @@ func (s *paperInfoService) ExtractMetadata(
 		logger.Error(ctx, "persist extracted paper metadata failed", "error", err)
 		return false, fmt.Errorf("persist extracted paper metadata: %w", err)
 	}
-	if err := s.ensureCurrentRevision(ctx, command.DocumentID, command.MarkdownSHA256); err != nil {
+	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
 		return false, err
 	}
 	if _, err := s.papers.ReplaceCitations(
@@ -256,11 +257,11 @@ func hasUsablePaperLookupIdentity(doi, title string) bool {
 }
 
 // paperReferenceRunID deterministically identifies one bibliography dispatch
-// for a document revision and user-initiated attempt. Re-running the same
+// for a document and user-initiated attempt. Re-running the same
 // Asynq task therefore emits the same provider batch task IDs instead of
 // creating duplicate reference work.
-func paperReferenceRunID(documentID uuid.UUID, markdownSHA256 string, attempt int) uuid.UUID {
-	key := documentID.String() + "\x00" + strings.ToLower(strings.TrimSpace(markdownSHA256)) + "\x00" + strconv.Itoa(attempt)
+func paperReferenceRunID(documentID uuid.UUID, attempt int) uuid.UUID {
+	key := documentID.String() + "\x00" + strconv.Itoa(attempt)
 	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("paper-reference-run\x00"+key))
 }
 
@@ -349,7 +350,7 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 		logger.Info(ctx, "source catalog lookup completed without match", "document_id", document.ID)
 		return nil
 	}
-	if err := s.ensureCatalogSourceCurrent(ctx, document, command.MarkdownSHA256); err != nil {
+	if err := s.ensureCatalogSourceCurrent(ctx, document); err != nil {
 		return err
 	}
 	applied, err := s.applySourceCatalogCandidate(ctx, document, selected)
@@ -386,7 +387,7 @@ func (s *paperInfoService) DispatchReferences(
 	if document.Status == types.DocumentStatusUnknown {
 		return ErrPaperInfoCatalogUnavailable
 	}
-	if err := s.ensureCatalogSourceCurrent(ctx, document, command.MarkdownSHA256); err != nil {
+	if err := s.ensureCatalogSourceCurrent(ctx, document); err != nil {
 		return err
 	}
 	return s.enqueueReferenceCatalogTasks(ctx, document, command)
@@ -401,27 +402,7 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 	}
 	claim, err := s.referenceScheduler.Claim(ctx, cited.ID)
 	if err != nil {
-		// Direct service callers (not queue workers) can ask to resolve one
-		// unknown placeholder. Rebuild the minimum scheduler ownership from an
-		// incoming citation so the same single-target path remains reusable.
-		incoming, incomingErr := s.papers.ListCitedBy(ctx, cited.ID.String())
-		if incomingErr != nil || len(incoming) == 0 {
-			return err
-		}
-		owner := incoming[0].CitingDocumentID
-		if _, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
-			TargetDocumentID: cited.ID,
-			Owners: []types.PaperReferenceOwner{{
-				SourceDocumentID: owner,
-				RunID:            uuid.New(),
-			}},
-		}); registerErr != nil {
-			return registerErr
-		}
-		claim, err = s.referenceScheduler.Claim(ctx, cited.ID)
-		if err != nil {
-			return err
-		}
+		return err
 	}
 	if !claim.Ready() {
 		return nil
@@ -492,6 +473,7 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 	if err := query.Validate(); err != nil {
 		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeTerminalFailure, nil)
 	}
+
 	provider, ok := s.catalogs.Get(claim.Provider.String())
 	if !ok {
 		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
@@ -519,6 +501,10 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 		return err
 	}
 
+	if selected.DOI == "" && query.DOI != "" {
+		selected.DOI = query.DOI
+	}
+
 	// dedup
 	resolvedID, err := s.findStoredCatalogDocument(ctx, selected, incoming[0].CitingDocumentID)
 	if err != nil {
@@ -534,6 +520,26 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 	if resolvedID == uuid.Nil {
 		if _, metadataErr := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); metadataErr != nil {
 			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, metadataErr)
+		}
+		doi := normalizePaperDOI(selected.DOI)
+		if doi != "" {
+			applied, err := s.documents.SetDOIIfEmpty(ctx, cited.ID, doi)
+			switch {
+			case err != nil:
+				logger.Warn(ctx,
+					"persist catalog DOI to referenced document failed",
+					"document_id", cited.ID,
+					"doi", doi,
+					"provider", claim.Provider,
+					"error", err,
+				)
+			case applied:
+				logger.Info(ctx, "catalog DOI applied to referenced document",
+					"document_id", cited.ID,
+					"doi", doi,
+					"provider", claim.Provider,
+				)
+			}
 		}
 	}
 	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeMatched, nil)
@@ -783,7 +789,7 @@ func (s *paperInfoService) loadExtractionSource(
 	ctx context.Context,
 	command types.PaperMetadataExtractCommand,
 ) ([]byte, []types.PaperSourceBlock, error) {
-	if err := s.ensureCurrentRevision(ctx, command.DocumentID, command.MarkdownSHA256); err != nil {
+	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
 		return nil, nil, err
 	}
 	manifest, err := s.documents.GetMarkdown(ctx, command.DocumentID)
@@ -826,10 +832,9 @@ func (s *paperInfoService) loadExtractionSource(
 		})
 	}
 	request := types.PaperExtractionRequest{
-		DocumentID:     command.DocumentID,
-		MarkdownSHA256: command.MarkdownSHA256,
-		Markdown:       markdown,
-		Blocks:         blocks,
+		DocumentID: command.DocumentID,
+		Markdown:   markdown,
+		Blocks:     blocks,
 	}
 	if err := request.Validate(); err != nil {
 		return nil, nil, err
@@ -837,11 +842,10 @@ func (s *paperInfoService) loadExtractionSource(
 	return markdown, blocks, nil
 }
 
-func (s *paperInfoService) ensureCurrentRevision(
-	ctx context.Context,
-	documentID uuid.UUID,
-	expectedSHA256 string,
-) error {
+// ensureDocumentReady prevents late extraction results from being persisted
+// after the document has been cancelled, deleted, or otherwise left the
+// parsed state. It deliberately does not compare Markdown content revisions.
+func (s *paperInfoService) ensureDocumentReady(ctx context.Context, documentID uuid.UUID) error {
 	document, err := s.documents.Get(ctx, documentID)
 	if err != nil {
 		return err
@@ -853,34 +857,12 @@ func (s *paperInfoService) ensureCurrentRevision(
 			document.Status,
 		)
 	}
-	if strings.TrimSpace(expectedSHA256) == "" {
-		return fmt.Errorf(
-			"%w: Markdown SHA-256 is required for a source-backed document",
-			ErrStalePaperInfo,
-		)
-	}
-	markdown, err := s.documents.GetMarkdown(ctx, documentID)
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(
-		strings.TrimSpace(markdown.SHA256),
-		strings.TrimSpace(expectedSHA256),
-	) {
-		return fmt.Errorf(
-			"%w: expected Markdown SHA-256 %s, got %s",
-			ErrStalePaperInfo,
-			expectedSHA256,
-			markdown.SHA256,
-		)
-	}
 	return nil
 }
 
 func (s *paperInfoService) ensureCatalogSourceCurrent(
 	ctx context.Context,
 	initialDocument types.Document,
-	expectedSHA256 string,
 ) error {
 	current, err := s.documents.Get(ctx, initialDocument.ID)
 	if err != nil {
@@ -914,22 +896,6 @@ func (s *paperInfoService) ensureCatalogSourceCurrent(
 		return fmt.Errorf(
 			"%w: source document changed to a source-free placeholder",
 			ErrStalePaperInfo,
-		)
-	}
-	expectedSHA256 = strings.TrimSpace(expectedSHA256)
-	if expectedSHA256 == "" {
-		return nil
-	}
-	markdown, err := s.documents.GetMarkdown(ctx, initialDocument.ID)
-	if err != nil {
-		return err
-	}
-	if !strings.EqualFold(strings.TrimSpace(markdown.SHA256), expectedSHA256) {
-		return fmt.Errorf(
-			"%w: expected Markdown SHA-256 %s, got %s",
-			ErrStalePaperInfo,
-			expectedSHA256,
-			markdown.SHA256,
 		)
 	}
 	return nil
@@ -1019,6 +985,7 @@ func metadataLookupQuery(
 	return query
 }
 
+// reference recognition
 func referenceLookupQuery(rawReference string) types.PaperLookupQuery {
 	query := types.PaperLookupQuery{Limit: types.DefaultPaperCatalogLimit}
 	if match := doiPattern.FindString(rawReference); match != "" {
