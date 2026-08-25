@@ -1,14 +1,12 @@
 # Local environment settings can contain database passwords and must not be committed.
-.env
-.venv
-.vscode
-.example
-.cc_task
-.codex_plan
+.*
+!.air.toml
+
 AGENTS.md
 CLAUDE.md
 __pycache__/
 *.py[cod]
+tmp
 
 /model_train
 

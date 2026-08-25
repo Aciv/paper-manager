@@ -34,7 +34,11 @@ PATH=/root/go/bin:$PATH .venv/bin/python -m grpc_tools.protoc \
 Paper extraction accepts at most 32 MiB of valid UTF-8 Markdown and 50,000
 source blocks. The `PaperExtractionEngine` protocol in
 `papers_parser/paper_extractor.py` is the replacement boundary for a future
-CRF implementation.
+CRF implementation. `server.py` is the composition root: it constructs both
+gRPC servicers and injects the extraction engine plus request limits into
+`PaperMetadataExtractionRPC`. Override those limits with
+`PARSER_MAX_EXTRACTION_MARKDOWN_BYTES` and
+`PARSER_MAX_EXTRACTION_BLOCKS` (or the matching command-line flags).
 
 The Go API and worker need the same `UPLOAD_DIR` only when Go supplies a
 shared file path. Without an explicit `UPLOAD_DIR`, the worker uses the repository's

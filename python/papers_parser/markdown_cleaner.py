@@ -1,4 +1,5 @@
-"""Safe cleanup for Markdown generated from PDF pages.
+"""
+Safe cleanup for Markdown generated from PDF pages.
 
 The cleaner removes known parser/OCR noise while preserving Markdown syntax.
 It also returns a raw-to-cleaned code-point map because PyMuPDF4LLM page-box

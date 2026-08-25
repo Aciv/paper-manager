@@ -44,18 +44,55 @@ docker compose up --build -d
 
 上传文件保存到宿主机的 `./data/uploads`，API 与 worker 共用该目录；PostgreSQL 数据保存在 Docker 卷 `postgres-data`。停止服务使用 `docker compose down`，保留数据；如需同时删除数据库卷，使用 `docker compose down -v`。
 
-## 本地开发（可选）
+## 快速开发模式
 
-仍可分别运行 Python worker、Go API 和 Vite 前端，具体命令见 [`python/README.md`](python/README.md)。
+频繁修改代码时，使用混合模式：Docker 只运行 PostgreSQL 与 Redis；Go API、
+Python gRPC parser 和 Vite 都从宿主机直接运行。因此，日常源码修改无需重建镜像。
 
-首次本地运行时，从示例生成未提交的开发配置：
+```text
+本机 Go API (:8080)  <-  本机 Vite (:5173)
+       |                         |
+本机 Python parser (:50051)      |
+       \_________________________/
+                    Docker: PostgreSQL / Redis
+```
+
+首次使用时创建本地配置，并启动基础设施：
 
 ```bash
 cp .env.example .env
-go run ./cmd/server
+make dev-start
 ```
 
-服务启动时自动加载根目录 `.env`。文件缺失会被忽略，且已经由 shell、Docker 或部署平台提供的环境变量优先于 `.env` 中的值。请勿将 `.env` 或真实凭据提交到仓库。
+随后在另外三个终端分别运行：
+
+```bash
+make dev-app       # Go API；安装 Air 后自动重载
+make dev-parser    # Python gRPC parser
+make dev-frontend  # Vite HMR
+```
+
+`make dev-app` 会优先使用 [Air](https://github.com/air-verse/air)。可选安装：
+
+```bash
+go install github.com/air-verse/air@latest
+```
+
+首次运行 parser 前，创建 Python 虚拟环境并安装依赖：
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r python/requirements.txt
+```
+
+常用命令包括 `make dev-status`、`make dev-logs`、`make dev-stop`。修改 Go、Python
+或 React 时都不需要 Docker build；分别重启对应本机进程即可。相同入口也可通过
+`./scripts/dev.sh start|app|parser|frontend` 使用。
+
+开发 Compose 使用独立的 `postgres-data-dev`、`redis-data-dev` 卷，不会与全容器
+模式的 `postgres-data`、`redis-data` 混用。Go API 会自动加载根目录 `.env`；parser
+使用其内建的本地默认值（与 `.env.example` 一致），或读取已导出的 `PARSER_GRPC_ADDR`、
+`UPLOAD_DIR` 等环境变量。请勿提交 `.env` 或真实凭据。
 
 默认 API 位于 `http://localhost:8080`，Web 位于 `http://localhost:5173`。
 
@@ -67,7 +104,7 @@ go run ./cmd/server
 - 每个文档对应一条 `paper_metadata`。其中保存正式标题、摘要、作者、来源、期刊/会议、卷期页码、发布日期与学科 `tags`；标题为空时界面和搜索会回退到 `original_filename`。
 - `document_bases` 是命名论文集合，`document_base_files` 是多对多关联。加入、移除或整理 Base 只改变关联记录，不会复制、删除或修改源文档与论文书目信息。
 - 文档识别通过 `DocumentRecognizer` 端口接入：`default` 在 Go 本地转换 TXT、Markdown、JSON 与 CSV，`builtin` 调用 `proto/document_parser.proto` 的 Python gRPC `DocumentParser.Recognize`。识别任务由 Asynq 执行；Python 返回 Markdown 与页级 source-map Blocks，Go 负责文件存储、数据库事务和状态更新。
-- 解析结果写入 `document_blocks`。每个块包含 `type`、文本、页面尺寸、PyMuPDF 坐标、Markdown Unicode code-point 区间和 Markdown SHA-256；网页可据此将块高亮回原 PDF。图片和表格需要独立资产 URL，因此在资产导出实现前不会被持久化为 `image` / `table` Block。
+- 解析结果写入 `document_blocks`。每个块包含 `type`、文本、页面尺寸、PyMuPDF 坐标与 Markdown Unicode code-point 区间；网页可据此将块高亮回原 PDF。图片和表格需要独立资产 URL，因此在资产导出实现前不会被持久化为 `image` / `table` Block。
 - 阅读端使用 PDF.js（通过 `react-pdf`）渲染 PDF、复制文本，并可切换到解析 Block 选择模式。
 
 ## API

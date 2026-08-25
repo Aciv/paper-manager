@@ -11,6 +11,7 @@ service DocumentParser {
 // PaperMetadataExtractor derives candidates from an already-persisted
 // Markdown revision. It performs no catalog lookups and writes no database
 // state; Go remains responsible for orchestration and canonical persistence.
+
 service PaperMetadataExtractor {
   rpc Extract(PaperExtractionRequest) returns (PaperExtractionResult);
 }

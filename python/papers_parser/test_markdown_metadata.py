@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from papers_parser.markdown_metadata import extract_paper_sections
+from papers_parser.regex_metadata_find import extract_paper_sections
 
 
 class MarkdownPaperSectionsTest(unittest.TestCase):

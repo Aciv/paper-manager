@@ -1,0 +1,38 @@
+# Fast local-development topology. Source processes (Go API, Python parser,
+# and Vite) run on the host; Docker owns only stateful dependencies.
+# This file deliberately excludes the api, parser, and web production images.
+name: papers-manager-dev
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: papers
+      POSTGRES_PASSWORD: papers
+      POSTGRES_DB: papers
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data-dev:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U papers -d papers"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data-dev:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  postgres-data-dev:
+  redis-data-dev:
