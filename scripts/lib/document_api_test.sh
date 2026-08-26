@@ -90,6 +90,31 @@ if document.get("originalFilename") != sys.argv[2] or document.get("doi") != sys
 PY
 }
 
+assert_accepted_response() {
+  python3 - "${RESPONSE_FILE}" <<'PY'
+import json
+import sys
+
+body = json.load(open(sys.argv[1], encoding="utf-8"))
+if body.get("accepted") is not True:
+    raise SystemExit(f"expected accepted=true: {body}")
+PY
+}
+
+wait_for_document_terminal() {
+  local document_id=$1 timeout_seconds=${2:-180}
+  local deadline=$((SECONDS + timeout_seconds))
+  while :; do
+    api_request 200 --get --data-urlencode "id=${document_id}" "${API_BASE_URL}/api/document/search"
+    LAST_DOCUMENT_STATUS=$(json_value 'items.0.status')
+    case "${LAST_DOCUMENT_STATUS}" in
+      ready|failed|cancelled) return ;;
+    esac
+    (( SECONDS < deadline )) || fail "document ${document_id} did not reach a terminal state within ${timeout_seconds}s (last status: ${LAST_DOCUMENT_STATUS})"
+    sleep 2
+  done
+}
+
 upload_file() {
   local path=$1 filename=$2 doi=$3 content_type=$4
   api_request 201 --request POST \
@@ -108,16 +133,50 @@ make_pdf_fixture() {
   printf '%%PDF-1.7\n%% API test fixture\n' > "${target}"
 }
 
-make_zip_fixture() { printf 'PK\003\004document-api-fixture' > "$1"; }
-make_legacy_office_fixture() { printf '\320\317\021\340\241\261\032\341document-api-fixture' > "$1"; }
+make_valid_pdf_fixture() {
+  local target=$1
+  python3 - "${target}" <<'PY'
+import sys
+
+target = sys.argv[1]
+stream = b"BT /F1 18 Tf 72 720 Td (Phase 17 processing fixture) Tj ET\n"
+objects = [
+    b"<< /Type /Catalog /Pages 2 0 R >>",
+    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    b"<< /Length %d >>\nstream\n" % len(stream) + stream + b"endstream",
+    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+]
+pdf = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+offsets = [0]
+for number, body in enumerate(objects, 1):
+    offsets.append(len(pdf))
+    pdf.extend(f"{number} 0 obj\n".encode())
+    pdf.extend(body)
+    pdf.extend(b"\nendobj\n")
+xref = len(pdf)
+pdf.extend(f"xref\n0 {len(objects) + 1}\n".encode())
+pdf.extend(b"0000000000 65535 f \n")
+for offset in offsets[1:]:
+    pdf.extend(f"{offset:010d} 00000 n \n".encode())
+pdf.extend(
+    f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n".encode()
+)
+with open(target, "wb") as handle:
+    handle.write(pdf)
+PY
+}
+
+make_zip_fixture() { printf 'PK\003\004document-api-fixture-%s' "$(basename "$1")" > "$1"; }
+make_legacy_office_fixture() { printf '\320\317\021\340\241\261\032\341document-api-fixture-%s' "$(basename "$1")" > "$1"; }
 
 cleanup_api_test() {
   local id status
-  for id in "${TEST_BASE_IDS[@]:-}"; do
+  for id in "${TEST_BASE_IDS[@]}"; do
     status=$(api_status --request DELETE "${API_BASE_URL}/api/document/bases/${id}" 2>/dev/null || true)
     [[ "${status}" == "204" || "${status}" == "404" ]] && printf 'CLEANUP [%s]: base %s removed\n' "${TEST_NAME}" "${id}"
   done
-  for id in "${TEST_DOCUMENT_IDS[@]:-}"; do
+  for id in "${TEST_DOCUMENT_IDS[@]}"; do
     status=$(api_status --request DELETE "${API_BASE_URL}/api/document/${id}" 2>/dev/null || true)
     [[ "${status}" == "204" || "${status}" == "404" ]] && printf 'CLEANUP [%s]: document %s removed\n' "${TEST_NAME}" "${id}"
   done

@@ -100,6 +100,9 @@ python3 -m venv .venv
 
 远程 PDF 可通过 `POST /api/document/import-url` 导入，请求体为 `{"url":"https://arxiv.org/abs/2401.01234","doi":"可选","filename":"可选.pdf"}`。服务会区分论文落地页和实际 PDF URL，逐跳执行 SSRF 校验并流式写入；普通出版社落地页不会被猜测或抓取，当前内建转换仅支持 arXiv 和显式 `.pdf` URL。参考文献批量获取通过 `POST /api/paper/:documentID/references/download` 启动，通过对应的 `/cancel` 路由取消。
 
+生产限流、重试、队列、状态排查和端到端测试方式见
+[`OPERATIONS.md`](OPERATIONS.md)。
+
 ## 统一扩展模型
 
 - `documents` 只管理源文件和处理生命周期：`original_filename`、`storage_key`、文件类型、DOI、状态与错误信息。
@@ -111,15 +114,18 @@ python3 -m venv .venv
 
 ## API
 
-- `POST /api/document/upload`：multipart 字段 `file`，可选 `doi`、`title` 与重复 `tags` 字段；支持 txt、Markdown、JSON、CSV、PDF、Word、Excel 和 PowerPoint 文件，单文件最大 100 MiB。
-- `GET /api/document/search`：仅支持可选 `id`、`doi` 与 `page`；无筛选条件时按创建时间倒序返回全部源文档，每页 10 条。
+- `POST /api/document/upload`：multipart 字段 `file`，可选 `doi`；支持 txt、Markdown、JSON、CSV、PDF、Word、Excel 和 PowerPoint 文件，单文件最大 100 MiB。正式标题和标签通过后续 `PATCH /api/paper/{documentID}` 更新。
+- `GET /api/document/search`：支持可选 `id`、`doi`、`status` 与 `page`；无筛选条件时按创建时间倒序返回全部文档，每页 10 条。
+- `POST /api/document/import-url`：验证并流式导入显式 PDF、arXiv 页面或受支持的 DOI URL，然后提交正常文档处理流程。
 - `GET /api/document/{id}/content`：以内联方式流式返回原始文件，供 PDF 阅读器使用。
 - `GET /api/document/{id}/blocks?page=N`：读取某一 PDF 页的解析 Block；省略 `page` 返回全部 Block。
 - `PATCH /api/document/{id}`：仅更新 `originalFilename`、`doi`。旧的请求字段 `filename` 暂作为输入别名兼容。
 - `GET /api/paper/{documentID}`、`PATCH /api/paper/{documentID}`：获取或更新独立的论文书目信息；标签通过 `paperMetadata.tags` 数组维护。
 - `GET /api/paper/search`：支持 `title`、`author`（作者姓名模糊匹配）、重复的 `tag` 参数、`tagMode=all|any` 及 `page`；标签查询使用 PostgreSQL JSONB GIN 索引。
 - `GET|POST|PUT /api/paper/{documentID}/citations`、`DELETE /api/paper/{documentID}/citations/{citedDocumentID}`：读取、新增、整体替换或删除本论文的引用关系；`GET /api/paper/{documentID}/cited-by` 查询反向引用，`POST /api/paper/{documentID}/citations/resolve` 可将一个原始引用显式指向库内论文。
-- `GET /api/paper/{documentID}/info`：返回论文元数据提取和论文库查询的当前可观察状态，独立于 `documents.status`。`POST /api/paper/{documentID}/info/extraction/retry` 与 `.../catalog/retry` 仅提交当前安全输入对应的 Asynq 重试任务。
+- `GET /api/document/{id}/processing`：返回文档、论文信息、引用查询与引用 PDF 获取的持久化 span，以及紧凑引用进度；它是唯一处理状态读取接口。
+- `POST /api/paper/{documentID}/info/{extraction|catalog|reference}/retry`：分别重试元数据提取、源论文库查询或引用论文查询，不会隐式重跑其他阶段。
+- `POST /api/paper/{documentID}/references/download` 与对应的 `/cancel`：启动或取消独立的引用 PDF 获取批次；不会修改源文档生命周期状态。
 - `DELETE /api/document/{id}`：删除文档元数据及其已存储的原始文件。
 - `POST /api/document/bases`、`GET /api/document/bases`、`GET|PATCH|DELETE /api/document/bases/{baseID}`：管理文档 Base。
 - `PUT|DELETE /api/document/bases/{baseID}/documents/{documentID}`：加入或移除 Base 成员；`GET /api/document/bases/{baseID}/documents?page=1` 分页列出成员。
@@ -128,6 +134,8 @@ Python worker 位于 [`python/`](python/README.md)。启动它和 Redis 后，PD
 
 ## 论文信息异步流程
 
-文档解析成功后，API 在 `default` 队列提交 `paper:metadata_extract`：worker 从持久化 Markdown 和 Blocks 调用 Python 的 `PaperMetadataExtractor.Extract`，再将标题、作者、摘要和原始参考文献写入 `paper_metadata` / `paper_citations`。提取成功且存在 DOI 或标题时，worker 在 `low` 队列提交 `paper:catalog_resolve`，依次查询 `PAPER_CATALOG_PROVIDERS`（默认 arXiv、Semantic Scholar、OpenAlex、Crossref）。论文信息任务失败不会把已解析文档从 `ready` 改成 `failed`；重试与死信由 Asynq 负责。
+正常上传只提交一个 `document:process`。该 worker 按固定顺序直接执行识别、元数据提取和源论文查询，在每个外部阶段之间重新检查取消/删除状态；完成源论文查询后只投递一个独立的引用 dispatcher。各操作保留独立重试入口，但不会自行推进下一阶段。解析成功后文档即可为 `ready`，后续引用查询失败不会把文档改回 `failed`。
 
-源论文查询完成后，最多 `PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT` 条去重后的未知引用会作为同一个 `paper:catalog_resolve` 任务的 `reference` scope 投入低优先级队列；它们不会阻塞源论文信息。`PAPER_REFERENCE_CATALOG_CONCURRENCY` 与 `PAPER_REFERENCE_CATALOG_PER_DOCUMENT_CONCURRENCY` 是全局和单篇文献的分布式任务租约上限。`REDIS_ADDR` 启用时这些租约、provider 请求间隔、并发租约和 `Retry-After` 冷却在所有 worker 间共享；Lite 模式退化为进程内保护。`PAPER_CATALOG_<PROVIDER>_TIMEOUT`、`_SPACING` 与 `_CONCURRENCY` 可分别配置 provider（默认值见 `.env.example`）。队列和任务超时仍由 `PAPER_EXTRACTION_TASK_TIMEOUT`、`PAPER_EXTRACTION_TASK_MAX_RETRY`、`PAPER_CATALOG_TASK_TIMEOUT`、`PAPER_CATALOG_TASK_MAX_RETRY` 配置。Semantic Scholar 的 `SEMANTIC_SCHOLAR_API_KEY`、OpenAlex 的 `OPENALEX_API_KEY` 与 Crossref 的 `CROSSREF_MAILTO` 均可选；不要提交真实值。变更 `proto/document_parser.proto` 后，按 [`python/README.md`](python/README.md) 中的 Python 与 Go `grpc_tools.protoc` 命令重新生成两个语言的 stub，绝不手改生成文件。
+引用 dispatcher 分页读取并去重未知引用，向全局 `PaperReferenceScheduler` 注册单目标任务。每个目标在执行前按权重轮转选择一个 provider；无匹配或可恢复错误会转向尚未尝试的 provider。默认权重固定为 arXiv 45、OpenAlex 35、Semantic Scholar 10、Crossref 10。`PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT`、全局/单文档并发租约以及 provider 的 timeout、spacing、concurrency 控制负载。Redis 存在时这些状态跨 worker 共享；Lite 模式只在当前进程有效。
+
+引用 PDF 获取是另一个显式启动的两级流程：dispatcher 最多选择 `REMOTE_PDF_DISPATCH_LIMIT` 个已有 DOI 或可信源 URL 的未知引用，再向隔离的 `download` 队列投递单文档任务。每个任务重新解析最新 URL、流式下载、按 DOI/SHA256 去重并提交正常文档处理。`FILE_MAX_UPLOAD_SIZE` 同时是远程响应字节上限。任务重试遵循 `Retry-After` 或 Asynq 默认指数退避；取消只影响尚未完成的该批获取。

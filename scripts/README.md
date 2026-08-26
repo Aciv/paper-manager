@@ -8,6 +8,8 @@ Start the API stack first, then run focused checks from the repository root:
 ./scripts/test_document_crud_api.sh
 ./scripts/test_paper_metadata_api.sh
 ./scripts/test_paper_info_api.sh
+./scripts/test_remote_import_api.sh
+./scripts/test_reference_acquisition_api.sh
 ./scripts/test_document_base_api.sh
 ./scripts/test_cancel_api.sh
 ./scripts/test_processing_api.sh
@@ -30,12 +32,32 @@ is needed. Set `REQUIRE_IMAGE_BLOCKS=1` to require the processing fixture to
 produce at least one rendered image/table block.
 
 `test_paper_info_api.sh` verifies forward/reverse citation endpoints, the
-paper-info status response, and both retry controls. It deliberately does not
-assert a live provider result: catalog no-match, provider outage, and retry
-exhaustion are operational Asynq outcomes and are covered deterministically by
-the focused Go tests. Stale-revision guards are covered by
-`TestPaperInfoExtractMetadataRejectsRevisionChangedDuringRPC` and
-`TestPaperInfoResolveMetadataRejectsRevisionChangedDuringLookup`; cancellation
+persistent processing response, and extraction/source/reference retry
+controls. `test_reference_acquisition_api.sh` verifies acquisition
+start/cancel, processing-span visibility, compact progress shape, and source
+status isolation. Bounded fan-out is checked by
+`TestDispatchReferenceDownloadsHonorsConfiguredLimit`.
+
+Default scripts do not require public provider availability.
+`test_remote_import_api.sh` always checks malformed URLs, SSRF rejection, and
+unsupported generic landing pages. Set `RUN_LIVE_INTEGRATION_TESTS=1` to also
+download two public arXiv PDFs through an explicit PDF URL and a DOI URL:
+
+```bash
+RUN_LIVE_INTEGRATION_TESTS=1 ./scripts/test_remote_import_api.sh
+PAPER_CATALOG_LIVE_TEST=1 go test ./internal/infrastructure/papercatalog \
+  -run '^TestLivePaperCatalogProviders$' -v
+```
+
+Public URLs can be overridden with `REMOTE_PDF_DIRECT_URL` and
+`REMOTE_PDF_DOI_URL`. Live remote imports require the complete parser stack;
+set `REMOTE_IMPORT_REQUIRE_READY=0` only when testing download persistence
+without requiring successful recognition. Catalog no-match, provider outage,
+and retry exhaustion are operational Asynq outcomes and are covered
+deterministically by focused Go tests. Stale-input guards are covered by
+`TestPaperInfoExtractMetadataRejectsStatusChangedDuringRPC`,
+`TestPaperInfoResolveMetadataRejectsStatusChangedDuringLookup`, and
+`TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup`; cancellation
 and deletion remain covered by `test_cancel_api.sh` and the document CRUD
 script. Candidate ambiguity has no user-selection API by design: the resolver
 uses deterministic scoring and only persists a safe automatic match.

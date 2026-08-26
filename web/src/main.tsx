@@ -38,6 +38,11 @@ function processingKindLabel(kind: string) {
     catalog_source: '源论文查询',
     catalog_reference: '引用论文查询',
     catalog_provider: '论文库提供方查询',
+    reference_download: '引用 PDF 获取',
+    resolve_pdf_url: '解析 PDF 地址',
+    download_pdf: '下载 PDF',
+    deduplicate_document: '文档去重',
+    enqueue_document_process: '提交文档处理',
   };
   return labels[kind] ?? kind;
 }
@@ -54,6 +59,9 @@ function App() {
   const [doi, setDoi] = useState('');
   const [title, setTitle] = useState('');
   const [tags, setTags] = useState('');
+  const [remoteURL, setRemoteURL] = useState('');
+  const [remoteDOI, setRemoteDOI] = useState('');
+  const [remoteFilename, setRemoteFilename] = useState('');
   const [editOriginalFilename, setEditOriginalFilename] = useState('');
   const [editDoi, setEditDoi] = useState('');
   const [editTitle, setEditTitle] = useState('');
@@ -72,7 +80,10 @@ function App() {
   const [selectedBaseID, setSelectedBaseID] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
-	const processingPollDelay = useRef(2500);
+  const processingPollDelay = useRef(2500);
+  const processingWatchUntil = useRef(0);
+  const processingWatchDocumentID = useRef('');
+  const [processingPollRevision, setProcessingPollRevision] = useState(0);
 
   const pageCount = Math.max(1, Math.ceil(page.total / page.pageSize));
   const hasPreviousPage = page.page > 1;
@@ -80,13 +91,23 @@ function App() {
   const parseStages = processing?.stages.filter((stage) => stage.kind === 'recognition') ?? [];
   const pipelineStages = processing?.stages.filter((stage) => stage.kind === 'pipeline') ?? [];
   const paperInfoStages = processing?.stages.filter((stage) => stage.kind !== 'recognition' && stage.kind !== 'pipeline') ?? [];
-  const paperInfoActive = paperInfoStages.some(isActiveSpan);
   const pipelineActive = pipelineStages.some(isActiveSpan);
+  const extractionActive = paperInfoStages.some((stage) => stage.kind === 'metadata_extraction' && isActiveSpan(stage));
+  const sourceCatalogActive = paperInfoStages.some((stage) => stage.kind === 'catalog_source' && isActiveSpan(stage));
+  const referenceCatalogActive = paperInfoStages.some((stage) => stage.kind === 'catalog_reference' && isActiveSpan(stage));
+  const referenceDownloadActive = paperInfoStages.some((stage) => stage.kind === 'reference_download' && isActiveSpan(stage));
   const documentStatus = processing?.documentStatus ?? selected?.status ?? 'uploaded';
 
   function applyProcessingView(view: DocumentProcessingView) {
     setProcessing(view);
     setSelected((prev) => (prev ? { ...prev, status: view.documentStatus } : prev));
+  }
+
+  function watchQueuedProcessing(documentID: string) {
+    processingPollDelay.current = 2500;
+    processingWatchUntil.current = Date.now() + 30_000;
+    processingWatchDocumentID.current = documentID;
+    setProcessingPollRevision((value) => value + 1);
   }
 
   async function load(nextFilters = filters) {
@@ -122,7 +143,7 @@ function App() {
     setProcessing(undefined);
     setCitations([]);
     setCitedBy([]);
-		processingPollDelay.current = 2500;
+    processingPollDelay.current = 2500;
     if (!selected) {
       setEditTitle('');
       setEditTags('');
@@ -145,22 +166,25 @@ function App() {
   }, [selected?.id]);
 
   useEffect(() => {
-    if (!selected || !processing?.stages.some((stage) => stage.status === 'queued' || stage.status === 'running')) return;
-		const visible = document.visibilityState === 'visible';
-		const delay = visible ? processingPollDelay.current : Math.max(processingPollDelay.current, 8000);
-		const timer = window.setTimeout(() => {
-			void api.getDocumentProcessing(selected.id).then(({ processing: view }) => {
-				processingPollDelay.current = Math.min(
-					visible ? processingPollDelay.current * 1.5 : processingPollDelay.current * 2,
-					visible ? 15000 : 60000,
-				);
-				applyProcessingView(view);
-			}).catch(() => {
-				processingPollDelay.current = Math.min(processingPollDelay.current * 2, visible ? 15000 : 60000);
-			});
-		}, delay);
-		return () => window.clearTimeout(timer);
-  }, [selected?.id, processing?.stages]);
+    const hasActive = processing?.stages.some((stage) => stage.status === 'queued' || stage.status === 'running');
+    const watchingQueuedTask = selected?.id === processingWatchDocumentID.current && Date.now() < processingWatchUntil.current;
+    if (!selected || (!hasActive && !watchingQueuedTask)) return;
+    const visible = document.visibilityState === 'visible';
+    const delay = visible ? processingPollDelay.current : Math.max(processingPollDelay.current, 8000);
+    const timer = window.setTimeout(() => {
+      void api.getDocumentProcessing(selected.id).then(({ processing: view }) => {
+        processingPollDelay.current = Math.min(
+          visible ? processingPollDelay.current * 1.5 : processingPollDelay.current * 2,
+          visible ? 15000 : 60000,
+        );
+        applyProcessingView(view);
+      }).catch(() => {
+        processingPollDelay.current = Math.min(processingPollDelay.current * 2, visible ? 15000 : 60000);
+        setProcessingPollRevision((value) => value + 1);
+      });
+    }, delay);
+    return () => window.clearTimeout(timer);
+  }, [selected?.id, processing?.stages, processingPollRevision]);
 
   // Poll document list periodically while any document is in a transient state,
   // so status badges in the list stay current without a manual refresh.
@@ -214,6 +238,7 @@ function App() {
     setMessage(`正在上传 ${file.name}…`);
     try {
       const { document: uploadedDocument } = await api.upload(file, doi.trim());
+      watchQueuedProcessing(uploadedDocument.id);
       let uploadedPaper: PaperMetadata | undefined;
       if (title.trim() || parseTags(tags).length > 0) {
         ({ paperMetadata: uploadedPaper } = await api.updatePaperMetadata(uploadedDocument.id, { title: title.trim(), tags: parseTags(tags) }));
@@ -230,6 +255,34 @@ function App() {
       await load({ page: 1 });
     } catch (error) {
       setMessage(error instanceof Error ? `上传失败：${error.message}` : '上传失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitRemoteImport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!remoteURL.trim()) {
+      setMessage('请输入可下载的 PDF、arXiv 或 DOI URL。');
+      return;
+    }
+    setBusy(true);
+    setMessage('正在验证并下载远程 PDF…');
+    try {
+      const { document: imported } = await api.importFromURL({
+        url: remoteURL.trim(),
+        doi: remoteDOI.trim() || undefined,
+        filename: remoteFilename.trim() || undefined,
+      });
+      setSelected(imported);
+      setRemoteURL('');
+      setRemoteDOI('');
+      setRemoteFilename('');
+      watchQueuedProcessing(imported.id);
+      setMessage(`远程 PDF 已导入并提交处理：${imported.originalFilename}（${imported.id}）。`);
+      await load({ page: 1 });
+    } catch (error) {
+      setMessage(error instanceof Error ? `远程导入失败：${error.message}` : '远程导入失败。');
     } finally {
       setBusy(false);
     }
@@ -268,7 +321,7 @@ function App() {
   async function retrySelected() {
     if (!selected || !window.confirm(`重新开始“${documentLabel(selected, paperMetadata)}”的解析？`)) return;
     setBusy(true);
-		processingPollDelay.current = 2500;
+    watchQueuedProcessing(selected.id);
     try {
       const { document: queued } = await api.retryDocument(selected.id);
       setSelected(queued);
@@ -306,20 +359,28 @@ function App() {
     }
   }
 
-  async function retryPaperInfo() {
+  async function runPaperControl(
+    operation: (documentID: string) => Promise<{ accepted: boolean }>,
+    successMessage: string,
+  ) {
     if (!selected) return;
     setBusy(true);
-		processingPollDelay.current = 2500;
+    watchQueuedProcessing(selected.id);
     try {
-		await api.retryDocument(selected.id);
-	  const { processing: view } = await api.getDocumentProcessing(selected.id);
-	  applyProcessingView(view);
-		setMessage('已提交文档处理流程重试；已完成的文件识别将复用当前 Markdown。');
+      await operation(selected.id);
+      const { processing: view } = await api.getDocumentProcessing(selected.id);
+      applyProcessingView(view);
+      setMessage(successMessage);
     } catch (error) {
-      setMessage(error instanceof Error ? `论文任务重试失败：${error.message}` : '论文任务重试失败。');
+      setMessage(error instanceof Error ? `论文任务操作失败：${error.message}` : '论文任务操作失败。');
     } finally {
       setBusy(false);
     }
+  }
+
+  async function cancelReferenceDownloads() {
+    if (!selected || !window.confirm('取消当前引用 PDF 获取任务？已经成功保存的论文不会被删除。')) return;
+    await runPaperControl(api.cancelReferenceDownloads, '已取消仍在等待或下载中的引用 PDF 获取任务。');
   }
 
   async function cancelPaperInfo() {
@@ -405,6 +466,18 @@ function App() {
         <p className="hint">支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；最大大小由服务器配置决定。</p>
       </form>
 
+      <form className="upload-form" onSubmit={submitRemoteImport}>
+        <h2>从 URL 导入 PDF</h2>
+        <label htmlFor="remote-url">PDF、arXiv 或 DOI URL</label>
+        <input id="remote-url" type="url" value={remoteURL} onChange={(event) => setRemoteURL(event.target.value)} placeholder="https://arxiv.org/abs/1706.03762" disabled={busy} required />
+        <label htmlFor="remote-doi">显式 DOI（可选）</label>
+        <input id="remote-doi" value={remoteDOI} maxLength={255} onChange={(event) => setRemoteDOI(event.target.value)} placeholder="10.1000/example" disabled={busy} />
+        <label htmlFor="remote-filename">保存文件名（可选）</label>
+        <input id="remote-filename" value={remoteFilename} onChange={(event) => setRemoteFilename(event.target.value)} placeholder="paper.pdf" disabled={busy} />
+        <button className="primary" type="submit" disabled={busy || !remoteURL.trim()}>验证、下载并处理</button>
+        <p className="hint">普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。</p>
+      </form>
+
       <form className="search-form" onSubmit={submitSearch}>
         <h2>查询文档</h2>
         <label htmlFor="search-id">文档 ID</label>
@@ -450,7 +523,7 @@ function App() {
         <div><p className="eyebrow">Document API</p><h2>上传、查询、取消与删除</h2></div>
         <button type="button" onClick={() => void load()} disabled={busy}>刷新</button>
       </header>
-      <p className={`status-message ${message.startsWith('上传失败') || message.startsWith('查询失败') || message.startsWith('删除失败') ? 'error' : ''}`}>{message || '正在准备文档列表…'}</p>
+      <p className={`status-message ${message.includes('失败') ? 'error' : ''}`}>{message || '正在准备文档列表…'}</p>
 
       <div className="workspace-grid">
         <section className="document-list-panel">
@@ -500,12 +573,15 @@ function App() {
 			</section>
 				<section className="paper-info-panel">
 				  <div className="panel-heading"><h4>论文信息任务</h4><span>由统一处理流程编排</span></div>
-			  <div className="paper-info-stages">
-				{paperInfoStages.length ? paperInfoStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">尚未产生论文信息处理 span。</p>}
-				<div><strong>统一处理流程</strong><span className="paper-stage">按持久流程控制</span><button type="button" onClick={() => void retryPaperInfo()} disabled={busy || paperInfoActive || pipelineActive}>重试流程</button></div>
-			  </div>
+				  <div className="paper-info-stages">
+					{paperInfoStages.length ? paperInfoStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">尚未产生论文信息处理 span。</p>}
+					<div><strong>元数据提取</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperExtraction, '已提交元数据提取重试。')} disabled={busy || extractionActive || pipelineActive}>重试</button></div>
+					<div><strong>源论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperCatalog, '已提交源论文查询重试。')} disabled={busy || sourceCatalogActive || pipelineActive}>重试</button></div>
+					<div><strong>引用论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperReferences, '已提交引用论文查询重试。')} disabled={busy || referenceCatalogActive}>重试</button></div>
+					<div><strong>引用 PDF 获取</strong><span className="paper-stage">独立下载队列</span><button type="button" onClick={() => void runPaperControl(api.startReferenceDownloads, '已提交引用 PDF 获取任务。')} disabled={busy || referenceDownloadActive}>开始</button>{referenceDownloadActive && <button type="button" className="warning" onClick={() => void cancelReferenceDownloads()} disabled={busy}>取消</button>}</div>
+				  </div>
 			  {processing?.referenceProgress && <p className="hint">引用查询：排队 {processing.referenceProgress.queued} · 运行 {processing.referenceProgress.running} · 完成 {processing.referenceProgress.completed} · 已取消 {processing.referenceProgress.cancelled}</p>}
-			  {paperInfoActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消论文信息任务</button>}
+			  {referenceCatalogActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消引用论文查询</button>}
 			  <p className="hint">状态来自持久化处理 span；元数据来源来自已落库的论文信息。历史失败请查看 Asynq 死信记录。</p>
 			</section>
 			<section className="citation-panel">

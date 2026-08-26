@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+	gormlogger "gorm.io/gorm/logger"
 )
 
 // NewDatabase selects and configures the application's GORM database from
@@ -23,6 +24,10 @@ func NewDatabase(cfg config.Config) (*gorm.DB, error) {
 
 		db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{
 			NowFunc: func() time.Time { return time.Now().UTC() },
+			// Repository methods own structured query/mutation logging. Keeping
+			// GORM's default logger enabled would emit unstructured, ANSI-colored
+			// SQL (including expected ErrRecordNotFound lookups) beside JSON logs.
+			Logger: gormlogger.Default.LogMode(gormlogger.Silent),
 		})
 		if err != nil {
 			logger.Error(ctx, "open postgres database failed", "error", err)

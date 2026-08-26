@@ -80,7 +80,7 @@ func TestDispatchReferenceDownloadsTraversesMoreThanOnePage(t *testing.T) {
 		}
 		papers.metadata[targetID.String()] = types.PaperMetadata{
 			DocumentID: targetID,
-			SourceURL: "https://arxiv.org/abs/2401.01234",
+			SourceURL:  "https://arxiv.org/abs/2401.01234",
 		}
 		papers.citations[sourceID.String()] = append(
 			papers.citations[sourceID.String()],
@@ -91,11 +91,11 @@ func TestDispatchReferenceDownloadsTraversesMoreThanOnePage(t *testing.T) {
 	service := &paperInfoService{
 		cfg: config.Config{
 			RemotePDFDispatchLimit: citationCount,
-			RemotePDFTaskMaxRetry: 2,
+			RemotePDFTaskMaxRetry:  2,
 		},
 		documents: documents,
-		papers:     papers,
-		tasks:      tasks,
+		papers:    papers,
+		tasks:     tasks,
 	}
 	payload := types.PaperReferenceDownloadDispatchPayload{
 		SourceDocumentID: sourceID.String(),
@@ -106,6 +106,44 @@ func TestDispatchReferenceDownloadsTraversesMoreThanOnePage(t *testing.T) {
 	}
 	if len(tasks.tasks) != citationCount {
 		t.Fatalf("queued tasks = %d, want %d across multiple pages", len(tasks.tasks), citationCount)
+	}
+}
+
+func TestDispatchReferenceDownloadsHonorsConfiguredLimit(t *testing.T) {
+	sourceID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{ID: sourceID, Status: types.DocumentStatusReady})
+	papers := newPaperInfoPaperServiceStub()
+	for index := 0; index < 5; index++ {
+		targetID := uuid.New()
+		documents.documents[targetID] = types.Document{
+			ID: targetID, Status: types.DocumentStatusUnknown,
+			ContentType: types.UnknownDocumentContentType,
+			StorageKey:  types.UnknownDocumentStorageScheme + targetID.String(),
+		}
+		papers.metadata[targetID.String()] = types.PaperMetadata{
+			DocumentID: targetID,
+			SourceURL:  "https://arxiv.org/abs/2401.01234",
+		}
+		papers.citations[sourceID.String()] = append(papers.citations[sourceID.String()],
+			types.PaperCitation{CitingDocumentID: sourceID, CitedDocumentID: targetID})
+	}
+	tasks := &documentTaskEnqueuerStub{}
+	service := &paperInfoService{
+		cfg: config.Config{
+			RemotePDFDispatchLimit: 2,
+			RemotePDFTaskMaxRetry:  2,
+		},
+		documents: documents,
+		papers:    papers,
+		tasks:     tasks,
+	}
+	if err := service.DispatchReferenceDownloads(context.Background(), types.PaperReferenceDownloadDispatchPayload{
+		SourceDocumentID: sourceID.String(), ReferenceRunID: uuid.NewString(),
+	}); err != nil {
+		t.Fatalf("DispatchReferenceDownloads() error = %v", err)
+	}
+	if len(tasks.tasks) != 2 {
+		t.Fatalf("queued tasks = %d, want configured limit 2", len(tasks.tasks))
 	}
 }
 

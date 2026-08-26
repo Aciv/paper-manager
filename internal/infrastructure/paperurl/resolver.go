@@ -40,7 +40,8 @@ func (r *resolver) Resolve(ctx context.Context, request types.PaperURLResolveReq
 		return types.ResolvedPaperURL{}, fmt.Errorf("%w: source URL must be absolute HTTP(S)", types.ErrRemotePDFUnavailable)
 	}
 	if err := utils.ValidateURLForSSRF(raw); err != nil {
-		return types.ResolvedPaperURL{}, fmt.Errorf("validate source URL: %w", err)
+		return types.ResolvedPaperURL{}, fmt.Errorf("%w: source URL is not allowed: %v",
+			types.ErrInvalidRemotePDFRequest, err)
 	}
 	if doi == "" {
 		doi = types.ExtractDOIFromURL(raw)

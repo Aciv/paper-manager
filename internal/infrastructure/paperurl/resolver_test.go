@@ -35,6 +35,15 @@ func TestResolverDoesNotGuessPublisherPDF(t *testing.T) {
 	}
 }
 
+func TestResolverClassifiesSSRFRejectionAsInvalidRequest(t *testing.T) {
+	_, err := NewResolver().Resolve(context.Background(), types.PaperURLResolveRequest{
+		SourceURL: "http://127.0.0.1/private.pdf",
+	})
+	if !errors.Is(err, types.ErrInvalidRemotePDFRequest) {
+		t.Fatalf("Resolve() error = %v, want ErrInvalidRemotePDFRequest", err)
+	}
+}
+
 func TestResolverAcceptsExplicitGenericPDF(t *testing.T) {
 	allowResolverHost(t, "files.example")
 	resolved, err := NewResolver().Resolve(context.Background(), types.PaperURLResolveRequest{
