@@ -24,6 +24,14 @@ const (
 	defaultPaperReferenceCatalogMaxPerDocument         = 25
 	defaultPaperReferenceCatalogConcurrency            = 2
 	defaultPaperReferenceCatalogPerDocumentConcurrency = 1
+	defaultRemotePDFDownloadTimeout                    = 2 * time.Minute
+	defaultRemotePDFMaxRedirects                       = 5
+	defaultRemotePDFTaskTimeout                        = 5 * time.Minute
+	defaultRemotePDFTaskMaxRetry                       = 4
+	defaultRemotePDFDownloadConcurrency                = 2
+	defaultRemotePDFHostConcurrency                    = 1
+	defaultRemotePDFHostSpacing                        = time.Second
+	defaultRemotePDFDispatchLimit                      = 100
 )
 
 // Config contains the infrastructure options selected at process startup.
@@ -65,6 +73,14 @@ type Config struct {
 	PaperReferenceCatalogMaxPerDocument         int
 	PaperReferenceCatalogConcurrency            int
 	PaperReferenceCatalogPerDocumentConcurrency int
+	RemotePDFDownloadTimeout                    time.Duration
+	RemotePDFMaxRedirects                       int
+	RemotePDFTaskTimeout                        time.Duration
+	RemotePDFTaskMaxRetry                       int
+	RemotePDFDownloadConcurrency                int
+	RemotePDFHostConcurrency                    int
+	RemotePDFHostSpacing                        time.Duration
+	RemotePDFDispatchLimit                      int
 }
 
 func Load() (Config, error) {
@@ -165,6 +181,38 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	remotePDFDownloadTimeout, err := durationEnv("REMOTE_PDF_DOWNLOAD_TIMEOUT", defaultRemotePDFDownloadTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	remotePDFMaxRedirects, err := positiveIntEnv("REMOTE_PDF_MAX_REDIRECTS", defaultRemotePDFMaxRedirects, 20)
+	if err != nil {
+		return Config{}, err
+	}
+	remotePDFTaskTimeout, err := durationEnv("REMOTE_PDF_TASK_TIMEOUT", defaultRemotePDFTaskTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	remotePDFTaskMaxRetry, err := positiveIntEnv("REMOTE_PDF_TASK_MAX_RETRY", defaultRemotePDFTaskMaxRetry, 20)
+	if err != nil {
+		return Config{}, err
+	}
+	remotePDFDownloadConcurrency, err := positiveIntEnv("REMOTE_PDF_DOWNLOAD_CONCURRENCY", defaultRemotePDFDownloadConcurrency, 32)
+	if err != nil {
+		return Config{}, err
+	}
+	remotePDFHostConcurrency, err := positiveIntEnv("REMOTE_PDF_HOST_CONCURRENCY", defaultRemotePDFHostConcurrency, 16)
+	if err != nil {
+		return Config{}, err
+	}
+	remotePDFHostSpacing, err := durationEnv("REMOTE_PDF_HOST_SPACING", defaultRemotePDFHostSpacing)
+	if err != nil {
+		return Config{}, err
+	}
+	remotePDFDispatchLimit, err := positiveIntEnv("REMOTE_PDF_DISPATCH_LIMIT", defaultRemotePDFDispatchLimit, 1000)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		HTTPAddress:                                 env("HTTP_ADDR", "127.0.0.1:8080"),
 		DatabaseDriver:                              strings.ToLower(env("DB_DRIVER", "postgres")),
@@ -198,6 +246,14 @@ func Load() (Config, error) {
 		PaperReferenceCatalogMaxPerDocument:         paperReferenceCatalogMaxPerDocument,
 		PaperReferenceCatalogConcurrency:            paperReferenceCatalogConcurrency,
 		PaperReferenceCatalogPerDocumentConcurrency: paperReferenceCatalogPerDocumentConcurrency,
+		RemotePDFDownloadTimeout:                    remotePDFDownloadTimeout,
+		RemotePDFMaxRedirects:                       remotePDFMaxRedirects,
+		RemotePDFTaskTimeout:                        remotePDFTaskTimeout,
+		RemotePDFTaskMaxRetry:                       remotePDFTaskMaxRetry,
+		RemotePDFDownloadConcurrency:                remotePDFDownloadConcurrency,
+		RemotePDFHostConcurrency:                    remotePDFHostConcurrency,
+		RemotePDFHostSpacing:                        remotePDFHostSpacing,
+		RemotePDFDispatchLimit:                      remotePDFDispatchLimit,
 	}, nil
 }
 

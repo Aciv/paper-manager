@@ -36,6 +36,14 @@ type PaperCitationInput struct {
 	RawReference    string     `json:"rawReference"`
 }
 
+// PaperCitationPage is an internal bounded page used by bibliography workers
+// so large papers do not load every reference edge into memory at once.
+type PaperCitationPage struct {
+	Items      []PaperCitation
+	NextOffset int
+	HasMore    bool
+}
+
 // TableName returns the PostgreSQL table used for paper citation edges.
 func (PaperCitation) TableName() string { return "paper_citations" }
 

@@ -6,10 +6,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"paperMaster/internal/types/interfaces"
+	"paperMaster/internal/utils"
 )
 
 func TestLocalStorageSaveAndOpen(t *testing.T) {
@@ -108,6 +112,123 @@ func TestLocalStorageSaveBytesAndCopy(t *testing.T) {
 	if got, want := string(content), "original"; got != want {
 		t.Fatalf("content = %q, want %q", got, want)
 	}
+}
+
+func TestLocalStorageSaveFromURLStreamsRedirectedPDF(t *testing.T) {
+	allowLocalHTTPServer(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/start" {
+			http.Redirect(writer, request, "/paper.pdf", http.StatusFound)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/pdf")
+		_, _ = writer.Write([]byte("%PDF-1.7\nremote"))
+	}))
+	defer server.Close()
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := storage.SaveFromURL(context.Background(), interfaces.SaveFromURLRequest{
+		URL: server.URL + "/start", Filename: "remote.pdf", Category: interfaces.StorageCategoryPDF,
+	})
+	if err != nil {
+		t.Fatalf("SaveFromURL() error = %v", err)
+	}
+	if !strings.HasSuffix(result.FinalURL, "/paper.pdf") || result.File.SHA256 == "" || result.File.Size == 0 {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+type recordingDownloadLimiter struct {
+	hosts []string
+}
+
+func (limiter *recordingDownloadLimiter) Acquire(_ context.Context, host string) (func(), error) {
+	limiter.hosts = append(limiter.hosts, host)
+	return func() {}, nil
+}
+
+func (*recordingDownloadLimiter) Cooldown(context.Context, string, time.Duration) error {
+	return nil
+}
+
+func TestLocalStorageSaveFromURLLimitsEveryRedirectRequest(t *testing.T) {
+	allowLocalHTTPServer(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/start" {
+			http.Redirect(writer, request, "/paper.pdf", http.StatusFound)
+			return
+		}
+		_, _ = writer.Write([]byte("%PDF-1.7\nremote"))
+	}))
+	defer server.Close()
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	limiter := &recordingDownloadLimiter{}
+	storage.ConfigureRemoteClient(time.Second, 3, limiter)
+	if _, err := storage.SaveFromURL(context.Background(), interfaces.SaveFromURLRequest{
+		URL: server.URL + "/start", Filename: "paper.pdf",
+	}); err != nil {
+		t.Fatalf("SaveFromURL() error = %v", err)
+	}
+	if len(limiter.hosts) != 2 || limiter.hosts[0] != "127.0.0.1" || limiter.hosts[1] != "127.0.0.1" {
+		t.Fatalf("limited hosts = %#v, want one lease per redirect request", limiter.hosts)
+	}
+}
+
+func TestLocalStorageSaveFromURLRejectsOversizeAndInvalidPDF(t *testing.T) {
+	allowLocalHTTPServer(t)
+	for _, test := range []struct {
+		name string
+		body string
+		max  int64
+		want error
+	}{
+		{name: "oversize", body: "%PDF-1.7\ncontent larger than limit", max: 8, want: ErrFileTooLarge},
+		{name: "invalid header", body: "<html>not a pdf</html>", max: 1024, want: ErrInvalidPDF},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writer.Header().Set("Content-Type", "application/pdf")
+				_, _ = writer.Write([]byte(test.body))
+			}))
+			defer server.Close()
+			storage, err := NewLocalStorage(t.TempDir(), test.max)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = storage.SaveFromURL(context.Background(), interfaces.SaveFromURLRequest{URL: server.URL + "/paper.pdf", Filename: "paper.pdf"})
+			if !errors.Is(err, test.want) {
+				t.Fatalf("SaveFromURL() error = %v, want %v", err, test.want)
+			}
+		})
+	}
+}
+
+func TestLocalStorageSaveFromURLRevalidatesRedirectTarget(t *testing.T) {
+	allowLocalHTTPServer(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, "http://169.254.169.254/latest/meta-data", http.StatusFound)
+	}))
+	defer server.Close()
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = storage.SaveFromURL(context.Background(), interfaces.SaveFromURLRequest{URL: server.URL + "/paper.pdf", Filename: "paper.pdf"})
+	if err == nil || !strings.Contains(err.Error(), "redirect blocked") {
+		t.Fatalf("SaveFromURL() error = %v, want blocked redirect", err)
+	}
+}
+
+func allowLocalHTTPServer(t *testing.T) {
+	t.Helper()
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+	utils.ResetSSRFWhitelistForTest()
+	t.Cleanup(utils.ResetSSRFWhitelistForTest)
 }
 
 func TestLocalStoragePlacesCategorizedFilesUnderTypeDirectory(t *testing.T) {

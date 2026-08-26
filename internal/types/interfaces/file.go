@@ -39,12 +39,29 @@ type StoredFile struct {
 	SHA256 string
 }
 
+// SaveFromURLRequest describes one already-resolved remote object. URL must be
+// an absolute HTTP(S) URL; storage revalidates it and every redirect before
+// opening a connection. Filename is metadata and must not be used as a path.
+type SaveFromURLRequest struct {
+	URL      string
+	Filename string
+	Category StorageCategory
+}
+
+// SaveFromURLResult includes the durable object and the final response URL so
+// callers can persist canonical redirect information without trusting input.
+type SaveFromURLResult struct {
+	File     StoredFile
+	FinalURL string
+}
+
 // FileStorage is implemented by local disk, object storage, or another durable
 // backend. Save must consume the input stream without loading the whole file in memory.
 type FileStorage interface {
 	CheckConnectivity(ctx context.Context) error
 	Save(ctx context.Context, upload FileUpload) (StoredFile, error)
 	SaveBytes(ctx context.Context, filename string, content []byte) (StoredFile, error)
+	SaveFromURL(ctx context.Context, request SaveFromURLRequest) (SaveFromURLResult, error)
 	Copy(ctx context.Context, source StoredFile) (StoredFile, error)
 	Open(ctx context.Context, key string) (io.ReadCloser, error)
 	Delete(ctx context.Context, key string) error

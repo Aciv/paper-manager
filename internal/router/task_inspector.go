@@ -55,9 +55,10 @@ func NewTaskInspector() interfaces.TaskInspector {
 // so a single struct covers Document / ImageMultimodal / PostProcess /
 // Question / Summary / Extract / Manual.
 type DocumentIDProbe struct {
-	DocumentID     string `json:"document_id,omitempty"`
-	ReferenceRunID string `json:"reference_run_id,omitempty"`
-	IsReference    bool   `json:"is_reference,omitempty"`
+	DocumentID       string `json:"document_id,omitempty"`
+	SourceDocumentID string `json:"source_document_id,omitempty"`
+	ReferenceRunID   string `json:"reference_run_id,omitempty"`
+	IsReference      bool   `json:"is_reference,omitempty"`
 }
 
 // queuesScanned is the fixed set of queue names this codebase enqueues
@@ -69,6 +70,7 @@ var queuesScanned = []string{
 	types.QueueDefault,
 	types.QueueCritical,
 	types.QueueLow,
+	types.QueueDownload,
 }
 
 // taskTypesForDocumentCancel lists every asynq task type that carries
@@ -76,11 +78,13 @@ var queuesScanned = []string{
 // deliberately narrow: we don't touch FAQ import / KB-level tasks
 // because the cancel API is per-Document.
 var taskTypesForDocumentCancel = map[string]struct{}{
-	types.TypeDocumentProcess:        {},
-	types.TypeDocumentRecognize:      {},
-	types.TypePaperMetadataExtract:   {},
-	types.TypePaperReferenceDispatch: {},
-	types.TypePaperCatalogResolve:    {},
+	types.TypeDocumentProcess:                {},
+	types.TypeDocumentRecognize:              {},
+	types.TypePaperMetadataExtract:           {},
+	types.TypePaperReferenceDispatch:         {},
+	types.TypePaperCatalogResolve:            {},
+	types.TypePaperReferenceDownloadDispatch: {},
+	types.TypeDocumentRemoteImport:           {},
 }
 
 // listPageSize caps each Redis LIST call. Asynq pages tasks, so we
@@ -330,7 +334,7 @@ func matchesDocument(
 	if err := json.Unmarshal(payload, &probe); err != nil {
 		return false
 	}
-	return probe.DocumentID == documentID
+	return probe.DocumentID == documentID || probe.SourceDocumentID == documentID
 }
 
 func matchesReferenceRun(taskType string, payload []byte, documentID, runID string) bool {
@@ -341,7 +345,7 @@ func matchesReferenceRun(taskType string, payload []byte, documentID, runID stri
 	if err := json.Unmarshal(payload, &probe); err != nil {
 		return false
 	}
-	return probe.DocumentID == documentID && probe.ReferenceRunID == runID
+	return (probe.DocumentID == documentID || probe.SourceDocumentID == documentID) && probe.ReferenceRunID == runID
 }
 
 func (a *asynqTaskInspector) deleteMatches(ctx context.Context, queue, documentID, taskType, runID, state string, list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)) int {

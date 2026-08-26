@@ -84,6 +84,16 @@ func (r *paperDocumentRepoStub) DeleteUnknownIfUnreferenced(
 	return true, nil
 }
 
+func (r *paperDocumentRepoStub) PromoteUnknown(_ context.Context, document types.Document) (bool, error) {
+	current, ok := r.documents[document.ID]
+	if !ok || current.Status != types.DocumentStatusUnknown {
+		return false, nil
+	}
+	document.Status = types.DocumentStatusUploaded
+	r.documents[document.ID] = document
+	return true, nil
+}
+
 func (r *paperDocumentRepoStub) Search(
 	_ context.Context, search types.DocumentSearch,
 ) (types.DocumentPage, error) {
@@ -357,6 +367,22 @@ func (r *paperCitationRepoStub) ListByCitingDocumentID(
 		return items[i].CitedDocumentID.String() < items[j].CitedDocumentID.String()
 	})
 	return items, nil
+}
+func (r *paperCitationRepoStub) ListByCitingDocumentIDPage(
+	ctx context.Context, id uuid.UUID, offset, limit int,
+) (types.PaperCitationPage, error) {
+	items, err := r.ListByCitingDocumentID(ctx, id)
+	if err != nil {
+		return types.PaperCitationPage{}, err
+	}
+	if offset >= len(items) {
+		return types.PaperCitationPage{Items: []types.PaperCitation{}}, nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	return types.PaperCitationPage{Items: items[offset:end], HasMore: end < len(items), NextOffset: end}, nil
 }
 
 func (r *paperCitationRepoStub) ListByCitedDocumentID(

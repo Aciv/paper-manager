@@ -9,9 +9,14 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"paperMaster/internal/config"
 	"paperMaster/internal/logger"
@@ -29,6 +34,7 @@ var (
 	ErrUnsupportedFileType = errors.New("unsupported file type")
 	ErrInvalidPDF          = errors.New("invalid PDF file")
 	ErrInvalidOfficeFile   = errors.New("invalid office file")
+	ErrRemoteHTTPStatus    = errors.New("remote file server returned an unsuccessful status")
 )
 
 var supportedTypes = map[string]string{
@@ -50,8 +56,9 @@ var supportedTypes = map[string]string{
 // LocalStorage stores uploads beneath BaseDir using opaque keys. Its temporary-file
 // and rename sequence prevents readers from observing partially written files.
 type LocalStorage struct {
-	baseDir string
-	maxSize int64
+	baseDir    string
+	maxSize    int64
+	httpClient *http.Client
 }
 
 func NewLocalStorage(baseDir string, maxSize int64) (*LocalStorage, error) {
@@ -68,12 +75,73 @@ func NewLocalStorage(baseDir string, maxSize int64) (*LocalStorage, error) {
 		logger.Error(context.Background(), "resolve upload directory failed", "directory", baseDir, "error", err)
 		return nil, fmt.Errorf("resolve upload directory: %w", err)
 	}
-	storage := &LocalStorage{baseDir: absBase, maxSize: maxSize}
+	storage := &LocalStorage{baseDir: absBase, maxSize: maxSize,
+		httpClient: utils.NewSSRFSafeHTTPClient(utils.DefaultSSRFSafeHTTPClientConfig())}
 	if err := storage.CheckConnectivity(context.Background()); err != nil {
 		logger.Error(context.Background(), "check local file storage failed", "directory", absBase, "error", err)
 		return nil, err
 	}
 	return storage, nil
+}
+
+// ConfigureRemoteClient applies runtime URL-download limits while retaining
+// NewLocalStorage's compact constructor for focused storage tests.
+func (s *LocalStorage) ConfigureRemoteClient(
+	timeout time.Duration,
+	maxRedirects int,
+	downloads interfaces.RemoteDownloadLimiter,
+) {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	if maxRedirects <= 0 {
+		maxRedirects = 5
+	}
+	client := utils.NewSSRFSafeHTTPClient(utils.SSRFSafeHTTPClientConfig{
+		Timeout: timeout, MaxRedirects: maxRedirects,
+	})
+	if downloads != nil {
+		client.Transport = &downloadLimitedTransport{
+			base: client.Transport, downloads: downloads,
+		}
+	}
+	s.httpClient = client
+}
+
+// downloadLimitedTransport acquires the limiter for the host of every actual
+// HTTP request. Because net/http executes redirects as separate RoundTrip
+// calls, a cross-host redirect is constrained by its final host rather than
+// only by the user-supplied URL's host.
+type downloadLimitedTransport struct {
+	base      http.RoundTripper
+	downloads interfaces.RemoteDownloadLimiter
+}
+
+func (transport *downloadLimitedTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	release, err := transport.downloads.Acquire(request.Context(), request.URL.Hostname())
+	if err != nil {
+		return nil, err
+	}
+	// actually get from url
+	response, err := transport.base.RoundTrip(request)
+	if err != nil {
+		release()
+		return nil, err
+	}
+	response.Body = &releaseOnClose{ReadCloser: response.Body, release: release}
+	return response, nil
+}
+
+type releaseOnClose struct {
+	io.ReadCloser
+	release func()
+	once    sync.Once
+}
+
+func (body *releaseOnClose) Close() error {
+	err := body.ReadCloser.Close()
+	body.once.Do(body.release)
+	return err
 }
 
 func (s *LocalStorage) CheckConnectivity(_ context.Context) error {
@@ -236,6 +304,89 @@ func SaveMultipart(ctx context.Context, storage interfaces.FileStorage, file *mu
 // same validation, size-limit, and atomic-write path as uploaded documents.
 func (s *LocalStorage) SaveBytes(ctx context.Context, filename string, content []byte) (interfaces.StoredFile, error) {
 	return s.Save(ctx, interfaces.FileUpload{Filename: filename, Content: bytes.NewReader(content)})
+}
+
+// SaveFromURL streams one already-resolved remote PDF through the same
+// header, size, hashing, temporary-file, fsync, and atomic-rename path as an
+// uploaded file. The initial URL and every redirect are SSRF-validated.
+func (s *LocalStorage) SaveFromURL(
+	ctx context.Context, request interfaces.SaveFromURLRequest,
+) (interfaces.SaveFromURLResult, error) {
+	rawURL := strings.TrimSpace(request.URL)
+	if err := utils.ValidateURLForSSRF(rawURL); err != nil {
+		return interfaces.SaveFromURLResult{}, fmt.Errorf("validate remote file URL: %w", err)
+	}
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Host == "" {
+		return interfaces.SaveFromURLResult{}, fmt.Errorf("invalid remote file URL")
+	}
+	filename := strings.TrimSpace(request.Filename)
+	if filename == "" {
+		filename = filepath.Base(parsed.Path)
+	}
+	if !strings.EqualFold(filepath.Ext(filename), ".pdf") {
+		filename += ".pdf"
+	}
+	client := s.httpClient
+	if client == nil {
+		client = utils.NewSSRFSafeHTTPClient(utils.DefaultSSRFSafeHTTPClientConfig())
+	}
+	httpRequest, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return interfaces.SaveFromURLResult{}, fmt.Errorf("create remote file request: %w", err)
+	}
+	httpRequest.Header.Set("Accept", "application/pdf,application/octet-stream;q=0.8")
+	response, err := client.Do(httpRequest)
+	if err != nil {
+		return interfaces.SaveFromURLResult{}, fmt.Errorf("download remote PDF: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return interfaces.SaveFromURLResult{}, &RemoteHTTPError{
+			StatusCode: response.StatusCode,
+			RetryAfter: parseHTTPRetryAfter(response.Header.Get("Retry-After")),
+			FinalURL:   response.Request.URL.String(),
+		}
+	}
+	if response.ContentLength > s.maxSize {
+		return interfaces.SaveFromURLResult{}, ErrFileTooLarge
+	}
+	stored, err := s.Save(ctx, interfaces.FileUpload{
+		Filename: filename, ContentType: response.Header.Get("Content-Type"),
+		Content: response.Body, Category: request.Category,
+	})
+	if err != nil {
+		return interfaces.SaveFromURLResult{}, err
+	}
+	return interfaces.SaveFromURLResult{File: stored, FinalURL: response.Request.URL.String()}, nil
+}
+
+// RemoteHTTPError exposes bounded retry metadata without retaining or leaking
+// response bodies. Deterministic 4xx responses remain terminal.
+type RemoteHTTPError struct {
+	StatusCode int
+	RetryAfter time.Duration
+	FinalURL   string
+}
+
+func (e *RemoteHTTPError) Error() string {
+	return fmt.Sprintf("%s: HTTP %d", ErrRemoteHTTPStatus, e.StatusCode)
+}
+func (e *RemoteHTTPError) Unwrap() error { return ErrRemoteHTTPStatus }
+func (e *RemoteHTTPError) TaskRetryable() bool {
+	return e.StatusCode == http.StatusTooManyRequests || e.StatusCode >= 500
+}
+func (e *RemoteHTTPError) TaskRetryAfter() time.Duration { return e.RetryAfter }
+
+func parseHTTPRetryAfter(value string) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.Atoi(value); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil && when.After(time.Now()) {
+		return time.Until(when)
+	}
+	return 0
 }
 
 // Copy creates an independent object. It never exposes or accepts filesystem paths.

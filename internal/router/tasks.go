@@ -157,6 +157,7 @@ func NewAsynqServer() *asynq.Server {
 				types.QueueCritical: 6, // Highest priority queue
 				types.QueueDefault:  3, // Default priority queue
 				types.QueueLow:      1, // Lowest priority queue
+				types.QueueDownload: 1, // Isolated remote PDF acquisition lane
 				//types.QueueMultimodal: 1, // Isolated lane for high-volume slow VLM image tasks
 				//types.QueueGraph:      1, // Isolated lane for high-volume slow graph-extraction tasks
 				//types.QueueQuestion:   1, // Isolated lane for high-volume slow question-generation tasks
@@ -199,6 +200,7 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 	if params.DocumentService != nil {
 		mux.HandleFunc(types.TypeDocumentProcess, params.DocumentService.ProcessDocument)
 		mux.HandleFunc(types.TypeDocumentRecognize, params.DocumentService.RecognizeDocument)
+		mux.HandleFunc(types.TypeDocumentRemoteImport, params.DocumentService.ImportRemoteDocument)
 	}
 	if params.PaperInfoService != nil {
 		mux.HandleFunc(types.TypePaperMetadataExtract, func(ctx context.Context, task *asynq.Task) error {
@@ -209,6 +211,17 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 		})
 		mux.HandleFunc(types.TypePaperReferenceDispatch, func(ctx context.Context, task *asynq.Task) error {
 			return processPaperReferenceDispatchTask(ctx, task, params.PaperInfoService)
+		})
+		mux.HandleFunc(types.TypePaperReferenceDownloadDispatch, func(ctx context.Context, task *asynq.Task) error {
+			if task == nil {
+				return skipPaperTask(errors.New("reference download dispatch task is required"))
+			}
+			var payload types.PaperReferenceDownloadDispatchPayload
+			if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+				return skipPaperTask(err)
+			}
+			ctx = paperTaskContext(ctx, payload.RequestID, payload.SourceDocumentID, task.Type())
+			return classifyPaperTaskError(params.PaperInfoService.DispatchReferenceDownloads(ctx, payload))
 		})
 	}
 

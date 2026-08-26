@@ -40,6 +40,9 @@ type PaperService interface {
 	RemoveCitation(ctx context.Context, citingDocumentID, citedDocumentID string) error
 	// ListCitations returns papers referenced by documentID.
 	ListCitations(ctx context.Context, documentID string) ([]types.PaperCitation, error)
+	// ListCitationsPage provides bounded bibliography traversal for background
+	// dispatchers without changing the existing handler-facing list operation.
+	ListCitationsPage(ctx context.Context, documentID string, offset, limit int) (types.PaperCitationPage, error)
 	// ListCitedBy returns papers that reference documentID.
 	ListCitedBy(ctx context.Context, documentID string) ([]types.PaperCitation, error)
 	// ResolveCitation repoints the unknown edge derived from rawReference to a

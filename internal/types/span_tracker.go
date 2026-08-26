@@ -33,12 +33,17 @@ const (
 	// ProcessingSpanPipeline is the persistent root of one DocumentService
 	// controlled workflow through source-catalog handoff. The bibliography
 	// dispatch branch owns an independent reference-run span after handoff.
-	ProcessingSpanPipeline         ProcessingSpanKind = "pipeline"
-	ProcessingSpanRecognition      ProcessingSpanKind = "recognition"
-	ProcessingSpanMetadataExtract  ProcessingSpanKind = "metadata_extraction"
-	ProcessingSpanCatalogSource    ProcessingSpanKind = "catalog_source"
-	ProcessingSpanCatalogReference ProcessingSpanKind = "catalog_reference"
-	ProcessingSpanCatalogProvider  ProcessingSpanKind = "catalog_provider"
+	ProcessingSpanPipeline               ProcessingSpanKind = "pipeline"
+	ProcessingSpanRecognition            ProcessingSpanKind = "recognition"
+	ProcessingSpanMetadataExtract        ProcessingSpanKind = "metadata_extraction"
+	ProcessingSpanCatalogSource          ProcessingSpanKind = "catalog_source"
+	ProcessingSpanCatalogReference       ProcessingSpanKind = "catalog_reference"
+	ProcessingSpanCatalogProvider        ProcessingSpanKind = "catalog_provider"
+	ProcessingSpanReferenceDownload      ProcessingSpanKind = "reference_download"
+	ProcessingSpanResolvePDFURL          ProcessingSpanKind = "resolve_pdf_url"
+	ProcessingSpanDownloadPDF            ProcessingSpanKind = "download_pdf"
+	ProcessingSpanDeduplicateDocument    ProcessingSpanKind = "deduplicate_document"
+	ProcessingSpanEnqueueDocumentProcess ProcessingSpanKind = "enqueue_document_process"
 )
 
 // ProcessingSpanScope identifies the ownership level of a processing span.
@@ -60,7 +65,9 @@ const (
 	// ProcessingSpanScopeReferenceBatch owns one provider-assigned reference batch.
 	ProcessingSpanScopeReferenceBatch ProcessingSpanScope = "reference_batch"
 	// ProcessingSpanScopeProvider owns one external catalog-provider request.
-	ProcessingSpanScopeProvider ProcessingSpanScope = "provider"
+	ProcessingSpanScopeProvider             ProcessingSpanScope = "provider"
+	ProcessingSpanScopeReferenceDownloadRun ProcessingSpanScope = "reference_download_run"
+	ProcessingSpanScopeRemoteDocument       ProcessingSpanScope = "remote_document"
 )
 
 // ProcessingSpanScopeID is the durable, encoded identifier within a span

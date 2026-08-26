@@ -180,4 +180,66 @@ func (r *documentProcessingSpanRepository) ForceCancelScope(ctx context.Context,
 	return err
 }
 
+func (r *documentProcessingSpanRepository) CancelDescendants(
+	ctx context.Context, parentSpanID uuid.UUID, code, reason string,
+) error {
+	if parentSpanID == uuid.Nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	result := r.db.WithContext(ctx).Exec(`WITH RECURSIVE descendants AS (
+		SELECT id FROM document_processing_spans WHERE parent_span_id = ?
+		UNION ALL
+		SELECT child.id FROM document_processing_spans child
+		JOIN descendants parent ON child.parent_span_id = parent.id
+	)
+	UPDATE document_processing_spans SET status = ?, error_code = ?,
+		error_reason = ?, finished_at = ?, updated_at = ?
+	WHERE id IN (SELECT id FROM descendants) AND status IN (?, ?)`,
+		parentSpanID, types.ProcessingSpanCancelled, code, reason, now, now,
+		types.ProcessingSpanQueued, types.ProcessingSpanRunning)
+	if result.Error != nil {
+		logger.Error(ctx, "cancel descendant processing spans failed", "parent_span_id", parentSpanID, "error", result.Error)
+	}
+	return result.Error
+}
+
+func (r *documentProcessingSpanRepository) FinalizeParentFromChildren(
+	ctx context.Context, childSpanID uuid.UUID,
+) error {
+	if childSpanID == uuid.Nil {
+		return nil
+	}
+	return r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var child types.DocumentProcessingSpan
+		if err := tx.Select("parent_span_id").First(&child, "id = ?", childSpanID).Error; err != nil {
+			return err
+		}
+		if child.ParentSpanID == nil || *child.ParentSpanID == uuid.Nil {
+			return nil
+		}
+		type aggregate struct {
+			Active int64
+			Failed int64
+		}
+		var counts aggregate
+		if err := tx.Model(&types.DocumentProcessingSpan{}).
+			Select("COUNT(*) FILTER (WHERE status IN ('queued','running')) AS active, COUNT(*) FILTER (WHERE status = 'failed') AS failed").
+			Where("parent_span_id = ?", *child.ParentSpanID).Scan(&counts).Error; err != nil {
+			return err
+		}
+		if counts.Active > 0 {
+			return nil
+		}
+		status, code, reason := types.ProcessingSpanSucceeded, "", ""
+		if counts.Failed > 0 {
+			status, code, reason = types.ProcessingSpanFailed, "CHILD_FAILED", "one or more remote PDF acquisitions failed"
+		}
+		now := time.Now().UTC()
+		return tx.Model(&types.DocumentProcessingSpan{}).
+			Where("id = ? AND status IN ?", *child.ParentSpanID, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).
+			Updates(map[string]interface{}{"status": status, "error_code": code, "error_reason": reason, "finished_at": now}).Error
+	})
+}
+
 var _ interfaces.DocumentProcessingSpanRepository = (*documentProcessingSpanRepository)(nil)

@@ -11,7 +11,7 @@ func TestNewStorageSelectsLocalDriver(t *testing.T) {
 		FileStorageDriver: "local",
 		UploadDirectory:   t.TempDir(),
 		MaxUploadSize:     1024,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("NewStorage() error = %v", err)
 	}
@@ -21,7 +21,7 @@ func TestNewStorageSelectsLocalDriver(t *testing.T) {
 }
 
 func TestNewStorageRejectsUnknownDriver(t *testing.T) {
-	_, err := NewStorage(config.Config{FileStorageDriver: "unknown"})
+	_, err := NewStorage(config.Config{FileStorageDriver: "unknown"}, nil)
 	if err == nil {
 		t.Fatal("NewStorage() error = nil, want unsupported driver error")
 	}

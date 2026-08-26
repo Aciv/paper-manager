@@ -34,6 +34,8 @@ const (
 	defaultPaperExtractionTaskMaxRetry = 3
 	defaultPaperCatalogTaskTimeout     = 10 * time.Minute
 	defaultPaperCatalogTaskMaxRetry    = 5
+	defaultRemotePDFTaskTimeout        = 5 * time.Minute
+	defaultRemotePDFTaskMaxRetry       = 4
 )
 
 // documentProcessSpanContextKey carries the active ProcessDocument root only
@@ -97,6 +99,7 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	if aborted {
 		return nil
 	}
+	// step1 parse pdf to get markdown
 	if document.Status != types.DocumentStatusReady {
 		if err := s.recognizeDocument(ctx, payload); err != nil {
 			return err
@@ -121,6 +124,7 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		RequestID: payload.RequestID, DocumentID: documentID,
 		Attempt: payload.Attempt,
 	}
+	// step2 extraction markdown
 	if _, err := s.paperInfo.ExtractMetadata(ctx, extraction); err != nil {
 		return err
 	}
@@ -130,6 +134,7 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 		return nil
 	}
 
+	// step3 web search paper metadate
 	if err := s.paperInfo.ResolveMetadata(ctx, types.PaperCatalogResolveCommand{
 		RequestID: payload.RequestID, DocumentID: documentID,
 		Attempt: payload.Attempt,
@@ -141,6 +146,8 @@ func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task)
 	} else if aborted {
 		return nil
 	}
+
+	// step4 find reference matedate
 	return s.enqueueReferenceDispatch(ctx, payload, documentID)
 }
 
@@ -905,6 +912,60 @@ func NewPaperCatalogResolveTask(
 		types.TypePaperCatalogResolve, payload.DocumentID, payload.Attempt, stage,
 	)))
 	return task, options, nil
+}
+
+// NewPaperReferenceDownloadDispatchTask creates the lightweight
+// bibliography-scoped acquisition dispatcher. It performs no HTTP request.
+func NewPaperReferenceDownloadDispatchTask(
+	payload types.PaperReferenceDownloadDispatchPayload,
+	timeout time.Duration,
+	maxRetry int,
+) (*asynq.Task, []asynq.Option, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if timeout <= 0 {
+		timeout = defaultRemotePDFTaskTimeout
+	}
+	if maxRetry <= 0 {
+		maxRetry = defaultRemotePDFTaskMaxRetry
+	}
+	task, err := newPaperInfoJSONTask(types.TypePaperReferenceDownloadDispatch, payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode reference download dispatch task: %w", err)
+	}
+	return task, []asynq.Option{
+		asynq.Queue(types.QueueLow), asynq.Timeout(timeout), asynq.MaxRetry(maxRetry),
+		asynq.TaskID(paperInfoTaskID(types.TypePaperReferenceDownloadDispatch,
+			payload.SourceDocumentID, payload.Attempt, payload.ReferenceRunID)),
+	}, nil
+}
+
+// NewDocumentRemoteImportTask creates one isolated remote-PDF acquisition.
+// The payload intentionally contains no URL; every retry reloads metadata.
+func NewDocumentRemoteImportTask(
+	payload types.DocumentRemoteImportPayload,
+	timeout time.Duration,
+	maxRetry int,
+) (*asynq.Task, []asynq.Option, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if timeout <= 0 {
+		timeout = defaultRemotePDFTaskTimeout
+	}
+	if maxRetry <= 0 {
+		maxRetry = defaultRemotePDFTaskMaxRetry
+	}
+	task, err := newPaperInfoJSONTask(types.TypeDocumentRemoteImport, payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode remote document import task: %w", err)
+	}
+	return task, []asynq.Option{
+		asynq.Queue(types.QueueDownload), asynq.Timeout(timeout), asynq.MaxRetry(maxRetry),
+		asynq.TaskID(paperInfoTaskID(types.TypeDocumentRemoteImport,
+			payload.DocumentID, payload.Attempt)),
+	}, nil
 }
 
 func newPaperInfoJSONTask(taskType string, payload any) (*asynq.Task, error) {

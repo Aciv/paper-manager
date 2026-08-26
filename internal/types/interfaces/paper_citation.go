@@ -33,6 +33,8 @@ type PaperCitationRepository interface {
 	// ListByCitingDocumentID returns papers referenced by the given document,
 	// newest relationships first.
 	ListByCitingDocumentID(ctx context.Context, citingDocumentID uuid.UUID) ([]types.PaperCitation, error)
+	// ListByCitingDocumentIDPage returns a stable created-at/ID ordered page.
+	ListByCitingDocumentIDPage(ctx context.Context, citingDocumentID uuid.UUID, offset, limit int) (types.PaperCitationPage, error)
 	// ListByCitedDocumentID returns papers that reference the given document,
 	// newest relationships first.
 	ListByCitedDocumentID(ctx context.Context, citedDocumentID uuid.UUID) ([]types.PaperCitation, error)

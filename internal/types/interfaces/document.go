@@ -56,12 +56,19 @@ type DocumentRepository interface {
 	// supplied a DOI first, and returns ErrDuplicateDOI if another document owns
 	// the provider DOI.
 	SetDOIIfEmpty(ctx context.Context, id uuid.UUID, doi string) (bool, error)
+	// PromoteUnknown atomically attaches a durable source object to a
+	// bibliographic placeholder. It returns false if another worker already
+	// promoted or deleted the placeholder.
+	PromoteUnknown(ctx context.Context, document types.Document) (bool, error)
 }
 
 // DocumentService contains document lifecycle and storage orchestration.
 type DocumentService interface {
 	// CreateDocumentFromFile stores an upload and creates its source record.
 	CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error)
+	// CreateDocumentFromURL resolves and safely downloads one explicit remote
+	// PDF, creates its source record, and starts the normal document pipeline.
+	CreateDocumentFromURL(ctx context.Context, command types.DocumentURLImportCommand) (*types.Document, error)
 	// GetDocumentByID parses and retrieves a document by its textual UUID.
 	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
 	// GetDocumentStatus returns the current lifecycle status for a document.
@@ -104,4 +111,7 @@ type DocumentService interface {
 	ProcessDocument(ctx context.Context, task *asynq.Task) error
 	// RecognizeDocument performs only the asynchronous recognition stage.
 	RecognizeDocument(ctx context.Context, task *asynq.Task) error
+	// ImportRemoteDocument reloads one unknown placeholder's current metadata,
+	// downloads its PDF if available, deduplicates it, and starts processing.
+	ImportRemoteDocument(ctx context.Context, task *asynq.Task) error
 }

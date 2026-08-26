@@ -190,6 +190,33 @@ func (r *paperCitationRepository) ListByCitingDocumentID(
 	return citations, nil
 }
 
+func (r *paperCitationRepository) ListByCitingDocumentIDPage(
+	ctx context.Context, citingDocumentID uuid.UUID, offset, limit int,
+) (types.PaperCitationPage, error) {
+	if offset < 0 {
+		offset = 0
+	}
+	if limit < 1 {
+		limit = 50
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	rows := make([]types.PaperCitation, 0, limit+1)
+	err := r.db.WithContext(ctx).Where("citing_document_id = ?", citingDocumentID).
+		Order("created_at DESC, cited_document_id").Offset(offset).Limit(limit + 1).Find(&rows).Error
+	if err != nil {
+		return types.PaperCitationPage{}, err
+	}
+	page := types.PaperCitationPage{Items: rows}
+	if len(rows) > limit {
+		page.Items = rows[:limit]
+		page.HasMore = true
+		page.NextOffset = offset + limit
+	}
+	return page, nil
+}
+
 func (r *paperCitationRepository) ListByCitedDocumentID(
 	ctx context.Context,
 	citedDocumentID uuid.UUID,

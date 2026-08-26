@@ -187,6 +187,15 @@ func (s *documentStatusRepoStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, 
 	return true, nil
 }
 
+func (s *documentStatusRepoStub) PromoteUnknown(_ context.Context, document types.Document) (bool, error) {
+	if s.document.ID != document.ID || s.document.Status != types.DocumentStatusUnknown {
+		return false, nil
+	}
+	document.Status = types.DocumentStatusUploaded
+	s.document = document
+	return true, nil
+}
+
 func TestFailDocumentIfProcessingDoesNotOverwriteReadyStatus(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}}
 	svc := NewDocumentService(repo, nil)
@@ -404,10 +413,15 @@ func (stub *documentPaperInfoStub) ResolveMetadata(ctx context.Context, command 
 func (stub *documentPaperInfoStub) DispatchReferences(context.Context, types.PaperReferenceDispatchCommand) error {
 	return nil
 }
+func (*documentPaperInfoStub) DispatchReferenceDownloads(context.Context, types.PaperReferenceDownloadDispatchPayload) error {
+	return nil
+}
 func (*documentPaperInfoStub) RetryExtraction(context.Context, string) error          { return nil }
 func (*documentPaperInfoStub) RetryCatalogResolution(context.Context, string) error   { return nil }
 func (*documentPaperInfoStub) RetryReferenceResolution(context.Context, string) error { return nil }
+func (*documentPaperInfoStub) StartReferenceDownloads(context.Context, string) error  { return nil }
 func (*documentPaperInfoStub) Cancel(context.Context, string) error                   { return nil }
+func (*documentPaperInfoStub) CancelReferenceDownloads(context.Context, string) error { return nil }
 
 func (stub *documentTaskEnqueuerStub) EnqueueContext(
 	_ context.Context,

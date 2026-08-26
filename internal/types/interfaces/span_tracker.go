@@ -38,6 +38,15 @@ type SpanTracker interface {
 	// batch/provider spans. It returns the run IDs whose matching queue tasks
 	// must be removed or signalled by the caller.
 	CancelReferenceRuns(ctx context.Context, documentID uuid.UUID, code, reason string) ([]uuid.UUID, error)
+	// CancelReferenceDownloadRuns closes active bibliography acquisition roots
+	// and all of their child URL/download/deduplication spans.
+	CancelReferenceDownloadRuns(ctx context.Context, documentID uuid.UUID, code, reason string) ([]uuid.UUID, error)
+	// ScopeCancelled reports whether one exact operation was cancelled before a
+	// queued worker began. It prevents an upsert from reactivating the marker.
+	ScopeCancelled(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID) (bool, error)
+	// FinalizeParent closes a parent span once all direct children are terminal,
+	// propagating a child failure while preserving an explicit cancellation.
+	FinalizeParent(ctx context.Context, childSpanID uuid.UUID) error
 	// ReferenceRunActive reports whether a bibliography run has not been
 	// cancelled. Workers call it before external I/O and again before writes to
 	// prevent late results from a cancelled run reaching the database.
@@ -105,4 +114,11 @@ type DocumentProcessingSpanRepository interface {
 	// ForceCancelScope records cancellation even when a run-root has already
 	// completed its enqueue phase. It provides a durable late-result guard.
 	ForceCancelScope(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID, code, reason string) error
+	// CancelDescendants closes every active child below parentSpanID. It is used
+	// for bibliography acquisition cancellation where targets are documents
+	// different from the source paper that owns the run root.
+	CancelDescendants(ctx context.Context, parentSpanID uuid.UUID, code, reason string) error
+	// FinalizeParentFromChildren aggregates direct child terminal states for the
+	// parent of childSpanID and no-ops while any sibling remains active.
+	FinalizeParentFromChildren(ctx context.Context, childSpanID uuid.UUID) error
 }

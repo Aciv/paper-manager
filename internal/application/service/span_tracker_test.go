@@ -60,6 +60,10 @@ func (*spanRepositoryStub) IsScopeCancelled(context.Context, uuid.UUID, types.Pr
 func (*spanRepositoryStub) ForceCancelScope(context.Context, uuid.UUID, types.ProcessingSpanKind, types.ProcessingSpanScope, types.ProcessingSpanScopeID, string, string) error {
 	return nil
 }
+func (*spanRepositoryStub) CancelDescendants(context.Context, uuid.UUID, string, string) error {
+	return nil
+}
+func (*spanRepositoryStub) FinalizeParentFromChildren(context.Context, uuid.UUID) error { return nil }
 
 var _ interfaces.DocumentProcessingSpanRepository = (*spanRepositoryStub)(nil)
 

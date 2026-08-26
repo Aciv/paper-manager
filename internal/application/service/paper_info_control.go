@@ -146,6 +146,43 @@ func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documen
 	return nil
 }
 
+func (s *paperInfoService) StartReferenceDownloads(ctx context.Context, documentID string) error {
+	document, _, err := s.loadPaperStatusSource(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if document.Status == types.DocumentStatusDeleting {
+		return ErrPaperInfoDeleting
+	}
+	if document.Status == types.DocumentStatusUnknown {
+		return ErrPaperInfoCatalogUnavailable
+	}
+	if s.spans != nil {
+		active, activeErr := s.spans.HasActive(ctx, document.ID, types.ProcessingSpanReferenceDownload)
+		if activeErr != nil {
+			return activeErr
+		}
+		if active {
+			return ErrPaperInfoAttemptActive
+		}
+	}
+	runID := uuid.New()
+	payload := types.PaperReferenceDownloadDispatchPayload{
+		SourceDocumentID: document.ID.String(), ReferenceRunID: runID.String(),
+		Attempt: remoteDownloadAttempt(runID),
+	}
+	task, options, err := NewPaperReferenceDownloadDispatchTask(payload,
+		s.cfg.RemotePDFTaskTimeout, s.cfg.RemotePDFTaskMaxRetry)
+	if err != nil {
+		return err
+	}
+	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
+		return err
+	}
+	logger.Info(ctx, "reference PDF acquisition queued", "document_id", document.ID, "reference_run_id", runID)
+	return nil
+}
+
 // Cancel stops only active reference-catalog runs. Metadata extraction and
 // source-paper lookup deliberately run to their terminal state, and the ready
 // document remains ready throughout.

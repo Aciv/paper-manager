@@ -33,6 +33,9 @@ type documentService struct {
 	recognizer    interfaces.DocumentRecognizer
 	paperInfo     interfaces.PaperInfoService
 	spans         interfaces.SpanTracker
+	papers        interfaces.PaperService
+	urlResolver   interfaces.PaperURLResolver
+	downloads     interfaces.RemoteDownloadLimiter
 	// recognitionOutputDir is the trusted shared-volume root for directory
 	// recognizers. It is deliberately separate from upload storage: recognizer
 	// output is untrusted until ProcessDocument validates and copies it.
@@ -95,8 +98,15 @@ func NewDocumentServiceWithProcessingAndSpanTracker(
 	recognizer interfaces.DocumentRecognizer,
 	paperInfo interfaces.PaperInfoService,
 	spans interfaces.SpanTracker,
+	papers interfaces.PaperService,
+	urlResolver interfaces.PaperURLResolver,
+	downloads interfaces.RemoteDownloadLimiter,
 ) interfaces.DocumentService {
-	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, paperInfo, spans)
+	service := newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, paperInfo, spans).(*documentService)
+	service.papers = papers
+	service.urlResolver = urlResolver
+	service.downloads = downloads
+	return service
 }
 
 func newDocumentServiceWithProcessing(

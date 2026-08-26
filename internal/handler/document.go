@@ -38,6 +38,38 @@ type updateDocumentRequest struct {
 	DOI      *string `json:"doi"`
 }
 
+// ImportURL accepts a trusted provider landing page or an explicit PDF URL.
+// The service owns URL resolution, SSRF checks, streaming, and persistence.
+func (h *DocumentHandler) ImportURL(c *gin.Context) {
+	var command types.DocumentURLImportCommand
+	if err := c.ShouldBindJSON(&command); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
+		return
+	}
+	created, err := h.documents.CreateDocumentFromURL(c.Request.Context(), command)
+	if err != nil {
+		switch {
+		case errors.Is(err, types.ErrInvalidRemotePDFRequest):
+			h.writeError(c, apperrors.NewBadRequestError("URL and DOI must be valid"), err)
+		case errors.Is(err, types.ErrRemotePDFUnavailable):
+			h.writeError(c, apperrors.NewBadRequestError("URL does not resolve to a supported PDF"), err)
+		case errors.Is(err, appservice.ErrDuplicateDOI), errors.Is(err, appservice.ErrDuplicateFileHash):
+			h.writeError(c, apperrors.NewConflictError("document already exists"), err)
+		case errors.Is(err, appservice.ErrInvalidDocumentFilename):
+			h.writeError(c, apperrors.NewBadRequestError("filename must be a safe PDF filename"), err)
+		case errors.Is(err, fileservice.ErrFileTooLarge):
+			h.writeError(c, apperrors.NewPayloadTooLargeError("remote PDF exceeds the configured upload limit"), err)
+		case errors.Is(err, fileservice.ErrInvalidPDF):
+			h.writeError(c, apperrors.NewBadRequestError("remote content is not a valid PDF"), err)
+		default:
+			h.writeError(c, apperrors.NewInternalServerError("import remote document"), err)
+		}
+		return
+	}
+	logger.Info(c.Request.Context(), "remote document import accepted", "document_id", created.ID)
+	c.JSON(http.StatusCreated, gin.H{"document": created})
+}
+
 // NewDocumentHandler receives the application service through DI; handlers do
 // not coordinate storage or repositories directly.
 func NewDocumentHandler(cfg config.Config, documents interfaces.DocumentService) *DocumentHandler {

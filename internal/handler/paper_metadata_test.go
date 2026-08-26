@@ -74,6 +74,22 @@ func (s *paperHandlerServiceStub) ListCitations(
 ) ([]types.PaperCitation, error) {
 	return append([]types.PaperCitation(nil), s.citations...), nil
 }
+func (s *paperHandlerServiceStub) ListCitationsPage(
+	ctx context.Context, documentID string, offset, limit int,
+) (types.PaperCitationPage, error) {
+	items, err := s.ListCitations(ctx, documentID)
+	if err != nil {
+		return types.PaperCitationPage{}, err
+	}
+	if offset >= len(items) {
+		return types.PaperCitationPage{Items: []types.PaperCitation{}}, nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	return types.PaperCitationPage{Items: items[offset:end], HasMore: end < len(items), NextOffset: end}, nil
+}
 
 func (s *paperHandlerServiceStub) ListCitedBy(
 	context.Context, string,

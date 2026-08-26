@@ -88,6 +88,11 @@ func (*paperInfoStorageStub) SaveBytes(
 ) (interfaces.StoredFile, error) {
 	return interfaces.StoredFile{}, errors.New("not implemented")
 }
+func (*paperInfoStorageStub) SaveFromURL(
+	context.Context, interfaces.SaveFromURLRequest,
+) (interfaces.SaveFromURLResult, error) {
+	return interfaces.SaveFromURLResult{}, errors.New("not implemented")
+}
 func (*paperInfoStorageStub) Copy(
 	context.Context, interfaces.StoredFile,
 ) (interfaces.StoredFile, error) {
@@ -216,6 +221,13 @@ func (*paperInfoSpanStub) CancelDocument(context.Context, uuid.UUID, string, str
 func (*paperInfoSpanStub) CancelReferenceRuns(context.Context, uuid.UUID, string, string) ([]uuid.UUID, error) {
 	return nil, nil
 }
+func (*paperInfoSpanStub) CancelReferenceDownloadRuns(context.Context, uuid.UUID, string, string) ([]uuid.UUID, error) {
+	return nil, nil
+}
+func (*paperInfoSpanStub) ScopeCancelled(context.Context, uuid.UUID, types.ProcessingSpanKind, types.ProcessingSpanScope, types.ProcessingSpanScopeID) (bool, error) {
+	return false, nil
+}
+func (*paperInfoSpanStub) FinalizeParent(context.Context, uuid.UUID) error { return nil }
 func (*paperInfoSpanStub) ReferenceRunActive(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
 	return true, nil
 }
@@ -346,6 +358,22 @@ func (s *paperInfoPaperServiceStub) ListCitations(
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]types.PaperCitation(nil), s.citations[documentID]...), nil
+}
+func (s *paperInfoPaperServiceStub) ListCitationsPage(
+	ctx context.Context, documentID string, offset, limit int,
+) (types.PaperCitationPage, error) {
+	items, err := s.ListCitations(ctx, documentID)
+	if err != nil {
+		return types.PaperCitationPage{}, err
+	}
+	if offset >= len(items) {
+		return types.PaperCitationPage{Items: []types.PaperCitation{}}, nil
+	}
+	end := offset + limit
+	if end > len(items) {
+		end = len(items)
+	}
+	return types.PaperCitationPage{Items: items[offset:end], HasMore: end < len(items), NextOffset: end}, nil
 }
 
 func (s *paperInfoPaperServiceStub) ListCitedBy(

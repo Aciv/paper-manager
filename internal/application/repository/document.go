@@ -362,6 +362,41 @@ func (r *documentRepository) SetDOIIfEmpty(ctx context.Context, id uuid.UUID, do
 	return false, nil
 }
 
+func (r *documentRepository) PromoteUnknown(
+	ctx context.Context, document types.Document,
+) (bool, error) {
+	if document.ID == uuid.Nil || document.StorageKey == "" || document.FileSHA256 == "" {
+		return false, errors.New("promoted document source fields are required")
+	}
+	result := r.db.WithContext(ctx).Model(&types.Document{}).
+		Where("id = ? AND status = ?", document.ID, types.DocumentStatusUnknown).
+		Updates(map[string]interface{}{
+			"original_filename": document.OriginalFilename,
+			"content_type":      document.ContentType,
+			"size_bytes":        document.SizeBytes,
+			"doi":               strings.ToLower(strings.TrimSpace(document.DOI)),
+			"file_sha256":       strings.ToLower(strings.TrimSpace(document.FileSHA256)),
+			"storage_key":       document.StorageKey,
+			"status":            types.DocumentStatusUploaded,
+			"error_message":     nil,
+		})
+	if isDuplicateDOIError(result.Error) {
+		return false, fmt.Errorf("%w: %s", types.ErrDuplicateDOI, document.DOI)
+	}
+	if isDuplicateFileHashError(result.Error) {
+		return false, fmt.Errorf("%w: %s", types.ErrDuplicateFileHash, document.FileSHA256)
+	}
+	if result.Error != nil {
+		logger.Error(ctx, "promote unknown document failed", "document_id", document.ID, "error", result.Error)
+		return false, result.Error
+	}
+	if result.RowsAffected > 0 {
+		logger.Info(ctx, "unknown document promoted", "document_id", document.ID, "storage_key", document.StorageKey)
+		return true, nil
+	}
+	return false, nil
+}
+
 func valueOrEmpty(value *string) string {
 	if value == nil {
 		return ""

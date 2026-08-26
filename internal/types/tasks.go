@@ -7,6 +7,9 @@ const (
 	QueueCritical = "critical"
 	QueueDefault  = "default"
 	QueueLow      = "low"
+	// QueueDownload isolates bounded remote PDF traffic from parser and catalog
+	// workers so a slow publisher cannot starve normal document processing.
+	QueueDownload = "download"
 )
 
 const (
@@ -26,8 +29,10 @@ const (
 	// TypePaperReferenceDispatch reads persisted bibliography entries and
 	// schedules provider-owned catalog batches. It performs no provider HTTP
 	// request itself.
-	TypePaperReferenceDispatch = "paper:reference_dispatch"
-	TypePaperCatalogResolve    = "paper:catalog_resolve" // 查询外部论文库并解析规范元数据
+	TypePaperReferenceDispatch         = "paper:reference_dispatch"
+	TypePaperCatalogResolve            = "paper:catalog_resolve" // 查询外部论文库并解析规范元数据
+	TypePaperReferenceDownloadDispatch = "paper:reference_download_dispatch"
+	TypeDocumentRemoteImport           = "document:remote_import"
 	//TypeKnowledgePostProcess = "knowledge:postprocess"
 	//TypeManualProcess        = "knowledge:manual"
 	//TypeKnowledgeListDelete  = "knowledge:list_delete"

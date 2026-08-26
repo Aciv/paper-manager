@@ -141,6 +141,15 @@ func (s *documentCreatorStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, doi
 	return true, nil
 }
 
+func (s *documentCreatorStub) PromoteUnknown(_ context.Context, document types.Document) (bool, error) {
+	if s.document.ID != document.ID || s.document.Status != types.DocumentStatusUnknown {
+		return false, nil
+	}
+	document.Status = types.DocumentStatusUploaded
+	s.document = document
+	return true, nil
+}
+
 func newDocumentHandler(storage *fileservice.LocalStorage, repo *documentCreatorStub) *handler.DocumentHandler {
 	return handler.NewDocumentHandler(config.Config{MaxUploadSize: fileservice.DefaultMaxUploadSize}, service.NewDocumentService(repo, storage))
 }

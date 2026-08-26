@@ -171,6 +171,9 @@ func buildDeadLetter(t *asynq.Task, taskErr error, attempts int) *types.TaskDead
 
 	scope, scopeID := inferScope(probe)
 	relatedID := probe.DocumentID
+	if relatedID == "" {
+		relatedID = probe.SourceDocumentID
+	}
 
 	// asynq stores the payload as raw bytes; preserve it verbatim so a
 	// future requeue can reuse it directly.
@@ -211,8 +214,9 @@ func buildDeadLetter(t *asynq.Task, taskErr error, attempts int) *types.TaskDead
 // Missing keys decode to zero values, which we then fall back through
 // in inferScope.
 type payloadProbe struct {
-	DocumentBaseID string `json:"document_base_id,omitempty"`
-	DocumentID     string `json:"document_id,omitempty"`
+	DocumentBaseID   string `json:"document_base_id,omitempty"`
+	DocumentID       string `json:"document_id,omitempty"`
+	SourceDocumentID string `json:"source_document_id,omitempty"`
 }
 
 // inferScope picks the most-specific scope tuple available in the
@@ -229,6 +233,8 @@ func inferScope(p payloadProbe) (string, string) {
 		return types.TaskScopeDocumentBase, p.DocumentBaseID
 	case p.DocumentID != "":
 		return types.TaskScopeDocument, p.DocumentID
+	case p.SourceDocumentID != "":
+		return types.TaskScopeDocument, p.SourceDocumentID
 	default:
 		return types.TaskScopeUnknown, ""
 	}

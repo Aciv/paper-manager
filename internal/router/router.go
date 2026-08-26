@@ -83,6 +83,7 @@ func ServerFile(router gin.IRoutes, documentHandler *handler.DocumentHandler) {
 		return
 	}
 	router.POST("/api/document/upload", documentHandler.Upload)
+	router.POST("/api/document/import-url", documentHandler.ImportURL)
 	router.GET("/api/document/search", documentHandler.Search)
 	router.GET("/api/document/:id/content", documentHandler.Content)
 	router.GET("/api/document/:id/blocks", documentHandler.ListBlocks)
@@ -125,6 +126,8 @@ func ServerPaperMetadata(
 		router.POST("/api/paper/:documentID/info/extraction/retry", infoHandler.RetryExtraction)
 		router.POST("/api/paper/:documentID/info/catalog/retry", infoHandler.RetryCatalog)
 		router.POST("/api/paper/:documentID/info/reference/retry", infoHandler.RetryReference)
+		router.POST("/api/paper/:documentID/references/download", infoHandler.StartReferenceDownloads)
+		router.POST("/api/paper/:documentID/references/download/cancel", infoHandler.CancelReferenceDownloads)
 		router.POST("/api/paper/:documentID/info/cancel", infoHandler.Cancel)
 	}
 }

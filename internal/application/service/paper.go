@@ -256,6 +256,19 @@ func (s *paperService) ListCitations(
 	return s.citations.ListByCitingDocumentID(ctx, id)
 }
 
+func (s *paperService) ListCitationsPage(
+	ctx context.Context, documentID string, offset, limit int,
+) (types.PaperCitationPage, error) {
+	id, err := parsePaperDocumentID(documentID)
+	if err != nil {
+		return types.PaperCitationPage{}, err
+	}
+	if _, err := s.documents.Get(ctx, id); err != nil {
+		return types.PaperCitationPage{}, err
+	}
+	return s.citations.ListByCitingDocumentIDPage(ctx, id, offset, limit)
+}
+
 func (s *paperService) ListCitedBy(
 	ctx context.Context, documentID string,
 ) ([]types.PaperCitation, error) {

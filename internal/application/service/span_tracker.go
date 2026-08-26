@@ -177,6 +177,67 @@ func (s *spanTracker) CancelReferenceRuns(ctx context.Context, documentID uuid.U
 	return runs, nil
 }
 
+func (s *spanTracker) CancelReferenceDownloadRuns(
+	ctx context.Context, documentID uuid.UUID, code, reason string,
+) ([]uuid.UUID, error) {
+	if s == nil || s.repo == nil || documentID == uuid.Nil {
+		return nil, nil
+	}
+	values, err := s.repo.ListActiveScopeIDs(ctx, documentID,
+		types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeReferenceDownloadRun)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.repo.ListLatestAttempt(ctx, documentID)
+	if err != nil {
+		return nil, err
+	}
+	runs := make([]uuid.UUID, 0, len(values))
+	for _, value := range values {
+		parts := types.SplitProcessingSpanScopeID(value)
+		if len(parts) != 2 || parts[0] != string(types.ProcessingSpanReferenceDownload) {
+			continue
+		}
+		runID, parseErr := uuid.Parse(parts[1])
+		if parseErr != nil || runID == uuid.Nil {
+			continue
+		}
+		for _, row := range rows {
+			if row.Kind == types.ProcessingSpanReferenceDownload &&
+				row.Scope == types.ProcessingSpanScopeReferenceDownloadRun && row.ScopeID == value {
+				if err := s.repo.CancelDescendants(ctx, row.ID, code, safeSpanReason(reason)); err != nil {
+					return runs, err
+				}
+				break
+			}
+		}
+		if err := s.repo.CancelActiveScope(ctx, documentID,
+			types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeReferenceDownloadRun,
+			value, code, safeSpanReason(reason)); err != nil {
+			return runs, err
+		}
+		runs = append(runs, runID)
+	}
+	return runs, nil
+}
+
+func (s *spanTracker) ScopeCancelled(
+	ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind,
+	scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID,
+) (bool, error) {
+	if s == nil || s.repo == nil {
+		return false, nil
+	}
+	return s.repo.IsScopeCancelled(ctx, documentID, kind, scope, scopeID)
+}
+
+func (s *spanTracker) FinalizeParent(ctx context.Context, childSpanID uuid.UUID) error {
+	if s == nil || s.repo == nil || childSpanID == uuid.Nil {
+		return nil
+	}
+	return s.repo.FinalizeParentFromChildren(ctx, childSpanID)
+}
+
 func (s *spanTracker) ReferenceRunActive(ctx context.Context, documentID, runID uuid.UUID) (bool, error) {
 	if s == nil || s.repo == nil || documentID == uuid.Nil || runID == uuid.Nil {
 		return false, nil
