@@ -70,8 +70,11 @@ type DocumentSearch struct {
 	DOI        string
 	FileSHA256 string
 	Status     DocumentStatus
-	Page       int
-	PageSize   int
+	// ExcludeUnknown omits bibliography placeholders that do not have a
+	// locally stored source file. It is primarily used by reading views.
+	ExcludeUnknown bool
+	Page           int
+	PageSize       int
 }
 
 // DocumentPage is the paginated result returned by document search endpoints.

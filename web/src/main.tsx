@@ -2,8 +2,10 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 're
 import { createRoot } from 'react-dom/client';
 import { api, Document, DocumentBase, DocumentPage, DocumentProcessingView, DocumentSearch, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
 import { PdfReader } from './PdfReader';
+import { PaperLibraryPage } from './PaperLibraryPage';
 import './PaperInfo.css';
 import './styles.css';
+import './UploadBasePicker.css';
 
 const acceptedFiles = '.txt,.json,.md,.markdown,.csv,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx';
 
@@ -78,6 +80,7 @@ function App() {
   const [baseName, setBaseName] = useState('');
   const [baseDescription, setBaseDescription] = useState('');
   const [selectedBaseID, setSelectedBaseID] = useState('');
+  const [uploadBaseIDs, setUploadBaseIDs] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState(false);
   const processingPollDelay = useRef(2500);
@@ -243,16 +246,33 @@ function App() {
       if (title.trim() || parseTags(tags).length > 0) {
         ({ paperMetadata: uploadedPaper } = await api.updatePaperMetadata(uploadedDocument.id, { title: title.trim(), tags: parseTags(tags) }));
       }
+      const selectedUploadBases = bases.filter((base) => uploadBaseIDs.includes(base.id));
+      const baseAttachmentFailures: string[] = [];
+      for (const base of selectedUploadBases) {
+        try {
+          await api.addDocumentToBase(base.id, uploadedDocument.id);
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : '未知错误';
+          baseAttachmentFailures.push(`${base.name}（${reason}）`);
+        }
+      }
       setSelected(uploadedDocument);
       setPaperMetadata(uploadedPaper);
       setFile(undefined);
       setDoi('');
       setTitle('');
       setTags('');
+      setUploadBaseIDs([]);
       const input = window.document.getElementById('document-file') as HTMLInputElement | null;
       if (input) input.value = '';
-      setMessage(`上传成功：${documentLabel(uploadedDocument, uploadedPaper)}（${uploadedDocument.id}）。`);
       await load({ page: 1 });
+      if (baseAttachmentFailures.length > 0) {
+        setMessage(`上传成功：${documentLabel(uploadedDocument, uploadedPaper)}；已加入 ${selectedUploadBases.length - baseAttachmentFailures.length}/${selectedUploadBases.length} 个 Base，失败：${baseAttachmentFailures.join('；')}。`);
+      } else if (selectedUploadBases.length > 0) {
+        setMessage(`上传成功：${documentLabel(uploadedDocument, uploadedPaper)}；已加入 ${selectedUploadBases.length} 个 Base。`);
+      } else {
+        setMessage(`上传成功：${documentLabel(uploadedDocument, uploadedPaper)}（${uploadedDocument.id}）。`);
+      }
     } catch (error) {
       setMessage(error instanceof Error ? `上传失败：${error.message}` : '上传失败。');
     } finally {
@@ -298,6 +318,64 @@ function App() {
       await load({ ...filters, page: page.items.length === 1 && page.page > 1 ? page.page - 1 : page.page });
     } catch (error) {
       setMessage(error instanceof Error ? `删除失败：${error.message}` : '删除失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function deleteAllDocuments() {
+    setBusy(true);
+    try {
+      const firstPage = await api.searchDocuments({ page: 1 });
+      if (firstPage.total === 0) {
+        setMessage('当前没有可删除的论文。');
+        return;
+      }
+
+      const confirmation = window.prompt(
+        `即将永久删除全部 ${firstPage.total} 篇论文、原始文件及关联数据。文档 Base 会保留。\n请输入“删除全部论文”继续：`,
+      );
+      if (confirmation !== '删除全部论文') {
+        setMessage('已取消删除全部论文。');
+        return;
+      }
+
+      // Capture a stable ID snapshot before deleting. Fetching and deleting
+      // page-by-page at the same time would shrink pagination and skip rows.
+      const documents = [...firstPage.items];
+      const pageCount = Math.ceil(firstPage.total / firstPage.pageSize);
+      for (let pageNumber = 2; pageNumber <= pageCount; pageNumber += 1) {
+        const nextPage = await api.searchDocuments({ page: pageNumber });
+        documents.push(...nextPage.items);
+      }
+
+      const uniqueDocuments = Array.from(new Map(documents.map((document) => [document.id, document])).values());
+      const failures: string[] = [];
+      let deleted = 0;
+      setSelected(undefined);
+      setPaperMetadata(undefined);
+
+      for (const document of uniqueDocuments) {
+        setMessage(`正在删除全部论文：${deleted + failures.length + 1} / ${uniqueDocuments.length}…`);
+        try {
+          await api.deleteDocument(document.id);
+          deleted += 1;
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : '未知错误';
+          failures.push(`${document.originalFilename}（${reason}）`);
+        }
+      }
+
+      await load({ page: 1 });
+      if (failures.length > 0) {
+        const preview = failures.slice(0, 3).join('；');
+        const remainder = failures.length > 3 ? `；另有 ${failures.length - 3} 篇` : '';
+        setMessage(`删除全部论文完成：成功 ${deleted} 篇，失败 ${failures.length} 篇。${preview}${remainder}`);
+      } else {
+        setMessage(`已删除全部 ${deleted} 篇论文。`);
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? `删除全部论文失败：${error.message}` : '删除全部论文失败。');
     } finally {
       setBusy(false);
     }
@@ -440,6 +518,12 @@ function App() {
     setFile(event.target.files?.[0]);
   }
 
+  function toggleUploadBase(baseID: string) {
+    setUploadBaseIDs((current) => current.includes(baseID)
+      ? current.filter((id) => id !== baseID)
+      : [...current, baseID]);
+  }
+
   const selectedDescription = useMemo(() => {
 	if (!selected) return '选择左侧列表中的文档，可查看其 ID、DOI、状态及删除操作。';
 	if (selected.errorMessage) return selected.errorMessage;
@@ -450,7 +534,7 @@ function App() {
 
   return <main className="document-console">
     <aside className="document-sidebar">
-      <div className="brand"><p className="eyebrow">Papers Manager</p><h1>文档测试台</h1></div>
+      <div className="brand"><p className="eyebrow">Papers Manager</p><h1>文档测试台</h1><a className="library-back-link" href="#/library">打开论文阅读库</a></div>
 
       <form className="upload-form" onSubmit={submitUpload}>
         <h2>上传文档</h2>
@@ -462,6 +546,15 @@ function App() {
         <input id="document-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="未填写时使用原始文件名" disabled={busy} />
         <label htmlFor="document-tags">学科标签（可选）</label>
         <input id="document-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="computer science, graphics" disabled={busy} />
+        <fieldset className="base-picker" disabled={busy || bases.length === 0}>
+          <legend>加入 Document Base（可多选）</legend>
+          {bases.length === 0 ? <p className="hint">暂无可选 Base；可先在下方创建。</p> : bases.map((base) => (
+            <label className="base-option" htmlFor={`upload-base-${base.id}`} key={base.id}>
+              <input id={`upload-base-${base.id}`} type="checkbox" checked={uploadBaseIDs.includes(base.id)} onChange={() => toggleUploadBase(base.id)} />
+              <span>{base.name}</span>
+            </label>
+          ))}
+        </fieldset>
         <button className="primary" type="submit" disabled={busy || !file}>上传并创建记录</button>
         <p className="hint">支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；最大大小由服务器配置决定。</p>
       </form>
@@ -484,6 +577,18 @@ function App() {
         <input id="search-id" value={filters.id ?? ''} onChange={(event) => setFilters({ ...filters, id: event.target.value })} placeholder="UUID" disabled={busy} />
         <label htmlFor="search-doi">DOI</label>
         <input id="search-doi" value={filters.doi ?? ''} onChange={(event) => setFilters({ ...filters, doi: event.target.value })} placeholder="精确匹配，不区分大小写" disabled={busy} />
+        <label htmlFor="search-status">文档状态</label>
+        <select id="search-status" value={filters.status ?? ''} onChange={(event) => setFilters({ ...filters, status: event.target.value as DocumentSearch['status'] })} disabled={busy}>
+          <option value="">全部状态</option>
+          <option value="unknown">仅 unknown 占位论文</option>
+          <option value="uploaded">uploaded</option>
+          <option value="queued">queued</option>
+          <option value="processing">processing</option>
+          <option value="cancelled">cancelled</option>
+          <option value="deleting">deleting</option>
+          <option value="ready">ready</option>
+          <option value="failed">failed</option>
+        </select>
         <div className="form-actions"><button type="submit" disabled={busy}>查询</button><button type="button" onClick={() => { const next = { page: 1 }; setFilters(next); void load(next); }} disabled={busy}>重置</button></div>
       </form>
 
@@ -521,7 +626,10 @@ function App() {
     <section className="document-workspace">
       <header className="workspace-header">
         <div><p className="eyebrow">Document API</p><h2>上传、查询、取消与删除</h2></div>
-        <button type="button" onClick={() => void load()} disabled={busy}>刷新</button>
+        <div className="detail-actions">
+          <button type="button" onClick={() => void load()} disabled={busy}>刷新</button>
+          <button className="danger" type="button" onClick={() => void deleteAllDocuments()} disabled={busy}>删除所有论文</button>
+        </div>
       </header>
       <p className={`status-message ${message.includes('失败') ? 'error' : ''}`}>{message || '正在准备文档列表…'}</p>
 
@@ -600,4 +708,16 @@ function App() {
   </main>;
 }
 
-createRoot(document.getElementById('root')!).render(<App />);
+function Root() {
+  const [showLibrary, setShowLibrary] = useState(window.location.hash === '#/library');
+
+  useEffect(() => {
+    const syncRoute = () => setShowLibrary(window.location.hash === '#/library');
+    window.addEventListener('hashchange', syncRoute);
+    return () => window.removeEventListener('hashchange', syncRoute);
+  }, []);
+
+  return showLibrary ? <PaperLibraryPage /> : <App />;
+}
+
+createRoot(document.getElementById('root')!).render(<Root />);

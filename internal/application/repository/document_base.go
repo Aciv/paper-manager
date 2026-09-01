@@ -139,7 +139,9 @@ func (r *documentBaseRepository) RemoveDocument(ctx context.Context, baseID, doc
 	return nil
 }
 
-func (r *documentBaseRepository) ListDocuments(ctx context.Context, baseID uuid.UUID, page, pageSize int) (types.DocumentPage, error) {
+func (r *documentBaseRepository) ListDocuments(
+	ctx context.Context, baseID uuid.UUID, page, pageSize int, excludeUnknown bool,
+) (types.DocumentPage, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -150,6 +152,9 @@ func (r *documentBaseRepository) ListDocuments(ctx context.Context, baseID uuid.
 	query := r.db.WithContext(ctx).Model(&types.Document{}).
 		Joins("JOIN document_base_files ON document_base_files.document_id = documents.id").
 		Where("document_base_files.document_base_id = ?", baseID)
+	if excludeUnknown {
+		query = query.Where("documents.status <> ?", types.DocumentStatusUnknown)
+	}
 	if err := query.Count(&result.Total).Error; err != nil {
 		logger.Error(ctx, "count document base members failed", "document_base_id", baseID, "error", err)
 		return result, err

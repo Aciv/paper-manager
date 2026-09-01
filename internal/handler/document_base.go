@@ -129,7 +129,16 @@ func (h *DocumentBaseHandler) ListDocuments(c *gin.Context) {
 		}
 		page = parsed
 	}
-	result, err := h.bases.ListBaseDocuments(c.Request.Context(), c.Param("baseID"), page)
+	excludeUnknown := false
+	if rawExcludeUnknown := strings.TrimSpace(c.Query("excludeUnknown")); rawExcludeUnknown != "" {
+		parsed, err := strconv.ParseBool(rawExcludeUnknown)
+		if err != nil {
+			h.writeBaseError(c, apperrors.NewBadRequestError("excludeUnknown must be true or false"), err)
+			return
+		}
+		excludeUnknown = parsed
+	}
+	result, err := h.bases.ListBaseDocuments(c.Request.Context(), c.Param("baseID"), page, excludeUnknown)
 	if err != nil {
 		h.handleBaseServiceError(c, err)
 		return

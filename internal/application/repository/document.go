@@ -156,6 +156,9 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	if search.Status != "" {
 		query = query.Where("documents.status = ?", search.Status)
 	}
+	if search.ExcludeUnknown {
+		query = query.Where("documents.status <> ?", types.DocumentStatusUnknown)
+	}
 
 	result := types.DocumentPage{Page: page, PageSize: pageSize, Items: []types.Document{}}
 	if err := query.Count(&result.Total).Error; err != nil {

@@ -208,6 +208,14 @@ func (h *DocumentHandler) Search(c *gin.Context) {
 	if rawStatus := strings.TrimSpace(c.Query("status")); rawStatus != "" {
 		search.Status = types.DocumentStatus(rawStatus)
 	}
+	if rawExcludeUnknown := strings.TrimSpace(c.Query("excludeUnknown")); rawExcludeUnknown != "" {
+		excludeUnknown, err := strconv.ParseBool(rawExcludeUnknown)
+		if err != nil {
+			h.writeError(c, apperrors.NewBadRequestError("excludeUnknown must be true or false"), err)
+			return
+		}
+		search.ExcludeUnknown = excludeUnknown
+	}
 	result, err := h.documents.SearchDocument(c.Request.Context(), search)
 	if err != nil {
 		h.writeError(c, apperrors.NewInternalServerError("search documents"), err)

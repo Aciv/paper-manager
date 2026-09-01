@@ -117,7 +117,9 @@ func (s *documentBaseService) RemoveDocumentFromBase(ctx context.Context, baseID
 	return s.bases.RemoveDocument(ctx, base, document)
 }
 
-func (s *documentBaseService) ListBaseDocuments(ctx context.Context, baseID string, page int) (types.DocumentPage, error) {
+func (s *documentBaseService) ListBaseDocuments(
+	ctx context.Context, baseID string, page int, excludeUnknown bool,
+) (types.DocumentPage, error) {
 	base, err := parseDocumentBaseID(baseID)
 	if err != nil {
 		return types.DocumentPage{}, err
@@ -125,7 +127,7 @@ func (s *documentBaseService) ListBaseDocuments(ctx context.Context, baseID stri
 	if _, err := s.bases.GetBase(ctx, base); err != nil {
 		return types.DocumentPage{}, err
 	}
-	return s.bases.ListDocuments(ctx, base, page, types.DocumentPageSize)
+	return s.bases.ListDocuments(ctx, base, page, types.DocumentPageSize, excludeUnknown)
 }
 
 func parseDocumentBaseID(id string) (uuid.UUID, error) {

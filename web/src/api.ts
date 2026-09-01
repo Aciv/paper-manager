@@ -1,4 +1,4 @@
-export type DocumentStatus = 'uploaded' | 'queued' | 'processing' | 'cancelled' | 'deleting' | 'ready' | 'failed';
+export type DocumentStatus = 'unknown' | 'uploaded' | 'queued' | 'processing' | 'cancelled' | 'deleting' | 'ready' | 'failed';
 
 export type Document = {
   id: string;
@@ -88,6 +88,7 @@ export type DocumentSearch = {
   id?: string;
   doi?: string;
   status?: DocumentStatus;
+  excludeUnknown?: boolean;
   page?: number;
 };
 
@@ -148,6 +149,7 @@ export const api = {
     if (search.id) query.set('id', search.id);
     if (search.doi) query.set('doi', search.doi);
     if (search.status) query.set('status', search.status);
+    if (search.excludeUnknown) query.set('excludeUnknown', 'true');
     query.set('page', String(search.page ?? 1));
     return request<DocumentPage>(`/search?${query.toString()}`);
   },
@@ -196,6 +198,11 @@ export const api = {
   cancelReferenceDownloads: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/references/download/cancel`, { method: 'POST' }),
   cancelPaperInfo: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/cancel`, { method: 'POST' }),
   listDocumentBases: (): Promise<{ items: DocumentBase[] }> => request<{ items: DocumentBase[] }>('/bases'),
+  listDocumentBaseDocuments: (baseID: string, page = 1, excludeUnknown = false): Promise<DocumentPage> => {
+    const query = new URLSearchParams({ page: String(page) });
+    if (excludeUnknown) query.set('excludeUnknown', 'true');
+    return request<DocumentPage>(`/bases/${encodeURIComponent(baseID)}/documents?${query.toString()}`);
+  },
   createDocumentBase: (payload: { name: string; description?: string }): Promise<{ documentBase: DocumentBase }> => request<{ documentBase: DocumentBase }>('/bases', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
   }),

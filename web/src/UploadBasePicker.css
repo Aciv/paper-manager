@@ -1,0 +1,32 @@
+.base-picker {
+  display: grid;
+  gap: 6px;
+  margin: 2px 0 0;
+  padding: 10px;
+  border: 1px solid #dce3ed;
+  border-radius: 7px;
+}
+
+.base-picker legend {
+  padding: 0 4px;
+  font-size: 13px;
+  font-weight: 650;
+  color: #41506a;
+}
+
+.upload-form .base-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.upload-form .base-option input {
+  width: auto;
+  padding: 0;
+  accent-color: #2563eb;
+}
+
+.base-picker:disabled {
+  opacity: 0.55;
+}
