@@ -57,14 +57,34 @@ Python gRPC parser 和 Vite 都从宿主机直接运行。因此，日常源码�
                     Docker: PostgreSQL / Redis
 ```
 
-首次使用时创建本地配置，并启动基础设施：
+首次使用时创建本地配置，然后一键启动完整开发栈：
 
 ```bash
 cp .env.example .env
-make dev-start
+make dev
 ```
 
-随后在另外三个终端分别运行：
+该命令会等待 PostgreSQL/Redis 健康，然后并行启动 Go API、Python gRPC parser
+和 Vite。三路输出会以 `[api]`、`[parser]`、`[web]` 为前缀显示在当前终端，原始
+日志同时分别写入 `Logs/dev/api.log`、`Logs/dev/parser.log` 和
+`Logs/dev/web.log`。按 `Ctrl+C` 会统一结束三个源码进程，但保留 PostgreSQL/Redis；
+随后再次执行 `make dev` 即可快速恢复。
+
+默认监听端口为 Web `5173`、API `8080`、parser `50051`。需要避开本机端口时，
+可在执行命令前覆盖 `VITE_PORT`、`HTTP_ADDR`、`PARSER_GRPC_ADDR`，并用
+`VITE_API_PROXY_TARGET` 指向新的 API 地址。
+
+`make dev` 会在启动源码进程前检查这三个端口；若发现已有进程占用，会立刻退出，
+而不会额外启动 Asynq worker 后再等待 API 的监听重试。
+
+如果需要让启动终端保持在后台，可在另一个终端查看最近日志并持续跟踪：
+
+```bash
+make dev-logs                 # 三个源码服务
+make dev-logs SERVICE=parser  # 只查看 parser
+```
+
+仍可使用三个独立终端运行单个服务，便于只重启或调试其中一项：
 
 ```bash
 make dev-app       # Go API；安装 Air 后自动重载
@@ -85,9 +105,9 @@ python3 -m venv .venv
 .venv/bin/pip install -r python/requirements.txt
 ```
 
-常用命令包括 `make dev-status`、`make dev-logs`、`make dev-stop`。修改 Go、Python
+常用命令包括 `make dev-status`、`make dev-infra-logs`、`make dev-stop`。修改 Go、Python
 或 React 时都不需要 Docker build；分别重启对应本机进程即可。相同入口也可通过
-`./scripts/dev.sh start|app|parser|frontend` 使用。
+`./scripts/dev.sh all|start|app|parser|frontend` 使用。
 
 开发 Compose 使用独立的 `postgres-data-dev`、`redis-data-dev` 卷，不会与全容器
 模式的 `postgres-data`、`redis-data` 混用。Go API 会自动加载根目录 `.env`；parser
