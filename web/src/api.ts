@@ -120,6 +120,21 @@ export type Block = {
   location?: PDFBlockLocation;
 };
 
+export type NormalizedDocumentRegion = { x0: number; y0: number; x1: number; y1: number };
+export type DocumentSelectionProcess =
+  | { kind: 'text'; text: string; pageNumber?: number; region?: NormalizedDocumentRegion }
+  | { kind: 'block'; blockId: string }
+  | { kind: 'area'; pageNumber: number; region: NormalizedDocumentRegion; image: Blob };
+export type DocumentSelectionResult = {
+  kind: DocumentSelectionProcess['kind'];
+  pageNumber?: number;
+  blockId?: string;
+  textRunes?: number;
+  imageWidth?: number;
+  imageHeight?: number;
+  message: string;
+};
+
 const baseUrl = (import.meta.env.VITE_API_URL ?? '/api/document').replace(/\/$/, '');
 const paperBaseUrl = baseUrl.endsWith('/document') ? `${baseUrl.slice(0, -'/document'.length)}/paper` : '/api/paper';
 
@@ -174,6 +189,31 @@ export const api = {
   listDocumentBlocks: (id: string, page?: number): Promise<{ items: Block[] }> => {
     const query = page ? `?page=${encodeURIComponent(String(page))}` : '';
     return request<{ items: Block[] }>(`/${encodeURIComponent(id)}/blocks${query}`);
+  },
+  processDocumentSelection: (id: string, selection: DocumentSelectionProcess, signal?: AbortSignal): Promise<{ result: DocumentSelectionResult }> => {
+    const body = new FormData();
+    body.set('document_id', id);
+    body.set('kind', selection.kind);
+    if (selection.kind === 'text') {
+      body.set('text', selection.text);
+      if (selection.pageNumber) body.set('page_number', String(selection.pageNumber));
+      if (selection.region) {
+        body.set('x0', String(selection.region.x0));
+        body.set('y0', String(selection.region.y0));
+        body.set('x1', String(selection.region.x1));
+        body.set('y1', String(selection.region.y1));
+      }
+    } else if (selection.kind === 'block') {
+      body.set('block_id', selection.blockId);
+    } else {
+      body.set('page_number', String(selection.pageNumber));
+      body.set('x0', String(selection.region.x0));
+      body.set('y0', String(selection.region.y0));
+      body.set('x1', String(selection.region.x1));
+      body.set('y1', String(selection.region.y1));
+      body.set('image', selection.image, `selection-page-${selection.pageNumber}.png`);
+    }
+    return request<{ result: DocumentSelectionResult }>(`/${encodeURIComponent(id)}/selection/process`, { method: 'POST', body, signal });
   },
   getPaperMetadata: (documentID: string): Promise<{ paperMetadata: PaperMetadata }> => requestFrom<{ paperMetadata: PaperMetadata }>(paperBaseUrl, `/${encodeURIComponent(documentID)}`),
   updatePaperMetadata: (documentID: string, payload: PaperMetadataUpdate): Promise<{ paperMetadata: PaperMetadata }> => requestFrom<{ paperMetadata: PaperMetadata }>(

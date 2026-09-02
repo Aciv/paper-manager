@@ -7,3 +7,48 @@
   border-radius: 5px;
   background: #fff;
 }
+
+.area-selection-overlay { position:absolute; inset:0; z-index:3; pointer-events:none; touch-action:none; cursor:crosshair; }
+.area-selection-overlay.active { pointer-events:auto; }
+.area-selection-box { position:absolute; border:2px solid #2563eb; background:rgb(37 99 235 / 16%); box-shadow:0 0 0 1px rgb(255 255 255 / 75%) inset; pointer-events:none; }
+.pdf-selection-summary { display:grid; gap:8px; margin:0 0 14px; padding:12px; border:1px solid #bfdbfe; border-radius:8px; background:#eff6ff; }
+.pdf-selection-summary > div:first-child { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
+.pdf-selection-summary span,.pdf-selection-summary code { color:#475569; font-size:13px; }
+.pdf-selection-summary p { margin:0; max-height:160px; overflow:auto; white-space:pre-wrap; }
+.pdf-selection-actions { display:flex; gap:8px; }
+.pdf-selection-actions .primary { margin:0; }
+.pdf-selection-result { color:#166534; font-weight:650; }
+
+/* react-pdf's text layer uses z-index: 2. Raise the Block hit target only in
+   Block mode so its buttons receive pointer events without breaking normal
+   text selection or area dragging. */
+.block-overlay.active {
+  z-index: 4;
+}
+
+/* Parser block geometry is an invisible hit map. Show the box only while the
+   user is actively hovering or keyboard-focusing a Block in Block mode. The
+   extra specificity also overrides type colors from the legacy global CSS. */
+.block-overlay .pdf-block,
+.block-overlay .pdf-block:hover,
+.block-overlay .pdf-block:focus {
+  border-color: transparent;
+  outline: none;
+  background: transparent;
+}
+
+.block-overlay.active .pdf-block:hover,
+.block-overlay.active .pdf-block:focus-visible {
+  border-color: #2563eb;
+  outline: 2px solid rgb(37 99 235 / 53%);
+  background: rgb(37 99 235 / 21%);
+}
+
+.block-overlay .pdf-block span {
+  display: none;
+}
+
+.block-overlay.active .pdf-block:hover span,
+.block-overlay.active .pdf-block:focus-visible span {
+  display: block;
+}

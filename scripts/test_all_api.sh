@@ -8,6 +8,7 @@ tests=(
   test_health_api.sh
   test_upload_api.sh
   test_document_crud_api.sh
+  test_document_selection_api.sh
   test_paper_metadata_api.sh
   test_paper_info_api.sh
   test_remote_import_api.sh

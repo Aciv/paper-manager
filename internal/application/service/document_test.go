@@ -55,6 +55,40 @@ type documentStatusRepoStub struct {
 	blocks   []types.Block
 }
 
+func TestDocumentSelectionProcessorReloadsOwnedBlock(t *testing.T) {
+	documentID, blockID := uuid.New(), uuid.New()
+	repository := &documentStatusRepoStub{
+		document: types.Document{ID: documentID},
+		blocks:   []types.Block{{ID: blockID, DocumentID: documentID}},
+	}
+	processor := NewDocumentSelectionProcessor(repository)
+	result, err := processor.ProcessSelection(context.Background(), types.DocumentSelectionInput{
+		DocumentID: documentID,
+		Kind:       types.DocumentSelectionBlock,
+		BlockID:    blockID,
+	})
+	if err != nil {
+		t.Fatalf("process owned block: %v", err)
+	}
+	if result.BlockID != blockID.String() {
+		t.Fatalf("block id = %q, want %q", result.BlockID, blockID)
+	}
+}
+
+func TestDocumentSelectionProcessorHonorsCancelledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	processor := NewDocumentSelectionProcessor(&documentStatusRepoStub{})
+	_, err := processor.ProcessSelection(ctx, types.DocumentSelectionInput{
+		DocumentID: uuid.New(),
+		Kind:       types.DocumentSelectionText,
+		Text:       "selected text",
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+}
+
 func (s *documentStatusRepoStub) Create(_ context.Context, document types.Document) (types.Document, error) {
 	s.document = document
 	return document, nil

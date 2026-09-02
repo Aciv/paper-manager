@@ -23,6 +23,7 @@ import (
 type documentCreatorStub struct {
 	document types.Document
 	deleted  bool
+	blocks   []types.Block
 }
 
 func (s *documentCreatorStub) Create(_ context.Context, doc types.Document) (types.Document, error) {
@@ -95,7 +96,12 @@ func (*documentCreatorStub) ListBlocks(context.Context, uuid.UUID, int) ([]types
 	return []types.Block{}, nil
 }
 
-func (*documentCreatorStub) GetBlock(context.Context, uuid.UUID, uuid.UUID) (types.Block, error) {
+func (s *documentCreatorStub) GetBlock(_ context.Context, documentID, blockID uuid.UUID) (types.Block, error) {
+	for _, block := range s.blocks {
+		if block.DocumentID == documentID && block.ID == blockID {
+			return block, nil
+		}
+	}
 	return types.Block{}, sql.ErrNoRows
 }
 

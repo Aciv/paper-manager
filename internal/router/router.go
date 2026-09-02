@@ -18,14 +18,15 @@ import (
 type RouterParams struct {
 	dig.In
 
-	Config                 config.Config
-	FileService            interfaces.FileStorage
-	DocumentHandler        *handler.DocumentHandler
-	DocumentProcessHandler *handler.DocumentProcessHandler
-	PaperMetadataHandler   *handler.PaperMetadataHandler
-	PaperCitationHandler   *handler.PaperCitationHandler
-	PaperInfoHandler       *handler.PaperInfoHandler
-	DocumentBaseHandler    *handler.DocumentBaseHandler
+	Config                   config.Config
+	FileService              interfaces.FileStorage
+	DocumentHandler          *handler.DocumentHandler
+	DocumentProcessHandler   *handler.DocumentProcessHandler
+	DocumentSelectionHandler *handler.DocumentSelectionHandler
+	PaperMetadataHandler     *handler.PaperMetadataHandler
+	PaperCitationHandler     *handler.PaperCitationHandler
+	PaperInfoHandler         *handler.PaperInfoHandler
+	DocumentBaseHandler      *handler.DocumentBaseHandler
 }
 
 // NewRouter 创建新的路由
@@ -57,7 +58,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 	ServerFile(r, params.DocumentHandler)
-	ServerProcess(r, params.DocumentProcessHandler)
+	ServerProcess(r, params.DocumentProcessHandler, params.DocumentSelectionHandler)
 	ServerPaperMetadata(r, params.PaperMetadataHandler, params.PaperCitationHandler, params.PaperInfoHandler)
 	ServerDocumentBase(r, params.DocumentBaseHandler)
 
@@ -93,13 +94,19 @@ func ServerFile(router gin.IRoutes, documentHandler *handler.DocumentHandler) {
 }
 
 // ServerProcess registers asynchronous document-processing controls.
-func ServerProcess(router gin.IRoutes, processHandler *handler.DocumentProcessHandler) {
-	if processHandler == nil {
-		return
+func ServerProcess(
+	router gin.IRoutes,
+	processHandler *handler.DocumentProcessHandler,
+	selectionHandler *handler.DocumentSelectionHandler,
+) {
+	if processHandler != nil {
+		router.POST("/api/document/:id/cancel", processHandler.CancelDocumentParse)
+		router.POST("/api/document/:id/retry", processHandler.RetryDocumentParse)
+		router.GET("/api/document/:id/processing", processHandler.Status)
 	}
-	router.POST("/api/document/:id/cancel", processHandler.CancelDocumentParse)
-	router.POST("/api/document/:id/retry", processHandler.RetryDocumentParse)
-	router.GET("/api/document/:id/processing", processHandler.Status)
+	if selectionHandler != nil {
+		router.POST("/api/document/:id/selection/process", selectionHandler.Process)
+	}
 }
 
 // ServerPaperMetadata registers the bibliography and paper-search API.
