@@ -735,6 +735,17 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		if cited.Status != types.DocumentStatusUnknown {
 			continue
 		}
+		// Automatic catalog lookup covers only placeholders created by Python
+		// extraction candidates (metadata_source=extraction). Manually added
+		// unknown references stay out of the automatic run and are resolved
+		// through the explicit citation resolve API.
+		metadata, err := s.papers.GetMetadata(ctx, cited.ID.String())
+		if err != nil {
+			return err
+		}
+		if metadata.MetadataSource != types.PaperMetadataSourceExtraction {
+			continue
+		}
 		key := referenceCatalogDedupKey(citation.RawReference)
 		if key == "" {
 			continue

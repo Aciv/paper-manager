@@ -21,7 +21,14 @@ const (
 	defaultPaperExtractionTaskMaxRetry                 = 3
 	defaultPaperCatalogTaskTimeout                     = 10 * time.Minute
 	defaultPaperCatalogTaskMaxRetry                    = 5
-	defaultPaperReferenceCatalogMaxPerDocument         = 25
+	// defaultPaperReferenceCatalogMaxPerDocument is the per-document
+	// registration budget, not a running-concurrency bound: it caps how many
+	// unresolved citations one dispatch registers into the scheduler queue,
+	// while actual parallelism is governed by the per-document concurrency
+	// lease and provider spacing. It must comfortably exceed realistic
+	// bibliography sizes so a paper's whole reference list is scheduled in a
+	// single round; there is no automatic continuation beyond this cap.
+	defaultPaperReferenceCatalogMaxPerDocument         = 200
 	defaultPaperReferenceCatalogConcurrency            = 2
 	defaultPaperReferenceCatalogPerDocumentConcurrency = 1
 	defaultRemotePDFDownloadTimeout                    = 2 * time.Minute

@@ -748,10 +748,20 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 	}
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
+	// Placeholders created from Python extraction candidates carry the
+	// extraction metadata source; only those join the automatic catalog run.
+	for _, id := range []uuid.UUID{first, second, duplicate} {
+		papers.metadata[id.String()] = types.PaperMetadata{DocumentID: id, MetadataSource: types.PaperMetadataSourceExtraction}
+	}
+	// A manually added unknown reference must never be auto-dispatched.
+	manual := uuid.New()
+	documents.documents[manual] = types.Document{ID: manual, Status: types.DocumentStatusUnknown}
+	papers.metadata[manual.String()] = types.PaperMetadata{DocumentID: manual, MetadataSource: types.PaperMetadataSourceManual}
 	papers.citations[documentID.String()] = []types.PaperCitation{
 		{CitingDocumentID: documentID, CitedDocumentID: first, RawReference: "Ada. 2024. One. doi:10.1000/one"},
 		{CitingDocumentID: documentID, CitedDocumentID: duplicate, RawReference: "Other rendering. doi:10.1000/one"},
 		{CitingDocumentID: documentID, CitedDocumentID: second, RawReference: "Grace. 2023. Two. doi:10.1000/two"},
+		{CitingDocumentID: documentID, CitedDocumentID: manual, RawReference: "Manual entry. doi:10.1000/three"},
 	}
 	queue := &paperInfoQueueStub{}
 	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1, PaperReferenceCatalogMaxPerDocument: 2}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {

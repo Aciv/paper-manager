@@ -93,3 +93,28 @@ func TestMemoryReferenceSchedulerKeepsSharedTargetForOtherOwner(t *testing.T) {
 		t.Fatalf("second-source progress = %#v, %v", progress, err)
 	}
 }
+
+func TestMemoryReferenceSchedulerResurrectsCancelledTargetForNewOwner(t *testing.T) {
+	scheduler := &memoryReferenceScheduler{jobs: make(map[uuid.UUID]types.PaperReferenceJob), providers: []types.PaperCatalogProvider{types.PaperCatalogProviderCrossref}}
+	target, firstSource, secondSource := uuid.New(), uuid.New(), uuid.New()
+	firstRun, secondRun := uuid.New(), uuid.New()
+	if _, err := scheduler.Register(context.Background(), types.PaperReferenceJob{TargetDocumentID: target, Owners: []types.PaperReferenceOwner{{SourceDocumentID: firstSource, RunID: firstRun}}}); err != nil {
+		t.Fatal(err)
+	}
+	ids, err := scheduler.CancelRun(context.Background(), firstSource, firstRun)
+	if err != nil || len(ids) != 1 {
+		t.Fatalf("cancellation should release the target: ids=%v err=%v", ids, err)
+	}
+	if active, _ := scheduler.IsRunActive(context.Background(), firstSource, firstRun); active {
+		t.Fatal("cancelled run still reports active")
+	}
+	// A re-uploaded paper (new source and run) reuses the same unknown
+	// placeholder target: it must be able to re-register immediately.
+	queued, err := scheduler.Register(context.Background(), types.PaperReferenceJob{TargetDocumentID: target, Owners: []types.PaperReferenceOwner{{SourceDocumentID: secondSource, RunID: secondRun}}})
+	if err != nil || !queued {
+		t.Fatalf("resurrected register = %v, %v", queued, err)
+	}
+	if active, _ := scheduler.IsRunActive(context.Background(), secondSource, secondRun); !active {
+		t.Fatal("resurrected run does not report active")
+	}
+}

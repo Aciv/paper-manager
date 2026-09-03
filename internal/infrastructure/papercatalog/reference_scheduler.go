@@ -400,21 +400,31 @@ func (s *redisReferenceScheduler) Register(ctx context.Context, job types.PaperR
 		return false, fmt.Errorf("register reference scheduler job: %w", err)
 	}
 	if !created {
+		// The job key outlives its document: deleting a source document never
+		// cleans it up, so a re-uploaded paper can reuse the same unknown
+		// placeholder target while the 24h key still exists. A terminal job
+		// (cancelled run or completed lookup) must therefore be replaceable:
+		// the new owner takes it over instead of being silently deduplicated.
+		resurrected := false
 		if err := s.withJobLock(ctx, job.TargetDocumentID, func() error {
 			existing, err := s.load(ctx, job.TargetDocumentID)
 			if err != nil {
 				return err
 			}
-			if !existing.Completed && !existing.Cancelled {
-				for _, owner := range job.Owners {
-					addReferenceOwner(&existing, owner)
-				}
-				existing.UpdatedAt = time.Now().UTC()
-				return s.save(ctx, existing)
+			if existing.Completed || existing.Cancelled {
+				resurrected = true
+				return s.save(ctx, job)
 			}
-			return nil
+			for _, owner := range job.Owners {
+				addReferenceOwner(&existing, owner)
+			}
+			existing.UpdatedAt = time.Now().UTC()
+			return s.save(ctx, existing)
 		}); err != nil {
 			return false, err
+		}
+		if resurrected {
+			created = true
 		}
 	}
 	for _, owner := range job.Owners {
@@ -539,6 +549,12 @@ func (s *redisReferenceScheduler) CancelRun(ctx context.Context, source, run uui
 				job.Cancelled, job.InFlight, cancelTask = true, false, true
 			}
 			job.UpdatedAt = time.Now().UTC()
+			if cancelTask {
+				// No owner remains active: delete the job key outright so a
+				// later upload of the same paper can re-register immediately
+				// instead of waiting for the 24h TTL.
+				return s.client.Del(ctx, referenceSchedulerJobKey(id)).Err()
+			}
 			return s.save(ctx, job)
 		})
 		if err != nil {
@@ -546,6 +562,10 @@ func (s *redisReferenceScheduler) CancelRun(ctx context.Context, source, run uui
 		}
 		if cancelTask {
 			ids = append(ids, id)
+			// Drop the target from this run's membership sets; the keys then
+			// expire naturally once the last member is gone.
+			_ = s.client.SRem(ctx, referenceSchedulerRunKey(source, run), id.String()).Err()
+			_ = s.client.SRem(ctx, referenceSchedulerSourceKey(source), id.String()).Err()
 		}
 	}
 	return ids, nil
