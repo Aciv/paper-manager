@@ -105,6 +105,18 @@ python3 -m venv .venv
 .venv/bin/pip install -r python/requirements.txt
 ```
 
+Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，在 `.env` 设置
+`PAPER_EXTRACTION_ENGINE=hybrid`（缺失或不兼容模型自动退回规则）、`shadow`
+（仅记录累计差异，写入仍使用规则结果）或 `crf`（模型问题即启动失败）；模型目录由
+`PAPER_CRF_MODEL_DIR` 指定。Compose 默认
+将 `model_train/artifacts` 以只读方式挂载到 parser。单独评估本地 PDF 的识别与
+提取耗时可运行：
+
+```bash
+.venv/bin/python scripts/benchmark_paper_extraction_pdf.py path/to/paper.pdf \
+  --engine hybrid --output /tmp/paper-extraction.json
+```
+
 常用命令包括 `make dev-status`、`make dev-infra-logs`、`make dev-stop`。修改 Go、Python
 或 React 时都不需要 Docker build；分别重启对应本机进程即可。相同入口也可通过
 `./scripts/dev.sh all|start|app|parser|frontend` 使用。

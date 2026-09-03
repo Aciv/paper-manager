@@ -141,9 +141,10 @@ func mapExtractionRequest(
 		rpcBlocks = append(rpcBlocks, rpcBlock)
 	}
 	return &papersv1.PaperExtractionRequest{
-		DocumentId: request.DocumentID.String(),
-		Markdown:   append([]byte(nil), request.Markdown...),
-		Blocks:     rpcBlocks,
+		DocumentId:       request.DocumentID.String(),
+		Markdown:         append([]byte(nil), request.Markdown...),
+		Blocks:           rpcBlocks,
+		SourceStorageKey: request.SourceStorageKey,
 	}, nil
 }
 
@@ -178,10 +179,11 @@ func mapExtractionResult(
 	response *papersv1.PaperExtractionResult,
 ) (*types.PaperExtractionResult, error) {
 	result := &types.PaperExtractionResult{
-		References:       append([]string(nil), response.GetReferences()...),
-		ExtractorName:    strings.TrimSpace(response.GetExtractorName()),
-		ExtractorVersion: strings.TrimSpace(response.GetExtractorVersion()),
-		Authors:          make([]types.PaperTextCandidate, 0, len(response.GetAuthors())),
+		References:          append([]string(nil), response.GetReferences()...),
+		ExtractorName:       strings.TrimSpace(response.GetExtractorName()),
+		ExtractorVersion:    strings.TrimSpace(response.GetExtractorVersion()),
+		Authors:             make([]types.PaperTextCandidate, 0, len(response.GetAuthors())),
+		ReferenceCandidates: make([]types.PaperReferenceCandidate, 0, len(response.GetReferenceCandidates())),
 	}
 	if response.GetTitle() != nil {
 		result.Title = mapTextCandidate(response.GetTitle())
@@ -198,6 +200,19 @@ func mapExtractionResult(
 	}
 	if response.GetAbstract() != nil {
 		result.Abstract = mapTextCandidate(response.GetAbstract())
+	}
+	for index, candidate := range response.GetReferenceCandidates() {
+		if candidate == nil {
+			return nil, fmt.Errorf("%w: reference candidate %d is empty", types.ErrInvalidPaperExtraction, index)
+		}
+		result.ReferenceCandidates = append(result.ReferenceCandidates, types.PaperReferenceCandidate{
+			RawReference: candidate.GetRawReference(),
+			Authors:      append([]string(nil), candidate.GetAuthors()...),
+			Title:        candidate.GetTitle(), Venue: candidate.GetVenue(),
+			PublishedYear: int(candidate.GetPublishedYear()), DOI: candidate.GetDoi(),
+			ArXivID: candidate.GetArxivId(), Volume: candidate.GetVolume(),
+			Pages: candidate.GetPages(), Confidence: candidate.GetConfidence(),
+		})
 	}
 	if err := result.Validate(); err != nil {
 		return nil, err

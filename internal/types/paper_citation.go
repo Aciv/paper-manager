@@ -34,6 +34,9 @@ type PaperCitation struct {
 type PaperCitationInput struct {
 	CitedDocumentID *uuid.UUID `json:"citedDocumentId,omitempty"`
 	RawReference    string     `json:"rawReference"`
+	// Candidate is internal extraction evidence for a newly created/reused
+	// unknown placeholder. It is not accepted from the public citation API.
+	Candidate *PaperReferenceCandidate `json:"-"`
 }
 
 // PaperCitationPage is an internal bounded page used by bibliography workers

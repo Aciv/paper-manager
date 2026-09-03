@@ -36,6 +36,7 @@ message RecognitionResult {
   string parser_name = 8;
   string parser_version = 9;
   repeated RecognitionBlock blocks = 10;
+  reserved 15;
 }
 
 // A block maps a semantic Markdown fragment to one rectangular PDF region.
@@ -62,9 +63,13 @@ message RecognitionBlock {
 message PaperExtractionRequest {
   string document_id = 1;
   bytes markdown = 3;
-  // Compact source-map data only: no database IDs, storage keys, URLs, or
-  // image bytes cross this RPC.
+  // Compact source-map data only: no database IDs, URLs, or image bytes cross
+  // this RPC. The source storage key is a Go-created, relative key beneath the
+  // parser's shared upload root; Python uses it only to derive temporary
+  // layout facts from the original PDF.
   repeated PaperSourceBlock blocks = 4;
+  reserved 5;
+  string source_storage_key = 6;
 }
 
 message PaperSourceBlock {
@@ -95,6 +100,24 @@ message PaperExtractionResult {
   repeated string references = 4;
   string extractor_name = 5;
   string extractor_version = 6;
+  // Additive structured interpretation of a raw reference. `references`
+  // remains the compatibility source of truth for the original strings.
+  repeated PaperReferenceCandidate reference_candidates = 7;
+}
+
+// PaperReferenceCandidate contains optional fields parsed from one exact raw
+// bibliography entry. It performs no catalog lookup and may be partial.
+message PaperReferenceCandidate {
+  string raw_reference = 1;
+  repeated string authors = 2;
+  string title = 3;
+  string venue = 4;
+  int32 published_year = 5;
+  string doi = 6;
+  string arxiv_id = 7;
+  string volume = 8;
+  string pages = 9;
+  double confidence = 10;
 }
 
 message PaperTextCandidate {

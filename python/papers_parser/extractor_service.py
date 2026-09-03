@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+from pathlib import Path
 from uuid import UUID
 
 import grpc
@@ -10,9 +11,11 @@ import grpc
 import document_parser_pb2
 import document_parser_pb2_grpc
 from logger import get_logger
+from papers_parser.pdf2md_service import extract_layout_lines_from_storage
 from papers_parser.paper_extractor import (
     ExtractionOutput,
     PaperExtractionEngine,
+    ReferenceCandidate,
     SourceBlock,
     SourceLocation,
 )
@@ -37,19 +40,25 @@ class PaperMetadataExtractionRPC(
         engine: PaperExtractionEngine,
         max_markdown_bytes: int,
         max_blocks: int,
+        upload_dir: Path | None = None,
+        max_layout_lines: int = 100_000,
     ):
         """Build the extractor with limits selected by the server bootstrap."""
         if max_markdown_bytes <= 0:
             raise ValueError("max_markdown_bytes must be positive")
         if max_blocks <= 0:
             raise ValueError("max_blocks must be positive")
+        if max_layout_lines <= 0:
+            raise ValueError("max_layout_lines must be positive")
         self.engine = engine
         self.max_markdown_bytes = max_markdown_bytes
         self.max_blocks = max_blocks
+        self.upload_dir = None if upload_dir is None else upload_dir.resolve()
+        self.max_layout_lines = max_layout_lines
 
     def Extract(self, request, context):  # noqa: N802 - gRPC generated name
         try:
-            markdown, blocks = _decode_extraction_request(
+            markdown, blocks, source_storage_key = _decode_extraction_request(
                 request,
                 self.max_markdown_bytes,
                 self.max_blocks,
@@ -65,7 +74,19 @@ class PaperMetadataExtractionRPC(
                 "paper extraction request was cancelled",
             )
         try:
-            output = self.engine.extract(markdown, blocks)
+            layout_lines = ()
+            if source_storage_key and self.upload_dir is not None and getattr(self.engine, "requires_layout", False):
+                try:
+                    layout_lines = extract_layout_lines_from_storage(
+                        self.upload_dir, source_storage_key, blocks, self.max_layout_lines,
+                    )
+                except ValueError as exc:
+                    # Layout is an optional CRF input. The raw PDF is never
+                    # required for deterministic Markdown rules, so a stale
+                    # source object degrades safely rather than losing an
+                    # otherwise usable metadata extraction.
+                    LOG.warning("lazy PDF layout unavailable document=%s error=%s", request.document_id, exc)
+            output = self.engine.extract(markdown, blocks, layout_lines)
             response = _encode_extraction_output(output)
             if not context.is_active():
                 context.abort(
@@ -98,7 +119,7 @@ def _decode_extraction_request(
     request,
     max_markdown_bytes: int,
     max_blocks: int,
-) -> tuple[str, tuple[SourceBlock, ...]]:
+) -> tuple[str, tuple[SourceBlock, ...], str]:
     """Validate a server-bounded protobuf request and map it to engine input."""
     try:
         UUID(request.document_id)
@@ -137,7 +158,10 @@ def _decode_extraction_request(
                 location=location,
             )
         )
-    return markdown, tuple(blocks)
+    source_storage_key = request.source_storage_key.strip()
+    if len(source_storage_key) > 1024:
+        raise ValueError("source storage key exceeds extraction limit")
+    return markdown, tuple(blocks), source_storage_key
 
 
 def _decode_source_location(location, markdown_length: int) -> SourceLocation:
@@ -205,7 +229,33 @@ def _encode_extraction_output(output: ExtractionOutput):
         response.authors.add().CopyFrom(_encode_text_candidate(author))
     if output.abstract is not None:
         response.abstract.CopyFrom(_encode_text_candidate(output.abstract))
+    for candidate in output.reference_candidates:
+        response.reference_candidates.add().CopyFrom(
+            _encode_reference_candidate(candidate)
+        )
     return response
+
+
+def _encode_reference_candidate(candidate: ReferenceCandidate):
+    """Map an optional parser candidate while preserving its raw source text."""
+    if not candidate.raw_reference.strip():
+        raise ValueError("reference candidate raw_reference is required")
+    if candidate.published_year < 0 or candidate.published_year > 9999:
+        raise ValueError("reference candidate published_year is invalid")
+    if not math.isfinite(candidate.confidence) or not 0 <= candidate.confidence <= 1:
+        raise ValueError("reference candidate confidence must be between 0 and 1")
+    return document_parser_pb2.PaperReferenceCandidate(
+        raw_reference=candidate.raw_reference,
+        authors=list(candidate.authors),
+        title=candidate.title,
+        venue=candidate.venue,
+        published_year=candidate.published_year,
+        doi=candidate.doi,
+        arxiv_id=candidate.arxiv_id,
+        volume=candidate.volume,
+        pages=candidate.pages,
+        confidence=candidate.confidence,
+    )
 
 
 def _encode_text_candidate(candidate):

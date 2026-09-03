@@ -260,6 +260,21 @@ func (r *paperMetadataRepoStub) Upsert(
 	if update.Tags != nil {
 		metadata.Tags = append([]string(nil), (*update.Tags)...)
 	}
+	if update.Venue != nil {
+		metadata.Venue = *update.Venue
+	}
+	if update.SourceURL != nil {
+		metadata.SourceURL = *update.SourceURL
+	}
+	if update.PublishedAt != nil {
+		metadata.PublishedAt = update.PublishedAt
+	}
+	if update.Volume != nil {
+		metadata.Volume = *update.Volume
+	}
+	if update.Pages != nil {
+		metadata.Pages = *update.Pages
+	}
 	if update.MetadataSource != nil {
 		metadata.MetadataSource = *update.MetadataSource
 	}
@@ -481,6 +496,33 @@ func TestPaperServiceReusesUnknownPlaceholderAndPreservesRawReference(t *testing
 	}
 	if documents.documents[first.CitedDocumentID].Status != types.DocumentStatusUnknown {
 		t.Fatal("citation target is not an unknown placeholder")
+	}
+}
+
+func TestPaperServiceStoresStructuredCandidateOnUnknownPlaceholder(t *testing.T) {
+	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	service, documents, metadata, _ := newPaperServiceForTest(citing)
+	raw := "Ada Lovelace. 2024. Structured Citation. Example Venue."
+	_, err := service.AddCitation(context.Background(), citing.ID.String(), types.PaperCitationInput{
+		RawReference: raw,
+		Candidate: &types.PaperReferenceCandidate{
+			RawReference: raw, Authors: []string{"Ada Lovelace"}, Title: "Structured Citation",
+			Venue: "Example Venue", PublishedYear: 2024, DOI: "10.1000/example", ArXivID: " arXiv 2401.01234v2 ", Volume: "2", Pages: "10-20", Confidence: 0.9,
+		},
+	})
+	if err != nil {
+		t.Fatalf("AddCitation() error = %v", err)
+	}
+	placeholderID := unknownPaperDocumentID(raw)
+	stored := metadata.items[placeholderID]
+	if stored.Title != "Structured Citation" || stored.Venue != "Example Venue" || len(stored.Authors) != 1 || stored.PublishedAt == nil {
+		t.Fatalf("structured metadata not stored: %#v", stored)
+	}
+	if documents.documents[placeholderID].DOI != "10.1000/example" {
+		t.Fatalf("placeholder DOI = %q", documents.documents[placeholderID].DOI)
+	}
+	if stored.SourceURL != "https://arxiv.org/abs/2401.01234" {
+		t.Fatalf("placeholder arXiv source URL = %q", stored.SourceURL)
 	}
 }
 

@@ -102,6 +102,44 @@ type PaperTextCandidate struct {
 	Evidence   []PaperSourceEvidence `json:"evidence,omitempty"`
 }
 
+// PaperReferenceCandidate is an optional structured interpretation of one raw
+// reference. RawReference remains the citation edge evidence and must also be
+// present in PaperExtractionResult.References. Empty parsed fields mean the
+// parser could not identify that field; they never erase stored metadata.
+type PaperReferenceCandidate struct {
+	RawReference  string   `json:"raw_reference"`
+	Authors       []string `json:"authors,omitempty"`
+	Title         string   `json:"title,omitempty"`
+	Venue         string   `json:"venue,omitempty"`
+	PublishedYear int      `json:"published_year,omitempty"`
+	DOI           string   `json:"doi,omitempty"`
+	ArXivID       string   `json:"arxiv_id,omitempty"`
+	Volume        string   `json:"volume,omitempty"`
+	Pages         string   `json:"pages,omitempty"`
+	Confidence    float64  `json:"confidence"`
+}
+
+// Validate ensures the structured candidate is safe to apply to an unknown
+// placeholder. Bibliographic fields are intentionally optional.
+func (candidate PaperReferenceCandidate) Validate() error {
+	if strings.TrimSpace(candidate.RawReference) == "" {
+		return fmt.Errorf("%w: reference candidate raw_reference is required", ErrInvalidPaperExtraction)
+	}
+	if candidate.PublishedYear < 0 || candidate.PublishedYear > 9999 {
+		return fmt.Errorf("%w: reference candidate published_year is invalid", ErrInvalidPaperExtraction)
+	}
+	if math.IsNaN(candidate.Confidence) || math.IsInf(candidate.Confidence, 0) ||
+		candidate.Confidence < 0 || candidate.Confidence > 1 {
+		return fmt.Errorf("%w: reference candidate confidence must be between 0 and 1", ErrInvalidPaperExtraction)
+	}
+	for index, author := range candidate.Authors {
+		if strings.TrimSpace(author) == "" {
+			return fmt.Errorf("%w: reference candidate author %d is empty", ErrInvalidPaperExtraction, index)
+		}
+	}
+	return nil
+}
+
 // Validate checks a non-empty value, normalized confidence, and all evidence.
 func (candidate PaperTextCandidate) Validate() error {
 	if strings.TrimSpace(candidate.Value) == "" {
@@ -127,6 +165,10 @@ type PaperExtractionRequest struct {
 	DocumentID uuid.UUID          `json:"document_id"`
 	Markdown   []byte             `json:"-"`
 	Blocks     []PaperSourceBlock `json:"blocks,omitempty"`
+	// SourceStorageKey is an opaque, Go-created relative storage key. Python
+	// resolves it under its shared upload root only in CRF/hybrid mode; Go does
+	// not interpret PDF line layout.
+	SourceStorageKey string `json:"source_storage_key,omitempty"`
 }
 
 // Validate checks request bounds and UTF-8.
@@ -217,12 +259,13 @@ func finitePaperExtractionFloat(value float64) bool {
 // PaperExtractionResult contains parser candidates, not canonical database
 // metadata. References deliberately remain raw strings for later processing.
 type PaperExtractionResult struct {
-	Title            *PaperTextCandidate  `json:"title,omitempty"`
-	Authors          []PaperTextCandidate `json:"authors"`
-	Abstract         *PaperTextCandidate  `json:"abstract,omitempty"`
-	References       []string             `json:"references"`
-	ExtractorName    string               `json:"extractor_name"`
-	ExtractorVersion string               `json:"extractor_version,omitempty"`
+	Title               *PaperTextCandidate       `json:"title,omitempty"`
+	Authors             []PaperTextCandidate      `json:"authors"`
+	Abstract            *PaperTextCandidate       `json:"abstract,omitempty"`
+	References          []string                  `json:"references"`
+	ReferenceCandidates []PaperReferenceCandidate `json:"reference_candidates,omitempty"`
+	ExtractorName       string                    `json:"extractor_name"`
+	ExtractorVersion    string                    `json:"extractor_version,omitempty"`
 }
 
 // Validate verifies extractor identity and every returned candidate.
@@ -257,5 +300,21 @@ func (result PaperExtractionResult) Validate() error {
 			return fmt.Errorf("%w: reference %d is empty", ErrInvalidPaperExtraction, index)
 		}
 	}
+	references := make(map[string]struct{}, len(result.References))
+	for _, reference := range result.References {
+		references[compactPaperExtractionText(reference)] = struct{}{}
+	}
+	for index, candidate := range result.ReferenceCandidates {
+		if err := candidate.Validate(); err != nil {
+			return fmt.Errorf("%w: reference candidate %d: %v", ErrInvalidPaperExtraction, index, err)
+		}
+		if _, exists := references[compactPaperExtractionText(candidate.RawReference)]; !exists {
+			return fmt.Errorf("%w: reference candidate %d has no matching raw reference", ErrInvalidPaperExtraction, index)
+		}
+	}
 	return nil
+}
+
+func compactPaperExtractionText(value string) string {
+	return strings.ToLower(strings.Join(strings.Fields(value), " "))
 }

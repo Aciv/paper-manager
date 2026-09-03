@@ -2,18 +2,18 @@
 .*
 !.air.toml
 
+
 AGENTS.md
 CLAUDE.md
 __pycache__
 *.py[cod]
 tmp
-
-/model_train
+reports
 
 # Runtime files
 Logs/
 data/uploads/
 
 # Local model corpora and trained artifacts
-model_train/data/
-model_train/artifacts/
+model_train
+model_train

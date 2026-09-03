@@ -9,6 +9,7 @@ values: ``references`` remains a ``list[str]`` for later independent handling.
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import re
 from dataclasses import asdict, dataclass, field
@@ -23,7 +24,9 @@ _EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
 _SUPERSCRIPT_RE = re.compile(r"<sup>.*?</sup>", re.IGNORECASE)
 _AUTHOR_SEPARATOR_RE = re.compile(r"\s*(?:;|；|、|\s+and\s+|\s+和\s+)\s*", re.IGNORECASE)
 _COMMA_SEPARATOR_RE = re.compile(r"\s*[,，]\s*")
-_REFERENCE_ITEM_START_RE = re.compile(r"^\s*(?:\[\d+\]|\d+[.)]|[-*+])\s+")
+# A ">" prefix is pymupdf4llm blockquote markup for footnote-style citation
+# lines ("> [1] Author ..."); it must not hide the 序号 from the style anchor.
+_REFERENCE_ITEM_START_RE = re.compile(r"^\s*(?:>\s*)*(?:\[\d+\]|\d+[.)]|[-*+])\s+")
 
 _ABSTRACT_HEADINGS = {"abstract", "abstruct", "摘要"}
 _REFERENCES_HEADINGS = {"references", "bibliography", "参考文献"}
@@ -289,7 +292,7 @@ def _line_offsets(lines: list[str]) -> list[int]:
 
 def _split_reference_items(section: str) -> list[str]:
     """Split list-like references while preserving raw citation text."""
-    lines = [line.strip() for line in section.splitlines() if line.strip()]
+    lines = [_strip_blockquote(line) for line in section.splitlines() if line.strip()]
     if not lines:
         return []
     if not any(_REFERENCE_ITEM_START_RE.match(line) for line in lines):
@@ -314,6 +317,105 @@ def _split_reference_items(section: str) -> list[str]:
 def split_reference_items(section: str) -> list[str]:
     """Split one raw reference block while preserving each citation's text."""
     return _split_reference_items(section)
+
+
+_REFERENCE_ORDINAL_RE = re.compile(r"^\s*(?:[-*+•▪◦>\s]\s*)*\[(\d+)\]")
+_REFERENCE_ORDINAL_SUFFIX_RE = re.compile(r"^\s*(?:[-*+•▪◦>\s]\s*)*(\d+)\s*[.)、]")
+
+
+def _strip_blockquote(line: str) -> str:
+    """Remove a leading pymupdf4llm blockquote marker ("> [1] ...")."""
+    return re.sub(r"^>\s*", "", line.strip())
+
+
+def reference_item_ordinal(text: str) -> str | None:
+    """Return the leading sequence number of one reference item, if present.
+
+    List markers (``-``/``*``/bullets) before the number are ignored; the
+    ordinal must be the first number of the item, written ``[1]``, ``1.``,
+    ``1)`` or ``1、``. Numbers later in the text are page/venue references, not
+    the item identity.
+    """
+    match = _REFERENCE_ORDINAL_RE.match(text)
+    if match is None:
+        match = _REFERENCE_ORDINAL_SUFFIX_RE.match(text)
+    return None if match is None else match.group(1)
+
+
+_OVERLAP_DUPLICATE_RATIO = 0.9
+# Template-like short lines (e.g. "Image 2: Method A generated UI") can share
+# 90%+ of their characters while being unrelated; only longer texts carry
+# enough signal for overlap-based deduplication.
+_OVERLAP_DUPLICATE_MIN_CHARS = 40
+
+
+def _char_overlap_ratio(a: str, b: str) -> float:
+    """Contiguous character overlap over the shorter text, in ``[0, 1]``.
+
+    Uses the total length of difflib's longest matching blocks, divided by the
+    shorter text length. A duplicate (one entry truncated, or one carrying
+    extra page/URL suffixes) therefore scores near ``1.0``, while unrelated
+    citations with the same letter distribution stay far below ``0.9``.
+    """
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if not shorter:
+        return 0.0
+    matcher = difflib.SequenceMatcher(None, shorter, longer)
+    matched = sum(block.size for block in matcher.get_matching_blocks())
+    return matched / len(shorter)
+
+
+def filter_reference_items(items: Iterable[str]) -> list[str]:
+    """Consolidate reference items with the first item as the region style.
+
+    The style of the first non-empty item decides how the whole region is
+    handled:
+
+    - Numbered region: the first detected leading 序号 is the only identity.
+      Later items repeating an already-seen number are duplicates and are
+      dropped; items without a leading number break the numbered style and
+      are invalid.
+    - Unnumbered region (bullet/paragraph style): no numbering criterion is
+      applied. Two unnumbered items (each at least
+      ``_OVERLAP_DUPLICATE_MIN_CHARS`` long) whose contiguous character
+      overlap covers at least 90% of the shorter text are duplicates — the
+      shorter one is dropped (or replaced by a later longer duplicate).
+    """
+    style_numbered: bool | None = None
+    seen_numbers: set[str] = set()
+    kept_unnumbered: list[str] = []
+    output: list[str] = []
+    for item in items:
+        if not item.strip():
+            continue
+        ordinal = reference_item_ordinal(item)
+        if style_numbered is None:
+            style_numbered = ordinal is not None
+        if style_numbered:
+            if ordinal is None or ordinal in seen_numbers:
+                continue
+            seen_numbers.add(ordinal)
+            output.append(item)
+            continue
+        if ordinal is not None:
+            continue
+        duplicate_index: int | None = None
+        for index, kept in enumerate(kept_unnumbered):
+            shorter_length = min(len(item), len(kept))
+            if (
+                shorter_length >= _OVERLAP_DUPLICATE_MIN_CHARS
+                and _char_overlap_ratio(item, kept) >= _OVERLAP_DUPLICATE_RATIO
+            ):
+                duplicate_index = index
+                break
+        if duplicate_index is None:
+            output.append(item)
+            kept_unnumbered.append(item)
+        elif len(item) > len(kept_unnumbered[duplicate_index]):
+            kept = kept_unnumbered[duplicate_index]
+            output[output.index(kept)] = item
+            kept_unnumbered[duplicate_index] = item
+    return output
 
 
 def _parse_heading(line: str) -> tuple[int, str] | None:

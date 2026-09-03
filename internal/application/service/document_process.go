@@ -368,7 +368,12 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 		ContentType: metadata.ContentType, SizeBytes: storedMarkdown.Size,
 		ParserName: metadata.ParserName, ParserVersion: metadata.ParserVersion,
 		InputMode: string(types.RecognitionInputBytes), Language: metadata.Language,
-		PageCount: metadata.PageCount, Metadata: types.JSON(`{}`),
+		PageCount: metadata.PageCount,
+		// metadata is a non-null JSONB column. An empty named RawMessage can be
+		// serialized by GORM as an invalid database JSON value, whereas an empty
+		// object faithfully represents that this parser result has no extra
+		// metadata yet.
+		Metadata: types.JSON(`{}`),
 	}
 	if err := s.repo.ReplaceParsedOutput(ctx, markdown, blocks); err != nil {
 		if deleteErr := s.storage.Delete(context.WithoutCancel(ctx), storedMarkdown.Key); deleteErr != nil {

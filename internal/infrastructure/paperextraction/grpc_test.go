@@ -48,7 +48,11 @@ func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 				Value:      "Ada Lovelace",
 				Confidence: 0.85,
 			}},
-			References:       []string{"[1] A raw reference."},
+			References: []string{"[1] A raw reference."},
+			ReferenceCandidates: []*papersv1.PaperReferenceCandidate{{
+				RawReference: "[1] A raw reference.", Authors: []string{"Ada Lovelace"},
+				Title: "A raw reference", Venue: "Example", PublishedYear: 2024, Doi: "10.1000/example", Confidence: 0.8,
+			}},
 			ExtractorName:    "markdown-rules",
 			ExtractorVersion: "1",
 		},
@@ -65,20 +69,23 @@ func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 			Text:     "Mapped Paper",
 			Location: location,
 		}},
+		SourceStorageKey: "pdf/mapped-paper.pdf",
 	})
 	if err != nil {
 		t.Fatalf("Extract() error = %v", err)
 	}
 	if client.received.GetDocumentId() != documentID.String() ||
 		string(client.received.GetMarkdown()) != string(markdown) ||
-		client.received.GetBlocks()[0].GetLocation().GetPageNumber() != 1 {
+		client.received.GetBlocks()[0].GetLocation().GetPageNumber() != 1 ||
+		client.received.GetSourceStorageKey() != "pdf/mapped-paper.pdf" {
 		t.Fatalf("unexpected protobuf request: %+v", client.received)
 	}
 	if result.Title == nil ||
 		result.Title.Value != "Mapped Paper" ||
 		len(result.Title.Evidence) != 1 ||
 		len(result.Authors) != 1 ||
-		len(result.References) != 1 {
+		len(result.References) != 1 || len(result.ReferenceCandidates) != 1 ||
+		result.ReferenceCandidates[0].Title != "A raw reference" {
 		t.Fatalf("unexpected extraction result: %+v", result)
 	}
 }

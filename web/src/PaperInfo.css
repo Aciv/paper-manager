@@ -56,9 +56,23 @@
 .citation-columns li { font-size: 13px; overflow-wrap: anywhere; }
 .citation-columns code { font-size: 11px; color: #475569; }
 .citation-columns p { margin: 3px 0 0; line-height: 1.45; color: #475569; }
+.citation-source-button { margin-top: 4px; font-size: 12px; text-align: left; }
+.citation-source-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 24px; background: #17203399; }
+.citation-source-dialog { width: min(680px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto; padding: 20px; border-radius: 12px; background: #fff; box-shadow: 0 20px 60px #17203366; }
+.citation-source-dialog > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid #e6ebf1; }
+.citation-source-dialog h4, .citation-source-dialog h5 { margin: 0; }
+.citation-source-dialog h5 { font-size: 14px; }
+.citation-source-dialog dl { display: grid; grid-template-columns: 106px minmax(0, 1fr); gap: 10px 14px; margin: 18px 0 0; }
+.citation-source-dialog dt { color: #64748b; font-size: 13px; font-weight: 700; }
+.citation-source-dialog dd { margin: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.citation-source-raw { margin-top: 16px; padding: 12px; border-radius: 7px; background: #f8fafc; }
+.citation-source-raw p { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.55; }
 
 @media (max-width: 720px) {
   .paper-info-stages > div { grid-template-columns: 1fr auto; }
   .paper-info-stages button { grid-column: 1 / -1; }
   .citation-columns { grid-template-columns: 1fr; }
+  .citation-source-backdrop { padding: 12px; }
+  .citation-source-dialog dl { grid-template-columns: 1fr; gap: 4px; }
+  .citation-source-dialog dd { margin-bottom: 8px; }
 }

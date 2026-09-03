@@ -961,6 +961,82 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 	}
 }
 
+func TestPaperInfoResolveUnknownReferencePrefersStoredExtractionMetadata(t *testing.T) {
+	citingID := uuid.New()
+	unknownID := uuid.New()
+	documents := newPaperDocumentRepoStub(
+		types.Document{ID: citingID, Status: types.DocumentStatusReady},
+		types.Document{
+			ID:     unknownID,
+			DOI:    "10.4000/structured-reference",
+			Status: types.DocumentStatusUnknown,
+		},
+	)
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[unknownID.String()] = types.PaperMetadata{
+		DocumentID: unknownID,
+		Title:      "Structured Reference Title",
+		Authors:    []types.PaperAuthor{{Name: "Ada Lovelace"}},
+		Venue:      "Structured Journal",
+		PublishedAt: func() *time.Time {
+			value := time.Date(2024, time.January, 1, 0, 0, 0, 0, time.UTC)
+			return &value
+		}(),
+	}
+	// This deliberately conflicts with the structured extraction result. The
+	// scheduler must not reparse it while the placeholder has a valid identity.
+	papers.citations[citingID.String()] = []types.PaperCitation{{
+		CitingDocumentID: citingID,
+		CitedDocumentID:  unknownID,
+		RawReference:     "Different Raw Title. 2020. doi:10.9999/raw-reference",
+	}}
+	provider := &paperInfoProviderStub{
+		name: "crossref",
+		search: func(query types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+			if query.DOI != "10.4000/structured-reference" || query.Title != "Structured Reference Title" {
+				t.Fatalf("query = %#v, want stored extraction identity", query)
+			}
+			if len(query.Authors) != 1 || query.Authors[0] != "Ada Lovelace" || query.PublishedYear != 2024 {
+				t.Fatalf("query did not retain stored reference context: %#v", query)
+			}
+			return []types.PaperCatalogCandidate{
+				testCatalogCandidate("crossref", "10.4000/structured-reference", "Structured Reference Title", 1),
+			}, nil
+		},
+	}
+	service := newPaperInfoServiceForTest(
+		config.Config{PaperCatalogConcurrency: 1},
+		documents,
+		&paperInfoStorageStub{},
+		&paperInfoExtractorStub{},
+		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
+		papers,
+		nil,
+		nil,
+		nil,
+	)
+
+	registerReferenceJobForTest(t, service, unknownID, citingID)
+	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
+		DocumentID: unknownID, IsReference: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPaperArXivIDAcceptsBareAndWrappedIDsWithoutDamagingLegacyIDs(t *testing.T) {
+	for input, want := range map[string]string{
+		"2401.01234v2":                       "2401.01234",
+		" arXiv 2401.01234v2 ":               "2401.01234",
+		"https://arxiv.org/abs/2401.01234v2": "2401.01234",
+		"hep-th/9901001":                     "hep-th/9901001",
+	} {
+		if got := paperArXivID(input); got != want {
+			t.Fatalf("paperArXivID(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestPaperInfoResolveUnknownReferenceRequiresRegisteredJob(t *testing.T) {
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{

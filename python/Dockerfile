@@ -4,11 +4,14 @@ ARG HTTPS_PROXY
 ARG NO_PROXY
 ENV HTTP_PROXY=$HTTP_PROXY HTTPS_PROXY=$HTTPS_PROXY NO_PROXY=$NO_PROXY
 WORKDIR /app/python
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app/python
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app:/app/python
 COPY python/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 COPY proto /app/proto
 COPY python /app/python
+# Runtime imports the exact pure feature functions used during training, but
+# artifacts are mounted read-only by Compose rather than baked into the image.
+COPY model_train/paper_crf /app/model_train/paper_crf
 # Generated stubs are checked in, but regenerate them during image construction
 # so the image always matches the contract it receives.
 RUN python -m grpc_tools.protoc -I/app/proto --python_out=. --grpc_python_out=. /app/proto/document_parser.proto

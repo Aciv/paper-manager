@@ -14,6 +14,7 @@ from papers_parser.regex_metadata_find import (
     MarkdownTextSpan,
     extract_author_names,
     extract_paper_sections,
+    filter_reference_items,
     is_affiliation_only,
     is_markdown_heading,
     section_kind,
@@ -47,6 +48,31 @@ class SourceBlock:
 
 
 @dataclass(frozen=True)
+class LayoutLine:
+    """Private parser line facts shared with the runtime CRF adapter."""
+
+    page_number: int
+    order_in_page: int
+    order_in_document: int
+    text: str
+    page_width: float
+    page_height: float
+    bbox_x0: float
+    bbox_y0: float
+    bbox_x1: float
+    bbox_y1: float
+    font_name: str | None = None
+    font_size: float | None = None
+    max_font_size: float | None = None
+    bold_ratio: float | None = None
+    italic_ratio: float | None = None
+    column_index: int | None = None
+    markdown_codepoint_start: int | None = None
+    markdown_codepoint_end: int | None = None
+    parent_block_ordinal: int | None = None
+
+
+@dataclass(frozen=True)
 class SourceEvidence:
     """A candidate's link back to one persisted source-map block."""
 
@@ -66,6 +92,27 @@ class TextCandidate:
 
 
 @dataclass(frozen=True)
+class ReferenceCandidate:
+    """Optional structured fields for one raw bibliography entry.
+
+    The deterministic engine currently preserves only the raw entry. Phase 23
+    will populate the optional fields from the loaded Citation CRF; keeping the
+    shape here makes the gRPC contract and Go persistence path additive now.
+    """
+
+    raw_reference: str
+    authors: tuple[str, ...] = ()
+    title: str = ""
+    venue: str = ""
+    published_year: int = 0
+    doi: str = ""
+    arxiv_id: str = ""
+    volume: str = ""
+    pages: str = ""
+    confidence: float = 0.0
+
+
+@dataclass(frozen=True)
 class ExtractionOutput:
     """Transport-neutral extraction response."""
 
@@ -73,6 +120,7 @@ class ExtractionOutput:
     authors: tuple[TextCandidate, ...] = ()
     abstract: TextCandidate | None = None
     references: tuple[str, ...] = ()
+    reference_candidates: tuple[ReferenceCandidate, ...] = ()
     extractor_name: str = ""
     extractor_version: str = ""
 
@@ -98,7 +146,12 @@ class _BlockPaperSections:
 class PaperExtractionEngine(Protocol):
     """Boundary implemented by deterministic rules and future CRF models."""
 
-    def extract(self, markdown: str, blocks: Sequence[SourceBlock]) -> ExtractionOutput:
+    def extract(
+        self,
+        markdown: str,
+        blocks: Sequence[SourceBlock],
+        layout_lines: Sequence[LayoutLine] = (),
+    ) -> ExtractionOutput:
         """Extract candidates from one exact Markdown revision."""
 
 
@@ -107,8 +160,14 @@ class DeterministicPaperExtractionEngine:
 
     name = "markdown-rules"
     version = "1"
+    requires_layout = False
 
-    def extract(self, markdown: str, blocks: Sequence[SourceBlock]) -> ExtractionOutput:
+    def extract(
+        self,
+        markdown: str,
+        blocks: Sequence[SourceBlock],
+        layout_lines: Sequence[LayoutLine] = (),
+    ) -> ExtractionOutput:
         """Extract directly from blocks, using Markdown rules only without block data."""
         block_sections = _extract_sections_from_blocks(blocks)
         if block_sections is not None:
@@ -121,6 +180,10 @@ class DeterministicPaperExtractionEngine:
                 ),
                 abstract=_candidate_from_blocks(block_sections.abstract, 0.85),
                 references=block_sections.references,
+                reference_candidates=tuple(
+                    ReferenceCandidate(raw_reference=reference)
+                    for reference in block_sections.references
+                ),
                 extractor_name=self.name,
                 extractor_version=self.version,
             )
@@ -133,11 +196,16 @@ class DeterministicPaperExtractionEngine:
             for span in sections.author_spans
             if (candidate := _candidate_from_markdown_span(span, 0.85)) is not None
         )
+        references = filter_reference_items(sections.references)
         return ExtractionOutput(
             title=title,
             authors=authors,
             abstract=abstract,
-            references=tuple(sections.references),
+            references=tuple(references),
+            reference_candidates=tuple(
+                ReferenceCandidate(raw_reference=reference)
+                for reference in references
+            ),
             extractor_name=self.name,
             extractor_version=self.version,
         )
@@ -201,7 +269,9 @@ def _extract_sections_from_blocks(
         title=title,
         authors=tuple(authors),
         abstract=abstract,
-        references=tuple(reference for reference in references if reference.strip()),
+        # Cross-block merge: one global pass so a reference list split across
+        # blocks is deduplicated by 序号 instead of per block.
+        references=tuple(filter_reference_items(references)),
     )
 
 

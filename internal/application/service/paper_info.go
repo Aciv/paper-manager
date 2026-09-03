@@ -73,6 +73,12 @@ var (
 	arxivIDPattern = regexp.MustCompile(
 		`(?i)(?:arxiv\s*:\s*|arxiv\.org/(?:abs|pdf)/|10\.48550/arxiv\.)([a-z-]+(?:\.[a-z-]+)?/[0-9]{7}|[0-9]{4}\.[0-9]{4,5})(?:v[0-9]+)?`,
 	)
+	// arxivBareIDPattern accepts a parser-provided ID without a URL or
+	// "arXiv:" prefix. The capture intentionally excludes its optional
+	// version so the persisted landing URL is stable across versions.
+	arxivBareIDPattern = regexp.MustCompile(
+		`(?i)^([a-z-]+(?:\.[a-z-]+)?/[0-9]{7}|[0-9]{4}\.[0-9]{4,5})(?:v[0-9]+)?$`,
+	)
 )
 
 // paperInfoService coordinates durable document state, Python extraction,
@@ -193,15 +199,16 @@ func (s *paperInfoService) ExtractMetadata(
 	stopHeartbeat := keepSpanAlive(ctx, s.spans, spanID)
 	defer stopHeartbeat()
 
-	markdown, blocks, err := s.loadExtractionSource(ctx, command)
+	markdown, blocks, sourceStorageKey, err := s.loadExtractionSource(ctx, command)
 	if err != nil {
 		logger.Error(ctx, "paper metadata extraction source unavailable", "error", err)
 		return false, err
 	}
 	result, err := s.extractor.Extract(ctx, &types.PaperExtractionRequest{
-		DocumentID: command.DocumentID,
-		Markdown:   markdown,
-		Blocks:     blocks,
+		DocumentID:       command.DocumentID,
+		Markdown:         markdown,
+		Blocks:           blocks,
+		SourceStorageKey: sourceStorageKey,
 	})
 	if err != nil {
 		return false, err
@@ -214,7 +221,7 @@ func (s *paperInfoService) ExtractMetadata(
 	}
 
 	update := extractionMetadataUpdate(result)
-	references := extractionCitationInputs(result.References)
+	references := extractionCitationInputs(result.References, result.ReferenceCandidates)
 	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
 		return false, err
 	}
@@ -461,7 +468,11 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 		defer release()
 	}
 
-	// get query
+	// The extraction pipeline persists a structured interpretation of each
+	// reference on the unknown placeholder before this worker is scheduled.
+	// Prefer that normalized DOI/title/author data over reparsing the rendered
+	// citation text. The raw text remains a compatibility fallback for older
+	// citations and for extractors that could not identify a usable lookup key.
 	incoming, err := s.papers.ListCitedBy(ctx, cited.ID.String())
 	if err != nil {
 		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
@@ -469,10 +480,24 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 	if len(incoming) == 0 {
 		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeTerminalFailure, nil)
 	}
-	query := referenceLookupQuery(incoming[0].RawReference)
+	metadata, err := s.papers.GetMetadata(ctx, cited.ID.String())
+	if err != nil {
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
+	}
+
+	// get query
+	query, querySource := scheduledReferenceLookupQuery(cited, metadata, incoming[0].RawReference)
 	if err := query.Validate(); err != nil {
 		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeTerminalFailure, nil)
 	}
+	logger.Debug(ctx, "reference catalog lookup query selected",
+		"document_id", cited.ID,
+		"query_source", querySource,
+		"has_doi", strings.TrimSpace(query.DOI) != "",
+		"has_title", strings.TrimSpace(query.Title) != "",
+		"has_source_url", strings.TrimSpace(query.SourceURL) != "",
+		"author_count", len(query.Authors),
+	)
 
 	provider, ok := s.catalogs.Get(claim.Provider.String())
 	if !ok {
@@ -788,20 +813,24 @@ func referenceCatalogDedupKey(rawReference string) string {
 func (s *paperInfoService) loadExtractionSource(
 	ctx context.Context,
 	command types.PaperMetadataExtractCommand,
-) ([]byte, []types.PaperSourceBlock, error) {
+) ([]byte, []types.PaperSourceBlock, string, error) {
 	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
+	}
+	document, err := s.documents.Get(ctx, command.DocumentID)
+	if err != nil {
+		return nil, nil, "", err
 	}
 	manifest, err := s.documents.GetMarkdown(ctx, command.DocumentID)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	reader, err := s.storage.Open(ctx, manifest.StorageKey)
 	if err != nil {
 		logger.Error(ctx, "open Markdown for paper extraction failed",
 			"storage_key", manifest.StorageKey,
 			"error", err)
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	defer reader.Close()
 	markdown, err := io.ReadAll(io.LimitReader(
@@ -809,10 +838,10 @@ func (s *paperInfoService) loadExtractionSource(
 		int64(types.MaxPaperExtractionMarkdownBytes)+1,
 	))
 	if err != nil {
-		return nil, nil, fmt.Errorf("read Markdown for paper extraction: %w", err)
+		return nil, nil, "", fmt.Errorf("read Markdown for paper extraction: %w", err)
 	}
 	if len(markdown) > types.MaxPaperExtractionMarkdownBytes {
-		return nil, nil, fmt.Errorf(
+		return nil, nil, "", fmt.Errorf(
 			"%w: Markdown exceeds %d bytes",
 			types.ErrInvalidPaperExtraction,
 			types.MaxPaperExtractionMarkdownBytes,
@@ -820,7 +849,7 @@ func (s *paperInfoService) loadExtractionSource(
 	}
 	persistedBlocks, err := s.documents.ListBlocks(ctx, command.DocumentID, 0)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
 	blocks := make([]types.PaperSourceBlock, 0, len(persistedBlocks))
 	for _, block := range persistedBlocks {
@@ -832,14 +861,15 @@ func (s *paperInfoService) loadExtractionSource(
 		})
 	}
 	request := types.PaperExtractionRequest{
-		DocumentID: command.DocumentID,
-		Markdown:   markdown,
-		Blocks:     blocks,
+		DocumentID:       command.DocumentID,
+		Markdown:         markdown,
+		Blocks:           blocks,
+		SourceStorageKey: document.StorageKey,
 	}
 	if err := request.Validate(); err != nil {
-		return nil, nil, err
+		return nil, nil, "", err
 	}
-	return markdown, blocks, nil
+	return markdown, blocks, document.StorageKey, nil
 }
 
 // ensureDocumentReady prevents late extraction results from being persisted
@@ -941,7 +971,21 @@ func extractionMetadataUpdate(
 	}
 }
 
-func extractionCitationInputs(references []string) []types.PaperCitationInput {
+func extractionCitationInputs(
+	references []string,
+	candidates []types.PaperReferenceCandidate,
+) []types.PaperCitationInput {
+	candidateByReference := make(map[string]types.PaperReferenceCandidate, len(candidates))
+	for _, candidate := range candidates {
+		key := compactPaperText(candidate.RawReference)
+		if key == "" {
+			continue
+		}
+		current, exists := candidateByReference[key]
+		if !exists || candidate.Confidence > current.Confidence {
+			candidateByReference[key] = candidate
+		}
+	}
 	inputs := make([]types.PaperCitationInput, 0, len(references))
 	seen := make(map[string]struct{}, len(references))
 	for _, rawReference := range references {
@@ -954,7 +998,12 @@ func extractionCitationInputs(references []string) []types.PaperCitationInput {
 			continue
 		}
 		seen[key] = struct{}{}
-		inputs = append(inputs, types.PaperCitationInput{RawReference: rawReference})
+		input := types.PaperCitationInput{RawReference: rawReference}
+		if candidate, exists := candidateByReference[key]; exists {
+			candidate.RawReference = rawReference
+			input.Candidate = &candidate
+		}
+		inputs = append(inputs, input)
 	}
 	return inputs
 }
@@ -983,6 +1032,23 @@ func metadataLookupQuery(
 		query.PublishedYear = metadata.PublishedAt.Year()
 	}
 	return query
+}
+
+// scheduledReferenceLookupQuery returns the best available catalog identity
+// for an unknown citation placeholder. Structured fields already persisted by
+// extraction are authoritative for lookup because they have been separated
+// from surrounding reference noise. Parsing RawReference is retained only for
+// legacy rows and extractor outputs without a DOI, title, or source URL.
+func scheduledReferenceLookupQuery(
+	cited types.Document,
+	metadata *types.PaperMetadata,
+	rawReference string,
+) (types.PaperLookupQuery, string) {
+	query := metadataLookupQuery(cited, metadata)
+	if query.Validate() == nil {
+		return query, "stored_metadata"
+	}
+	return referenceLookupQuery(rawReference), "raw_reference_fallback"
 }
 
 // reference recognition
@@ -1288,6 +1354,24 @@ func normalizePaperDOI(value string) string {
 
 func paperArXivID(value string) string {
 	match := arxivIDPattern.FindStringSubmatch(value)
+	if len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+
+	value = strings.TrimSpace(value)
+	match = arxivBareIDPattern.FindStringSubmatch(value)
+	if len(match) == 2 {
+		return strings.ToLower(match[1])
+	}
+
+	// Some extractors emit a textual wrapper such as "arXiv 2401.01234".
+	// Strip only leading/trailing letters and whitespace, then validate the
+	// remaining value as an ID. Checking the untrimmed value above preserves
+	// old-style IDs such as hep-th/9901001, whose leading letters are data.
+	value = strings.TrimFunc(value, func(r rune) bool {
+		return unicode.IsLetter(r) || unicode.IsSpace(r)
+	})
+	match = arxivBareIDPattern.FindStringSubmatch(value)
 	if len(match) != 2 {
 		return ""
 	}

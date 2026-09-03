@@ -133,10 +133,6 @@ const (
 // PaperMetadataExtractorClient is the client API for PaperMetadataExtractor service.
 //
 // For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
-//
-// PaperMetadataExtractor derives candidates from an already-persisted
-// Markdown revision. It performs no catalog lookups and writes no database
-// state; Go remains responsible for orchestration and canonical persistence.
 type PaperMetadataExtractorClient interface {
 	Extract(ctx context.Context, in *PaperExtractionRequest, opts ...grpc.CallOption) (*PaperExtractionResult, error)
 }
@@ -162,10 +158,6 @@ func (c *paperMetadataExtractorClient) Extract(ctx context.Context, in *PaperExt
 // PaperMetadataExtractorServer is the server API for PaperMetadataExtractor service.
 // All implementations must embed UnimplementedPaperMetadataExtractorServer
 // for forward compatibility.
-//
-// PaperMetadataExtractor derives candidates from an already-persisted
-// Markdown revision. It performs no catalog lookups and writes no database
-// state; Go remains responsible for orchestration and canonical persistence.
 type PaperMetadataExtractorServer interface {
 	Extract(context.Context, *PaperExtractionRequest) (*PaperExtractionResult, error)
 	mustEmbedUnimplementedPaperMetadataExtractorServer()

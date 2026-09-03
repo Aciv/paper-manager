@@ -1,5 +1,22 @@
 # API Smoke Scripts
 
+## Single-PDF parser and extraction benchmark
+
+Run recognition plus the selected paper-extraction engine without starting the
+API, Redis, PostgreSQL, or a gRPC server. It prints title/authors/reference
+candidates and separate recognition/extraction timings:
+
+```bash
+.venv/bin/python scripts/benchmark_paper_extraction_pdf.py path/to/paper.pdf \
+  --engine hybrid --output /tmp/paper-extraction.json
+```
+
+Use `--engine rules` to compare the fallback, `--engine shadow` to return the
+rules result while logging aggregate CRF disagreements, or `--engine crf` to
+fail fast if the selected artifacts are missing/incompatible. Artifacts default to
+`model_train/artifacts`; override with `--model-dir` when testing a promoted
+model directory.
+
 Start the API stack first, then run focused checks from the repository root:
 
 ```bash

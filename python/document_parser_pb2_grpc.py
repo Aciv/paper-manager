@@ -107,6 +107,7 @@ class PaperMetadataExtractorStub:
     """PaperMetadataExtractor derives candidates from an already-persisted
     Markdown revision. It performs no catalog lookups and writes no database
     state; Go remains responsible for orchestration and canonical persistence.
+
     """
 
     def __init__(self, channel):
@@ -126,6 +127,7 @@ class PaperMetadataExtractorServicer:
     """PaperMetadataExtractor derives candidates from an already-persisted
     Markdown revision. It performs no catalog lookups and writes no database
     state; Go remains responsible for orchestration and canonical persistence.
+
     """
 
     def Extract(self, request, context):
@@ -154,6 +156,7 @@ class PaperMetadataExtractor:
     """PaperMetadataExtractor derives candidates from an already-persisted
     Markdown revision. It performs no catalog lookups and writes no database
     state; Go remains responsible for orchestration and canonical persistence.
+
     """
 
     @staticmethod

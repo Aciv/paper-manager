@@ -24,7 +24,7 @@ _sym_db = _symbol_database.Default()
 
 
 
-DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15\x64ocument_parser.proto\x12\tpapers.v1\"\x99\x01\n\x12RecognitionRequest\x12\x13\n\x0b\x64ocument_id\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontent_type\x18\x03 \x01(\t\x12\x11\n\x07\x63ontent\x18\x04 \x01(\x0cH\x00\x12\x13\n\tfile_path\x18\x05 \x01(\tH\x00\x12\x14\n\nsource_url\x18\x06 \x01(\tH\x00\x42\x08\n\x06source\"\xea\x01\n\x11RecognitionResult\x12\x10\n\x08markdown\x18\x01 \x01(\x0c\x12\x19\n\x11markdown_filename\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontent_type\x18\x03 \x01(\t\x12\x12\n\nsize_bytes\x18\x04 \x01(\x03\x12\x10\n\x08language\x18\x06 \x01(\t\x12\x12\n\npage_count\x18\x07 \x01(\x05\x12\x13\n\x0bparser_name\x18\x08 \x01(\t\x12\x16\n\x0eparser_version\x18\t \x01(\t\x12+\n\x06\x62locks\x18\n \x03(\x0b\x32\x1b.papers.v1.RecognitionBlock\"\xb3\x02\n\x10RecognitionBlock\x12\x0f\n\x07ordinal\x18\x01 \x01(\x05\x12\x0c\n\x04type\x18\x02 \x01(\t\x12\x0c\n\x04text\x18\x03 \x01(\t\x12\x13\n\x0bpage_number\x18\x04 \x01(\x05\x12\x12\n\npage_width\x18\x05 \x01(\x01\x12\x13\n\x0bpage_height\x18\x06 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x0\x18\x07 \x01(\x01\x12\x0f\n\x07\x62\x62ox_y0\x18\x08 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x1\x18\t \x01(\x01\x12\x0f\n\x07\x62\x62ox_y1\x18\n \x01(\x01\x12 \n\x18markdown_codepoint_start\x18\x0b \x01(\x05\x12\x1e\n\x16markdown_codepoint_end\x18\x0c \x01(\x05\x12\x12\n\nimage_data\x18\r \x01(\x0c\x12\x1a\n\x12image_content_type\x18\x0e \x01(\t\"l\n\x16PaperExtractionRequest\x12\x13\n\x0b\x64ocument_id\x18\x01 \x01(\t\x12\x10\n\x08markdown\x18\x03 \x01(\x0c\x12+\n\x06\x62locks\x18\x04 \x03(\x0b\x32\x1b.papers.v1.PaperSourceBlock\"q\n\x10PaperSourceBlock\x12\x0f\n\x07ordinal\x18\x01 \x01(\x05\x12\x0c\n\x04type\x18\x02 \x01(\t\x12\x0c\n\x04text\x18\x03 \x01(\t\x12\x30\n\x08location\x18\x04 \x01(\x0b\x32\x1e.papers.v1.PaperSourceLocation\"\xd9\x01\n\x13PaperSourceLocation\x12\x13\n\x0bpage_number\x18\x01 \x01(\x05\x12\x12\n\npage_width\x18\x02 \x01(\x01\x12\x13\n\x0bpage_height\x18\x03 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x0\x18\x04 \x01(\x01\x12\x0f\n\x07\x62\x62ox_y0\x18\x05 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x1\x18\x06 \x01(\x01\x12\x0f\n\x07\x62\x62ox_y1\x18\x07 \x01(\x01\x12 \n\x18markdown_codepoint_start\x18\x08 \x01(\x05\x12\x1e\n\x16markdown_codepoint_end\x18\t \x01(\x05\"\xed\x01\n\x15PaperExtractionResult\x12,\n\x05title\x18\x01 \x01(\x0b\x32\x1d.papers.v1.PaperTextCandidate\x12.\n\x07\x61uthors\x18\x02 \x03(\x0b\x32\x1d.papers.v1.PaperTextCandidate\x12/\n\x08\x61\x62stract\x18\x03 \x01(\x0b\x32\x1d.papers.v1.PaperTextCandidate\x12\x12\n\nreferences\x18\x04 \x03(\t\x12\x16\n\x0e\x65xtractor_name\x18\x05 \x01(\t\x12\x19\n\x11\x65xtractor_version\x18\x06 \x01(\t\"i\n\x12PaperTextCandidate\x12\r\n\x05value\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x01\x12\x30\n\x08\x65vidence\x18\x03 \x03(\x0b\x32\x1e.papers.v1.PaperSourceEvidence\"\x83\x01\n\x13PaperSourceEvidence\x12\x15\n\rblock_ordinal\x18\x01 \x01(\x05\x12\x13\n\x0bpage_number\x18\x02 \x01(\x05\x12 \n\x18markdown_codepoint_start\x18\x03 \x01(\x05\x12\x1e\n\x16markdown_codepoint_end\x18\x04 \x01(\x05\x32Z\n\x0e\x44ocumentParser\x12H\n\tRecognize\x12\x1d.papers.v1.RecognitionRequest\x1a\x1c.papers.v1.RecognitionResult2h\n\x16PaperMetadataExtractor\x12N\n\x07\x45xtract\x12!.papers.v1.PaperExtractionRequest\x1a .papers.v1.PaperExtractionResultB$Z\"paperMaster/gen/papers/v1;papersv1b\x06proto3')
+DESCRIPTOR = _descriptor_pool.Default().AddSerializedFile(b'\n\x15\x64ocument_parser.proto\x12\tpapers.v1\"\x99\x01\n\x12RecognitionRequest\x12\x13\n\x0b\x64ocument_id\x18\x01 \x01(\t\x12\x10\n\x08\x66ilename\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontent_type\x18\x03 \x01(\t\x12\x11\n\x07\x63ontent\x18\x04 \x01(\x0cH\x00\x12\x13\n\tfile_path\x18\x05 \x01(\tH\x00\x12\x14\n\nsource_url\x18\x06 \x01(\tH\x00\x42\x08\n\x06source\"\xf0\x01\n\x11RecognitionResult\x12\x10\n\x08markdown\x18\x01 \x01(\x0c\x12\x19\n\x11markdown_filename\x18\x02 \x01(\t\x12\x14\n\x0c\x63ontent_type\x18\x03 \x01(\t\x12\x12\n\nsize_bytes\x18\x04 \x01(\x03\x12\x10\n\x08language\x18\x06 \x01(\t\x12\x12\n\npage_count\x18\x07 \x01(\x05\x12\x13\n\x0bparser_name\x18\x08 \x01(\t\x12\x16\n\x0eparser_version\x18\t \x01(\t\x12+\n\x06\x62locks\x18\n \x03(\x0b\x32\x1b.papers.v1.RecognitionBlockJ\x04\x08\x0f\x10\x10\"\xb3\x02\n\x10RecognitionBlock\x12\x0f\n\x07ordinal\x18\x01 \x01(\x05\x12\x0c\n\x04type\x18\x02 \x01(\t\x12\x0c\n\x04text\x18\x03 \x01(\t\x12\x13\n\x0bpage_number\x18\x04 \x01(\x05\x12\x12\n\npage_width\x18\x05 \x01(\x01\x12\x13\n\x0bpage_height\x18\x06 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x0\x18\x07 \x01(\x01\x12\x0f\n\x07\x62\x62ox_y0\x18\x08 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x1\x18\t \x01(\x01\x12\x0f\n\x07\x62\x62ox_y1\x18\n \x01(\x01\x12 \n\x18markdown_codepoint_start\x18\x0b \x01(\x05\x12\x1e\n\x16markdown_codepoint_end\x18\x0c \x01(\x05\x12\x12\n\nimage_data\x18\r \x01(\x0c\x12\x1a\n\x12image_content_type\x18\x0e \x01(\t\"\x8e\x01\n\x16PaperExtractionRequest\x12\x13\n\x0b\x64ocument_id\x18\x01 \x01(\t\x12\x10\n\x08markdown\x18\x03 \x01(\x0c\x12+\n\x06\x62locks\x18\x04 \x03(\x0b\x32\x1b.papers.v1.PaperSourceBlock\x12\x1a\n\x12source_storage_key\x18\x06 \x01(\tJ\x04\x08\x05\x10\x06\"q\n\x10PaperSourceBlock\x12\x0f\n\x07ordinal\x18\x01 \x01(\x05\x12\x0c\n\x04type\x18\x02 \x01(\t\x12\x0c\n\x04text\x18\x03 \x01(\t\x12\x30\n\x08location\x18\x04 \x01(\x0b\x32\x1e.papers.v1.PaperSourceLocation\"\xd9\x01\n\x13PaperSourceLocation\x12\x13\n\x0bpage_number\x18\x01 \x01(\x05\x12\x12\n\npage_width\x18\x02 \x01(\x01\x12\x13\n\x0bpage_height\x18\x03 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x0\x18\x04 \x01(\x01\x12\x0f\n\x07\x62\x62ox_y0\x18\x05 \x01(\x01\x12\x0f\n\x07\x62\x62ox_x1\x18\x06 \x01(\x01\x12\x0f\n\x07\x62\x62ox_y1\x18\x07 \x01(\x01\x12 \n\x18markdown_codepoint_start\x18\x08 \x01(\x05\x12\x1e\n\x16markdown_codepoint_end\x18\t \x01(\x05\"\xaf\x02\n\x15PaperExtractionResult\x12,\n\x05title\x18\x01 \x01(\x0b\x32\x1d.papers.v1.PaperTextCandidate\x12.\n\x07\x61uthors\x18\x02 \x03(\x0b\x32\x1d.papers.v1.PaperTextCandidate\x12/\n\x08\x61\x62stract\x18\x03 \x01(\x0b\x32\x1d.papers.v1.PaperTextCandidate\x12\x12\n\nreferences\x18\x04 \x03(\t\x12\x16\n\x0e\x65xtractor_name\x18\x05 \x01(\t\x12\x19\n\x11\x65xtractor_version\x18\x06 \x01(\t\x12@\n\x14reference_candidates\x18\x07 \x03(\x0b\x32\".papers.v1.PaperReferenceCandidate\"\xc9\x01\n\x17PaperReferenceCandidate\x12\x15\n\rraw_reference\x18\x01 \x01(\t\x12\x0f\n\x07\x61uthors\x18\x02 \x03(\t\x12\r\n\x05title\x18\x03 \x01(\t\x12\r\n\x05venue\x18\x04 \x01(\t\x12\x16\n\x0epublished_year\x18\x05 \x01(\x05\x12\x0b\n\x03\x64oi\x18\x06 \x01(\t\x12\x10\n\x08\x61rxiv_id\x18\x07 \x01(\t\x12\x0e\n\x06volume\x18\x08 \x01(\t\x12\r\n\x05pages\x18\t \x01(\t\x12\x12\n\nconfidence\x18\n \x01(\x01\"i\n\x12PaperTextCandidate\x12\r\n\x05value\x18\x01 \x01(\t\x12\x12\n\nconfidence\x18\x02 \x01(\x01\x12\x30\n\x08\x65vidence\x18\x03 \x03(\x0b\x32\x1e.papers.v1.PaperSourceEvidence\"\x83\x01\n\x13PaperSourceEvidence\x12\x15\n\rblock_ordinal\x18\x01 \x01(\x05\x12\x13\n\x0bpage_number\x18\x02 \x01(\x05\x12 \n\x18markdown_codepoint_start\x18\x03 \x01(\x05\x12\x1e\n\x16markdown_codepoint_end\x18\x04 \x01(\x05\x32Z\n\x0e\x44ocumentParser\x12H\n\tRecognize\x12\x1d.papers.v1.RecognitionRequest\x1a\x1c.papers.v1.RecognitionResult2h\n\x16PaperMetadataExtractor\x12N\n\x07\x45xtract\x12!.papers.v1.PaperExtractionRequest\x1a .papers.v1.PaperExtractionResultB$Z\"paperMaster/gen/papers/v1;papersv1b\x06proto3')
 
 _globals = globals()
 _builder.BuildMessageAndEnumDescriptors(DESCRIPTOR, _globals)
@@ -35,23 +35,25 @@ if not _descriptor._USE_C_DESCRIPTORS:
   _globals['_RECOGNITIONREQUEST']._serialized_start=37
   _globals['_RECOGNITIONREQUEST']._serialized_end=190
   _globals['_RECOGNITIONRESULT']._serialized_start=193
-  _globals['_RECOGNITIONRESULT']._serialized_end=427
-  _globals['_RECOGNITIONBLOCK']._serialized_start=430
-  _globals['_RECOGNITIONBLOCK']._serialized_end=737
-  _globals['_PAPEREXTRACTIONREQUEST']._serialized_start=739
-  _globals['_PAPEREXTRACTIONREQUEST']._serialized_end=847
-  _globals['_PAPERSOURCEBLOCK']._serialized_start=849
-  _globals['_PAPERSOURCEBLOCK']._serialized_end=962
-  _globals['_PAPERSOURCELOCATION']._serialized_start=965
-  _globals['_PAPERSOURCELOCATION']._serialized_end=1182
-  _globals['_PAPEREXTRACTIONRESULT']._serialized_start=1185
-  _globals['_PAPEREXTRACTIONRESULT']._serialized_end=1422
-  _globals['_PAPERTEXTCANDIDATE']._serialized_start=1424
-  _globals['_PAPERTEXTCANDIDATE']._serialized_end=1529
-  _globals['_PAPERSOURCEEVIDENCE']._serialized_start=1532
-  _globals['_PAPERSOURCEEVIDENCE']._serialized_end=1663
-  _globals['_DOCUMENTPARSER']._serialized_start=1665
-  _globals['_DOCUMENTPARSER']._serialized_end=1755
-  _globals['_PAPERMETADATAEXTRACTOR']._serialized_start=1757
-  _globals['_PAPERMETADATAEXTRACTOR']._serialized_end=1861
+  _globals['_RECOGNITIONRESULT']._serialized_end=433
+  _globals['_RECOGNITIONBLOCK']._serialized_start=436
+  _globals['_RECOGNITIONBLOCK']._serialized_end=743
+  _globals['_PAPEREXTRACTIONREQUEST']._serialized_start=746
+  _globals['_PAPEREXTRACTIONREQUEST']._serialized_end=888
+  _globals['_PAPERSOURCEBLOCK']._serialized_start=890
+  _globals['_PAPERSOURCEBLOCK']._serialized_end=1003
+  _globals['_PAPERSOURCELOCATION']._serialized_start=1006
+  _globals['_PAPERSOURCELOCATION']._serialized_end=1223
+  _globals['_PAPEREXTRACTIONRESULT']._serialized_start=1226
+  _globals['_PAPEREXTRACTIONRESULT']._serialized_end=1529
+  _globals['_PAPERREFERENCECANDIDATE']._serialized_start=1532
+  _globals['_PAPERREFERENCECANDIDATE']._serialized_end=1733
+  _globals['_PAPERTEXTCANDIDATE']._serialized_start=1735
+  _globals['_PAPERTEXTCANDIDATE']._serialized_end=1840
+  _globals['_PAPERSOURCEEVIDENCE']._serialized_start=1843
+  _globals['_PAPERSOURCEEVIDENCE']._serialized_end=1974
+  _globals['_DOCUMENTPARSER']._serialized_start=1976
+  _globals['_DOCUMENTPARSER']._serialized_end=2066
+  _globals['_PAPERMETADATAEXTRACTOR']._serialized_start=2068
+  _globals['_PAPERMETADATAEXTRACTOR']._serialized_end=2172
 # @@protoc_insertion_point(module_scope)

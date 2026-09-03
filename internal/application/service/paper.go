@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"paperMaster/internal/logger"
@@ -144,6 +145,12 @@ func (s *paperService) AddCitation(
 	if err != nil {
 		return nil, err
 	}
+	if err := s.applyReferenceCandidate(ctx, targetID, input.Candidate, rawReference); err != nil {
+		if created {
+			s.cleanupUnknown(ctx, targetID)
+		}
+		return nil, err
+	}
 	citation := types.PaperCitation{
 		CitingDocumentID: citingID,
 		CitedDocumentID:  targetID,
@@ -197,6 +204,10 @@ func (s *paperService) ReplaceCitations(
 			continue
 		}
 		seenTargets[targetID] = struct{}{}
+		if applyErr := s.applyReferenceCandidate(ctx, targetID, input.Candidate, rawReference); applyErr != nil {
+			s.cleanupUnknownSet(ctx, createdUnknowns)
+			return nil, applyErr
+		}
 		replacements = append(replacements, types.PaperCitation{
 			CitingDocumentID: citingID,
 			CitedDocumentID:  targetID,
@@ -215,6 +226,86 @@ func (s *paperService) ReplaceCitations(
 		"citing_document_id", citingID,
 		"citation_count", len(replacements))
 	return replacements, nil
+}
+
+// applyReferenceCandidate persists only non-empty parsed fields to an unknown
+// citation placeholder. It never changes a resolved/uploaded paper and leaves
+// RawReference on the citation edge untouched.
+func (s *paperService) applyReferenceCandidate(
+	ctx context.Context,
+	documentID uuid.UUID,
+	candidate *types.PaperReferenceCandidate,
+	rawReference string,
+) error {
+	if candidate == nil {
+		return nil
+	}
+	if err := candidate.Validate(); err != nil {
+		return err
+	}
+	if compactPaperText(candidate.RawReference) != compactPaperText(rawReference) {
+		return fmt.Errorf("%w: reference candidate does not match raw reference", types.ErrInvalidPaperExtraction)
+	}
+	document, err := s.documents.Get(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if document.Status != types.DocumentStatusUnknown {
+		return nil
+	}
+	if doi := strings.TrimSpace(candidate.DOI); doi != "" {
+		if _, err := s.documents.SetDOIIfEmpty(ctx, documentID, doi); err != nil {
+			logger.Warn(ctx, "persist reference candidate DOI skipped",
+				"document_id", documentID, "error", err)
+		}
+	}
+	update := referenceCandidateMetadataUpdate(*candidate)
+	if !update.HasChanges() {
+		return nil
+	}
+	if _, err := s.metadata.Upsert(ctx, documentID, update); err != nil {
+		return fmt.Errorf("persist reference candidate metadata: %w", err)
+	}
+	logger.Info(ctx, "reference candidate metadata persisted", "document_id", documentID)
+	return nil
+}
+
+func referenceCandidateMetadataUpdate(candidate types.PaperReferenceCandidate) types.PaperMetadataUpdate {
+	update := types.PaperMetadataUpdate{}
+	if arxivID := paperArXivID(candidate.ArXivID); arxivID != "" {
+		sourceURL := "https://arxiv.org/abs/" + arxivID
+		update.SourceURL = &sourceURL
+	}
+	if title := strings.TrimSpace(candidate.Title); title != "" {
+		update.Title = &title
+	}
+	if venue := strings.TrimSpace(candidate.Venue); venue != "" {
+		update.Venue = &venue
+	}
+	if volume := strings.TrimSpace(candidate.Volume); volume != "" {
+		update.Volume = &volume
+	}
+	if pages := strings.TrimSpace(candidate.Pages); pages != "" {
+		update.Pages = &pages
+	}
+	authors := make([]types.PaperAuthor, 0, len(candidate.Authors))
+	for _, value := range candidate.Authors {
+		if name := strings.TrimSpace(value); name != "" {
+			authors = append(authors, types.PaperAuthor{Name: name})
+		}
+	}
+	if len(authors) > 0 {
+		update.Authors = &authors
+	}
+	if candidate.PublishedYear >= 1000 {
+		publishedAt := time.Date(candidate.PublishedYear, time.January, 1, 0, 0, 0, 0, time.UTC)
+		update.PublishedAt = &publishedAt
+	}
+	if update.HasChanges() {
+		source := types.PaperMetadataSourceExtraction
+		update.MetadataSource = &source
+	}
+	return update
 }
 
 func (s *paperService) RemoveCitation(
