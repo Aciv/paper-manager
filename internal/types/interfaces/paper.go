@@ -35,6 +35,14 @@ type PaperService interface {
 		citingDocumentID string,
 		inputs []types.PaperCitationInput,
 	) ([]types.PaperCitation, error)
+	// MergeExtractedCitations reconciles a positively detected bibliography.
+	// It preserves manual edges and already-resolved targets by normalized raw
+	// reference; an undetected bibliography must not call it.
+	MergeExtractedCitations(
+		ctx context.Context,
+		citingDocumentID string,
+		inputs []types.PaperCitationInput,
+	) ([]types.PaperCitation, error)
 	// RemoveCitation removes one outgoing edge and cleans up an unreferenced
 	// unknown target.
 	RemoveCitation(ctx context.Context, citingDocumentID, citedDocumentID string) error

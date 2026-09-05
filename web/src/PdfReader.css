@@ -18,7 +18,87 @@
 .pdf-selection-actions { display:flex; gap:8px; }
 .pdf-selection-actions .primary { margin:0; }
 .pdf-selection-result { color:#166534; font-weight:650; }
+.pdf-viewer-panel { min-width:0; }
+.pdf-reader { grid-template-columns:clamp(160px, 17vw, 230px) minmax(0, 1fr); min-width:0; }
+.pdf-content { min-width:0; max-height:min(880px, calc(100dvh - 110px)); padding:clamp(10px, 1.5vw, 18px); scrollbar-gutter:stable; }
+.pdf-pages { width:100%; justify-items:center; }
+.pdf-page { width:auto; max-width:100%; }
+.pdf-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+.pdf-toolbar button { padding:5px 9px; font-size:12px; }
+.pdf-reader.outline-collapsed { grid-template-columns:minmax(0, 1fr); }
+.pdf-reader.outline-collapsed .outline { display:none; }
 
+/* Native PDF links are used only as geometric anchors. Their destinations are
+   previewed as original-PDF pixels; no citation text or metadata matching is
+   involved. Keep this layer below Block mode and disable it outside text mode
+   so it cannot interfere with area dragging or Block selection. */
+.citation-link-overlay { position:absolute; inset:0; z-index:3; pointer-events:none; }
+.citation-link-overlay.active { pointer-events:none; }
+.citation-link-hotspot {
+  position:absolute;
+  display:block;
+  min-width:3px;
+  min-height:3px;
+  padding:0;
+  border:0;
+  border-radius:2px;
+  background:transparent;
+  color:inherit;
+  pointer-events:none;
+  cursor:pointer;
+}
+.citation-link-overlay.active .citation-link-hotspot { pointer-events:auto; }
+.citation-link-overlay .citation-link-hotspot:hover:not(:disabled),
+.citation-link-overlay .citation-link-hotspot:focus-visible {
+  z-index:5;
+  border:0;
+  outline:2px solid rgb(37 99 235 / 62%);
+  background:rgb(37 99 235 / 14%);
+}
+.citation-link-preview {
+  position:absolute;
+  z-index:8;
+  left:0;
+  top:calc(100% + 7px);
+  display:grid;
+  width:min(620px, 78vw);
+  min-height:92px;
+  gap:7px;
+  padding:10px;
+  border:1px solid #93b4ef;
+  border-radius:8px;
+  background:#fff;
+  box-shadow:0 12px 34px rgb(15 23 42 / 28%);
+  text-align:left;
+  cursor:pointer;
+}
+.citation-link-hotspot.align-right .citation-link-preview { right:0; left:auto; }
+.citation-link-preview strong { color:#1e3a5f; font-size:12px; }
+.citation-link-preview img { display:block; width:100%; height:auto; max-height:220px; object-fit:contain; object-position:left top; border:1px solid #dce3ed; background:#fff; }
+.citation-link-preview small,
+.citation-link-preview-status { color:#64748b; font-size:11px; }
+.citation-link-preview-error { color:#a51d2d; font-size:12px; }
+
+@media (max-width: 980px) {
+  .pdf-reader { grid-template-columns:minmax(0, 1fr); min-height:520px; }
+  .pdf-reader:not(.outline-collapsed) .outline { display:block; max-height:220px; border-right:0; border-bottom:1px solid #dce3ed; }
+  .pdf-reader-controls { align-items:flex-start; flex-direction:column; }
+  .pdf-mode-switch { width:100%; overflow-x:auto; }
+  .pdf-mode-switch button { flex:1 0 auto; }
+  .pdf-content { max-height:75dvh; padding:10px; }
+  .pdf-toolbar { top:-10px; }
+  .citation-link-preview { width:min(520px, 88vw); }
+}
+
+@media (max-width: 520px) {
+  .pdf-reader { min-height:440px; border-radius:7px; }
+  .pdf-toolbar { align-items:flex-start; flex-direction:column; }
+  .pdf-toolbar button { align-self:flex-end; }
+  .pdf-selection-summary { padding:10px; }
+  .pdf-selection-actions { display:grid; grid-template-columns:1fr 1fr; }
+  .citation-link-preview { position:fixed; right:8px!important; bottom:8px; left:8px!important; top:auto; width:auto; max-height:45dvh; overflow:auto; }
+  .citation-link-preview img { max-height:30dvh; }
+}
 /* react-pdf's text layer uses z-index: 2. Raise the Block hit target only in
    Block mode so its buttons receive pointer events without breaking normal
    text selection or area dragging. */

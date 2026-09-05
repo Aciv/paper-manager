@@ -65,6 +65,12 @@ func (*paperHandlerServiceStub) ReplaceCitations(
 	return nil, nil
 }
 
+func (*paperHandlerServiceStub) MergeExtractedCitations(
+	context.Context, string, []types.PaperCitationInput,
+) ([]types.PaperCitation, error) {
+	return nil, nil
+}
+
 func (*paperHandlerServiceStub) RemoveCitation(context.Context, string, string) error {
 	return nil
 }

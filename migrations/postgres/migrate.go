@@ -60,6 +60,12 @@ var documentProcessingSpanParentsUp string
 //go:embed 000016_remove_markdown_sha256.up.sql
 var removeMarkdownSHA256Up string
 
+//go:embed 000017_paper_metadata_field_sources.up.sql
+var paperMetadataFieldSourcesUp string
+
+//go:embed 000018_paper_citation_origins.up.sql
+var paperCitationOriginsUp string
+
 type migration struct {
 	version int64
 	up      string
@@ -83,6 +89,8 @@ var migrations = []migration{
 	{version: 14, up: documentProcessingSpansUp},
 	{version: 15, up: documentProcessingSpanParentsUp},
 	{version: 16, up: removeMarkdownSHA256Up},
+	{version: 17, up: paperMetadataFieldSourcesUp},
+	{version: 18, up: paperCitationOriginsUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

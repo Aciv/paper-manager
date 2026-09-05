@@ -664,8 +664,11 @@ type PaperExtractionResult struct {
 	// Additive structured interpretation of a raw reference. `references`
 	// remains the compatibility source of truth for the original strings.
 	ReferenceCandidates []*PaperReferenceCandidate `protobuf:"bytes,7,rep,name=reference_candidates,json=referenceCandidates,proto3" json:"reference_candidates,omitempty"`
-	unknownFields       protoimpl.UnknownFields
-	sizeCache           protoimpl.SizeCache
+	// True only when the extractor positively located a bibliography region.
+	// Empty references with false means unavailable/undetected, not "clear all".
+	ReferencesDetected bool `protobuf:"varint,8,opt,name=references_detected,json=referencesDetected,proto3" json:"references_detected,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *PaperExtractionResult) Reset() {
@@ -745,6 +748,13 @@ func (x *PaperExtractionResult) GetReferenceCandidates() []*PaperReferenceCandid
 		return x.ReferenceCandidates
 	}
 	return nil
+}
+
+func (x *PaperExtractionResult) GetReferencesDetected() bool {
+	if x != nil {
+		return x.ReferencesDetected
+	}
+	return false
 }
 
 // PaperReferenceCandidate contains optional fields parsed from one exact raw
@@ -1065,7 +1075,7 @@ const file_document_parser_proto_rawDesc = "" +
 	"\abbox_x1\x18\x06 \x01(\x01R\x06bboxX1\x12\x17\n" +
 	"\abbox_y1\x18\a \x01(\x01R\x06bboxY1\x128\n" +
 	"\x18markdown_codepoint_start\x18\b \x01(\x05R\x16markdownCodepointStart\x124\n" +
-	"\x16markdown_codepoint_end\x18\t \x01(\x05R\x14markdownCodepointEnd\"\x8b\x03\n" +
+	"\x16markdown_codepoint_end\x18\t \x01(\x05R\x14markdownCodepointEnd\"\xbc\x03\n" +
 	"\x15PaperExtractionResult\x123\n" +
 	"\x05title\x18\x01 \x01(\v2\x1d.papers.v1.PaperTextCandidateR\x05title\x127\n" +
 	"\aauthors\x18\x02 \x03(\v2\x1d.papers.v1.PaperTextCandidateR\aauthors\x129\n" +
@@ -1075,7 +1085,8 @@ const file_document_parser_proto_rawDesc = "" +
 	"references\x12%\n" +
 	"\x0eextractor_name\x18\x05 \x01(\tR\rextractorName\x12+\n" +
 	"\x11extractor_version\x18\x06 \x01(\tR\x10extractorVersion\x12U\n" +
-	"\x14reference_candidates\x18\a \x03(\v2\".papers.v1.PaperReferenceCandidateR\x13referenceCandidates\"\xa6\x02\n" +
+	"\x14reference_candidates\x18\a \x03(\v2\".papers.v1.PaperReferenceCandidateR\x13referenceCandidates\x12/\n" +
+	"\x13references_detected\x18\b \x01(\bR\x12referencesDetected\"\xa6\x02\n" +
 	"\x17PaperReferenceCandidate\x12#\n" +
 	"\rraw_reference\x18\x01 \x01(\tR\frawReference\x12\x18\n" +
 	"\aauthors\x18\x02 \x03(\tR\aauthors\x12\x14\n" +

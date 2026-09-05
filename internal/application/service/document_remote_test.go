@@ -51,6 +51,38 @@ func TestCreateDocumentFromURLStoresPDFAndStartsPipeline(t *testing.T) {
 	_ = opened.Close()
 }
 
+func TestCreateDocumentFromURLReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := &documentStatusRepoStub{}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{
+		repo: repo, storage: storage,
+		taskEnqueuer: &documentTaskEnqueuerStub{enqueueErr: errors.New("redis unavailable")},
+		urlResolver:  paperurl.NewResolver(),
+	}
+
+	created, err := service.CreateDocumentFromURL(context.Background(), types.DocumentURLImportCommand{
+		URL: server.URL + "/paper.pdf",
+	})
+	if !errors.Is(err, ErrDocumentProcessQueue) {
+		t.Fatalf("CreateDocumentFromURL() error = %v, want ErrDocumentProcessQueue", err)
+	}
+	if created == nil || created.ID == uuid.Nil || created.Status != types.DocumentStatusFailed {
+		t.Fatalf("created = %#v, want durable failed document", created)
+	}
+	if created.ErrorMessage == nil || *created.ErrorMessage != "document processing was not queued; retry this document" {
+		t.Fatalf("safe queue failure message = %#v", created.ErrorMessage)
+	}
+	opened, openErr := storage.Open(context.Background(), created.StorageKey)
+	if openErr != nil {
+		t.Fatalf("stored remote PDF must remain available for retry: %v", openErr)
+	}
+	_ = opened.Close()
+}
+
 func TestImportRemoteDocumentCleansDuplicateObjectAndRedirectsCitation(t *testing.T) {
 	server := remotePDFTestServer(t)
 	sourceID, placeholderID, canonicalID := uuid.New(), uuid.New(), uuid.New()

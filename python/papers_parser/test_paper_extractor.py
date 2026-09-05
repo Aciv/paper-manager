@@ -87,6 +87,7 @@ An explainable abstract.
         self.assertEqual(result.title.evidence[0].block_ordinal, 3)
         self.assertEqual(tuple(author.value for author in result.authors), ("Ada Lovelace",))
         self.assertEqual(result.abstract.value, "An explainable abstract.")
+        self.assertTrue(result.references_detected)
         self.assertEqual(result.references, ("[1] A raw citation.",))
         self.assertEqual(result.extractor_name, "markdown-rules")
 
@@ -99,6 +100,7 @@ An explainable abstract.
         self.assertIsNone(result.title)
         self.assertEqual(result.authors, ())
         self.assertIsNone(result.abstract)
+        self.assertFalse(result.references_detected)
         self.assertEqual(result.references, ())
 
     def test_uses_rule_selected_markdown_range_not_first_matching_text(self) -> None:

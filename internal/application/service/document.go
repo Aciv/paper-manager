@@ -56,6 +56,11 @@ var (
 	ErrDocumentParseFinished   = errors.New("document parsing has already finished")
 	ErrDocumentParseActive     = errors.New("document parsing is still active")
 	ErrDocumentDeleting        = errors.New("document is being deleted")
+	// ErrDocumentProcessQueue means the source file and document row were
+	// committed, but the initial asynchronous process task was not accepted.
+	// Callers receive the persisted document alongside this error and can use
+	// the normal retry endpoint instead of asking users to upload again.
+	ErrDocumentProcessQueue = errors.New("document process could not be queued")
 )
 
 const maxDocumentDOILength = 255
@@ -176,12 +181,46 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 		return nil, err
 	}
 	logger.Info(ctx, "document created", "document_id", created.ID)
-	if s.taskEnqueuer != nil {
-		if err := s.enqueueDocumentRecognition(ctx, created.ID); err != nil {
-			return nil, err
-		}
+	return s.startCreatedDocumentProcessing(ctx, created)
+}
+
+// startCreatedDocumentProcessing starts the initial parse after the file and
+// row are durable. A queue outage must not hide that successful creation:
+// callers get the refreshed failed document plus ErrDocumentProcessQueue and
+// can invoke RetryDocumentParse without uploading the same file again.
+func (s *documentService) startCreatedDocumentProcessing(
+	ctx context.Context,
+	created types.Document,
+) (*types.Document, error) {
+	if s.taskEnqueuer == nil {
+		return &created, nil
 	}
-	return &created, nil
+	if err := s.enqueueDocumentRecognition(ctx, created.ID); err != nil {
+		persisted := s.loadCreatedDocumentAfterQueue(ctx, created)
+		logger.Warn(ctx, "document created but initial process was not queued",
+			"document_id", persisted.ID,
+			"status", persisted.Status,
+			"error", err)
+		return &persisted, fmt.Errorf("%w: %w", ErrDocumentProcessQueue, err)
+	}
+	returnDocument := s.loadCreatedDocumentAfterQueue(ctx, created)
+	return &returnDocument, nil
+}
+
+// loadCreatedDocumentAfterQueue returns the database state after a queue
+// transition. Repository read failure is non-fatal here because the caller
+// already holds the durable created row; logging preserves the diagnostic.
+func (s *documentService) loadCreatedDocumentAfterQueue(
+	ctx context.Context,
+	created types.Document,
+) types.Document {
+	persisted, err := s.repo.Get(ctx, created.ID)
+	if err != nil {
+		logger.Warn(ctx, "reload created document after queue transition failed",
+			"document_id", created.ID, "error", err)
+		return created
+	}
+	return persisted
 }
 
 func multipartFileSHA256(file *multipart.FileHeader) (string, error) {
@@ -214,13 +253,20 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 		attempt = attempts[0]
 	}
 	if err := s.startDocumentProcess(ctx, documentID, attempt); err != nil {
-		message := "document recognition could not be queued: " + err.Error()
-		if updateErr := s.repo.UpdateStatus(context.WithoutCancel(ctx), documentID, types.DocumentStatusFailed, &message); updateErr != nil {
-			logger.Error(ctx, "record document queue failure failed", "document_id", documentID, "error", updateErr)
-		}
+		s.markDocumentQueueFailure(ctx, documentID)
 		return err
 	}
 	return nil
+}
+
+// markDocumentQueueFailure restores a terminal, retryable state when an
+// Asynq handoff fails. It deliberately persists no transport detail because
+// Document.ErrorMessage is returned to API clients.
+func (s *documentService) markDocumentQueueFailure(ctx context.Context, documentID uuid.UUID) {
+	message := "document processing was not queued; retry this document"
+	if err := s.repo.UpdateStatus(context.WithoutCancel(ctx), documentID, types.DocumentStatusFailed, &message); err != nil {
+		logger.Error(ctx, "record document queue failure failed", "document_id", documentID, "error", err)
+	}
 }
 
 func (s *documentService) startDocumentProcess(ctx context.Context, documentID uuid.UUID, attempt int) error {
@@ -299,7 +345,11 @@ func (s *documentService) RetryDocumentProcess(ctx context.Context, id string) (
 		document.ErrorMessage = nil
 	}
 	if err := s.startDocumentProcess(ctx, document.ID, attempt); err != nil {
-		return nil, err
+		s.markDocumentQueueFailure(ctx, document.ID)
+		failed := s.loadCreatedDocumentAfterQueue(ctx, *document)
+		logger.Warn(ctx, "document process retry was not queued",
+			"document_id", failed.ID, "status", failed.Status, "error", err)
+		return &failed, fmt.Errorf("%w: %w", ErrDocumentProcessQueue, err)
 	}
 	logger.Info(ctx, "document process retry started", "document_id", document.ID, "attempt", attempt)
 	return document, nil
@@ -337,7 +387,8 @@ func (s *documentService) RetryDocumentParse(ctx context.Context, id string) (*t
 		attempt = view.LatestAttempt + 1
 	}
 	if err := s.enqueueDocumentRecognition(ctx, document.ID, attempt); err != nil {
-		return nil, err
+		failed := s.loadCreatedDocumentAfterQueue(ctx, *document)
+		return &failed, fmt.Errorf("%w: %w", ErrDocumentProcessQueue, err)
 	}
 	queued, err := s.GetDocumentByID(ctx, id)
 	if err != nil {

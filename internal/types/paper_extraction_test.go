@@ -64,7 +64,8 @@ func TestPaperExtractionResultValidate(t *testing.T) {
 				MarkdownCodepointEnd:   7,
 			}},
 		},
-		Authors: []PaperTextCandidate{{Value: "Ada Lovelace", Confidence: 0.8}},
+		Authors:            []PaperTextCandidate{{Value: "Ada Lovelace", Confidence: 0.8}},
+		ReferencesDetected: true,
 		References: []string{
 			"- A. Author. A cited work. 2025.",
 		},
@@ -88,14 +89,34 @@ func TestPaperExtractionResultValidate(t *testing.T) {
 
 func TestPaperExtractionResultRejectsTooManyReferences(t *testing.T) {
 	result := PaperExtractionResult{
-		ExtractorName: "markdown-rules",
-		References:    make([]string, MaxPaperExtractionReferences+1),
+		ExtractorName:      "markdown-rules",
+		ReferencesDetected: true,
+		References:         make([]string, MaxPaperExtractionReferences+1),
 	}
 	for index := range result.References {
 		result.References[index] = "reference"
 	}
 	if err := result.Validate(); !errors.Is(err, ErrInvalidPaperExtraction) {
 		t.Fatalf("expected reference count validation error, got %v", err)
+	}
+}
+
+func TestPaperExtractionResultRequiresDetectedBibliographyForReferences(t *testing.T) {
+	result := PaperExtractionResult{
+		ExtractorName: "markdown-rules",
+		References:    []string{"[1] A reference."},
+	}
+	if err := result.Validate(); !errors.Is(err, ErrInvalidPaperExtraction) {
+		t.Fatalf("undetected bibliography error = %v, want invalid extraction", err)
+	}
+
+	result.References = nil
+	if err := result.Validate(); err != nil {
+		t.Fatalf("undetected empty bibliography should remain valid: %v", err)
+	}
+	result.ReferencesDetected = true
+	if err := result.Validate(); err != nil {
+		t.Fatalf("detected empty bibliography should remain valid: %v", err)
 	}
 }
 

@@ -43,6 +43,10 @@ services:
     build:
       context: .
       dockerfile: python/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-${ALL_PROXY:-}}
+        HTTPS_PROXY: ${HTTPS_PROXY:-${ALL_PROXY:-}}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
     environment:
       UPLOAD_DIR: /data/uploads
       RECOGNITION_OUTPUT_DIR: /data/recognition-output
@@ -81,6 +85,11 @@ services:
       dockerfile: Dockerfile
       args:
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+        # Prefer explicit HTTP(S)_PROXY. In WSL/Docker Desktop setups that
+        # only export ALL_PROXY, use it rather than a stale ~/.docker proxy.
+        HTTP_PROXY: ${HTTP_PROXY:-${ALL_PROXY:-}}
+        HTTPS_PROXY: ${HTTPS_PROXY:-${ALL_PROXY:-}}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
     environment:
       DATABASE_URL: postgres://papers:papers@postgres:5432/papers?sslmode=disable
       UPLOAD_DIR: /data/uploads
@@ -152,6 +161,10 @@ services:
     build:
       context: .
       dockerfile: web/Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-${ALL_PROXY:-}}
+        HTTPS_PROXY: ${HTTPS_PROXY:-${ALL_PROXY:-}}
+        NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
     depends_on:
       - api
     ports:

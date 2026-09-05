@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"errors"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -18,7 +19,18 @@ import (
 	"paperMaster/internal/types"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
+
+type failingDocumentTaskEnqueuer struct{}
+
+func (*failingDocumentTaskEnqueuer) EnqueueContext(
+	context.Context,
+	*asynq.Task,
+	...asynq.Option,
+) (*asynq.TaskInfo, error) {
+	return nil, errors.New("queue unavailable")
+}
 
 type documentCreatorStub struct {
 	document types.Document
@@ -241,6 +253,65 @@ func TestUploadRouteStoresDocument(t *testing.T) {
 	}
 	if _, err := storage.Open(context.Background(), documents.document.StorageKey); err == nil {
 		t.Fatal("stored file still exists after deletion")
+	}
+}
+
+func TestUploadRouteReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	documents := &documentCreatorStub{}
+	documentService := service.NewDocumentServiceWithProcessing(
+		config.Config{MaxUploadSize: fileservice.DefaultMaxUploadSize},
+		documents,
+		storage,
+		nil,
+		&failingDocumentTaskEnqueuer{},
+		nil,
+	)
+	documentHandler := handler.NewDocumentHandler(config.Config{MaxUploadSize: fileservice.DefaultMaxUploadSize}, documentService)
+	processHandler := handler.NewDocumentProcessHandler(documentService)
+	engine := router.NewRouter(router.RouterParams{DocumentHandler: documentHandler, DocumentProcessHandler: processHandler})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "retryable.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("durable despite queue failure")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/document/upload", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+
+	if response.Code != http.StatusCreated {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	if documents.document.ID == uuid.Nil || documents.document.Status != types.DocumentStatusFailed {
+		t.Fatalf("persisted document = %#v, want failed durable document", documents.document)
+	}
+	if !strings.Contains(response.Body.String(), documents.document.ID.String()) ||
+		!strings.Contains(response.Body.String(), `"processingQueued":false`) ||
+		!strings.Contains(response.Body.String(), `"retryable":true`) {
+		t.Fatalf("response must expose retryable created document: %s", response.Body.String())
+	}
+	if _, err := storage.Open(context.Background(), documents.document.StorageKey); err != nil {
+		t.Fatalf("stored source must remain available for retry: %v", err)
+	}
+	retryRequest := httptest.NewRequest(http.MethodPost, "/api/document/"+documents.document.ID.String()+"/retry", nil)
+	retryResponse := httptest.NewRecorder()
+	engine.ServeHTTP(retryResponse, retryRequest)
+	if retryResponse.Code != http.StatusAccepted ||
+		!strings.Contains(retryResponse.Body.String(), `"processingQueued":false`) ||
+		documents.document.Status != types.DocumentStatusFailed {
+		t.Fatalf("retry queue failure response=%d body=%s document=%#v", retryResponse.Code, retryResponse.Body.String(), documents.document)
 	}
 }
 

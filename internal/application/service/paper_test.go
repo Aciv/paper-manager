@@ -336,6 +336,80 @@ func (r *paperCitationRepoStub) ReplaceCitations(
 	return nil
 }
 
+func (r *paperCitationRepoStub) MergeAutomaticCitations(
+	_ context.Context,
+	citingDocumentID uuid.UUID,
+	citations []types.PaperCitation,
+) ([]types.PaperCitation, []types.PaperCitation, error) {
+	existing, err := r.ListByCitingDocumentID(context.Background(), citingDocumentID)
+	if err != nil {
+		return nil, nil, err
+	}
+	items, removed := mergeAutomaticCitationsForStub(existing, citations)
+	for key, citation := range r.items {
+		if key[0] == citingDocumentID && citation.EffectiveOrigin() == types.PaperCitationOriginExtraction {
+			delete(r.items, key)
+		}
+	}
+	for _, citation := range items {
+		if citation.EffectiveOrigin() == types.PaperCitationOriginExtraction {
+			r.items[citationKey(citingDocumentID, citation.CitedDocumentID)] = citation
+		}
+	}
+	for _, citation := range existing {
+		if citation.EffectiveOrigin() == types.PaperCitationOriginManual {
+			r.items[citationKey(citingDocumentID, citation.CitedDocumentID)] = citation
+		}
+	}
+	return items, removed, nil
+}
+
+// mergeAutomaticCitationsForStub mirrors the externally visible repository
+// contract closely enough for PaperService tests. Repository unit tests cover
+// the PostgreSQL merge policy itself; this stub only needs to retain manual
+// edges and a previously resolved automatic target for the same raw reference.
+func mergeAutomaticCitationsForStub(
+	existing []types.PaperCitation,
+	incoming []types.PaperCitation,
+) (items []types.PaperCitation, removed []types.PaperCitation) {
+	manualByReference := make(map[string]types.PaperCitation)
+	automaticByReference := make(map[string]types.PaperCitation)
+	for _, citation := range existing {
+		key := types.PaperCitationReferenceKey(citation.RawReference)
+		if citation.EffectiveOrigin() == types.PaperCitationOriginExtraction {
+			automaticByReference[key] = citation
+			continue
+		}
+		citation.Origin = types.PaperCitationOriginManual
+		manualByReference[key] = citation
+		items = append(items, citation)
+	}
+	keptAutomatic := make(map[uuid.UUID]struct{}, len(incoming))
+	seen := make(map[string]struct{}, len(incoming))
+	for _, citation := range incoming {
+		key := types.PaperCitationReferenceKey(citation.RawReference)
+		if _, duplicate := seen[key]; duplicate {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, manual := manualByReference[key]; manual {
+			continue
+		}
+		if existingAutomatic, ok := automaticByReference[key]; ok {
+			citation.CitedDocumentID = existingAutomatic.CitedDocumentID
+		}
+		citation.Origin = types.PaperCitationOriginExtraction
+		items = append(items, citation)
+		keptAutomatic[citation.CitedDocumentID] = struct{}{}
+	}
+	for _, citation := range automaticByReference {
+		if _, kept := keptAutomatic[citation.CitedDocumentID]; !kept {
+			removed = append(removed, citation)
+		}
+	}
+	return items, removed
+}
+
 func (r *paperCitationRepoStub) RemoveCitation(
 	_ context.Context, citingDocumentID, citedDocumentID uuid.UUID,
 ) error {
@@ -353,7 +427,8 @@ func (r *paperCitationRepoStub) RepointCitation(
 	rawReference string,
 ) error {
 	oldKey := citationKey(citingDocumentID, oldCitedDocumentID)
-	if _, ok := r.items[oldKey]; !ok {
+	old, ok := r.items[oldKey]
+	if !ok {
 		return sql.ErrNoRows
 	}
 	delete(r.items, oldKey)
@@ -361,6 +436,7 @@ func (r *paperCitationRepoStub) RepointCitation(
 		CitingDocumentID: citingDocumentID,
 		CitedDocumentID:  newCitedDocumentID,
 		RawReference:     rawReference,
+		Origin:           old.EffectiveOrigin(),
 	}
 	if err := replacement.Validate(); err != nil {
 		return err
@@ -567,6 +643,64 @@ func TestPaperServiceResolveCitationRepointsAndCleansPlaceholder(t *testing.T) {
 	}
 	if len(reverse) != 1 || reverse[0].CitingDocumentID != citing.ID {
 		t.Fatalf("reverse citations = %#v", reverse)
+	}
+}
+
+func TestPaperServiceMergeExtractedCitationsRetainsResolvedTarget(t *testing.T) {
+	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	resolved := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	service, documents, _, _ := newPaperServiceForTest(citing, resolved)
+	raw := "[7] Ada Lovelace. Notes on the analytical engine."
+
+	first, err := service.MergeExtractedCitations(context.Background(), citing.ID.String(), []types.PaperCitationInput{{
+		RawReference: raw,
+	}})
+	if err != nil || len(first) != 1 {
+		t.Fatalf("first MergeExtractedCitations() items=%#v err=%v", first, err)
+	}
+	placeholderID := first[0].CitedDocumentID
+	if documents.documents[placeholderID].Status != types.DocumentStatusUnknown {
+		t.Fatalf("first target status = %q, want unknown", documents.documents[placeholderID].Status)
+	}
+	if _, err := service.ResolveCitation(context.Background(), citing.ID.String(), resolved.ID.String(), raw); err != nil {
+		t.Fatalf("ResolveCitation() error = %v", err)
+	}
+
+	second, err := service.MergeExtractedCitations(context.Background(), citing.ID.String(), []types.PaperCitationInput{{
+		RawReference: "  [7] ADA Lovelace. Notes on the analytical engine. ",
+	}})
+	if err != nil {
+		t.Fatalf("second MergeExtractedCitations() error = %v", err)
+	}
+	if len(second) != 1 || second[0].CitedDocumentID != resolved.ID {
+		t.Fatalf("second merge = %#v, want resolved target %s", second, resolved.ID)
+	}
+	if second[0].EffectiveOrigin() != types.PaperCitationOriginExtraction {
+		t.Fatalf("merged citation origin = %q, want extraction", second[0].Origin)
+	}
+	if _, exists := documents.documents[placeholderID]; exists {
+		t.Fatal("resolved placeholder was recreated or retained after repeat extraction")
+	}
+}
+
+func TestPaperServiceMergeExtractedCitationsDoesNotRemoveManualEdge(t *testing.T) {
+	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	manualTarget := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	service, _, _, _ := newPaperServiceForTest(citing, manualTarget)
+	if _, err := service.AddCitation(context.Background(), citing.ID.String(), types.PaperCitationInput{
+		CitedDocumentID: &manualTarget.ID,
+		RawReference:    "Curated citation",
+	}); err != nil {
+		t.Fatalf("AddCitation() error = %v", err)
+	}
+
+	items, err := service.MergeExtractedCitations(context.Background(), citing.ID.String(), nil)
+	if err != nil {
+		t.Fatalf("MergeExtractedCitations() error = %v", err)
+	}
+	if len(items) != 1 || items[0].CitedDocumentID != manualTarget.ID ||
+		items[0].EffectiveOrigin() != types.PaperCitationOriginManual {
+		t.Fatalf("manual citation was not retained: %#v", items)
 	}
 }
 

@@ -132,6 +132,7 @@ RPC extraction.
         self.assertEqual(response.title.evidence[0].block_ordinal, 0)
         self.assertEqual(response.authors[0].value, "Grace Hopper")
         self.assertEqual(response.abstract.value, "RPC extraction.")
+        self.assertTrue(response.references_detected)
         self.assertEqual(list(response.references), ["[1] Raw reference."])
         self.assertEqual(response.reference_candidates[0].raw_reference, "[1] Raw reference.")
         self.assertEqual(response.extractor_name, "markdown-rules")

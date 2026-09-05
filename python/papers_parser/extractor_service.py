@@ -219,6 +219,7 @@ def _encode_extraction_output(output: ExtractionOutput):
     if any(not reference.strip() for reference in references):
         raise ValueError("references cannot contain empty values")
     response = document_parser_pb2.PaperExtractionResult(
+        references_detected=output.references_detected,
         references=references,
         extractor_name=output.extractor_name,
         extractor_version=output.extractor_version,

@@ -13,6 +13,7 @@ function formatAuthors(authors: PaperMetadata['authors']) {
 }
 
 export function PaperLibraryPage() {
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [bases, setBases] = useState<DocumentBase[]>([]);
   const [baseID, setBaseID] = useState('');
   const [page, setPage] = useState<DocumentPage>({ items: [], page: 1, pageSize: 10, total: 0 });
@@ -113,8 +114,8 @@ export function PaperLibraryPage() {
       });
   }
 
-  return <main className="paper-library">
-    <aside className="paper-library-sidebar">
+  return <main className={`paper-library${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+    <aside id="paper-library-sidebar" className="paper-library-sidebar">
       <header>
         <p className="eyebrow">Papers Manager</p>
         <h1>论文阅读库</h1>
@@ -149,6 +150,7 @@ export function PaperLibraryPage() {
           <h2>{selected ? documentTitle(selected, metadata) : '请选择一篇论文'}</h2>
         </div>
         <div className="paper-library-tabs" role="toolbar" aria-label="论文信息操作">
+          <button type="button" aria-controls="paper-library-sidebar" aria-expanded={!sidebarCollapsed} onClick={() => setSidebarCollapsed(collapsed => !collapsed)}>{sidebarCollapsed ? '展开论文库' : '收起论文库'}</button>
           <button className={sourceInfoVisible ? 'active' : ''} type="button" onClick={() => setSourceInfoVisible((visible) => !visible)} disabled={!selected}>{sourceInfoVisible ? '收起源信息' : '查看源信息'}</button>
           <button type="button" onClick={() => setCitationDialogOpen(true)} disabled={!selected}>引用信息查看</button>
         </div>

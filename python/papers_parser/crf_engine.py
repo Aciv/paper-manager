@@ -166,10 +166,16 @@ class CRFPaperExtractionEngine:
         if reference_indexes and min(reference_confidence[index] for index in reference_indexes) >= self._reference_threshold:
             decoded = decode_reference_layout("runtime", lines, reference_labels)
             references = tuple(filter_reference_items(entry.raw_text for entry in decoded.entries))
+            references_detected = True
         else:
             references = ()
+            references_detected = False
         return ExtractionOutput(
-            title=title, authors=authors, abstract=abstract, references=references,
+            title=title,
+            authors=authors,
+            abstract=abstract,
+            references_detected=references_detected,
+            references=references,
             reference_candidates=self.reference_candidates(references),
             extractor_name=self.name, extractor_version=self.version,
         )
@@ -226,6 +232,7 @@ class HybridPaperExtractionEngine:
                 title=base.title,
                 authors=base.authors,
                 abstract=base.abstract,
+                references_detected=base.references_detected,
                 references=tuple(references), reference_candidates=candidates,
                 extractor_name=self.name + "-no-layout", extractor_version=self.version,
             )
@@ -238,6 +245,7 @@ class HybridPaperExtractionEngine:
             title=title,
             authors=authors,
             abstract=abstract,
+            references_detected=base.references_detected,
             references=tuple(references), reference_candidates=candidates,
             extractor_name=self.name, extractor_version=self.version,
         )

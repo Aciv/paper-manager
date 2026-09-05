@@ -103,6 +103,16 @@ func (h *DocumentProcessHandler) RetryDocumentParse(c *gin.Context) {
 	}
 	document, err := h.documents.RetryDocumentProcess(c.Request.Context(), documentID.String())
 	if err != nil {
+		if document != nil && errors.Is(err, appservice.ErrDocumentProcessQueue) {
+			logger.Warn(c.Request.Context(), "document process retry could not be queued",
+				"document_id", document.ID, "status", document.Status)
+			c.JSON(http.StatusAccepted, gin.H{
+				"document":         document,
+				"processingQueued": false,
+				"retryable":        true,
+			})
+			return
+		}
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)

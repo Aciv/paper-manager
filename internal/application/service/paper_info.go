@@ -225,25 +225,41 @@ func (s *paperInfoService) ExtractMetadata(
 	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
 		return false, err
 	}
-	updatedMetadata, err := s.papers.UpdateMetadata(
-		ctx,
-		command.DocumentID.String(),
-		update,
-	)
-	if err != nil {
-		logger.Error(ctx, "persist extracted paper metadata failed", "error", err)
-		return false, fmt.Errorf("persist extracted paper metadata: %w", err)
+	var updatedMetadata *types.PaperMetadata
+	if update.HasDataChanges() {
+		updatedMetadata, err = s.papers.UpdateMetadata(
+			ctx,
+			command.DocumentID.String(),
+			update,
+		)
+		if err != nil {
+			logger.Error(ctx, "persist extracted paper metadata failed", "error", err)
+			return false, fmt.Errorf("persist extracted paper metadata: %w", err)
+		}
+	} else {
+		// An extractor that finds no usable field did not ask to clear the
+		// canonical record. Reload it so catalog eligibility remains based on
+		// persisted data rather than an empty transient result.
+		updatedMetadata, err = s.papers.GetMetadata(ctx, command.DocumentID.String())
+		if err != nil {
+			return false, fmt.Errorf("load current paper metadata: %w", err)
+		}
+		logger.Info(ctx, "paper metadata extraction produced no usable fields")
 	}
 	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
 		return false, err
 	}
-	if _, err := s.papers.ReplaceCitations(
-		ctx,
-		command.DocumentID.String(),
-		references,
-	); err != nil {
-		logger.Error(ctx, "persist extracted paper references failed", "error", err)
-		return false, fmt.Errorf("persist extracted paper references: %w", err)
+	if result.ReferencesDetected {
+		if _, err := s.papers.MergeExtractedCitations(
+			ctx,
+			command.DocumentID.String(),
+			references,
+		); err != nil {
+			logger.Error(ctx, "persist extracted paper references failed", "error", err)
+			return false, fmt.Errorf("persist extracted paper references: %w", err)
+		}
+	} else {
+		logger.Info(ctx, "paper bibliography not detected; existing citations retained")
 	}
 	document, err := s.documents.Get(ctx, command.DocumentID)
 	if err != nil {
@@ -253,6 +269,7 @@ func (s *paperInfoService) ExtractMetadata(
 	logger.Info(ctx, "paper metadata extraction persisted",
 		"author_count", len(result.Authors),
 		"reference_count", len(references),
+		"references_detected", result.ReferencesDetected,
 		"metadata_applied", updatedMetadata.MetadataSource == types.PaperMetadataSourceExtraction,
 		"catalog_resolvable", catalogResolvable,
 		"extractor", result.ExtractorName)
@@ -959,13 +976,16 @@ func (s *paperInfoService) ensureReferenceRunActive(ctx context.Context, documen
 func extractionMetadataUpdate(
 	result *types.PaperExtractionResult,
 ) types.PaperMetadataUpdate {
-	title := ""
+	update := types.PaperMetadataUpdate{}
 	if result.Title != nil {
-		title = compactPaperText(result.Title.Value)
+		if title := compactPaperText(result.Title.Value); title != "" {
+			update.Title = &title
+		}
 	}
-	abstract := ""
 	if result.Abstract != nil {
-		abstract = compactPaperText(result.Abstract.Value)
+		if abstract := compactPaperText(result.Abstract.Value); abstract != "" {
+			update.Abstract = &abstract
+		}
 	}
 	authors := make([]types.PaperAuthor, 0, len(result.Authors))
 	for _, candidate := range result.Authors {
@@ -974,12 +994,13 @@ func extractionMetadataUpdate(
 			authors = append(authors, types.PaperAuthor{Name: name})
 		}
 	}
-	return types.PaperMetadataUpdate{
-		Title:          &title,
-		Abstract:       &abstract,
-		Authors:        &authors,
-		MetadataSource: paperMetadataSourcePointer(types.PaperMetadataSourceExtraction),
+	if len(authors) > 0 {
+		update.Authors = &authors
 	}
+	if update.HasDataChanges() {
+		update.MetadataSource = paperMetadataSourcePointer(types.PaperMetadataSourceExtraction)
+	}
+	return update
 }
 
 func extractionCitationInputs(
@@ -1392,36 +1413,61 @@ func paperArXivID(value string) string {
 func catalogMetadataUpdate(
 	candidate types.PaperCatalogCandidate,
 ) types.PaperMetadataUpdate {
-	title := compactPaperText(candidate.Title)
-	abstract := compactPaperText(candidate.Abstract)
-	authors := append([]types.PaperAuthor(nil), candidate.Authors...)
-	tags := append([]string(nil), candidate.Tags...)
+	update := types.PaperMetadataUpdate{}
+	if title := compactPaperText(candidate.Title); title != "" {
+		update.Title = &title
+	}
+	if abstract := compactPaperText(candidate.Abstract); abstract != "" {
+		update.Abstract = &abstract
+	}
+	authors := make([]types.PaperAuthor, 0, len(candidate.Authors))
+	for _, author := range candidate.Authors {
+		if name := compactPaperText(author.Name); name != "" {
+			author.Name = name
+			author.Affiliation = compactPaperText(author.Affiliation)
+			authors = append(authors, author)
+		}
+	}
+	if len(authors) > 0 {
+		update.Authors = &authors
+	}
+	tags := make([]string, 0, len(candidate.Tags))
+	for _, tag := range candidate.Tags {
+		if tag = compactPaperText(tag); tag != "" {
+			tags = append(tags, tag)
+		}
+	}
 	if len(tags) > maxAutomaticPaperTags {
 		tags = tags[:maxAutomaticPaperTags]
 	}
-	sourceName := compactPaperText(candidate.SourceName)
-	sourceURL := strings.TrimSpace(candidate.SourceURL)
-	venue := compactPaperText(candidate.Venue)
-	volume := compactPaperText(candidate.Volume)
-	issue := compactPaperText(candidate.Issue)
-	pages := compactPaperText(candidate.Pages)
-	language := compactPaperText(candidate.Language)
-	return types.PaperMetadataUpdate{
-		Title:       &title,
-		Abstract:    &abstract,
-		Authors:     &authors,
-		Tags:        &tags,
-		SourceName:  &sourceName,
-		SourceURL:   &sourceURL,
-		Venue:       &venue,
-		PublishedAt: candidate.PublishedAt,
-		Volume:      &volume,
-		Issue:       &issue,
-		Pages:       &pages,
-		Language:    &language,
-		MetadataSource: paperMetadataSourcePointer(
-			types.PaperMetadataSourceCatalog,
-		),
+	if len(tags) > 0 {
+		update.Tags = &tags
+	}
+	setCatalogMetadataText(&update.SourceName, candidate.SourceName)
+	setCatalogMetadataURL(&update.SourceURL, candidate.SourceURL)
+	setCatalogMetadataText(&update.Venue, candidate.Venue)
+	setCatalogMetadataText(&update.Volume, candidate.Volume)
+	setCatalogMetadataText(&update.Issue, candidate.Issue)
+	setCatalogMetadataText(&update.Pages, candidate.Pages)
+	setCatalogMetadataText(&update.Language, candidate.Language)
+	if candidate.PublishedAt != nil {
+		update.PublishedAt = candidate.PublishedAt
+	}
+	if update.HasDataChanges() {
+		update.MetadataSource = paperMetadataSourcePointer(types.PaperMetadataSourceCatalog)
+	}
+	return update
+}
+
+func setCatalogMetadataText(destination **string, value string) {
+	if value = compactPaperText(value); value != "" {
+		*destination = &value
+	}
+}
+
+func setCatalogMetadataURL(destination **string, value string) {
+	if value = strings.TrimSpace(value); value != "" {
+		*destination = &value
 	}
 }
 

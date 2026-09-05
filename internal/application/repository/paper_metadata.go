@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type paperMetadataRepository struct {
@@ -39,28 +41,47 @@ func (r *paperMetadataRepository) Upsert(
 	var updated types.PaperMetadata
 	incomingSource := types.PaperMetadataSourceUnknown
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		metadata := &types.PaperMetadata{}
-		preparePaperMetadata(metadata, documentID)
-		if err := tx.FirstOrCreate(metadata, "document_id = ?", documentID).Error; err != nil {
-			return err
+		metadata := types.PaperMetadata{}
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&metadata, "document_id = ?", documentID).Error; err != nil {
+			if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			preparePaperMetadata(&metadata, documentID)
+			if err := tx.Create(&metadata).Error; err != nil {
+				return err
+			}
+			// Lock the newly created row as well so every merge below uses the
+			// same serialized path as an existing row.
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				First(&metadata, "document_id = ?", documentID).Error; err != nil {
+				return err
+			}
 		}
-		changes, err := paperMetadataChanges(&update)
+		changes, nextSources, applied, err := mergePaperMetadataChanges(metadata.FieldSources, &update)
 		if err != nil {
 			return err
 		}
 		if len(changes) > 0 {
 			if update.MetadataSource != nil {
 				incomingSource = *update.MetadataSource
+				changes["metadata_source"] = incomingSource
 			}
-			// Metadata is last-write-wins. `paperMetadataChanges` contains only
-			// non-nil fields, so a partial update never alters omitted fields.
-			// A non-nil empty string/slice remains an explicit clear operation.
+			encodedSources, err := json.Marshal(nextSources)
+			if err != nil {
+				return fmt.Errorf("encode paper metadata field sources: %w", err)
+			}
+			changes["field_sources"] = gorm.Expr("?::jsonb", string(encodedSources))
+			// A non-nil empty string/slice is an explicit manual clear. Automated
+			// writers are filtered by mergePaperMetadataChanges before this query.
 			result := tx.Model(&types.PaperMetadata{}).
 				Where("document_id = ?", documentID).
 				Updates(changes)
 			if result.Error != nil {
 				return result.Error
 			}
+			logger.Info(ctx, "paper metadata fields updated", "document_id", documentID,
+				"metadata_source", incomingSource, "field_count", len(applied))
 		}
 		return tx.First(&updated, "document_id = ?", documentID).Error
 	})
@@ -68,7 +89,7 @@ func (r *paperMetadataRepository) Upsert(
 		logger.Error(ctx, "upsert paper metadata failed", "document_id", documentID, "error", err)
 		return types.PaperMetadata{}, repositoryError(err)
 	}
-	logger.Info(ctx, "paper metadata updated", "document_id", documentID, "metadata_source", incomingSource)
+	logger.Info(ctx, "paper metadata update completed", "document_id", documentID, "metadata_source", incomingSource)
 	return updated, nil
 }
 
@@ -134,10 +155,22 @@ func preparePaperMetadata(metadata *types.PaperMetadata, documentID uuid.UUID) {
 	metadata.Tags = []string{}
 	metadata.Metadata = types.JSON(`{}`)
 	metadata.MetadataSource = types.PaperMetadataSourceUnknown
+	metadata.FieldSources = types.PaperMetadataFieldSources{}
+}
+
+// paperMetadataFieldNames are both JSON keys in field_sources and column names
+// in paper_metadata. Keeping one canonical list prevents a newly editable
+// field from silently bypassing manual-edit protection.
+var paperMetadataFieldNames = []string{
+	"title", "abstract", "authors", "tags", "source_name", "source_url",
+	"venue", "published_at", "volume", "issue", "pages", "language",
 }
 
 func paperMetadataChanges(update *types.PaperMetadataUpdate) (map[string]interface{}, error) {
 	changes := map[string]interface{}{}
+	if update == nil {
+		return changes, nil
+	}
 	if update.Title != nil {
 		changes["title"] = *update.Title
 	}
@@ -190,13 +223,48 @@ func paperMetadataChanges(update *types.PaperMetadataUpdate) (map[string]interfa
 	if update.Language != nil {
 		changes["language"] = *update.Language
 	}
-	if update.MetadataSource != nil {
-		if !update.MetadataSource.IsValid() {
-			return nil, fmt.Errorf("invalid paper metadata source %q", *update.MetadataSource)
-		}
-		changes["metadata_source"] = *update.MetadataSource
-	}
 	return changes, nil
+}
+
+// mergePaperMetadataChanges builds an atomic patch from one incoming update.
+// Manual fields are sticky: automatic extraction/catalog patches cannot alter
+// them, including with an empty candidate. A manual patch may explicitly clear
+// a field and remains protected after that clear.
+func mergePaperMetadataChanges(
+	existing types.PaperMetadataFieldSources,
+	update *types.PaperMetadataUpdate,
+) (map[string]interface{}, types.PaperMetadataFieldSources, []string, error) {
+	changes, err := paperMetadataChanges(update)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	incoming := types.PaperMetadataSourceUnknown
+	if update != nil && update.MetadataSource != nil {
+		incoming = *update.MetadataSource
+		if !incoming.IsValid() {
+			return nil, nil, nil, fmt.Errorf("invalid paper metadata source %q", incoming)
+		}
+	}
+	next := make(types.PaperMetadataFieldSources, len(existing)+len(changes))
+	for field, source := range existing {
+		if source.IsValid() {
+			next[field] = source
+		}
+	}
+	applied := make([]string, 0, len(changes))
+	for _, field := range paperMetadataFieldNames {
+		_, present := changes[field]
+		if !present {
+			continue
+		}
+		if incoming != types.PaperMetadataSourceManual && next[field] == types.PaperMetadataSourceManual {
+			delete(changes, field)
+			continue
+		}
+		next[field] = incoming
+		applied = append(applied, field)
+	}
+	return changes, next, applied, nil
 }
 
 var _ interfaces.PaperMetadataRepository = (*paperMetadataRepository)(nil)

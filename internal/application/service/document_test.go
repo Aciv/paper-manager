@@ -1,11 +1,15 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,6 +304,79 @@ func TestRetryDocumentParseQueuesNewAttemptAfterFailure(t *testing.T) {
 	}
 }
 
+func TestRetryDocumentProcessRestoresFailedStatusWhenQueueFails(t *testing.T) {
+	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), Status: types.DocumentStatusFailed}}
+	svc := &documentService{
+		repo:         repo,
+		taskEnqueuer: &documentTaskEnqueuerStub{enqueueErr: errors.New("redis unavailable")},
+	}
+
+	document, err := svc.RetryDocumentProcess(context.Background(), repo.document.ID.String())
+	if !errors.Is(err, ErrDocumentProcessQueue) {
+		t.Fatalf("RetryDocumentProcess() error = %v, want ErrDocumentProcessQueue", err)
+	}
+	if document == nil || document.Status != types.DocumentStatusFailed || repo.document.Status != types.DocumentStatusFailed {
+		t.Fatalf("retry must restore failed status: document=%#v repo=%#v", document, repo.document)
+	}
+	if document.ErrorMessage == nil || *document.ErrorMessage != "document processing was not queued; retry this document" {
+		t.Fatalf("retry queue failure message = %#v", document.ErrorMessage)
+	}
+}
+
+func TestCreateDocumentFromFileReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
+	repo := &documentStatusRepoStub{}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &documentService{
+		repo:         repo,
+		storage:      storage,
+		taskEnqueuer: &documentTaskEnqueuerStub{enqueueErr: errors.New("redis unavailable")},
+	}
+
+	created, err := svc.CreateDocumentFromFile(context.Background(), documentUploadFileHeader(t, "queued.txt", []byte("queued content")), "")
+	if !errors.Is(err, ErrDocumentProcessQueue) {
+		t.Fatalf("CreateDocumentFromFile() error = %v, want ErrDocumentProcessQueue", err)
+	}
+	if created == nil || created.ID == uuid.Nil {
+		t.Fatalf("created document = %#v, want durable ID", created)
+	}
+	if created.Status != types.DocumentStatusFailed || repo.document.Status != types.DocumentStatusFailed {
+		t.Fatalf("document status = created:%q repo:%q, want failed", created.Status, repo.document.Status)
+	}
+	if created.ErrorMessage == nil || *created.ErrorMessage != "document processing was not queued; retry this document" {
+		t.Fatalf("safe queue failure message = %#v", created.ErrorMessage)
+	}
+	reader, openErr := storage.Open(context.Background(), created.StorageKey)
+	if openErr != nil {
+		t.Fatalf("stored document must remain retryable: %v", openErr)
+	}
+	_ = reader.Close()
+}
+
+func documentUploadFileHeader(t *testing.T, filename string, content []byte) *multipart.FileHeader {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/upload", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	if err := request.ParseMultipartForm(int64(body.Len()) + 1024); err != nil {
+		t.Fatal(err)
+	}
+	return request.MultipartForm.File["file"][0]
+}
+
 func TestRetryDocumentParseRejectsActiveDocument(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), Status: types.DocumentStatusProcessing}}
 	svc := &documentService{repo: repo, taskEnqueuer: &documentTaskEnqueuerStub{}}
@@ -424,6 +501,7 @@ type documentTaskEnqueuerStub struct {
 	tasks       []*asynq.Task
 	extractErr  error
 	catalogErr  error
+	enqueueErr  error
 	onEnqueue   func(*asynq.Task)
 }
 
@@ -465,6 +543,9 @@ func (stub *documentTaskEnqueuerStub) EnqueueContext(
 	stub.tasks = append(stub.tasks, task)
 	if stub.onEnqueue != nil {
 		stub.onEnqueue(task)
+	}
+	if stub.enqueueErr != nil {
+		return nil, stub.enqueueErr
 	}
 	switch task.Type() {
 	case types.TypeDocumentProcess:

@@ -103,6 +103,9 @@ message PaperExtractionResult {
   // Additive structured interpretation of a raw reference. `references`
   // remains the compatibility source of truth for the original strings.
   repeated PaperReferenceCandidate reference_candidates = 7;
+  // True only when the extractor positively located a bibliography region.
+  // Empty references with false means unavailable/undetected, not "clear all".
+  bool references_detected = 8;
 }
 
 // PaperReferenceCandidate contains optional fields parsed from one exact raw

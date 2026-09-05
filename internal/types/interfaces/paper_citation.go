@@ -19,6 +19,14 @@ type PaperCitationRepository interface {
 	// Each citation carries the raw extraction reference used to resolve it.
 	// An empty citations slice clears the document's references.
 	ReplaceCitations(ctx context.Context, citingDocumentID uuid.UUID, citations []types.PaperCitation) error
+	// MergeAutomaticCitations atomically reconciles extraction-origin edges.
+	// Manual and legacy edges remain untouched. Removed automatic edges are
+	// returned for deferred unknown-placeholder cleanup after commit.
+	MergeAutomaticCitations(
+		ctx context.Context,
+		citingDocumentID uuid.UUID,
+		citations []types.PaperCitation,
+	) (items []types.PaperCitation, removed []types.PaperCitation, err error)
 	// RemoveCitation removes one citation edge. It returns sql.ErrNoRows when
 	// the relationship does not exist.
 	RemoveCitation(ctx context.Context, citingDocumentID, citedDocumentID uuid.UUID) error

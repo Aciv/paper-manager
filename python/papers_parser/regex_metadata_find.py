@@ -43,6 +43,8 @@ class MarkdownPaperSections:
     title: str = ""
     authors: tuple[str, ...] = ()
     abstract: str = ""
+    # True only when an explicit References/Bibliography heading was found.
+    references_detected: bool = False
     # Raw reference Markdown is preserved exactly as an independent list.
     references: list[str] = field(default_factory=list)
     # Source ranges identify the exact Markdown region selected by a rule.
@@ -107,6 +109,7 @@ def extract_paper_sections(markdown: str) -> MarkdownPaperSections:
         title=title_span.value,
         authors=tuple(span.value for span in author_spans),
         abstract="" if abstract_span is None else abstract_span.value,
+        references_detected=references_index is not None,
         references=references,
         title_span=title_span,
         author_spans=tuple(author_spans),

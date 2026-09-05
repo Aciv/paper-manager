@@ -179,6 +179,7 @@ func mapExtractionResult(
 	response *papersv1.PaperExtractionResult,
 ) (*types.PaperExtractionResult, error) {
 	result := &types.PaperExtractionResult{
+		ReferencesDetected:  response.GetReferencesDetected(),
 		References:          append([]string(nil), response.GetReferences()...),
 		ExtractorName:       strings.TrimSpace(response.GetExtractorName()),
 		ExtractorVersion:    strings.TrimSpace(response.GetExtractorVersion()),

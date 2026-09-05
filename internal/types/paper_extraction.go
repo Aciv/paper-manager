@@ -259,9 +259,13 @@ func finitePaperExtractionFloat(value float64) bool {
 // PaperExtractionResult contains parser candidates, not canonical database
 // metadata. References deliberately remain raw strings for later processing.
 type PaperExtractionResult struct {
-	Title               *PaperTextCandidate       `json:"title,omitempty"`
-	Authors             []PaperTextCandidate      `json:"authors"`
-	Abstract            *PaperTextCandidate       `json:"abstract,omitempty"`
+	Title    *PaperTextCandidate  `json:"title,omitempty"`
+	Authors  []PaperTextCandidate `json:"authors"`
+	Abstract *PaperTextCandidate  `json:"abstract,omitempty"`
+	// ReferencesDetected distinguishes a positively identified bibliography
+	// section (including an empty one) from an unavailable/undetected section.
+	// Only the former may reconcile automatic citation edges.
+	ReferencesDetected  bool                      `json:"references_detected"`
 	References          []string                  `json:"references"`
 	ReferenceCandidates []PaperReferenceCandidate `json:"reference_candidates,omitempty"`
 	ExtractorName       string                    `json:"extractor_name"`
@@ -294,6 +298,9 @@ func (result PaperExtractionResult) Validate() error {
 			ErrInvalidPaperExtraction,
 			MaxPaperExtractionReferences,
 		)
+	}
+	if !result.ReferencesDetected && (len(result.References) > 0 || len(result.ReferenceCandidates) > 0) {
+		return fmt.Errorf("%w: references require references_detected", ErrInvalidPaperExtraction)
 	}
 	for index, reference := range result.References {
 		if strings.TrimSpace(reference) == "" {

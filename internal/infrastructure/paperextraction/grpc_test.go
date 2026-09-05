@@ -48,7 +48,8 @@ func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 				Value:      "Ada Lovelace",
 				Confidence: 0.85,
 			}},
-			References: []string{"[1] A raw reference."},
+			References:         []string{"[1] A raw reference."},
+			ReferencesDetected: true,
 			ReferenceCandidates: []*papersv1.PaperReferenceCandidate{{
 				RawReference: "[1] A raw reference.", Authors: []string{"Ada Lovelace"},
 				Title: "A raw reference", Venue: "Example", PublishedYear: 2024, Doi: "10.1000/example", Confidence: 0.8,
@@ -84,7 +85,7 @@ func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 		result.Title.Value != "Mapped Paper" ||
 		len(result.Title.Evidence) != 1 ||
 		len(result.Authors) != 1 ||
-		len(result.References) != 1 || len(result.ReferenceCandidates) != 1 ||
+		!result.ReferencesDetected || len(result.References) != 1 || len(result.ReferenceCandidates) != 1 ||
 		result.ReferenceCandidates[0].Title != "A raw reference" {
 		t.Fatalf("unexpected extraction result: %+v", result)
 	}

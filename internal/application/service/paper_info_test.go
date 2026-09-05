@@ -251,6 +251,7 @@ type paperInfoPaperServiceStub struct {
 	citations     map[string][]types.PaperCitation
 	updates       []paperInfoMetadataWrite
 	replacements  map[string][]types.PaperCitationInput
+	merges        map[string][]types.PaperCitationInput
 	resolutions   []types.PaperCitation
 	updateHook    func(string, types.PaperMetadataUpdate)
 	replaceHook   func(string, []types.PaperCitationInput)
@@ -262,6 +263,7 @@ func newPaperInfoPaperServiceStub() *paperInfoPaperServiceStub {
 		metadata:     make(map[string]types.PaperMetadata),
 		citations:    make(map[string][]types.PaperCitation),
 		replacements: make(map[string][]types.PaperCitationInput),
+		merges:       make(map[string][]types.PaperCitationInput),
 	}
 }
 
@@ -343,6 +345,17 @@ func (s *paperInfoPaperServiceStub) ReplaceCitations(
 	if s.replaceHook != nil {
 		s.replaceHook(documentID, inputs)
 	}
+	return nil, nil
+}
+
+func (s *paperInfoPaperServiceStub) MergeExtractedCitations(
+	_ context.Context,
+	documentID string,
+	inputs []types.PaperCitationInput,
+) ([]types.PaperCitation, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.merges[documentID] = append([]types.PaperCitationInput(nil), inputs...)
 	return nil, nil
 }
 
@@ -447,8 +460,9 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 					Value:      "A compact\nabstract.",
 					Confidence: 0.8,
 				},
-				References:    []string{"Reference One", "Reference One", "Reference Two"},
-				ExtractorName: "rules",
+				ReferencesDetected: true,
+				References:         []string{"Reference One", "Reference One", "Reference Two"},
+				ExtractorName:      "rules",
 			}, nil
 		},
 	}
@@ -491,8 +505,112 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 		*got != types.PaperMetadataSourceExtraction {
 		t.Fatalf("metadata source = %v, want extraction", got)
 	}
-	if got := papers.replacements[documentID.String()]; len(got) != 2 {
-		t.Fatalf("reference replacement count = %d, want 2", len(got))
+	if got := papers.merges[documentID.String()]; len(got) != 2 {
+		t.Fatalf("reference merge count = %d, want 2", len(got))
+	}
+}
+
+func TestPaperInfoExtractMetadataDoesNotClearExistingMetadataForEmptyResult(t *testing.T) {
+	documentID := uuid.New()
+	markdown := []byte("# Existing paper\n")
+	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, Status: types.DocumentStatusReady})
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/existing.md"}
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{
+		DocumentID:     documentID,
+		Title:          "Manual title",
+		Abstract:       "Manual abstract",
+		Authors:        []types.PaperAuthor{{Name: "Manual author"}},
+		MetadataSource: types.PaperMetadataSourceManual,
+	}
+	service := newPaperInfoServiceForTest(
+		config.Config{}, documents,
+		&paperInfoStorageStub{content: map[string][]byte{"markdown/existing.md": markdown}},
+		&paperInfoExtractorStub{extract: func(*types.PaperExtractionRequest) (*types.PaperExtractionResult, error) {
+			return &types.PaperExtractionResult{ExtractorName: "rules"}, nil
+		}},
+		&paperInfoRegistryStub{}, papers, nil, nil, nil,
+	)
+
+	resolvable, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{DocumentID: documentID})
+	if err != nil {
+		t.Fatalf("ExtractMetadata() error = %v", err)
+	}
+	if !resolvable {
+		t.Fatal("persisted title should remain usable for catalog lookup")
+	}
+	if len(papers.updates) != 0 {
+		t.Fatalf("empty extraction wrote metadata patch: %#v", papers.updates)
+	}
+	if _, merged := papers.merges[documentID.String()]; merged {
+		t.Fatal("undetected bibliography must not mutate existing citations")
+	}
+	got := papers.metadata[documentID.String()]
+	if got.Title != "Manual title" || got.Abstract != "Manual abstract" || len(got.Authors) != 1 {
+		t.Fatalf("existing metadata was changed: %#v", got)
+	}
+}
+
+func TestPaperInfoExtractMetadataClearsOnlyAutomaticCitationsForDetectedEmptyBibliography(t *testing.T) {
+	documentID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, Status: types.DocumentStatusReady})
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/empty-refs.md"}
+	papers := newPaperInfoPaperServiceStub()
+	service := newPaperInfoServiceForTest(
+		config.Config{}, documents,
+		&paperInfoStorageStub{content: map[string][]byte{"markdown/empty-refs.md": []byte("# Paper\n")}},
+		&paperInfoExtractorStub{extract: func(*types.PaperExtractionRequest) (*types.PaperExtractionResult, error) {
+			return &types.PaperExtractionResult{
+				ExtractorName:      "rules",
+				ReferencesDetected: true,
+			}, nil
+		}},
+		&paperInfoRegistryStub{}, papers, nil, nil, nil,
+	)
+
+	if _, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{DocumentID: documentID}); err != nil {
+		t.Fatalf("ExtractMetadata() error = %v", err)
+	}
+	inputs, called := papers.merges[documentID.String()]
+	if !called || len(inputs) != 0 {
+		t.Fatalf("detected empty bibliography merge = %#v, called=%t; want one empty merge", inputs, called)
+	}
+}
+
+func TestExtractionMetadataUpdateOnlyIncludesUsableCandidates(t *testing.T) {
+	result := &types.PaperExtractionResult{
+		Title:    &types.PaperTextCandidate{Value: "  ", Confidence: 1},
+		Abstract: &types.PaperTextCandidate{Value: "Abstract body", Confidence: 1},
+		Authors: []types.PaperTextCandidate{
+			{Value: "  ", Confidence: 1},
+			{Value: "Ada Lovelace", Confidence: 1},
+		},
+	}
+	update := extractionMetadataUpdate(result)
+	if update.Title != nil {
+		t.Fatalf("empty title must be omitted: %#v", update)
+	}
+	if update.Abstract == nil || *update.Abstract != "Abstract body" {
+		t.Fatalf("abstract update = %#v", update.Abstract)
+	}
+	if update.Authors == nil || len(*update.Authors) != 1 || (*update.Authors)[0].Name != "Ada Lovelace" {
+		t.Fatalf("authors update = %#v", update.Authors)
+	}
+	if update.MetadataSource == nil || *update.MetadataSource != types.PaperMetadataSourceExtraction {
+		t.Fatalf("metadata source = %#v, want extraction", update.MetadataSource)
+	}
+}
+
+func TestCatalogMetadataUpdateOmitsEmptyAutomaticFields(t *testing.T) {
+	update := catalogMetadataUpdate(types.PaperCatalogCandidate{Provider: "test", Title: "Catalog title"})
+	if update.Title == nil || *update.Title != "Catalog title" {
+		t.Fatalf("catalog title update = %#v", update.Title)
+	}
+	if update.Abstract != nil || update.Authors != nil || update.Tags != nil || update.Venue != nil {
+		t.Fatalf("empty catalog fields must be omitted: %#v", update)
+	}
+	if update.MetadataSource == nil || *update.MetadataSource != types.PaperMetadataSourceCatalog {
+		t.Fatalf("metadata source = %#v, want catalog", update.MetadataSource)
 	}
 }
 

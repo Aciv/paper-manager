@@ -69,6 +69,19 @@ func TestPaperMetadataSourceMigrationAddsOriginPrecedenceField(t *testing.T) {
 	}
 }
 
+func TestPaperMetadataFieldSourcesMigrationProtectsHistoricalManualEdits(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS field_sources JSONB",
+		"WHEN 'manual' THEN jsonb_build_object",
+		"'title', 'manual'",
+		"WHERE field_sources = '{}'::jsonb",
+	} {
+		if !strings.Contains(paperMetadataFieldSourcesUp, fragment) {
+			t.Fatalf("field sources migration does not include %q", fragment)
+		}
+	}
+}
+
 func TestDocumentBaseFileRenameMigrationSupportsExistingDeployments(t *testing.T) {
 	for _, fragment := range []string{"document_base_documents", "document_base_files", "RENAME TO document_base_files"} {
 		if !strings.Contains(documentBaseFilesRenameUp, fragment) {
@@ -142,6 +155,19 @@ func TestPaperCitationsMigrationCreatesDirectionalCascadeRelation(t *testing.T) 
 	} {
 		if !strings.Contains(paperCitationsUp, fragment) {
 			t.Fatalf("paper citations migration does not include %q", fragment)
+		}
+	}
+}
+
+func TestPaperCitationOriginsMigrationProtectsHistoricalEdges(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS origin TEXT NOT NULL DEFAULT 'manual'",
+		"chk_paper_citations_origin",
+		"'manual', 'extraction'",
+		"idx_paper_citations_automatic_owner",
+	} {
+		if !strings.Contains(paperCitationOriginsUp, fragment) {
+			t.Fatalf("citation origins migration does not include %q", fragment)
 		}
 	}
 }

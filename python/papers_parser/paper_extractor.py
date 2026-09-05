@@ -119,6 +119,7 @@ class ExtractionOutput:
     title: TextCandidate | None = None
     authors: tuple[TextCandidate, ...] = ()
     abstract: TextCandidate | None = None
+    references_detected: bool = False
     references: tuple[str, ...] = ()
     reference_candidates: tuple[ReferenceCandidate, ...] = ()
     extractor_name: str = ""
@@ -140,6 +141,7 @@ class _BlockPaperSections:
     title: _BlockText | None = None
     authors: tuple[_BlockText, ...] = ()
     abstract: _BlockText | None = None
+    references_detected: bool = False
     references: tuple[str, ...] = ()
 
 
@@ -179,6 +181,7 @@ class DeterministicPaperExtractionEngine:
                     if (candidate := _candidate_from_blocks(value, 0.85)) is not None
                 ),
                 abstract=_candidate_from_blocks(block_sections.abstract, 0.85),
+                references_detected=block_sections.references_detected,
                 references=block_sections.references,
                 reference_candidates=tuple(
                     ReferenceCandidate(raw_reference=reference)
@@ -201,6 +204,7 @@ class DeterministicPaperExtractionEngine:
             title=title,
             authors=authors,
             abstract=abstract,
+            references_detected=sections.references_detected,
             references=tuple(references),
             reference_candidates=tuple(
                 ReferenceCandidate(raw_reference=reference)
@@ -231,6 +235,7 @@ def _extract_sections_from_blocks(
     fallback_abstract_blocks: list[SourceBlock] = []
     abstract_blocks: list[SourceBlock] = []
     references: list[str] = []
+    references_detected = False
     mode = "header"
 
     for block in ordered[title_index + 1:]:
@@ -240,6 +245,7 @@ def _extract_sections_from_blocks(
             continue
         if kind == "references":
             mode = "references"
+            references_detected = True
             continue
         if mode == "header":
             names = extract_author_names(block.text)
@@ -269,6 +275,7 @@ def _extract_sections_from_blocks(
         title=title,
         authors=tuple(authors),
         abstract=abstract,
+        references_detected=references_detected,
         # Cross-block merge: one global pass so a reference list split across
         # blocks is deduplicated by 序号 instead of per block.
         references=tuple(filter_reference_items(references)),

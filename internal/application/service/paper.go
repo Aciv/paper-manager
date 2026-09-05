@@ -81,7 +81,7 @@ func (s *paperService) UpdateMetadata(
 	documentID string,
 	update types.PaperMetadataUpdate,
 ) (*types.PaperMetadata, error) {
-	if !update.HasChanges() {
+	if !update.HasDataChanges() {
 		return nil, errors.New("at least one paper metadata field is required")
 	}
 	id, err := parsePaperDocumentID(documentID)
@@ -155,6 +155,7 @@ func (s *paperService) AddCitation(
 		CitingDocumentID: citingID,
 		CitedDocumentID:  targetID,
 		RawReference:     rawReference,
+		Origin:           types.PaperCitationOriginManual,
 	}
 	if err := s.citations.AddCitation(ctx, citation); err != nil {
 		if created {
@@ -212,6 +213,7 @@ func (s *paperService) ReplaceCitations(
 			CitingDocumentID: citingID,
 			CitedDocumentID:  targetID,
 			RawReference:     rawReference,
+			Origin:           types.PaperCitationOriginManual,
 		})
 	}
 
@@ -226,6 +228,99 @@ func (s *paperService) ReplaceCitations(
 		"citing_document_id", citingID,
 		"citation_count", len(replacements))
 	return replacements, nil
+}
+
+// MergeExtractedCitations reconciles one positively detected bibliography.
+// It differs from ReplaceCitations: normalized raw text retains existing
+// resolved targets, and manual/legacy edges are never removed by automation.
+func (s *paperService) MergeExtractedCitations(
+	ctx context.Context,
+	citingDocumentID string,
+	inputs []types.PaperCitationInput,
+) ([]types.PaperCitation, error) {
+	citingID, _, err := s.requireCitingDocument(ctx, citingDocumentID)
+	if err != nil {
+		return nil, err
+	}
+	previous, err := s.citations.ListByCitingDocumentID(ctx, citingID)
+	if err != nil {
+		return nil, err
+	}
+	previousByReference := make(map[string][]types.PaperCitation, len(previous))
+	for _, citation := range previous {
+		key := types.PaperCitationReferenceKey(citation.RawReference)
+		if key != "" {
+			previousByReference[key] = append(previousByReference[key], citation)
+		}
+	}
+
+	automatic := make([]types.PaperCitation, 0, len(inputs))
+	createdUnknowns := make(map[uuid.UUID]struct{})
+	seenReferences := make(map[string]struct{}, len(inputs))
+	for _, input := range inputs {
+		rawReference, validateErr := validateRawReference(input.RawReference)
+		if validateErr != nil {
+			s.cleanupUnknownSet(ctx, createdUnknowns)
+			return nil, validateErr
+		}
+		key := types.PaperCitationReferenceKey(rawReference)
+		if _, seen := seenReferences[key]; seen {
+			continue
+		}
+		seenReferences[key] = struct{}{}
+
+		targetID, exists := preferredExistingCitationTarget(previousByReference[key])
+		created := false
+		if !exists {
+			targetID, created, err = s.resolveCitationTarget(ctx, input.CitedDocumentID, rawReference)
+			if err != nil {
+				s.cleanupUnknownSet(ctx, createdUnknowns)
+				return nil, err
+			}
+		}
+		if created {
+			createdUnknowns[targetID] = struct{}{}
+		}
+		if err := s.applyReferenceCandidate(ctx, targetID, input.Candidate, rawReference); err != nil {
+			s.cleanupUnknownSet(ctx, createdUnknowns)
+			return nil, err
+		}
+		automatic = append(automatic, types.PaperCitation{
+			CitingDocumentID: citingID,
+			CitedDocumentID:  targetID,
+			RawReference:     rawReference,
+			Origin:           types.PaperCitationOriginExtraction,
+		})
+	}
+
+	merged, removed, err := s.citations.MergeAutomaticCitations(ctx, citingID, automatic)
+	if err != nil {
+		s.cleanupUnknownSet(ctx, createdUnknowns)
+		return nil, err
+	}
+	for _, citation := range removed {
+		s.cleanupUnknown(ctx, citation.CitedDocumentID)
+	}
+	logger.Info(ctx, "extracted paper citations reconciled",
+		"citing_document_id", citingID,
+		"extracted_count", len(automatic),
+		"final_count", len(merged),
+		"removed_automatic_count", len(removed))
+	return merged, nil
+}
+
+// preferredExistingCitationTarget prioritizes manual/legacy edges, then an
+// automatic edge. The repository repeats the same rule under row lock.
+func preferredExistingCitationTarget(citations []types.PaperCitation) (uuid.UUID, bool) {
+	for _, citation := range citations {
+		if citation.EffectiveOrigin() == types.PaperCitationOriginManual {
+			return citation.CitedDocumentID, true
+		}
+	}
+	if len(citations) == 0 {
+		return uuid.Nil, false
+	}
+	return citations[0].CitedDocumentID, true
 }
 
 // applyReferenceCandidate persists only non-empty parsed fields to an unknown
@@ -301,7 +396,7 @@ func referenceCandidateMetadataUpdate(candidate types.PaperReferenceCandidate) t
 		publishedAt := time.Date(candidate.PublishedYear, time.January, 1, 0, 0, 0, 0, time.UTC)
 		update.PublishedAt = &publishedAt
 	}
-	if update.HasChanges() {
+	if update.HasDataChanges() {
 		source := types.PaperMetadataSourceExtraction
 		update.MetadataSource = &source
 	}
@@ -479,7 +574,7 @@ func (s *paperService) cleanupUnknownSet(
 }
 
 func unknownPaperDocumentID(rawReference string) uuid.UUID {
-	normalized := strings.ToLower(strings.Join(strings.Fields(rawReference), " "))
+	normalized := types.PaperCitationReferenceKey(rawReference)
 	return uuid.NewSHA1(
 		uuid.NameSpaceURL,
 		[]byte("paperMaster:unknown-paper-reference:"+normalized),

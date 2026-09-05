@@ -80,14 +80,12 @@ func (s *documentService) CreateDocumentFromURL(
 			logger.Warn(ctx, "persist imported paper source URL failed", "document_id", created.ID, "error", metadataErr)
 		}
 	}
-	if s.taskEnqueuer != nil {
-		if err := s.enqueueDocumentRecognition(ctx, created.ID); err != nil {
-			return nil, err
-		}
-		created, _ = s.repo.Get(ctx, created.ID)
+	processed, processErr := s.startCreatedDocumentProcessing(ctx, created)
+	if processErr != nil {
+		return processed, processErr
 	}
-	logger.Info(ctx, "remote document created", "document_id", created.ID, "source_url", resolved.LandingURL)
-	return &created, nil
+	logger.Info(ctx, "remote document created", "document_id", processed.ID, "source_url", resolved.LandingURL)
+	return processed, nil
 }
 
 // ImportRemoteDocument is the independently retryable worker for one resolved

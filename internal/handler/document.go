@@ -48,6 +48,10 @@ func (h *DocumentHandler) ImportURL(c *gin.Context) {
 	}
 	created, err := h.documents.CreateDocumentFromURL(c.Request.Context(), command)
 	if err != nil {
+		if created != nil && errors.Is(err, appservice.ErrDocumentProcessQueue) {
+			h.writeCreatedButNotQueued(c, *created)
+			return
+		}
 		switch {
 		case errors.Is(err, types.ErrInvalidRemotePDFRequest):
 			h.writeError(c, apperrors.NewBadRequestError("URL and DOI must be valid"), err)
@@ -104,10 +108,27 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	}
 	created, err := h.documents.CreateDocumentFromFile(c.Request.Context(), fileHeader, doi)
 	if err != nil {
+		if created != nil && errors.Is(err, appservice.ErrDocumentProcessQueue) {
+			h.writeCreatedButNotQueued(c, *created)
+			return
+		}
 		h.writeUploadError(c, err)
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"document": *created})
+}
+
+// writeCreatedButNotQueued reports a durable upload whose initial background
+// task failed to enqueue. This remains a successful resource creation, not a
+// 5xx: returning its ID lets the client call the normal retry endpoint.
+func (h *DocumentHandler) writeCreatedButNotQueued(c *gin.Context, document types.Document) {
+	logger.Warn(c.Request.Context(), "document created but processing was not queued",
+		"document_id", document.ID, "status", document.Status)
+	c.JSON(http.StatusCreated, gin.H{
+		"document":         document,
+		"processingQueued": false,
+		"retryable":        true,
+	})
 }
 
 // DeleteFile removes the stored document file and its database metadata.
