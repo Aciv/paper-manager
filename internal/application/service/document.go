@@ -56,6 +56,7 @@ var (
 	ErrDocumentParseFinished   = errors.New("document parsing has already finished")
 	ErrDocumentParseActive     = errors.New("document parsing is still active")
 	ErrDocumentDeleting        = errors.New("document is being deleted")
+	errDocumentDuplicateLookup = errors.New("document duplicate lookup failed")
 	// ErrDocumentProcessQueue means the source file and document row were
 	// committed, but the initial asynchronous process task was not accepted.
 	// Callers receive the persisted document alongside this error and can use
@@ -135,11 +136,11 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 		page, searchErr := s.repo.Search(ctx, types.DocumentSearch{DOI: doi, Page: 1, PageSize: 1})
 		if searchErr != nil {
 			logger.Error(ctx, "check document DOI failed", "doi", doi, "error", searchErr)
-			return nil, searchErr
+			return nil, fmt.Errorf("%w: %w", errDocumentDuplicateLookup, searchErr)
 		}
 		if page.Total > 0 {
 			logger.Warn(ctx, "duplicate document DOI rejected", "doi", doi)
-			return nil, ErrDuplicateDOI
+			return &page.Items[0], ErrDuplicateDOI
 		}
 	}
 	fileHash, err := multipartFileSHA256(file)
@@ -149,11 +150,11 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 	page, searchErr := s.repo.Search(ctx, types.DocumentSearch{FileSHA256: fileHash, Page: 1, PageSize: 1})
 	if searchErr != nil {
 		logger.Error(ctx, "check document file hash failed", "error", searchErr)
-		return nil, searchErr
+		return nil, fmt.Errorf("%w: %w", errDocumentDuplicateLookup, searchErr)
 	}
 	if page.Total > 0 {
 		logger.Warn(ctx, "duplicate document file hash rejected", "file_sha256", fileHash)
-		return nil, types.ErrDuplicateFileHash
+		return &page.Items[0], types.ErrDuplicateFileHash
 	}
 	stored, err := fileservice.SaveMultipart(ctx, s.storage, file)
 	if err != nil {
@@ -177,6 +178,16 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 		logger.Error(ctx, "create document record failed", "document_id", doc.ID, "error", err)
 		if cleanupErr := s.storage.Delete(context.WithoutCancel(ctx), stored.Key); cleanupErr != nil {
 			logger.Warn(ctx, "remove orphaned document file failed", "storage_key", stored.Key, "error", cleanupErr)
+		}
+		if errors.Is(err, types.ErrDuplicateFileHash) {
+			if duplicate, lookupErr := s.existingDocument(ctx, "", fileHash); lookupErr == nil && duplicate != nil {
+				return duplicate, err
+			}
+		}
+		if errors.Is(err, types.ErrDuplicateDOI) {
+			if duplicate, lookupErr := s.existingDocument(ctx, doi, ""); lookupErr == nil && duplicate != nil {
+				return duplicate, err
+			}
 		}
 		return nil, err
 	}
@@ -234,6 +245,22 @@ func multipartFileSHA256(file *multipart.FileHeader) (string, error) {
 		return "", fmt.Errorf("hash uploaded file: %w", err)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+// existingDocument reloads the canonical source document after a duplicate
+// DOI/hash result. A read failure means callers cannot safely report a
+// duplicate, so it shares the duplicate-lookup error contract used by both
+// file and URL creation paths.
+func (s *documentService) existingDocument(ctx context.Context, doi, hash string) (*types.Document, error) {
+	id, err := s.findDuplicateDocument(ctx, uuid.Nil, doi, hash)
+	if err != nil || id == uuid.Nil {
+		return nil, err
+	}
+	document, err := s.repo.Get(ctx, id)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errDocumentDuplicateLookup, err)
+	}
+	return &document, nil
 }
 
 // enqueueDocumentRecognition starts a durable pipeline root and queues its

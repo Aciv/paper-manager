@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"errors"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	fileservice "paperMaster/internal/application/service/file"
@@ -18,6 +20,143 @@ import (
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
 )
+
+type documentBatchRepoStub struct {
+	documentStatusRepoStub
+	documents    map[uuid.UUID]types.Document
+	searchCalls  int
+	failSearchAt int
+	searchErr    error
+}
+
+func (s *documentBatchRepoStub) Create(_ context.Context, document types.Document) (types.Document, error) {
+	if s.documents == nil {
+		s.documents = make(map[uuid.UUID]types.Document)
+	}
+	s.documents[document.ID] = document
+	return document, nil
+}
+
+func (s *documentBatchRepoStub) Get(_ context.Context, id uuid.UUID) (types.Document, error) {
+	document, ok := s.documents[id]
+	if !ok {
+		return types.Document{}, os.ErrNotExist
+	}
+	return document, nil
+}
+
+func (s *documentBatchRepoStub) Search(_ context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
+	s.searchCalls++
+	if s.failSearchAt > 0 && s.searchCalls >= s.failSearchAt {
+		return types.DocumentPage{}, s.searchErr
+	}
+	result := types.DocumentPage{Page: search.Page, PageSize: search.PageSize, Items: []types.Document{}}
+	for _, document := range s.documents {
+		if search.DOI != "" && strings.EqualFold(document.DOI, search.DOI) ||
+			search.FileSHA256 != "" && strings.EqualFold(document.FileSHA256, search.FileSHA256) {
+			result.Items = append(result.Items, document)
+		}
+	}
+	result.Total = int64(len(result.Items))
+	return result, nil
+}
+
+func TestCreateDocumentsFromFilesPreservesPriorResultsWhenDeduplicationFails(t *testing.T) {
+	repo := &documentBatchRepoStub{failSearchAt: 2, searchErr: errors.New("database unavailable")}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{repo: repo, storage: storage}
+
+	result, err := service.CreateDocumentsFromFiles(context.Background(), []*multipart.FileHeader{
+		documentUploadFileHeader(t, "first.txt", []byte("first")),
+		documentUploadFileHeader(t, "second.txt", []byte("second")),
+		documentUploadFileHeader(t, "not-processed.txt", []byte("third")),
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromFiles() error = %v", err)
+	}
+	if !result.Stopped || result.Error == "" || len(result.Items) != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Items[0].Status != types.DocumentImportItemAccepted || result.Items[0].Document == nil {
+		t.Fatalf("accepted item = %#v", result.Items[0])
+	}
+	if result.Items[1].Index != 1 || result.Items[1].Status != types.DocumentImportItemFailed || result.Items[1].Error == "" {
+		t.Fatalf("failed item = %#v", result.Items[1])
+	}
+	if len(repo.documents) != 1 {
+		t.Fatalf("created documents = %#v, want only the first file", repo.documents)
+	}
+	if repo.searchCalls != 2 {
+		t.Fatalf("duplicate lookup count = %d, want one lookup per processed file", repo.searchCalls)
+	}
+}
+
+func TestCreateDocumentsFromURLsStopsWhenDeduplicationFails(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := &documentBatchRepoStub{failSearchAt: 2, searchErr: errors.New("database unavailable")}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{repo: repo, storage: storage, urlResolver: paperurl.NewResolver()}
+
+	result, err := service.CreateDocumentsFromURLs(context.Background(), []types.DocumentURLImportCommand{
+		{URL: server.URL + "/first.pdf"},
+		{URL: server.URL + "/second.pdf"},
+		{URL: server.URL + "/not-processed.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromURLs() error = %v", err)
+	}
+	if !result.Stopped || result.Error == "" || len(result.Items) != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Items[0].Status != types.DocumentImportItemAccepted || result.Items[0].Document == nil {
+		t.Fatalf("accepted item = %#v", result.Items[0])
+	}
+	if result.Items[1].Index != 1 || result.Items[1].Status != types.DocumentImportItemFailed || result.Items[1].Error == "" {
+		t.Fatalf("failed item = %#v", result.Items[1])
+	}
+	if len(repo.documents) != 1 {
+		t.Fatalf("created documents = %#v, want only the first URL", repo.documents)
+	}
+}
+
+func TestCreateDocumentsFromURLsReportsPartialResultsAndContentDuplicates(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := &documentBatchRepoStub{}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{repo: repo, storage: storage, urlResolver: paperurl.NewResolver()}
+
+	result, err := service.CreateDocumentsFromURLs(context.Background(), []types.DocumentURLImportCommand{
+		{URL: "ftp://example.invalid/paper.pdf"},
+		{URL: server.URL + "/paper.pdf"},
+		{URL: server.URL + "/paper.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromURLs() error = %v", err)
+	}
+	if len(result.Items) != 3 {
+		t.Fatalf("items = %#v", result.Items)
+	}
+	if result.Items[0].Status != types.DocumentImportItemRejected {
+		t.Fatalf("invalid URL item = %#v", result.Items[0])
+	}
+	if result.Items[1].Status != types.DocumentImportItemAccepted || result.Items[1].Document == nil ||
+		result.Items[1].ProcessingQueued == nil || !*result.Items[1].ProcessingQueued {
+		t.Fatalf("accepted item = %#v", result.Items[1])
+	}
+	if result.Items[2].Status != types.DocumentImportItemDuplicate || result.Items[2].Document == nil ||
+		result.Items[2].Document.ID != result.Items[1].Document.ID {
+		t.Fatalf("duplicate item = %#v", result.Items[2])
+	}
+}
 
 func TestCreateDocumentFromURLStoresPDFAndStartsPipeline(t *testing.T) {
 	server := remotePDFTestServer(t)

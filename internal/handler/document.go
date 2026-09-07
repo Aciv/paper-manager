@@ -25,6 +25,11 @@ import (
 
 const maxDOILength = 255
 
+const (
+	documentBatchMultipartOverhead int64 = 1 << 20
+	maxDocumentBatchRequestSize    int64 = 500 << 20
+)
+
 type DocumentHandler struct {
 	documents     interfaces.DocumentService
 	maxUploadSize int64
@@ -74,6 +79,32 @@ func (h *DocumentHandler) ImportURL(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{"document": created})
 }
 
+// ImportURLBatch accepts a bounded list of explicit remote PDF imports. It
+// deliberately returns one outcome per URL so a bad provider response does
+// not discard the rest of the user's batch.
+func (h *DocumentHandler) ImportURLBatch(c *gin.Context) {
+	var request types.DocumentURLImportBatchRequest
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
+		return
+	}
+	if len(request.URLs) == 0 || len(request.URLs) > types.MaxDocumentBatchItems {
+		h.writeError(c, apperrors.NewBadRequestError("provide between 1 and 20 URLs"), nil)
+		return
+	}
+	result, err := h.documents.CreateDocumentsFromURLs(c.Request.Context(), request.URLs)
+	if err != nil {
+		h.writeError(c, apperrors.NewInternalServerError("import remote document batch"), err)
+		return
+	}
+	if result.Stopped {
+		logger.Warn(c.Request.Context(), "remote document batch import stopped", "item_count", len(result.Items))
+	} else {
+		logger.Info(c.Request.Context(), "remote document batch import accepted", "item_count", len(result.Items))
+	}
+	c.JSON(http.StatusOK, result)
+}
+
 // NewDocumentHandler receives the application service through DI; handlers do
 // not coordinate storage or repositories directly.
 func NewDocumentHandler(cfg config.Config, documents interfaces.DocumentService) *DocumentHandler {
@@ -116,6 +147,73 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"document": *created})
+}
+
+// UploadBatch accepts multipart/form-data containing repeated `files` fields.
+// An optional repeated `doi` field maps by index to its file; callers must
+// provide either no DOI fields or exactly one for every file.
+func (h *DocumentHandler) UploadBatch(c *gin.Context) {
+	if !strings.HasPrefix(strings.ToLower(c.GetHeader("Content-Type")), "multipart/form-data") {
+		h.writeError(c, apperrors.NewUnsupportedMediaTypeError("batch upload must use multipart/form-data"), nil)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, batchUploadRequestSize(h.maxUploadSize))
+	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			h.writeError(c, apperrors.NewPayloadTooLargeError("batch upload exceeds the configured batch limit"), err)
+			return
+		}
+		h.writeError(c, apperrors.NewBadRequestError("invalid multipart batch upload"), err)
+		return
+	}
+	if c.Request.MultipartForm == nil {
+		h.writeError(c, apperrors.NewBadRequestError("multipart field 'files' is required"), nil)
+		return
+	}
+	defer c.Request.MultipartForm.RemoveAll()
+	files := c.Request.MultipartForm.File["files"]
+	dois := c.Request.MultipartForm.Value["doi"]
+	if len(files) == 0 || len(files) > types.MaxDocumentBatchItems {
+		h.writeError(c, apperrors.NewBadRequestError("provide between 1 and 20 files"), nil)
+		return
+	}
+	if len(dois) != 0 && len(dois) != len(files) {
+		h.writeError(c, apperrors.NewBadRequestError("provide either no DOI values or one DOI for each file"), nil)
+		return
+	}
+	for _, doi := range dois {
+		if !validDocumentDOI(doi) {
+			h.writeError(c, apperrors.NewBadRequestError("doi must be at most 255 characters and contain no control characters"), nil)
+			return
+		}
+	}
+	result, err := h.documents.CreateDocumentsFromFiles(c.Request.Context(), files, dois)
+	if err != nil {
+		h.writeError(c, apperrors.NewInternalServerError("create document batch"), err)
+		return
+	}
+	if result.Stopped {
+		logger.Warn(c.Request.Context(), "document batch upload stopped", "item_count", len(result.Items))
+	} else {
+		logger.Info(c.Request.Context(), "document batch upload accepted", "item_count", len(result.Items))
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+func validDocumentDOI(doi string) bool {
+	doi = strings.TrimSpace(doi)
+	return utf8.ValidString(doi) && utf8.RuneCountInString(doi) <= maxDOILength && !strings.ContainsAny(doi, "\r\n\t")
+}
+
+func batchUploadRequestSize(maxFileSize int64) int64 {
+	if maxFileSize <= 0 {
+		maxFileSize = fileservice.DefaultMaxUploadSize
+	}
+	if maxFileSize > (maxDocumentBatchRequestSize-documentBatchMultipartOverhead)/int64(types.MaxDocumentBatchItems) {
+		return maxDocumentBatchRequestSize
+	}
+	return maxFileSize*int64(types.MaxDocumentBatchItems) + documentBatchMultipartOverhead
 }
 
 // writeCreatedButNotQueued reports a durable upload whose initial background

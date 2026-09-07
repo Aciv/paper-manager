@@ -98,6 +98,23 @@ export type DocumentURLImport = {
   filename?: string;
 };
 
+export type DocumentBatchItemStatus = 'accepted' | 'duplicate' | 'rejected' | 'failed';
+export type DocumentBatchItemResult = {
+  index: number;
+  filename?: string;
+  url?: string;
+  status: DocumentBatchItemStatus;
+  document?: Document;
+  processingQueued?: boolean;
+  retryable?: boolean;
+  error?: string;
+};
+export type DocumentBatchResult = {
+  items: DocumentBatchItemResult[];
+  stopped?: boolean;
+  error?: string;
+};
+
 export type PDFBlockLocation = {
   pageNumber?: number;
   pageWidth?: number;
@@ -174,9 +191,18 @@ export const api = {
     body.append('doi', doi);
     return request<{ document: Document }>('/upload', { method: 'POST', body });
   },
+  uploadBatch: (files: File[]): Promise<DocumentBatchResult> => {
+    const body = new FormData();
+    files.forEach((file) => body.append('files', file));
+    return request<DocumentBatchResult>('/batch-upload', { method: 'POST', body });
+  },
   importFromURL: (payload: DocumentURLImport): Promise<{ document: Document }> => request<{ document: Document }>(
     '/import-url',
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+  ),
+  importFromURLs: (payload: DocumentURLImport[]): Promise<DocumentBatchResult> => request<DocumentBatchResult>(
+    '/batch-import-url',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls: payload }) },
   ),
   updateDocument: (id: string, payload: { originalFilename?: string; doi?: string }): Promise<{ document: Document }> => request<{ document: Document }>(
     `/${encodeURIComponent(id)}`,

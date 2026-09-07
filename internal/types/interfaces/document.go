@@ -69,6 +69,13 @@ type DocumentService interface {
 	// CreateDocumentFromURL resolves and safely downloads one explicit remote
 	// PDF, creates its source record, and starts the normal document pipeline.
 	CreateDocumentFromURL(ctx context.Context, command types.DocumentURLImportCommand) (*types.Document, error)
+	// CreateDocumentsFromFiles independently accepts a bounded multipart batch.
+	// Duplicate file hashes return the existing document instead of creating a
+	// second source record; a failed item does not stop later items.
+	CreateDocumentsFromFiles(ctx context.Context, files []*multipart.FileHeader, dois []string) (types.DocumentBatchResult, error)
+	// CreateDocumentsFromURLs independently resolves and accepts a bounded URL
+	// batch through the same SSRF-protected single-item import path.
+	CreateDocumentsFromURLs(ctx context.Context, commands []types.DocumentURLImportCommand) (types.DocumentBatchResult, error)
 	// GetDocumentByID parses and retrieves a document by its textual UUID.
 	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
 	// GetDocumentStatus returns the current lifecycle status for a document.

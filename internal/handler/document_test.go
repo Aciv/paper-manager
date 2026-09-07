@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"mime/multipart"
 	"net/http"
@@ -351,6 +352,61 @@ func TestUploadRouteRejectsDuplicateFileHash(t *testing.T) {
 	}
 	if response := upload(); response.Code != http.StatusConflict {
 		t.Fatalf("duplicate upload status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestUploadBatchRouteReportsAcceptedDuplicateAndRejectedItems(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	documents := &documentCreatorStub{}
+	documentService := service.NewDocumentService(documents, storage)
+	documentHandler := handler.NewDocumentHandler(config.Config{MaxUploadSize: fileservice.DefaultMaxUploadSize}, documentService)
+	engine := router.NewRouter(router.RouterParams{DocumentHandler: documentHandler})
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	for _, input := range []struct {
+		filename string
+		content  string
+	}{{"paper.txt", "same document"}, {"copy.txt", "same document"}, {"empty.txt", ""}} {
+		part, createErr := writer.CreateFormFile("files", input.filename)
+		if createErr != nil {
+			t.Fatal(createErr)
+		}
+		if _, writeErr := part.Write([]byte(input.content)); writeErr != nil {
+			t.Fatal(writeErr)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/document/batch-upload", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var result types.DocumentBatchResult
+	if err := json.Unmarshal(response.Body.Bytes(), &result); err != nil {
+		t.Fatalf("decode result: %v", err)
+	}
+	if len(result.Items) != 3 {
+		t.Fatalf("items = %#v", result.Items)
+	}
+	if result.Items[0].Status != types.DocumentImportItemAccepted || result.Items[0].Document == nil ||
+		result.Items[0].ProcessingQueued == nil || !*result.Items[0].ProcessingQueued {
+		t.Fatalf("first item = %#v", result.Items[0])
+	}
+	if result.Items[1].Status != types.DocumentImportItemDuplicate || result.Items[1].Document == nil ||
+		result.Items[1].Document.ID != result.Items[0].Document.ID {
+		t.Fatalf("second item = %#v", result.Items[1])
+	}
+	if result.Items[2].Status != types.DocumentImportItemRejected || result.Items[2].Error == "" {
+		t.Fatalf("third item = %#v", result.Items[2])
 	}
 }
 

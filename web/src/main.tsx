@@ -1,6 +1,6 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, Document, DocumentBase, DocumentPage, DocumentProcessingView, DocumentSearch, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
+import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentURLImport, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
 import { PdfReader } from './PdfReader';
 import { PaperLibraryPage } from './PaperLibraryPage';
 import './PaperInfo.css';
@@ -8,6 +8,7 @@ import './styles.css';
 import './UploadBasePicker.css';
 
 const acceptedFiles = '.txt,.json,.md,.markdown,.csv,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx';
+const maxBatchItems = 20;
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -25,6 +26,17 @@ function documentLabel(document: Document, paper?: PaperMetadata) {
 
 function parseTags(value: string) {
   return value.split(',').map((tag) => tag.trim()).filter(Boolean);
+}
+
+function batchItemLabel(item: DocumentBatchItemResult) {
+  return item.filename || item.url || `第 ${item.index + 1} 项`;
+}
+
+function batchStatusLabel(status: DocumentBatchItemResult['status']) {
+  const labels: Record<DocumentBatchItemResult['status'], string> = {
+    accepted: '已受理', duplicate: '已存在', rejected: '已拒绝', failed: '失败',
+  };
+  return labels[status];
 }
 
 function processingStateLabel(state: ProcessingSpanStatus) {
@@ -57,7 +69,7 @@ function App() {
   const [filters, setFilters] = useState<DocumentSearch>({ page: 1 });
   const [page, setPage] = useState<DocumentPage>({ items: [], page: 1, pageSize: 10, total: 0 });
   const [selected, setSelected] = useState<Document>();
-  const [file, setFile] = useState<File>();
+  const [files, setFiles] = useState<File[]>([]);
   const [doi, setDoi] = useState('');
   const [title, setTitle] = useState('');
   const [tags, setTags] = useState('');
@@ -89,6 +101,7 @@ function App() {
   const [selectedBaseID, setSelectedBaseID] = useState('');
   const [uploadBaseIDs, setUploadBaseIDs] = useState<string[]>([]);
   const [message, setMessage] = useState('');
+  const [batchResults, setBatchResults] = useState<DocumentBatchItemResult[]>([]);
   const [busy, setBusy] = useState(false);
   const processingPollDelay = useRef(2500);
   const processingWatchUntil = useRef(0);
@@ -108,6 +121,7 @@ function App() {
   const referenceCatalogActive = paperInfoStages.some((stage) => stage.kind === 'catalog_reference' && isActiveSpan(stage));
   const referenceDownloadActive = paperInfoStages.some((stage) => stage.kind === 'reference_download' && isActiveSpan(stage));
   const documentStatus = processing?.documentStatus ?? selected?.status ?? 'uploaded';
+  const remoteURLs = useMemo(() => remoteURL.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), [remoteURL]);
 
   function applyProcessingView(view: DocumentProcessingView) {
     setProcessing(view);
@@ -270,11 +284,32 @@ function App() {
 
   async function submitUpload(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!file) {
+    if (files.length === 0) {
       setMessage('请先选择文件。');
       return;
     }
+    if (files.length > maxBatchItems) {
+      setMessage(`一次最多上传 ${maxBatchItems} 个文件。`);
+      return;
+    }
     setBusy(true);
+    setBatchResults([]);
+    if (files.length > 1) {
+      setMessage(`正在批量上传 ${files.length} 个文件…`);
+      try {
+        const result = await api.uploadBatch(files);
+        await presentBatchResult(result, '文件批量上传');
+        setFiles([]);
+        const input = window.document.getElementById('document-file') as HTMLInputElement | null;
+        if (input) input.value = '';
+      } catch (error) {
+        setMessage(error instanceof Error ? `批量上传失败：${error.message}` : '批量上传失败。');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
+    const file = files[0];
     setMessage(`正在上传 ${file.name}…`);
     try {
       const { document: uploadedDocument } = await api.upload(file, doi.trim());
@@ -295,7 +330,7 @@ function App() {
       }
       setSelected(uploadedDocument);
       setPaperMetadata(uploadedPaper);
-      setFile(undefined);
+      setFiles([]);
       setDoi('');
       setTitle('');
       setTags('');
@@ -319,15 +354,34 @@ function App() {
 
   async function submitRemoteImport(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!remoteURL.trim()) {
+    if (remoteURLs.length === 0) {
       setMessage('请输入可下载的 PDF、arXiv 或 DOI URL。');
       return;
     }
+    if (remoteURLs.length > maxBatchItems) {
+      setMessage(`一次最多导入 ${maxBatchItems} 个 URL。`);
+      return;
+    }
     setBusy(true);
+    setBatchResults([]);
+    if (remoteURLs.length > 1) {
+      setMessage(`正在批量验证并下载 ${remoteURLs.length} 个远程 PDF…`);
+      try {
+        const payload: DocumentURLImport[] = remoteURLs.map((url) => ({ url }));
+        const result = await api.importFromURLs(payload);
+        await presentBatchResult(result, 'URL 批量导入');
+        setRemoteURL('');
+      } catch (error) {
+        setMessage(error instanceof Error ? `URL 批量导入失败：${error.message}` : 'URL 批量导入失败。');
+      } finally {
+        setBusy(false);
+      }
+      return;
+    }
     setMessage('正在验证并下载远程 PDF…');
     try {
       const { document: imported } = await api.importFromURL({
-        url: remoteURL.trim(),
+        url: remoteURLs[0],
         doi: remoteDOI.trim() || undefined,
         filename: remoteFilename.trim() || undefined,
       });
@@ -552,7 +606,43 @@ function App() {
   }
 
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
-    setFile(event.target.files?.[0]);
+    const selectedFiles = Array.from(event.target.files ?? []);
+    setFiles(selectedFiles);
+    if (selectedFiles.length > 1) {
+      setDoi('');
+      setTitle('');
+      setTags('');
+      setUploadBaseIDs([]);
+    }
+  }
+
+  function onRemoteURLsChange(event: ChangeEvent<HTMLTextAreaElement>) {
+    const value = event.target.value;
+    setRemoteURL(value);
+    if (value.split(/\r?\n/).filter((item) => item.trim()).length > 1) {
+      setRemoteDOI('');
+      setRemoteFilename('');
+    }
+  }
+
+  async function presentBatchResult(result: DocumentBatchResult, operation: string) {
+    setBatchResults(result.items);
+    const accepted = result.items.filter((item) => item.status === 'accepted' && item.document);
+    const firstAccepted = accepted[0];
+    const firstDocument = firstAccepted?.document ?? result.items.find((item) => item.document)?.document;
+    if (firstDocument) {
+      setSelected(firstDocument);
+      if (firstAccepted?.document && firstAccepted.processingQueued !== false) {
+        watchQueuedProcessing(firstAccepted.document.id);
+      }
+    }
+    await load({ page: 1 });
+    const counts = result.items.reduce<Record<DocumentBatchItemResult['status'], number>>(
+      (current, item) => ({ ...current, [item.status]: current[item.status] + 1 }),
+      { accepted: 0, duplicate: 0, rejected: 0, failed: 0 },
+    );
+    const stopped = result.stopped ? `；已安全停止：${result.error ?? '重复检测暂不可用'}` : '';
+    setMessage(`${operation}完成：受理 ${counts.accepted}，已存在 ${counts.duplicate}，拒绝 ${counts.rejected}，失败 ${counts.failed}${stopped}。`);
   }
 
   function toggleUploadBase(baseID: string) {
@@ -575,15 +665,15 @@ function App() {
 
       <form className="upload-form" onSubmit={submitUpload}>
         <h2>上传文档</h2>
-        <label htmlFor="document-file">文件</label>
-        <input id="document-file" type="file" accept={acceptedFiles} onChange={onFileChange} disabled={busy} />
+        <label htmlFor="document-file">文件（可多选）</label>
+        <input id="document-file" type="file" accept={acceptedFiles} multiple onChange={onFileChange} disabled={busy} />
         <label htmlFor="document-doi">DOI（可选）</label>
-        <input id="document-doi" value={doi} maxLength={255} onChange={(event) => setDoi(event.target.value)} placeholder="10.1000/example" disabled={busy} />
+        <input id="document-doi" value={doi} maxLength={255} onChange={(event) => setDoi(event.target.value)} placeholder="10.1000/example" disabled={busy || files.length > 1} />
         <label htmlFor="document-title">论文正式标题（可选）</label>
-        <input id="document-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="未填写时使用原始文件名" disabled={busy} />
+        <input id="document-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="未填写时使用原始文件名" disabled={busy || files.length > 1} />
         <label htmlFor="document-tags">学科标签（可选）</label>
-        <input id="document-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="computer science, graphics" disabled={busy} />
-        <fieldset className="base-picker" disabled={busy || bases.length === 0}>
+        <input id="document-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="computer science, graphics" disabled={busy || files.length > 1} />
+        <fieldset className="base-picker" disabled={busy || files.length > 1 || bases.length === 0}>
           <legend>加入 Document Base（可多选）</legend>
           {bases.length === 0 ? <p className="hint">暂无可选 Base；可先在下方创建。</p> : bases.map((base) => (
             <label className="base-option" htmlFor={`upload-base-${base.id}`} key={base.id}>
@@ -592,21 +682,30 @@ function App() {
             </label>
           ))}
         </fieldset>
-        <button className="primary" type="submit" disabled={busy || !file}>上传并创建记录</button>
-        <p className="hint">支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；最大大小由服务器配置决定。</p>
+        <button className="primary" type="submit" disabled={busy || files.length === 0}>{files.length > 1 ? `批量上传 ${files.length} 个文件` : '上传并创建记录'}</button>
+        <p className="hint">支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；单文件可设置 DOI、标题、标签和 Base。批量上传仅提交文件，完成后可逐项编辑元数据。</p>
       </form>
 
       <form className="upload-form" onSubmit={submitRemoteImport}>
         <h2>从 URL 导入 PDF</h2>
-        <label htmlFor="remote-url">PDF、arXiv 或 DOI URL</label>
-        <input id="remote-url" type="url" value={remoteURL} onChange={(event) => setRemoteURL(event.target.value)} placeholder="https://arxiv.org/abs/1706.03762" disabled={busy} required />
+        <label htmlFor="remote-url">PDF、arXiv 或 DOI URL（每行一个）</label>
+        <textarea id="remote-url" value={remoteURL} onChange={onRemoteURLsChange} placeholder={'https://arxiv.org/abs/1706.03762\nhttps://example.org/paper.pdf'} disabled={busy} required />
         <label htmlFor="remote-doi">显式 DOI（可选）</label>
-        <input id="remote-doi" value={remoteDOI} maxLength={255} onChange={(event) => setRemoteDOI(event.target.value)} placeholder="10.1000/example" disabled={busy} />
+        <input id="remote-doi" value={remoteDOI} maxLength={255} onChange={(event) => setRemoteDOI(event.target.value)} placeholder="10.1000/example" disabled={busy || remoteURLs.length > 1} />
         <label htmlFor="remote-filename">保存文件名（可选）</label>
-        <input id="remote-filename" value={remoteFilename} onChange={(event) => setRemoteFilename(event.target.value)} placeholder="paper.pdf" disabled={busy} />
-        <button className="primary" type="submit" disabled={busy || !remoteURL.trim()}>验证、下载并处理</button>
-        <p className="hint">普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。</p>
+        <input id="remote-filename" value={remoteFilename} onChange={(event) => setRemoteFilename(event.target.value)} placeholder="paper.pdf" disabled={busy || remoteURLs.length > 1} />
+        <button className="primary" type="submit" disabled={busy || remoteURLs.length === 0}>{remoteURLs.length > 1 ? `批量导入 ${remoteURLs.length} 个 URL` : '验证、下载并处理'}</button>
+        <p className="hint">普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。多行 URL 会逐项受理，单项 DOI 和文件名仅适用于单行导入。</p>
       </form>
+
+      {batchResults.length > 0 && <section className="batch-results" aria-live="polite">
+        <h2>批量导入结果</h2>
+        <ul>{batchResults.map((item) => <li key={`${item.index}-${batchItemLabel(item)}`}>
+          <span>{batchItemLabel(item)}</span>
+          <strong className={`batch-status batch-status-${item.status}`}>{batchStatusLabel(item.status)}</strong>
+          {item.error && <small>{item.error}</small>}
+        </li>)}</ul>
+      </section>}
 
       <form className="search-form" onSubmit={submitSearch}>
         <h2>查询文档</h2>

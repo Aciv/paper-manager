@@ -47,7 +47,11 @@ func (s *documentService) CreateDocumentFromURL(
 	if duplicate, err := s.findDuplicateDocument(ctx, uuid.Nil, resolved.DOI, ""); err != nil {
 		return nil, err
 	} else if duplicate != uuid.Nil {
-		return nil, ErrDuplicateDOI
+		existing, getErr := s.repo.Get(ctx, duplicate)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return &existing, ErrDuplicateDOI
 	}
 	stored, err := s.downloadResolvedPDF(ctx, resolved.DownloadURL, filename)
 	if err != nil {
@@ -58,7 +62,11 @@ func (s *documentService) CreateDocumentFromURL(
 		return nil, searchErr
 	} else if duplicate != uuid.Nil {
 		_ = s.storage.Delete(context.WithoutCancel(ctx), stored.File.Key)
-		return nil, ErrDuplicateFileHash
+		existing, getErr := s.repo.Get(ctx, duplicate)
+		if getErr != nil {
+			return nil, getErr
+		}
+		return &existing, ErrDuplicateFileHash
 	}
 	document := types.Document{
 		ID: uuid.New(), OriginalFilename: stored.File.Filename,
@@ -69,6 +77,16 @@ func (s *documentService) CreateDocumentFromURL(
 	created, err := s.repo.Create(ctx, document)
 	if err != nil {
 		_ = s.storage.Delete(context.WithoutCancel(ctx), stored.File.Key)
+		if errors.Is(err, types.ErrDuplicateFileHash) {
+			if existing, lookupErr := s.existingDocument(ctx, "", stored.File.SHA256); lookupErr == nil && existing != nil {
+				return existing, err
+			}
+		}
+		if errors.Is(err, types.ErrDuplicateDOI) {
+			if existing, lookupErr := s.existingDocument(ctx, resolved.DOI, ""); lookupErr == nil && existing != nil {
+				return existing, err
+			}
+		}
 		return nil, err
 	}
 	if s.papers != nil {
@@ -300,7 +318,7 @@ func (s *documentService) findDuplicateDocument(ctx context.Context, exclude uui
 		}
 		page, err := s.repo.Search(ctx, search)
 		if err != nil {
-			return uuid.Nil, err
+			return uuid.Nil, fmt.Errorf("%w: %w", errDocumentDuplicateLookup, err)
 		}
 		for _, item := range page.Items {
 			if item.ID != exclude && item.Status != types.DocumentStatusUnknown {
