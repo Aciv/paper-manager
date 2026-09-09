@@ -2,12 +2,12 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	fileservice "paperMaster/internal/application/service/file"
@@ -73,6 +73,7 @@ func (s *documentService) CreateDocumentFromURL(
 		ContentType: stored.File.ContentType, SizeBytes: stored.File.Size,
 		DOI: resolved.DOI, FileSHA256: stored.File.SHA256,
 		StorageKey: stored.File.Key, Status: types.DocumentStatusUploaded,
+		SourceState: types.DocumentSourceAvailable,
 	}
 	created, err := s.repo.Create(ctx, document)
 	if err != nil {
@@ -121,21 +122,12 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 		return err
 	}
 	documentID := uuid.MustParse(payload.DocumentID)
+	attempt := stageAttempt(payload.Generation, 0)
 	ctx = logger.WithAttrs(ctx, "document_id", documentID, "task_type", task.Type())
-	rootScopeID := remoteDocumentScopeID(documentID, payload.Attempt)
-	if s.spans != nil {
-		cancelled, err := s.spans.ScopeCancelled(ctx, documentID,
-			types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeRemoteDocument, rootScopeID)
-		if err != nil {
-			return err
-		}
-		if cancelled {
-			return fmt.Errorf("%w: %w", asynq.RevokeTask, types.ErrRemotePDFRunCancelled)
-		}
-	}
+	rootScopeID := remoteDocumentScopeID(documentID, attempt)
 	var rootSpan uuid.UUID
 	if s.spans != nil {
-		rootSpan, _ = s.spans.Begin(ctx, documentID, positiveAttempt(payload.Attempt),
+		rootSpan, _ = s.spans.BeginSpan(ctx, documentID, attempt,
 			types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeRemoteDocument, rootScopeID, retryCount(ctx))
 		defer func() {
 			if rootSpan == uuid.Nil {
@@ -143,13 +135,9 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 			}
 			if outputErr != nil {
 				code, reason := spanFailure(outputErr)
-				_ = s.spans.Fail(context.WithoutCancel(ctx), rootSpan, code, reason)
+				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), rootSpan, types.ProcessingSpanFailed, code, reason)
 			} else {
-				_ = s.spans.Succeed(context.WithoutCancel(ctx), rootSpan)
-			}
-			if outputErr == nil || errors.Is(outputErr, asynq.SkipRetry) ||
-				errors.Is(outputErr, asynq.RevokeTask) || finalAsynqAttempt(ctx) {
-				_ = s.spans.FinalizeParent(context.WithoutCancel(ctx), rootSpan)
+				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), rootSpan, types.ProcessingSpanSucceeded, "", "")
 			}
 		}()
 	}
@@ -158,7 +146,7 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 	if err != nil {
 		return err
 	}
-	if document.Status != types.DocumentStatusUnknown {
+	if document.SourceState != types.DocumentSourceMissing {
 		// A previous attempt or another worker already acquired the object.
 		return nil
 	}
@@ -170,17 +158,12 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 		return err
 	}
 
-	resolved, err := s.resolveRemoteStage(ctx, rootSpan, document, *metadata, payload.Attempt)
+	resolved, err := s.resolveRemoteStage(ctx, rootSpan, document, *metadata, attempt)
 	if err != nil {
 		return terminalRemoteImportError(err)
 	}
-	if cancelled, err := s.remoteImportCancelled(ctx, documentID, payload.Attempt); err != nil {
-		return err
-	} else if cancelled {
-		return fmt.Errorf("%w: %w", asynq.RevokeTask, types.ErrRemotePDFRunCancelled)
-	}
 
-	deduplicateSpan := s.beginRemoteChild(ctx, rootSpan, document.ID, payload.Attempt, types.ProcessingSpanDeduplicateDocument)
+	deduplicateSpan := s.beginRemoteChild(ctx, rootSpan, document.ID, attempt, types.ProcessingSpanDeduplicateDocument)
 	if duplicate, err := s.findDuplicateDocument(ctx, documentID, resolved.DOI, ""); err != nil {
 		s.finishRemoteChild(ctx, deduplicateSpan, err)
 		return err
@@ -191,7 +174,7 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 	}
 
 	s.finishRemoteChild(ctx, deduplicateSpan, nil)
-	stored, err := s.downloadRemoteStage(ctx, rootSpan, document, resolved, payload.Attempt)
+	stored, err := s.downloadRemoteStage(ctx, rootSpan, document, resolved, attempt)
 	if err != nil {
 		return terminalRemoteImportError(err)
 	}
@@ -202,13 +185,7 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 			_ = s.storage.Delete(context.WithoutCancel(ctx), stored.File.Key)
 		}
 	}()
-	if cancelled, err := s.remoteImportCancelled(ctx, documentID, payload.Attempt); err != nil {
-		return err
-	} else if cancelled {
-		return fmt.Errorf("%w: %w", asynq.RevokeTask, types.ErrRemotePDFRunCancelled)
-	}
-
-	deduplicateSpan = s.beginRemoteChild(ctx, rootSpan, document.ID, payload.Attempt, types.ProcessingSpanDeduplicateDocument)
+	deduplicateSpan = s.beginRemoteChild(ctx, rootSpan, document.ID, attempt, types.ProcessingSpanDeduplicateDocument)
 	if duplicate, err := s.findDuplicateDocument(ctx, documentID, "", stored.File.SHA256); err != nil {
 		s.finishRemoteChild(ctx, deduplicateSpan, err)
 		return err
@@ -225,7 +202,7 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 		ID: documentID, OriginalFilename: stored.File.Filename,
 		ContentType: stored.File.ContentType, SizeBytes: stored.File.Size,
 		DOI: resolved.DOI, FileSHA256: stored.File.SHA256,
-		StorageKey: stored.File.Key,
+		StorageKey: stored.File.Key, SourceState: types.DocumentSourceAvailable,
 	})
 
 	if errors.Is(err, types.ErrDuplicateDOI) || errors.Is(err, types.ErrDuplicateFileHash) {
@@ -256,7 +233,7 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 		_, _ = s.papers.UpdateMetadata(ctx, documentID.String(), types.PaperMetadataUpdate{SourceURL: &sourceURL, MetadataSource: &source})
 	}
 
-	enqueueSpan := s.beginRemoteChild(ctx, rootSpan, document.ID, payload.Attempt, types.ProcessingSpanEnqueueDocumentProcess)
+	enqueueSpan := s.beginRemoteChild(ctx, rootSpan, document.ID, attempt, types.ProcessingSpanEnqueueDocumentProcess)
 	if err := s.enqueueDocumentRecognition(ctx, documentID); err != nil {
 		s.finishRemoteChild(ctx, enqueueSpan, err)
 		return err
@@ -321,7 +298,7 @@ func (s *documentService) findDuplicateDocument(ctx context.Context, exclude uui
 			return uuid.Nil, fmt.Errorf("%w: %w", errDocumentDuplicateLookup, err)
 		}
 		for _, item := range page.Items {
-			if item.ID != exclude && item.Status != types.DocumentStatusUnknown {
+			if item.ID != exclude && item.SourceState == types.DocumentSourceAvailable {
 				return item.ID, nil
 			}
 		}
@@ -330,16 +307,9 @@ func (s *documentService) findDuplicateDocument(ctx context.Context, exclude uui
 }
 
 func (s *documentService) redirectIncomingCitations(ctx context.Context, placeholderID, canonicalID uuid.UUID) error {
-	incoming, err := s.papers.ListCitedBy(ctx, placeholderID.String())
-	if err != nil {
+	if err := s.repo.MergeIntoCanonical(ctx, placeholderID, canonicalID); err != nil {
 		return err
 	}
-	for _, citation := range incoming {
-		if _, err := s.papers.ResolveCitation(ctx, citation.CitingDocumentID.String(), canonicalID.String(), citation.RawReference); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-	}
-	_, _ = s.repo.DeleteUnknownIfUnreferenced(ctx, placeholderID)
 	logger.Info(ctx, "remote duplicate citations redirected", "placeholder_document_id", placeholderID, "canonical_document_id", canonicalID)
 	return nil
 }
@@ -362,9 +332,9 @@ func (s *documentService) beginRemoteChild(ctx context.Context, parent, document
 	scopeID := types.ComposeProcessingSpanScopeID(kind, documentID.String())
 	var id uuid.UUID
 	if parent != uuid.Nil {
-		id, _ = s.spans.BeginChild(ctx, parent, documentID, positiveAttempt(attempt), kind, types.ProcessingSpanScopeRemoteDocument, scopeID, retryCount(ctx))
+		id, _ = s.spans.BeginChildSpan(ctx, parent, documentID, positiveAttempt(attempt), kind, types.ProcessingSpanScopeRemoteDocument, scopeID, retryCount(ctx))
 	} else {
-		id, _ = s.spans.Begin(ctx, documentID, positiveAttempt(attempt), kind, types.ProcessingSpanScopeRemoteDocument, scopeID, retryCount(ctx))
+		id, _ = s.spans.BeginSpan(ctx, documentID, positiveAttempt(attempt), kind, types.ProcessingSpanScopeRemoteDocument, scopeID, retryCount(ctx))
 	}
 	return id
 }
@@ -374,22 +344,16 @@ func (s *documentService) finishRemoteChild(ctx context.Context, spanID uuid.UUI
 		return
 	}
 	if err == nil {
-		_ = s.spans.Succeed(context.WithoutCancel(ctx), spanID)
+		_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanSucceeded, "", "")
 		return
 	}
 	code, reason := spanFailure(err)
-	_ = s.spans.Fail(context.WithoutCancel(ctx), spanID, code, reason)
+	_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanFailed, code, reason)
 }
 
-func (s *documentService) remoteImportCancelled(
-	ctx context.Context, documentID uuid.UUID, attempt int,
-) (bool, error) {
-	if s.spans == nil {
-		return false, nil
-	}
-	return s.spans.ScopeCancelled(ctx, documentID,
-		types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeRemoteDocument,
-		remoteDocumentScopeID(documentID, attempt))
+func remoteDocumentScopeID(documentID uuid.UUID, attempt int) types.ProcessingSpanScopeID {
+	return types.ComposeProcessingSpanScopeID(types.ProcessingSpanReferenceDownload,
+		documentID.String(), strconv.Itoa(positiveAttempt(attempt)))
 }
 
 func positiveAttempt(value int) int {

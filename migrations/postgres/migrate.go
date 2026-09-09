@@ -66,6 +66,30 @@ var paperMetadataFieldSourcesUp string
 //go:embed 000018_paper_citation_origins.up.sql
 var paperCitationOriginsUp string
 
+//go:embed 000019_processing_runs.up.sql
+var processingRunsUp string
+
+//go:embed 000019_processing_runs.down.sql
+var processingRunsDown string
+
+//go:embed 000020_processing_run_items_and_span_view.up.sql
+var processingRunItemsAndSpanViewUp string
+
+//go:embed 000020_processing_run_items_and_span_view.down.sql
+var processingRunItemsAndSpanViewDown string
+
+//go:embed 000021_document_stage_control.up.sql
+var documentStageControlUp string
+
+//go:embed 000021_document_stage_control.down.sql
+var documentStageControlDown string
+
+//go:embed 000022_document_source_lifecycle.up.sql
+var documentSourceLifecycleUp string
+
+//go:embed 000022_document_source_lifecycle.down.sql
+var documentSourceLifecycleDown string
+
 type migration struct {
 	version int64
 	up      string
@@ -91,6 +115,10 @@ var migrations = []migration{
 	{version: 16, up: removeMarkdownSHA256Up},
 	{version: 17, up: paperMetadataFieldSourcesUp},
 	{version: 18, up: paperCitationOriginsUp},
+	{version: 19, up: processingRunsUp},
+	{version: 20, up: processingRunItemsAndSpanViewUp},
+	{version: 21, up: documentStageControlUp},
+	{version: 22, up: documentSourceLifecycleUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

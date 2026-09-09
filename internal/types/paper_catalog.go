@@ -45,10 +45,10 @@ func (status PaperCatalogStatus) IsValid() bool {
 // claim a provider and fallback state from PaperReferenceScheduler instead of
 // carrying either concern in the Asynq payload.
 type PaperCatalogResolveCommand struct {
-	RequestID   string
-	DocumentID  uuid.UUID
-	IsReference bool
-	Attempt     int
+	RequestID  string
+	DocumentID uuid.UUID
+	Stage      DocumentStage
+	Generation int64
 }
 
 // PaperReferenceDispatchCommand is the typed request to build a bounded,
@@ -56,10 +56,10 @@ type PaperCatalogResolveCommand struct {
 // intentionally separate from PaperCatalogResolveCommand: dispatch schedules
 // work, whereas catalog resolution executes one source or provider batch.
 type PaperReferenceDispatchCommand struct {
-	RequestID      string
-	DocumentID     uuid.UUID
-	Attempt        int
-	ReferenceRunID uuid.UUID
+	RequestID  string
+	DocumentID uuid.UUID
+	Stage      DocumentStage
+	Generation int64
 }
 
 // Validate verifies that the dispatcher has a stable run ID for idempotent
@@ -68,11 +68,10 @@ func (command PaperReferenceDispatchCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
 	}
-	if command.Attempt < 0 {
-		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperCatalogData)
-	}
-	if command.ReferenceRunID == uuid.Nil {
-		return fmt.Errorf("%w: reference_run_id is required", ErrInvalidPaperCatalogData)
+	if command.Stage != "" || command.Generation != 0 {
+		if err := ValidateDocumentStageEnvelope(command.Stage, command.Generation, DocumentStageReferenceLookup); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidPaperCatalogData, err)
+		}
 	}
 	return nil
 }
@@ -81,6 +80,11 @@ func (command PaperReferenceDispatchCommand) Validate() error {
 func (command PaperCatalogResolveCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
+	}
+	if command.Stage != "" || command.Generation != 0 {
+		if err := ValidateDocumentStageEnvelope(command.Stage, command.Generation, DocumentStageSourceLookup); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidPaperCatalogData, err)
+		}
 	}
 	return nil
 }

@@ -198,7 +198,6 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 
 	// Register document processing handler
 	if params.DocumentService != nil {
-		mux.HandleFunc(types.TypeDocumentProcess, params.DocumentService.ProcessDocument)
 		mux.HandleFunc(types.TypeDocumentRecognize, params.DocumentService.RecognizeDocument)
 		mux.HandleFunc(types.TypeDocumentRemoteImport, params.DocumentService.ImportRemoteDocument)
 	}
@@ -211,17 +210,6 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 		})
 		mux.HandleFunc(types.TypePaperReferenceDispatch, func(ctx context.Context, task *asynq.Task) error {
 			return processPaperReferenceDispatchTask(ctx, task, params.PaperInfoService)
-		})
-		mux.HandleFunc(types.TypePaperReferenceDownloadDispatch, func(ctx context.Context, task *asynq.Task) error {
-			if task == nil {
-				return skipPaperTask(errors.New("reference download dispatch task is required"))
-			}
-			var payload types.PaperReferenceDownloadDispatchPayload
-			if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-				return skipPaperTask(err)
-			}
-			ctx = paperTaskContext(ctx, payload.RequestID, payload.SourceDocumentID, task.Type())
-			return classifyPaperTaskError(params.PaperInfoService.DispatchReferenceDownloads(ctx, payload))
 		})
 	}
 
@@ -457,7 +445,6 @@ type deadLetterDocumentPayload struct {
 // dead-letter event should flip the parent Knowledge to "failed". Only
 // terminal task types are listed here:
 //
-//   - TypeDocumentProcess: the entry point of the parsing pipeline.
 //   - TypeImageMultimodal: a single image hitting dead-letter would have
 //     been counted by isFinalAsynqAttempt (see image_multimodal.go), so
 //     the parent might still complete via remaining images. We DO NOT mark
@@ -470,7 +457,6 @@ type deadLetterDocumentPayload struct {
 // Question/Summary generation are NOT included: they run after parse_status
 // has already become "completed" and have their own status fields.
 var taskTypesAffectingKnowledgeStatus = map[string]struct{}{
-	types.TypeDocumentProcess:        {},
 	types.TypeDocumentRecognize:      {},
 	types.TypePaperMetadataExtract:   {},
 	types.TypePaperCatalogResolve:    {},

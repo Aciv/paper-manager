@@ -24,11 +24,8 @@ import (
 )
 
 const (
-	// ProcessDocument performs recognition, extraction, and source lookup, then
-	// hands bibliography work to its independent dispatch task.
-	defaultDocumentProcessTaskTimeout  = 30 * time.Minute
 	defaultDocumentRecognitionTimeout  = 15 * time.Minute
-	defaultDocumentProcessTaskMaxRetry = 3
+	defaultDocumentRecognitionMaxRetry = 3
 
 	defaultPaperExtractionTaskTimeout  = 2 * time.Minute
 	defaultPaperExtractionTaskMaxRetry = 3
@@ -37,169 +34,6 @@ const (
 	defaultRemotePDFTaskTimeout        = 5 * time.Minute
 	defaultRemotePDFTaskMaxRetry       = 4
 )
-
-// documentProcessSpanContextKey carries the active ProcessDocument root only
-// while the fixed chain is executing. It deliberately never enters a paper
-// task payload, a document row, or reference-scheduler state.
-type documentProcessSpanContextKey struct{}
-
-func withDocumentProcessSpan(ctx context.Context, processID uuid.UUID) context.Context {
-	if processID == uuid.Nil {
-		return ctx
-	}
-	return context.WithValue(ctx, documentProcessSpanContextKey{}, processID)
-}
-
-func documentProcessSpanID(ctx context.Context) uuid.UUID {
-	processID, _ := ctx.Value(documentProcessSpanContextKey{}).(uuid.UUID)
-	return processID
-}
-
-// ProcessDocument runs the fixed document pipeline through source lookup in
-// one Asynq execution. It then durably hands off the bibliography branch to a
-// separate task; a returned error lets Asynq retry this task from idempotent
-// checkpoints.
-func (s *documentService) ProcessDocument(ctx context.Context, task *asynq.Task) (processErr error) {
-	if task == nil {
-		return errors.New("document process task is required")
-	}
-	var payload types.DocumentProcessPayload
-	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-		return fmt.Errorf("decode document process payload: %w", err)
-	}
-	documentID, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
-	if err != nil {
-		return fmt.Errorf("invalid document id in process payload: %w", err)
-	}
-	processID, err := uuid.Parse(strings.TrimSpace(payload.ProcessID))
-	if err != nil || processID == uuid.Nil {
-		// Legacy queued payloads predate the root span. They still receive the
-		// same direct recognition behaviour but cannot run paper stages safely.
-		return s.recognizeDocument(ctx, payload)
-	}
-	ctx = logger.WithAttrs(ctx, "document_id", documentID, "process_id", processID)
-	ctx = withDocumentProcessSpan(ctx, processID)
-	if s.spans != nil {
-		stopHeartbeat := keepSpanAlive(ctx, s.spans, processID)
-		defer stopHeartbeat()
-		defer func() {
-			if processErr != nil {
-				code, reason := spanFailure(processErr)
-				_ = s.spans.Fail(context.WithoutCancel(ctx), processID, code, reason)
-				return
-			}
-			_ = s.spans.Succeed(context.WithoutCancel(ctx), processID)
-		}()
-	}
-
-	document, aborted, err := s.loadProcessDocument(ctx, documentID)
-	if err != nil {
-		return err
-	}
-	if aborted {
-		return nil
-	}
-	// step1 parse pdf to get markdown
-	if document.Status != types.DocumentStatusReady {
-		if err := s.recognizeDocument(ctx, payload); err != nil {
-			return err
-		}
-	}
-
-	document, aborted, err = s.loadProcessDocument(ctx, documentID)
-	if err != nil {
-		return err
-	}
-	if aborted {
-		return nil
-	}
-	if s.paperInfo == nil {
-		return errors.New("paper information service is not configured")
-	}
-	if _, err := s.repo.GetMarkdown(ctx, documentID); err != nil {
-		return fmt.Errorf("load parsed Markdown for document process: %w", err)
-	}
-
-	extraction := types.PaperMetadataExtractCommand{
-		RequestID: payload.RequestID, DocumentID: documentID,
-		Attempt: payload.Attempt,
-	}
-	// step2 extraction markdown
-	if _, err := s.paperInfo.ExtractMetadata(ctx, extraction); err != nil {
-		return err
-	}
-	if _, aborted, err := s.loadProcessDocument(ctx, documentID); err != nil {
-		return err
-	} else if aborted {
-		return nil
-	}
-
-	// step3 web search paper metadate
-	if err := s.paperInfo.ResolveMetadata(ctx, types.PaperCatalogResolveCommand{
-		RequestID: payload.RequestID, DocumentID: documentID,
-		Attempt: payload.Attempt,
-	}); err != nil {
-		return err
-	}
-	if _, aborted, err := s.loadProcessDocument(ctx, documentID); err != nil {
-		return err
-	} else if aborted {
-		return nil
-	}
-
-	// step4 find reference matedate
-	return s.enqueueReferenceDispatch(ctx, payload, documentID)
-}
-
-// enqueueReferenceDispatch hands the bibliography branch to its own Asynq
-// task. The document process is complete once this durable handoff succeeds;
-// reference providers then use their scheduler, cooldowns, fallback, and
-// reference-specific spans independently of the document parsing root.
-func (s *documentService) enqueueReferenceDispatch(
-	ctx context.Context,
-	payload types.DocumentProcessPayload,
-	documentID uuid.UUID,
-) error {
-	if s.taskEnqueuer == nil {
-		return errors.New("document task enqueuer is not configured")
-	}
-	dispatchPayload := types.PaperReferenceDispatchPayload{
-		RequestID:      payload.RequestID,
-		DocumentID:     documentID.String(),
-		Attempt:        payload.Attempt,
-		ReferenceRunID: paperReferenceRunID(documentID, payload.Attempt).String(),
-	}
-	task, options, err := NewPaperReferenceDispatchTask(dispatchPayload, 0, 0)
-	if err != nil {
-		return fmt.Errorf("build paper reference dispatch task: %w", err)
-	}
-	if err := enqueueManagedTask(ctx, s.taskEnqueuer, task, options, documentID.String()); err != nil {
-		return fmt.Errorf("enqueue paper reference dispatch: %w", err)
-	}
-	logger.Info(ctx, "paper reference dispatch handed off", "document_id", documentID, "reference_run_id", dispatchPayload.ReferenceRunID)
-	return nil
-}
-
-// loadProcessDocument is the durable cancellation/deletion checkpoint between
-// direct pipeline stages. External calls may take minutes; reloading here
-// prevents a late stage from mutating a document the user already stopped.
-func (s *documentService) loadProcessDocument(
-	ctx context.Context, documentID uuid.UUID,
-) (types.Document, bool, error) {
-	document, err := s.repo.Get(ctx, documentID)
-	if err != nil {
-		return types.Document{}, false, err
-	}
-	aborted := document.Status == types.DocumentStatusCancelled ||
-		document.Status == types.DocumentStatusDeleting
-	if aborted {
-		logger.Info(ctx, "stop document process after cancellation or deletion",
-			"document_id", document.ID,
-			"status", document.Status,
-		)
-	}
-	return document, aborted, nil
-}
 
 // RecognizeDocument is the dedicated recognition worker. The parser's
 // Markdown and source-map blocks are committed together, so readers never see
@@ -216,49 +50,34 @@ func (s *documentService) RecognizeDocument(ctx context.Context, task *asynq.Tas
 }
 
 // recognizeDocument owns only file recognition and parsed-output persistence.
-// ProcessDocument calls it directly; the standalone handler reuses it.
 func (s *documentService) recognizeDocument(ctx context.Context, payload types.DocumentProcessPayload) (processErr error) {
 	documentID, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
 	if err != nil {
 		return fmt.Errorf("invalid document id in processing payload: %w", err)
 	}
-	processID, _ := uuid.Parse(strings.TrimSpace(payload.ProcessID))
+	if err := types.ValidateDocumentStageEnvelope(payload.Stage, payload.Generation, types.DocumentStageMarkdown); err != nil {
+		return err
+	}
+	_, err = startDocumentStageTask(ctx, s.repo, documentID, payload.Stage, payload.Generation)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		finishDocumentStageTask(ctx, s.repo, documentID, payload.Stage, payload.Generation, processErr)
+	}()
 	document, err := s.repo.Get(ctx, documentID)
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusCancelled || document.Status == types.DocumentStatusDeleting {
-		logger.Info(ctx, "skip document recognition after cancellation or deletion", "document_id", document.ID, "status", document.Status)
-		return nil
+	if document.SourceState != types.DocumentSourceAvailable {
+		return fmt.Errorf("%w: document source is %s", asynq.RevokeTask, document.SourceState)
 	}
-	if document.Status == types.DocumentStatusReady {
-		logger.Info(ctx, "document recognition already committed", "document_id", document.ID)
-		return nil
-	}
-	if document.Status != types.DocumentStatusProcessing {
-		transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, document.ID, types.DocumentStatusProcessing, nil,
-			[]types.DocumentStatus{types.DocumentStatusUploaded, types.DocumentStatusQueued, types.DocumentStatusFailed})
-		if err != nil {
-			return fmt.Errorf("mark document processing: %w", err)
-		}
-		if !transitioned {
-			logger.Info(ctx, "skip document recognition after concurrent status transition", "document_id", document.ID)
-			return nil
-		}
-	}
-	attempt := payload.Attempt
-	if attempt < 1 {
-		attempt = 1
-	}
+	attempt := stageAttempt(payload.Generation, 0)
 	retryCount, _ := asynq.GetRetryCount(ctx)
 	var spanID uuid.UUID
 	if s.spans != nil {
 		var spanErr error
-		if processID != uuid.Nil {
-			spanID, spanErr = s.spans.BeginChild(ctx, processID, document.ID, attempt, types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, processID.String()), retryCount)
-		} else {
-			spanID, spanErr = s.spans.Begin(ctx, document.ID, attempt, types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, document.ID.String()), retryCount)
-		}
+		spanID, spanErr = s.spans.BeginSpan(ctx, document.ID, attempt, types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, document.ID.String()), retryCount)
 		if spanErr != nil {
 			logger.Warn(ctx, "start recognition processing span failed", "document_id", document.ID, "error", spanErr)
 		}
@@ -271,23 +90,29 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 		}
 		if processErr != nil {
 			code, reason := spanFailure(processErr)
-			if err := s.spans.Fail(context.WithoutCancel(ctx), spanID, code, reason); err != nil {
+			if err := s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanFailed, code, reason); err != nil {
 				logger.Warn(ctx, "mark recognition processing span failed", "document_id", document.ID, "error", err)
 			}
 			return
 		}
-		if err := s.spans.Succeed(context.WithoutCancel(ctx), spanID); err != nil {
+		if err := s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanSucceeded, "", ""); err != nil {
 			logger.Warn(ctx, "finish recognition processing span failed", "document_id", document.ID, "error", err)
 		}
 	}()
 	if s.storage == nil || s.recognizer == nil {
 		return errors.New("document recognition dependencies are not configured")
 	}
+	if err := ensureDocumentStageWork(ctx, s.repo, documentID, payload.Stage, payload.Generation); err != nil {
+		return err
+	}
 
 	logger.Info(ctx, "start document recognition", "document_id", document.ID, "content_type", document.ContentType)
 	input, err := s.storage.Open(ctx, document.StorageKey)
 	if err != nil {
 		return fmt.Errorf("open document source: %w", err)
+	}
+	if err := ensureDocumentStageWork(ctx, s.repo, documentID, payload.Stage, payload.Generation); err != nil {
+		return err
 	}
 	content, readErr := io.ReadAll(io.LimitReader(input, document.SizeBytes+1))
 	closeErr := input.Close()
@@ -318,6 +143,9 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 		}
 		return fmt.Errorf("recognize document: %w", err)
 	}
+	if err := ensureDocumentStageWork(ctx, s.repo, documentID, payload.Stage, payload.Generation); err != nil {
+		return err
+	}
 	// Recognition can take minutes. Re-read the durable state before doing any
 	// output work: a concurrent cancel or delete must discard this result rather
 	// than creating a new stored Markdown object after the user ended the job.
@@ -327,13 +155,15 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			logger.Info(ctx, "discard recognized output after document deletion", "document_id", document.ID)
-			return nil
+			return fmt.Errorf("%w: document was deleted during recognition", asynq.RevokeTask)
 		}
 		return fmt.Errorf("reload document after recognition: %w", err)
 	}
-	if current.Status != types.DocumentStatusProcessing {
-		logger.Info(ctx, "discard recognized output after status change", "document_id", document.ID, "status", current.Status)
-		return nil
+	if current.SourceState != types.DocumentSourceAvailable {
+		return fmt.Errorf("%w: document source changed to %s", asynq.RevokeTask, current.SourceState)
+	}
+	if err := ensureDocumentStageWork(ctx, s.repo, document.ID, payload.Stage, payload.Generation); err != nil {
+		return err
 	}
 	markdownBytes, metadata, err := s.readRecognitionMarkdown(result)
 	if err != nil {
@@ -375,14 +205,15 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 		// metadata yet.
 		Metadata: types.JSON(`{}`),
 	}
-	if err := s.repo.ReplaceParsedOutput(ctx, markdown, blocks); err != nil {
+
+	if err := s.repo.ReplaceParsedOutput(ctx, markdown, blocks, payload.Generation); err != nil {
 		if deleteErr := s.storage.Delete(context.WithoutCancel(ctx), storedMarkdown.Key); deleteErr != nil {
 			logger.Warn(ctx, "remove uncommitted Markdown failed", "document_id", document.ID, "storage_key", storedMarkdown.Key, "error", deleteErr)
 		}
 		cleanupImages()
 		if errors.Is(err, types.ErrDocumentNotProcessing) {
 			logger.Info(ctx, "discard recognized output after status change", "document_id", document.ID)
-			return nil
+			return fmt.Errorf("%w: Markdown stage no longer permits output commit", asynq.RevokeTask)
 		}
 		return fmt.Errorf("persist recognized output: %w", err)
 	}
@@ -402,7 +233,39 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 		logger.Info(ctx, "replaced document block image deleted", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey)
 	}
 	logger.Info(ctx, "document recognition completed", "document_id", document.ID, "block_count", len(blocks), "markdown_storage_key", storedMarkdown.Key)
+	if err := s.enqueueMetadataExtractionIfNeeded(ctx, document.ID); err != nil {
+		logger.Warn(ctx, "queue metadata extraction after recognition failed", "document_id", document.ID, "error", err)
+	}
 	return nil
+}
+
+func (s *documentService) enqueueMetadataExtractionIfNeeded(ctx context.Context, documentID uuid.UUID) error {
+	state, err := s.repo.GetStage(ctx, documentID, types.DocumentStageMetadataExtraction)
+	if err != nil {
+		return err
+	}
+	if state.Status == types.DocumentStageNotStarted {
+		state, _, err = s.repo.QueueStageNewGeneration(ctx, documentID, types.DocumentStageMetadataExtraction)
+		if err != nil {
+			return err
+		}
+	}
+	if state.Status != types.DocumentStageQueued {
+		return nil
+	}
+	payload := types.PaperMetadataExtractPayload{
+		DocumentID: documentID.String(),
+		Stage:      types.DocumentStageMetadataExtraction, Generation: state.Generation,
+	}
+	task, options, err := NewPaperMetadataExtractTask(payload, 0, 0)
+	if err == nil {
+		err = enqueueDocumentStageTask(ctx, s.taskEnqueuer, task, options, documentID.String())
+	}
+	if err != nil {
+		_, _, _ = s.repo.FinishStage(context.WithoutCancel(ctx), documentID,
+			types.DocumentStageMetadataExtraction, state.Generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
+	}
+	return err
 }
 
 func (s *documentService) finishDocumentProcess(ctx context.Context, processID uuid.UUID, status types.ProcessingSpanStatus, code, reason string) error {
@@ -412,11 +275,11 @@ func (s *documentService) finishDocumentProcess(ctx context.Context, processID u
 	var err error
 	switch status {
 	case types.ProcessingSpanSucceeded:
-		err = s.spans.Succeed(context.WithoutCancel(ctx), processID)
+		err = s.spans.FinishSpan(context.WithoutCancel(ctx), processID, types.ProcessingSpanSucceeded, "", "")
 	case types.ProcessingSpanCancelled:
-		err = s.spans.Fail(context.WithoutCancel(ctx), processID, code, reason)
+		err = s.spans.FinishSpan(context.WithoutCancel(ctx), processID, types.ProcessingSpanCancelled, code, reason)
 	default:
-		err = s.spans.Fail(context.WithoutCancel(ctx), processID, code, reason)
+		err = s.spans.FinishSpan(context.WithoutCancel(ctx), processID, types.ProcessingSpanFailed, code, reason)
 	}
 	if err != nil {
 		return fmt.Errorf("finish document process: %w", err)
@@ -567,18 +430,8 @@ func (s *documentService) recognitionOutputLimit() int64 {
 // A database failure remains retryable because recording the status is more
 // important than archiving an otherwise invisible failure.
 func (s *documentService) failUnsupportedDocumentRecognition(ctx context.Context, documentID uuid.UUID, cause error) error {
-	message := "document recognition is not supported for this content type"
-	updated, err := s.repo.UpdateStatusIfCurrent(ctx, documentID, types.DocumentStatusFailed, &message,
-		[]types.DocumentStatus{types.DocumentStatusProcessing})
-	if err != nil {
-		return fmt.Errorf("mark unsupported document recognition failed: %w", err)
-	}
-	if !updated {
-		logger.Info(ctx, "unsupported document recognition status already changed", "document_id", documentID)
-		return nil
-	}
 	logger.Warn(ctx, "document recognition rejected as unsupported", "document_id", documentID, "error", cause)
-	return fmt.Errorf("unsupported document recognition: %w", asynq.SkipRetry)
+	return fmt.Errorf("%w: %w", asynq.SkipRetry, cause)
 }
 
 // failUnavailableDocumentRecognition records a disconnected recognizer as a
@@ -587,18 +440,8 @@ func (s *documentService) failUnsupportedDocumentRecognition(ctx context.Context
 // processing state. Operators can restore Python and use the normal
 // document retry action, which creates a fresh recognition task.
 func (s *documentService) failUnavailableDocumentRecognition(ctx context.Context, documentID uuid.UUID, cause error) error {
-	message := "document recognition service is unavailable"
-	updated, err := s.repo.UpdateStatusIfCurrent(ctx, documentID, types.DocumentStatusFailed, &message,
-		[]types.DocumentStatus{types.DocumentStatusProcessing})
-	if err != nil {
-		return fmt.Errorf("mark unavailable document recognition failed: %w", err)
-	}
-	if !updated {
-		logger.Info(ctx, "unavailable document recognition status already changed", "document_id", documentID)
-		return nil
-	}
 	logger.Error(ctx, "document recognition service is unavailable", "document_id", documentID, "error", cause)
-	return fmt.Errorf("document recognition service unavailable: %w", asynq.SkipRetry)
+	return fmt.Errorf("%w: %w", asynq.SkipRetry, cause)
 }
 
 // persistBlocks converts parser-owned source-map entries into durable blocks.
@@ -685,12 +528,20 @@ func (s *documentService) CancelDocumentParse(ctx context.Context, id string) (*
 		logger.Error(ctx, "load document for cancellation failed", "document_id", id, "error", err)
 		return nil, err
 	}
+	markdownStage, stageErr := s.repo.GetStage(ctx, existing.ID, types.DocumentStageMarkdown)
+	if stageErr != nil {
+		return nil, stageErr
+	}
+	if markdownStage.Status.Active() {
+		if _, _, stageErr = s.repo.CancelStage(ctx, existing.ID, types.DocumentStageMarkdown, markdownStage.Generation); stageErr != nil {
+			return nil, stageErr
+		}
+	}
 
 	switch existing.Status {
 	case types.DocumentStatusCancelled:
-		s.dequeueDocumentTasks(ctx, existing.ID.String())
-		if s.spans != nil {
-			_ = s.spans.CancelDocument(context.WithoutCancel(ctx), existing.ID, "USER_CANCELLED", "document parsing cancelled by user")
+		if err := s.cancelDocumentWorkflow(ctx, existing.ID); err != nil {
+			return nil, err
 		}
 		logger.Info(ctx, "document cancellation already applied", "document_id", existing.ID)
 		return existing, nil
@@ -717,7 +568,9 @@ func (s *documentService) CancelDocumentParse(ctx context.Context, id string) (*
 			return nil, loadErr
 		}
 		if current.Status == types.DocumentStatusCancelled {
-			s.dequeueDocumentTasks(ctx, current.ID.String())
+			if err := s.cancelDocumentWorkflow(ctx, current.ID); err != nil {
+				return nil, err
+			}
 			return current, nil
 		}
 		if current.Status == types.DocumentStatusReady || current.Status == types.DocumentStatusFailed {
@@ -731,13 +584,27 @@ func (s *documentService) CancelDocumentParse(ctx context.Context, id string) (*
 	existing.Status = types.DocumentStatusCancelled
 	existing.ErrorMessage = &message
 	logger.Info(ctx, "document marked cancelled", "document_id", existing.ID)
-	if s.spans != nil {
-		if err := s.spans.CancelDocument(context.WithoutCancel(ctx), existing.ID, "USER_CANCELLED", message); err != nil {
-			logger.Warn(ctx, "cancel document processing spans failed", "document_id", existing.ID, "error", err)
+	if err := s.cancelDocumentWorkflow(ctx, existing.ID); err != nil {
+		return nil, err
+	}
+	return existing, nil
+}
+
+func (s *documentService) cancelDocumentWorkflow(ctx context.Context, documentID uuid.UUID) error {
+	if s.cancellations != nil {
+		result, err := s.cancellations.CancelActiveRuns(ctx, documentID, types.ProcessingWorkflowDocument)
+		if err != nil {
+			return err
+		}
+		// A zero-run result is expected while draining legacy payloads. Their
+		// document-status fence is already durable; broad cleanup is restricted
+		// to this compatibility path.
+		if len(result.RunIDs) > 0 {
+			return nil
 		}
 	}
-	s.dequeueDocumentTasks(ctx, existing.ID.String())
-	return existing, nil
+	s.dequeueDocumentTasks(ctx, documentID.String())
+	return nil
 }
 
 func (s *documentService) dequeueDocumentTasks(ctx context.Context, documentID string) {
@@ -749,36 +616,13 @@ func (s *documentService) dequeueDocumentTasks(ctx context.Context, documentID s
 	}
 }
 
-// NewDocumentProcessTask validates and creates the direct fixed-pipeline task.
-// It invokes recognition, extraction, source lookup, and bibliography lookup
-// in order; the operation that fails returns its error for normal Asynq retry.
-func NewDocumentProcessTask(
-	payload types.DocumentProcessPayload,
-) (*asynq.Task, []asynq.Option, error) {
-	if strings.TrimSpace(payload.DocumentID) == "" {
-		return nil, nil, errors.New("document id is required for processing task")
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return nil, nil, fmt.Errorf("encode document processing task: %w", err)
-	}
-	options := []asynq.Option{
-		asynq.Queue(types.QueueDefault),
-		asynq.MaxRetry(defaultDocumentProcessTaskMaxRetry),
-		asynq.Timeout(defaultDocumentProcessTaskTimeout),
-	}
-	if strings.TrimSpace(payload.ProcessID) != "" {
-		options = append(options, asynq.TaskID(paperInfoTaskID(
-			types.TypeDocumentProcess, payload.DocumentID, payload.Attempt, payload.ProcessID,
-		)))
-	}
-	return asynq.NewTask(types.TypeDocumentProcess, encoded), options, nil
-}
-
 // NewDocumentRecognitionTask creates the dedicated recognition worker task.
 func NewDocumentRecognitionTask(payload types.DocumentProcessPayload) (*asynq.Task, []asynq.Option, error) {
 	if strings.TrimSpace(payload.DocumentID) == "" {
 		return nil, nil, errors.New("document id is required for recognition task")
+	}
+	if err := types.ValidateDocumentStageEnvelope(payload.Stage, payload.Generation, types.DocumentStageMarkdown); err != nil {
+		return nil, nil, err
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -786,14 +630,12 @@ func NewDocumentRecognitionTask(payload types.DocumentProcessPayload) (*asynq.Ta
 	}
 	options := []asynq.Option{
 		asynq.Queue(types.QueueDefault),
-		asynq.MaxRetry(defaultDocumentProcessTaskMaxRetry),
+		asynq.MaxRetry(defaultDocumentRecognitionMaxRetry),
 		asynq.Timeout(defaultDocumentRecognitionTimeout),
 	}
-	if strings.TrimSpace(payload.ProcessID) != "" {
-		options = append(options, asynq.TaskID(paperInfoTaskID(
-			types.TypeDocumentRecognize, payload.DocumentID, payload.Attempt, payload.ProcessID,
-		)))
-	}
+	options = append(options, asynq.TaskID(paperInfoTaskID(
+		types.TypeDocumentRecognize, payload.DocumentID, 0, string(payload.Stage), strconv.FormatInt(payload.Generation, 10),
+	)))
 	return asynq.NewTask(types.TypeDocumentRecognize, encoded), options, nil
 }
 
@@ -818,6 +660,7 @@ func NewPaperMetadataExtractTask(
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode paper metadata extraction task: %w", err)
 	}
+	parts := stageTaskIDParts(payload.Stage, payload.Generation)
 	return task, []asynq.Option{
 		asynq.Queue(types.QueueDefault),
 		asynq.MaxRetry(maxRetry),
@@ -825,7 +668,8 @@ func NewPaperMetadataExtractTask(
 		asynq.TaskID(paperInfoTaskID(
 			types.TypePaperMetadataExtract,
 			payload.DocumentID,
-			payload.Attempt,
+			0,
+			parts...,
 		)),
 	}, nil
 }
@@ -839,19 +683,6 @@ func NewPaperReferenceDispatchTask(
 	timeout time.Duration,
 	maxRetry int,
 ) (*asynq.Task, []asynq.Option, error) {
-	if strings.TrimSpace(payload.ReferenceRunID) == "" {
-		documentID, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
-		if err != nil {
-			return nil, nil, fmt.Errorf("parse reference dispatcher document id: %w", err)
-		}
-		if documentID == uuid.Nil {
-			return nil, nil, errors.New("reference dispatcher document id must be non-zero")
-		}
-		payload.ReferenceRunID = paperReferenceRunID(
-			documentID,
-			payload.Attempt,
-		).String()
-	}
 	if err := payload.Validate(); err != nil {
 		return nil, nil, err
 	}
@@ -865,6 +696,7 @@ func NewPaperReferenceDispatchTask(
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode paper reference dispatch task: %w", err)
 	}
+	parts := stageTaskIDParts(payload.Stage, payload.Generation)
 	return task, []asynq.Option{
 		asynq.Queue(types.QueueLow),
 		asynq.MaxRetry(maxRetry),
@@ -872,8 +704,8 @@ func NewPaperReferenceDispatchTask(
 		asynq.TaskID(paperInfoTaskID(
 			types.TypePaperReferenceDispatch,
 			payload.DocumentID,
-			payload.Attempt,
-			payload.ReferenceRunID,
+			0,
+			parts...,
 		)),
 	}, nil
 }
@@ -900,50 +732,16 @@ func NewPaperCatalogResolveTask(
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode paper catalog resolution task: %w", err)
 	}
-	queue := types.QueueDefault
-	if payload.IsReference {
-		queue = types.QueueLow
-	}
 	options := []asynq.Option{
-		asynq.Queue(queue),
+		asynq.Queue(types.QueueDefault),
 		asynq.MaxRetry(maxRetry),
 		asynq.Timeout(timeout),
 	}
-	stage := "source"
-	if payload.IsReference {
-		stage = "reference"
-	}
+	parts := stageTaskIDParts(payload.Stage, payload.Generation)
 	options = append(options, asynq.TaskID(paperInfoTaskID(
-		types.TypePaperCatalogResolve, payload.DocumentID, payload.Attempt, stage,
+		types.TypePaperCatalogResolve, payload.DocumentID, 0, parts...,
 	)))
 	return task, options, nil
-}
-
-// NewPaperReferenceDownloadDispatchTask creates the lightweight
-// bibliography-scoped acquisition dispatcher. It performs no HTTP request.
-func NewPaperReferenceDownloadDispatchTask(
-	payload types.PaperReferenceDownloadDispatchPayload,
-	timeout time.Duration,
-	maxRetry int,
-) (*asynq.Task, []asynq.Option, error) {
-	if err := payload.Validate(); err != nil {
-		return nil, nil, err
-	}
-	if timeout <= 0 {
-		timeout = defaultRemotePDFTaskTimeout
-	}
-	if maxRetry <= 0 {
-		maxRetry = defaultRemotePDFTaskMaxRetry
-	}
-	task, err := newPaperInfoJSONTask(types.TypePaperReferenceDownloadDispatch, payload)
-	if err != nil {
-		return nil, nil, fmt.Errorf("encode reference download dispatch task: %w", err)
-	}
-	return task, []asynq.Option{
-		asynq.Queue(types.QueueLow), asynq.Timeout(timeout), asynq.MaxRetry(maxRetry),
-		asynq.TaskID(paperInfoTaskID(types.TypePaperReferenceDownloadDispatch,
-			payload.SourceDocumentID, payload.Attempt, payload.ReferenceRunID)),
-	}, nil
 }
 
 // NewDocumentRemoteImportTask creates one isolated remote-PDF acquisition.
@@ -969,7 +767,7 @@ func NewDocumentRemoteImportTask(
 	return task, []asynq.Option{
 		asynq.Queue(types.QueueDownload), asynq.Timeout(timeout), asynq.MaxRetry(maxRetry),
 		asynq.TaskID(paperInfoTaskID(types.TypeDocumentRemoteImport,
-			payload.DocumentID, payload.Attempt)),
+			payload.DocumentID, 0, strconv.FormatInt(payload.Generation, 10))),
 	}, nil
 }
 
@@ -994,6 +792,13 @@ func paperInfoTaskID(taskType, documentID string, attempt int, parts ...string) 
 		}
 	}
 	return base
+}
+
+func stageTaskIDParts(stage types.DocumentStage, generation int64) []string {
+	if !types.HasDocumentStageEnvelope(stage, generation) {
+		return nil
+	}
+	return []string{string(stage), strconv.FormatInt(generation, 10)}
 }
 
 var _ interfaces.DocumentRecognizer

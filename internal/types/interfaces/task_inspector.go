@@ -1,6 +1,10 @@
 package interfaces
 
-import "context"
+import (
+	"context"
+
+	"paperMaster/internal/types"
+)
 
 // TaskInspector abstracts queue inspection / cancellation against the
 // task backend. It is best-effort: implementations may scan a finite
@@ -20,11 +24,10 @@ type TaskInspector interface {
 	// truth, this just prevents wasted work.
 	CancelTasksForDocument(ctx context.Context, documentID string) (deleted int, cancelled int, err error)
 
-	// CancelReferenceTasksForRun removes only reference-dispatch and
-	// reference-catalog tasks carrying the exact durable run ID, then signals
-	// matching active workers. It never touches recognition, metadata
-	// extraction, or source-catalog work.
-	CancelReferenceTasksForRun(ctx context.Context, documentID, referenceRunID string) (deleted int, cancelled int, err error)
+	// CancelTasksForRun removes pending/scheduled/retry tasks and signals active
+	// tasks belonging to one exact processing run. Matching rules depend on the
+	// workflow kind and never cancel another run for the same document.
+	CancelTasksForRun(ctx context.Context, ownerDocumentID, runID string, kind types.ProcessingWorkflowKind) (deleted int, cancelled int, err error)
 
 	// CancelReferenceTasksForDocuments removes scheduler-owned reference catalog
 	// tasks for the listed target placeholders. The ownership/run information is

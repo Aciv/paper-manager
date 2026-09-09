@@ -10,8 +10,8 @@ import (
 )
 
 // PaperReferenceScheduler owns global reference-resolution scheduling state.
-// It keeps run ownership, provider history, cancellation, and the shared
-// provider rotation outside short-lived Asynq payloads.
+// It keeps per-target provider history, fallback, and global cooldown outside
+// short-lived Asynq payloads. Stage ownership remains on the target Document.
 type PaperReferenceScheduler interface {
 	// Register creates or refreshes one target job. It returns true only when a
 	// catalog task should be queued; duplicate active jobs return false.
@@ -25,15 +25,4 @@ type PaperReferenceScheduler interface {
 	// Cooldown temporarily removes a provider from new reference claims across
 	// every run. Existing provider throttles remain the final enforcement layer.
 	Cooldown(ctx context.Context, provider types.PaperCatalogProvider, delay time.Duration) error
-	// CancelRun marks all jobs belonging to the source/run tuple cancelled and
-	// returns their target IDs so queued tasks can be removed best-effort.
-	CancelRun(ctx context.Context, sourceDocumentID, runID uuid.UUID) ([]uuid.UUID, error)
-	// IsRunActive reports whether a run remains eligible for provider work.
-	IsRunActive(ctx context.Context, sourceDocumentID, runID uuid.UUID) (bool, error)
-	// IsTargetActive checks whether at least one non-cancelled owner still needs
-	// a target while an external provider call is in flight.
-	IsTargetActive(ctx context.Context, targetDocumentID uuid.UUID) (bool, error)
-	// Progress returns compact reference-resolution state for one source
-	// document across its currently retained scheduler jobs.
-	Progress(ctx context.Context, sourceDocumentID uuid.UUID) (types.PaperReferenceProgress, error)
 }

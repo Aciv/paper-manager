@@ -18,18 +18,17 @@ import (
 // processing. It is separate from DocumentHandler so retry, reparse, task
 // progress, and parser controls can be added without growing file endpoints.
 type DocumentProcessHandler struct {
-	documents  interfaces.DocumentService
-	spans      interfaces.SpanTracker
-	references interfaces.PaperReferenceScheduler
+	documents interfaces.DocumentService
+	spans     interfaces.SpanRecorder
 }
 
 func NewDocumentProcessHandler(documents interfaces.DocumentService) *DocumentProcessHandler {
 	return &DocumentProcessHandler{documents: documents}
 }
 
-// NewDocumentProcessHandlerWithSpanTracker is the production DI constructor.
-func NewDocumentProcessHandlerWithSpanTracker(documents interfaces.DocumentService, spans interfaces.SpanTracker, references interfaces.PaperReferenceScheduler) *DocumentProcessHandler {
-	return &DocumentProcessHandler{documents: documents, spans: spans, references: references}
+// NewDocumentProcessHandlerWithSpanRecorder is the production DI constructor.
+func NewDocumentProcessHandlerWithSpanRecorder(documents interfaces.DocumentService, spans interfaces.SpanRecorder) *DocumentProcessHandler {
+	return &DocumentProcessHandler{documents: documents, spans: spans}
 }
 
 // Status returns user-safe persistent processing state for a document.
@@ -52,18 +51,16 @@ func (h *DocumentProcessHandler) Status(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"processing": types.DocumentProcessingView{DocumentID: document.ID, DocumentStatus: document.Status, Stages: []types.DocumentProcessingSpan{}}})
 		return
 	}
-	view, err := h.spans.GetView(c.Request.Context(), *document)
+	view, err := h.spans.GetRunView(c.Request.Context(), *document)
 	if err != nil {
 		h.writeError(c, apperrors.NewInternalServerError("load document processing state"), err)
 		return
 	}
-	if h.references != nil {
-		progress, progressErr := h.references.Progress(c.Request.Context(), document.ID)
-		if progressErr != nil {
-			logger.Warn(c.Request.Context(), "load reference scheduler progress failed", "document_id", document.ID, "error", progressErr)
-		} else {
-			view.ReferenceProgress = &progress
-		}
+	progress, progressErr := h.documents.GetReferenceProgress(c.Request.Context(), document.ID.String())
+	if progressErr != nil {
+		logger.Warn(c.Request.Context(), "load reference target progress failed", "document_id", document.ID, "error", progressErr)
+	} else {
+		view.ReferenceProgress = &progress
 	}
 	c.JSON(http.StatusOK, gin.H{"processing": view})
 }

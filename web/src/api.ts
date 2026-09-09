@@ -56,15 +56,31 @@ export type ProcessingSpan = {
   startedAt: string;
   finishedAt?: string;
 };
+export type ProcessingRunSummary = {
+  id: string;
+  ownerDocumentId: string;
+  workflowKind: string;
+  attempt: number;
+  state: 'queued' | 'running' | 'cancel_requested' | 'succeeded' | 'failed' | 'cancelled';
+  errorCode?: string;
+  errorReason?: string;
+  cancelRequestedAt?: string;
+  startedAt?: string;
+  terminalAt?: string;
+  createdAt: string;
+  updatedAt: string;
+};
 export type DocumentProcessingView = {
   documentId: string;
   documentStatus: DocumentStatus;
   latestAttempt: number;
+  runs?: ProcessingRunSummary[];
   stages: ProcessingSpan[];
   referenceProgress?: {
     queued: number;
     running: number;
     completed: number;
+    failed: number;
     cancelled: number;
   };
 };
@@ -260,8 +276,6 @@ export const api = {
   retryPaperExtraction: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/extraction/retry`, { method: 'POST' }),
   retryPaperCatalog: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/catalog/retry`, { method: 'POST' }),
   retryPaperReferences: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/reference/retry`, { method: 'POST' }),
-  startReferenceDownloads: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/references/download`, { method: 'POST' }),
-  cancelReferenceDownloads: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/references/download/cancel`, { method: 'POST' }),
   cancelPaperInfo: (documentID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(paperBaseUrl, `/${encodeURIComponent(documentID)}/info/cancel`, { method: 'POST' }),
   listDocumentBases: (): Promise<{ items: DocumentBase[] }> => request<{ items: DocumentBase[] }>('/bases'),
   listDocumentBaseDocuments: (baseID: string, page = 1, excludeUnknown = false): Promise<DocumentPage> => {

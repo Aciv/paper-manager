@@ -32,9 +32,10 @@ func (s *documentTaskInspectorStub) CancelTasksForDocument(_ context.Context, do
 	return 1, 0, nil
 }
 
-func (*documentTaskInspectorStub) CancelReferenceTasksForRun(context.Context, string, string) (int, int, error) {
+func (*documentTaskInspectorStub) CancelTasksForRun(context.Context, string, string, types.ProcessingWorkflowKind) (int, int, error) {
 	return 0, 0, nil
 }
+
 func (*documentTaskInspectorStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
 	return 0, 0, nil
 }
@@ -57,6 +58,56 @@ type documentStatusRepoStub struct {
 	updated  bool
 	deleted  bool
 	blocks   []types.Block
+}
+
+func (*documentStatusRepoStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
+	return types.PaperReferenceProgress{}, nil
+}
+
+func (s *documentStatusRepoStub) GetStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, error) {
+	state, err := s.document.StageState(stage)
+	if err == nil && state.Status == "" {
+		state.Status = types.DocumentStageNotStarted
+	}
+	return state, err
+}
+
+func (s *documentStatusRepoStub) QueueStageNewGeneration(_ context.Context, _ uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, bool, error) {
+	return queueStubDocumentStage(&s.document, stage)
+}
+
+func (s *documentStatusRepoStub) TryStartStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error) {
+	state, _ := s.document.StageState(stage)
+	if state.Status == "" {
+		setStubDocumentStage(&s.document, types.DocumentStageState{Stage: stage, Status: types.DocumentStageQueued, Generation: generation})
+	}
+	return transitionStubDocumentStage(&s.document, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued}, types.DocumentStageRunning)
+}
+
+func (s *documentStatusRepoStub) MarkStageRetryQueued(_ context.Context, _ uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error) {
+	return transitionStubDocumentStage(&s.document, stage, generation, []types.DocumentStageStatus{types.DocumentStageRunning}, types.DocumentStageQueued)
+}
+
+func (s *documentStatusRepoStub) FinishStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage, generation int64, status types.DocumentStageStatus, errorCode, errorMessage string) (types.DocumentStageState, bool, error) {
+	state, applied, err := transitionStubDocumentStage(&s.document, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued, types.DocumentStageRunning}, status)
+	if applied && stage == types.DocumentStageMarkdown {
+		if errorCode != "" {
+			s.document.MarkdownErrorCode = &errorCode
+		}
+		if errorMessage != "" {
+			s.document.MarkdownErrorMessage = &errorMessage
+		}
+	}
+	return state, applied, err
+}
+
+func (s *documentStatusRepoStub) CancelStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error) {
+	return transitionStubDocumentStage(&s.document, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued, types.DocumentStageRunning}, types.DocumentStageCancelled)
+}
+
+func (s *documentStatusRepoStub) AllowsStageWork(_ context.Context, _ uuid.UUID, stage types.DocumentStage, generation int64) (bool, error) {
+	state, err := s.document.StageState(stage)
+	return err == nil && state.Generation == generation && state.Status == types.DocumentStageRunning, err
 }
 
 func TestDocumentSelectionProcessorReloadsOwnedBlock(t *testing.T) {
@@ -94,6 +145,7 @@ func TestDocumentSelectionProcessorHonorsCancelledContext(t *testing.T) {
 }
 
 func (s *documentStatusRepoStub) Create(_ context.Context, document types.Document) (types.Document, error) {
+	document = normalizeTestDocumentSource(document)
 	s.document = document
 	return document, nil
 }
@@ -102,6 +154,7 @@ func (s *documentStatusRepoStub) Get(_ context.Context, id uuid.UUID) (types.Doc
 	if s.document.ID != id {
 		return types.Document{}, nil
 	}
+	s.document = normalizeTestDocumentSource(s.document)
 	return s.document, nil
 }
 
@@ -140,13 +193,15 @@ func (s *documentStatusRepoStub) GetMarkdown(_ context.Context, id uuid.UUID) (t
 	return s.markdown, nil
 }
 
-func (s *documentStatusRepoStub) ReplaceParsedOutput(_ context.Context, markdown types.DocumentMarkdown, blocks []types.Block) error {
-	if s.document.ID != markdown.DocumentID || s.document.Status != types.DocumentStatusProcessing {
+func (s *documentStatusRepoStub) ReplaceParsedOutput(_ context.Context, markdown types.DocumentMarkdown, blocks []types.Block, _ int64) error {
+	s.document = normalizeTestDocumentSource(s.document)
+	if s.document.ID != markdown.DocumentID || s.document.SourceState != types.DocumentSourceAvailable || s.document.MarkdownStatus != types.DocumentStageRunning {
 		return types.ErrDocumentNotProcessing
 	}
 	s.markdown = markdown
 	s.blocks = append([]types.Block(nil), blocks...)
 	s.document.Status = types.DocumentStatusReady
+	setStubDocumentStage(&s.document, types.DocumentStageState{Stage: types.DocumentStageMarkdown, Status: types.DocumentStageSucceeded, Generation: s.document.MarkdownGeneration})
 	s.document.ErrorMessage = nil
 	return nil
 }
@@ -226,12 +281,23 @@ func (s *documentStatusRepoStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, 
 }
 
 func (s *documentStatusRepoStub) PromoteUnknown(_ context.Context, document types.Document) (bool, error) {
-	if s.document.ID != document.ID || s.document.Status != types.DocumentStatusUnknown {
+	s.document = normalizeTestDocumentSource(s.document)
+	if s.document.ID != document.ID || s.document.SourceState != types.DocumentSourceMissing {
 		return false, nil
 	}
 	document.Status = types.DocumentStatusUploaded
+	document.SourceState = types.DocumentSourceAvailable
 	s.document = document
 	return true, nil
+}
+
+func (s *documentStatusRepoStub) MergeIntoCanonical(_ context.Context, loserID, canonicalID uuid.UUID) error {
+	if s.document.ID != loserID {
+		return sql.ErrNoRows
+	}
+	s.document.SourceState = types.DocumentSourceMerged
+	s.document.CanonicalDocumentID = &canonicalID
+	return nil
 }
 
 func TestFailDocumentIfProcessingDoesNotOverwriteReadyStatus(t *testing.T) {
@@ -296,11 +362,11 @@ func TestRetryDocumentParseQueuesNewAttemptAfterFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RetryDocumentParse() error = %v", err)
 	}
-	if document.Status != types.DocumentStatusQueued || repo.document.Status != types.DocumentStatusQueued {
-		t.Fatalf("retry status = %q, want queued", document.Status)
+	if document.MarkdownStatus != types.DocumentStageQueued || repo.document.MarkdownStatus != types.DocumentStageQueued {
+		t.Fatalf("retry Markdown status = %q, want queued", document.MarkdownStatus)
 	}
-	if len(tasks.documents) != 1 || tasks.documents[0].Attempt != 1 {
-		t.Fatalf("recognition retry task = %#v, want attempt 1", tasks.documents)
+	if len(tasks.documents) != 1 || tasks.documents[0].Generation != 1 {
+		t.Fatalf("recognition retry task = %#v, want generation 1", tasks.documents)
 	}
 }
 
@@ -384,35 +450,6 @@ func TestRetryDocumentParseRejectsActiveDocument(t *testing.T) {
 	_, err := svc.RetryDocumentParse(context.Background(), repo.document.ID.String())
 	if !errors.Is(err, ErrDocumentParseFinished) {
 		t.Fatalf("RetryDocumentParse() error = %v, want ErrDocumentParseFinished", err)
-	}
-}
-
-func TestProcessDocumentRunsFixedPipelineAndQueuesReferences(t *testing.T) {
-	documentID, processID := uuid.New(), uuid.New()
-	repo := &documentStatusRepoStub{
-		document: types.Document{ID: documentID, Status: types.DocumentStatusReady},
-		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/parsed.md"},
-	}
-	paperInfo := &documentPaperInfoStub{}
-	tasks := &documentTaskEnqueuerStub{}
-	svc := &documentService{repo: repo, paperInfo: paperInfo, taskEnqueuer: tasks, spans: NewSpanTracker(&spanRepositoryStub{})}
-	payload, err := json.Marshal(types.DocumentProcessPayload{
-		DocumentID: documentID.String(), ProcessID: processID.String(), Attempt: 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
-		t.Fatalf("ProcessDocument() error = %v", err)
-	}
-	if len(paperInfo.extract) != 1 || len(paperInfo.source) != 1 || len(paperInfo.references) != 0 {
-		t.Fatalf("direct pipeline calls = extract:%d source:%d references:%d", len(paperInfo.extract), len(paperInfo.source), len(paperInfo.references))
-	}
-	if len(tasks.tasks) != 1 || tasks.tasks[0].Type() != types.TypePaperReferenceDispatch {
-		t.Fatalf("reference dispatch tasks = %#v, want one %q task", tasks.tasks, types.TypePaperReferenceDispatch)
-	}
-	if len(paperInfo.parents) != 2 || paperInfo.parents[0] != processID || paperInfo.parents[1] != processID {
-		t.Fatalf("pipeline parent span was not propagated through context: %#v", paperInfo.parents)
 	}
 }
 
@@ -514,26 +551,21 @@ type documentPaperInfoStub struct {
 
 func (stub *documentPaperInfoStub) ExtractMetadata(ctx context.Context, command types.PaperMetadataExtractCommand) (bool, error) {
 	stub.extract = append(stub.extract, command)
-	stub.parents = append(stub.parents, documentProcessSpanID(ctx))
+	stub.parents = append(stub.parents, uuid.Nil)
 	return true, nil
 }
 func (stub *documentPaperInfoStub) ResolveMetadata(ctx context.Context, command types.PaperCatalogResolveCommand) error {
 	stub.source = append(stub.source, command)
-	stub.parents = append(stub.parents, documentProcessSpanID(ctx))
+	stub.parents = append(stub.parents, uuid.Nil)
 	return nil
 }
 func (stub *documentPaperInfoStub) DispatchReferences(context.Context, types.PaperReferenceDispatchCommand) error {
 	return nil
 }
-func (*documentPaperInfoStub) DispatchReferenceDownloads(context.Context, types.PaperReferenceDownloadDispatchPayload) error {
-	return nil
-}
 func (*documentPaperInfoStub) RetryExtraction(context.Context, string) error          { return nil }
 func (*documentPaperInfoStub) RetryCatalogResolution(context.Context, string) error   { return nil }
 func (*documentPaperInfoStub) RetryReferenceResolution(context.Context, string) error { return nil }
-func (*documentPaperInfoStub) StartReferenceDownloads(context.Context, string) error  { return nil }
 func (*documentPaperInfoStub) Cancel(context.Context, string) error                   { return nil }
-func (*documentPaperInfoStub) CancelReferenceDownloads(context.Context, string) error { return nil }
 
 func (stub *documentTaskEnqueuerStub) EnqueueContext(
 	_ context.Context,
@@ -548,7 +580,7 @@ func (stub *documentTaskEnqueuerStub) EnqueueContext(
 		return nil, stub.enqueueErr
 	}
 	switch task.Type() {
-	case types.TypeDocumentProcess:
+	case types.TypeDocumentRecognize:
 		var payload types.DocumentProcessPayload
 		_ = json.Unmarshal(task.Payload(), &payload)
 		stub.documents = append(stub.documents, payload)
@@ -571,6 +603,66 @@ func (s *recognitionStub) Read(context.Context, *types.RecognitionRequest) (*typ
 		s.onRead()
 	}
 	return s.result, s.err
+}
+
+func TestRecognizeDocumentRejectsCancelledStageBeforeExternalIO(t *testing.T) {
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, Status: types.DocumentStatusQueued,
+		MarkdownStatus: types.DocumentStageCancelled, MarkdownGeneration: 1,
+	}}
+	called := false
+	svc := &documentService{repo: repo, recognizer: &recognitionStub{onRead: func() { called = true }}}
+	payload, err := json.Marshal(types.DocumentProcessPayload{
+		DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload))
+	if !errors.Is(err, asynq.RevokeTask) {
+		t.Fatalf("RecognizeDocument() error = %v, want RevokeTask", err)
+	}
+	if called {
+		t.Fatal("cancelled stage reached the recognizer")
+	}
+}
+
+func TestRecognizeDocumentRetryKeepsGeneration(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := storage.Save(context.Background(), interfaces.FileUpload{
+		Filename: "paper.pdf", Content: strings.NewReader("%PDF-1.7\nsource"), Category: interfaces.StorageCategoryPDF,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+		MarkdownStatus: types.DocumentStageQueued, MarkdownGeneration: 4,
+	}}
+	svc := &documentService{
+		repo: repo, storage: storage,
+		recognizer: &recognitionStub{err: errors.New("temporary parser failure")},
+	}
+	payload, err := json.Marshal(types.DocumentProcessPayload{
+		DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload))
+	if err == nil {
+		t.Fatal("RecognizeDocument() error = nil")
+	}
+	if repo.document.MarkdownStatus != types.DocumentStageQueued || repo.document.MarkdownGeneration != 4 {
+		t.Fatalf("retry stage = %s generation=%d, want queued generation=4",
+			repo.document.MarkdownStatus, repo.document.MarkdownGeneration)
+	}
 }
 
 func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
@@ -609,11 +701,11 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 		repo: repo, storage: storage, recognizer: recognizer,
 		taskEnqueuer: documentTasks,
 	}
-	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
+	if err := svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload)); err != nil {
 		t.Fatalf("ProcessDocument() error = %v", err)
 	}
 	if repo.document.Status != types.DocumentStatusReady {
@@ -632,38 +724,8 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	if !strings.HasPrefix(repo.markdown.StorageKey, "markdown/") {
 		t.Fatalf("markdown storage key = %q, want markdown/ prefix", repo.markdown.StorageKey)
 	}
-	if len(documentTasks.extractions) != 0 || len(documentTasks.catalogs) != 0 {
-		t.Fatalf("recognition worker must not orchestrate paper work: extractions=%#v catalogs=%#v", documentTasks.extractions, documentTasks.catalogs)
-	}
-}
-
-func TestProcessDocumentReadyRetryRepairsPaperInfoHandoff(t *testing.T) {
-	documentID := uuid.New()
-	repo := &documentStatusRepoStub{
-		document: types.Document{
-			ID: documentID, Status: types.DocumentStatusReady,
-		},
-		markdown: types.DocumentMarkdown{
-			DocumentID: documentID,
-			StorageKey: "markdown/ready.md",
-		},
-	}
-	documentTasks := &documentTaskEnqueuerStub{}
-	svc := &documentService{repo: repo, taskEnqueuer: documentTasks}
-	payload, err := json.Marshal(types.DocumentProcessPayload{
-		DocumentID: documentID.String(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := svc.ProcessDocument(
-		context.Background(),
-		asynq.NewTask(types.TypeDocumentProcess, payload),
-	); err != nil {
-		t.Fatalf("ProcessDocument() error = %v", err)
-	}
-	if len(documentTasks.extractions) != 0 {
-		t.Fatalf("legacy ready process must not orchestrate paper work: %#v", documentTasks.extractions)
+	if len(documentTasks.extractions) != 1 || len(documentTasks.catalogs) != 0 {
+		t.Fatalf("recognition handoff = extractions:%#v catalogs:%#v", documentTasks.extractions, documentTasks.catalogs)
 	}
 }
 
@@ -695,11 +757,11 @@ func TestProcessDocumentStoresRenderedImageBlock(t *testing.T) {
 				MarkdownCodepointStart: &start, MarkdownCodepointEnd: &end},
 		}},
 	}}}
-	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
+	if err := svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload)); err != nil {
 		t.Fatalf("ProcessDocument() error = %v", err)
 	}
 	if len(repo.blocks) != 1 || repo.blocks[0].AssetKey == "" || !strings.HasPrefix(repo.blocks[0].AssetKey, "image/") {
@@ -779,11 +841,11 @@ func TestProcessDocumentCopiesDirectoryRecognizerMarkdown(t *testing.T) {
 			Metadata: types.RecognitionMetadata{MarkdownFilename: "paper.md", ContentType: "text/markdown", SizeBytes: int64(len(markdown)), ParserName: "external"},
 		}},
 	}
-	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
+	if err := svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload)); err != nil {
 		t.Fatalf("ProcessDocument() error = %v", err)
 	}
 	if repo.document.Status != types.DocumentStatusReady {
@@ -832,21 +894,62 @@ func TestProcessDocumentDiscardsOutputCancelledDuringRecognition(t *testing.T) {
 				Markdown:   []byte("# Late result\n"),
 				Metadata:   types.RecognitionMetadata{MarkdownFilename: "late.md", ContentType: "text/markdown"},
 			},
-			onRead: func() { repo.document.Status = types.DocumentStatusCancelled },
+			onRead: func() { _, _, _ = repo.CancelStage(context.Background(), documentID, types.DocumentStageMarkdown, 1) },
 		},
 	}
-	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	if err := svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload)); err != nil {
-		t.Fatalf("ProcessDocument() error = %v", err)
+	if err := svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload)); !errors.Is(err, asynq.RevokeTask) {
+		t.Fatalf("RecognizeDocument() error = %v, want RevokeTask", err)
 	}
-	if repo.document.Status != types.DocumentStatusCancelled {
-		t.Fatalf("document status = %q, want cancelled", repo.document.Status)
+	if repo.document.MarkdownStatus != types.DocumentStageCancelled {
+		t.Fatalf("Markdown status = %q, want cancelled", repo.document.MarkdownStatus)
 	}
 	if repo.markdown.StorageKey != "" {
 		t.Fatalf("Markdown was stored after cancellation: %+v", repo.markdown)
+	}
+}
+
+func TestRecognizeDocumentDiscardsOutputWhenStageCancelledDuringRecognition(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatalf("NewLocalStorage() error = %v", err)
+	}
+	source, err := storage.SaveBytes(context.Background(), "paper.pdf", []byte("%PDF-1.7\nsource"))
+	if err != nil {
+		t.Fatalf("save source: %v", err)
+	}
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, StorageKey: source.Key, OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: source.Size, Status: types.DocumentStatusQueued,
+	}}
+	svc := &documentService{
+		repo: repo, storage: storage,
+		recognizer: &recognitionStub{
+			result: &types.RecognitionResult{
+				OutputMode: types.RecognitionOutputMarkdownBytes,
+				Markdown:   []byte("# Late result\n"),
+				Metadata:   types.RecognitionMetadata{MarkdownFilename: "late.md", ContentType: "text/markdown"},
+			},
+			onRead: func() {
+				_, _, _ = repo.CancelStage(context.Background(), documentID, types.DocumentStageMarkdown, 1)
+			},
+		},
+	}
+	payload, err := json.Marshal(types.DocumentProcessPayload{
+		DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload)); !errors.Is(err, asynq.RevokeTask) {
+		t.Fatalf("RecognizeDocument() error = %v, want RevokeTask", err)
+	}
+	if repo.markdown.StorageKey != "" {
+		t.Fatalf("Markdown was stored after run cancellation: %+v", repo.markdown)
 	}
 }
 
@@ -868,16 +971,16 @@ func TestProcessDocumentMarksUnsupportedRecognitionFailedWithoutRetry(t *testing
 		repo: repo, storage: storage,
 		recognizer: &recognitionStub{err: types.ErrUnsupportedRecognitionContentType},
 	}
-	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	err = svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload))
+	err = svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload))
 	if !errors.Is(err, asynq.SkipRetry) {
 		t.Fatalf("ProcessDocument() error = %v, want SkipRetry", err)
 	}
-	if repo.document.Status != types.DocumentStatusFailed {
-		t.Fatalf("document status = %q, want failed", repo.document.Status)
+	if repo.document.MarkdownStatus != types.DocumentStageFailed {
+		t.Fatalf("Markdown status = %q, want failed", repo.document.MarkdownStatus)
 	}
 }
 
@@ -899,18 +1002,18 @@ func TestProcessDocumentMarksUnavailableRecognizerFailedWithoutRetry(t *testing.
 		repo: repo, storage: storage,
 		recognizer: &recognitionStub{err: types.ErrRecognitionServiceUnavailable},
 	}
-	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String()})
+	payload, err := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
 	if err != nil {
 		t.Fatalf("marshal payload: %v", err)
 	}
-	err = svc.ProcessDocument(context.Background(), asynq.NewTask(types.TypeDocumentProcess, payload))
+	err = svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload))
 	if !errors.Is(err, asynq.SkipRetry) {
 		t.Fatalf("ProcessDocument() error = %v, want SkipRetry", err)
 	}
-	if repo.document.Status != types.DocumentStatusFailed {
-		t.Fatalf("document status = %q, want failed", repo.document.Status)
+	if repo.document.MarkdownStatus != types.DocumentStageFailed {
+		t.Fatalf("Markdown status = %q, want failed", repo.document.MarkdownStatus)
 	}
-	if repo.document.ErrorMessage == nil || *repo.document.ErrorMessage != "document recognition service is unavailable" {
-		t.Fatalf("document error message = %v", repo.document.ErrorMessage)
+	if repo.document.MarkdownErrorMessage == nil || *repo.document.MarkdownErrorMessage != "a required processing service is unavailable" {
+		t.Fatalf("Markdown error message = %v", repo.document.MarkdownErrorMessage)
 	}
 }

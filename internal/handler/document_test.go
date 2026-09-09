@@ -39,6 +39,47 @@ type documentCreatorStub struct {
 	blocks   []types.Block
 }
 
+func (*documentCreatorStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
+	return types.PaperReferenceProgress{}, nil
+}
+
+func (s *documentCreatorStub) GetStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, error) {
+	return s.document.StageState(stage)
+}
+
+func (s *documentCreatorStub) QueueStageNewGeneration(_ context.Context, _ uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, bool, error) {
+	if stage != types.DocumentStageMarkdown || s.document.MarkdownStatus.Active() {
+		return types.DocumentStageState{Stage: stage, Status: s.document.MarkdownStatus, Generation: s.document.MarkdownGeneration}, false, nil
+	}
+	s.document.MarkdownStatus = types.DocumentStageQueued
+	s.document.MarkdownGeneration++
+	return types.DocumentStageState{Stage: stage, Status: s.document.MarkdownStatus, Generation: s.document.MarkdownGeneration}, true, nil
+}
+
+func (*documentCreatorStub) TryStartStage(context.Context, uuid.UUID, types.DocumentStage, int64) (types.DocumentStageState, bool, error) {
+	return types.DocumentStageState{}, false, nil
+}
+
+func (*documentCreatorStub) MarkStageRetryQueued(context.Context, uuid.UUID, types.DocumentStage, int64) (types.DocumentStageState, bool, error) {
+	return types.DocumentStageState{}, false, nil
+}
+
+func (s *documentCreatorStub) FinishStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage, generation int64, status types.DocumentStageStatus, _, _ string) (types.DocumentStageState, bool, error) {
+	if stage != types.DocumentStageMarkdown || s.document.MarkdownGeneration != generation || !s.document.MarkdownStatus.Active() {
+		return types.DocumentStageState{Stage: stage, Status: s.document.MarkdownStatus, Generation: s.document.MarkdownGeneration}, false, nil
+	}
+	s.document.MarkdownStatus = status
+	return types.DocumentStageState{Stage: stage, Status: status, Generation: generation}, true, nil
+}
+
+func (*documentCreatorStub) CancelStage(context.Context, uuid.UUID, types.DocumentStage, int64) (types.DocumentStageState, bool, error) {
+	return types.DocumentStageState{}, false, nil
+}
+
+func (*documentCreatorStub) AllowsStageWork(context.Context, uuid.UUID, types.DocumentStage, int64) (bool, error) {
+	return false, nil
+}
+
 func (s *documentCreatorStub) Create(_ context.Context, doc types.Document) (types.Document, error) {
 	s.document = doc
 	return doc, nil
@@ -101,7 +142,7 @@ func (*documentCreatorStub) GetMarkdown(context.Context, uuid.UUID) (types.Docum
 	return types.DocumentMarkdown{}, sql.ErrNoRows
 }
 
-func (*documentCreatorStub) ReplaceParsedOutput(context.Context, types.DocumentMarkdown, []types.Block) error {
+func (*documentCreatorStub) ReplaceParsedOutput(context.Context, types.DocumentMarkdown, []types.Block, int64) error {
 	return nil
 }
 
@@ -167,6 +208,10 @@ func (s *documentCreatorStub) PromoteUnknown(_ context.Context, document types.D
 	document.Status = types.DocumentStatusUploaded
 	s.document = document
 	return true, nil
+}
+
+func (s *documentCreatorStub) MergeIntoCanonical(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
 }
 
 func newDocumentHandler(storage *fileservice.LocalStorage, repo *documentCreatorStub) *handler.DocumentHandler {

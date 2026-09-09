@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"sort"
+	"strings"
 	"testing"
 
 	"paperMaster/internal/types"
@@ -21,6 +22,57 @@ type paperDocumentRepoStub struct {
 	search        func(types.DocumentSearch) (types.DocumentPage, error)
 }
 
+func (*paperDocumentRepoStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
+	return types.PaperReferenceProgress{}, nil
+}
+
+func (r *paperDocumentRepoStub) GetStage(_ context.Context, id uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, error) {
+	document, ok := r.documents[id]
+	if !ok {
+		return types.DocumentStageState{}, sql.ErrNoRows
+	}
+	state, err := document.StageState(stage)
+	if err == nil && state.Status == "" {
+		state.Status = types.DocumentStageNotStarted
+	}
+	return state, err
+}
+
+func (r *paperDocumentRepoStub) QueueStageNewGeneration(_ context.Context, id uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, bool, error) {
+	document := r.documents[id]
+	state, applied, err := queueStubDocumentStage(&document, stage)
+	r.documents[id] = document
+	return state, applied, err
+}
+
+func (r *paperDocumentRepoStub) TryStartStage(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error) {
+	return r.transitionStage(id, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued}, types.DocumentStageRunning)
+}
+
+func (r *paperDocumentRepoStub) MarkStageRetryQueued(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error) {
+	return r.transitionStage(id, stage, generation, []types.DocumentStageStatus{types.DocumentStageRunning}, types.DocumentStageQueued)
+}
+
+func (r *paperDocumentRepoStub) FinishStage(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64, status types.DocumentStageStatus, _, _ string) (types.DocumentStageState, bool, error) {
+	return r.transitionStage(id, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued, types.DocumentStageRunning}, status)
+}
+
+func (r *paperDocumentRepoStub) CancelStage(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error) {
+	return r.transitionStage(id, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued, types.DocumentStageRunning}, types.DocumentStageCancelled)
+}
+
+func (r *paperDocumentRepoStub) AllowsStageWork(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64) (bool, error) {
+	state, err := r.GetStage(context.Background(), id, stage)
+	return err == nil && state.Generation == generation && state.Status == types.DocumentStageRunning, err
+}
+
+func (r *paperDocumentRepoStub) transitionStage(id uuid.UUID, stage types.DocumentStage, generation int64, from []types.DocumentStageStatus, to types.DocumentStageStatus) (types.DocumentStageState, bool, error) {
+	document := r.documents[id]
+	state, applied, err := transitionStubDocumentStage(&document, stage, generation, from, to)
+	r.documents[id] = document
+	return state, applied, err
+}
+
 func newPaperDocumentRepoStub(documents ...types.Document) *paperDocumentRepoStub {
 	repo := &paperDocumentRepoStub{
 		documents: make(map[uuid.UUID]types.Document),
@@ -28,6 +80,7 @@ func newPaperDocumentRepoStub(documents ...types.Document) *paperDocumentRepoStu
 		blocks:    make(map[uuid.UUID][]types.Block),
 	}
 	for _, document := range documents {
+		document = normalizeTestDocumentSource(document)
 		repo.documents[document.ID] = document
 	}
 	return repo
@@ -36,6 +89,7 @@ func newPaperDocumentRepoStub(documents ...types.Document) *paperDocumentRepoStu
 func (r *paperDocumentRepoStub) Create(
 	_ context.Context, document types.Document,
 ) (types.Document, error) {
+	document = normalizeTestDocumentSource(document)
 	r.documents[document.ID] = document
 	return document, nil
 }
@@ -47,6 +101,8 @@ func (r *paperDocumentRepoStub) Get(
 	if !ok {
 		return types.Document{}, sql.ErrNoRows
 	}
+	document = normalizeTestDocumentSource(document)
+	r.documents[id] = document
 	return document, nil
 }
 
@@ -62,12 +118,30 @@ func (r *paperDocumentRepoStub) EnsureUnknown(
 	document := types.Document{
 		ID:          id,
 		ContentType: types.UnknownDocumentContentType,
-		StorageKey:  types.UnknownDocumentStorageScheme + id.String(),
 		Status:      types.DocumentStatusUnknown,
+		SourceState: types.DocumentSourceMissing,
+		StorageKey:  types.UnknownDocumentStorageScheme + id.String(),
 	}
 	r.documents[id] = document
 	r.ensureCreated++
 	return document, true, nil
+}
+
+func normalizeTestDocumentSource(document types.Document) types.Document {
+	if document.SourceState == "" {
+		switch document.Status {
+		case types.DocumentStatusUnknown:
+			document.SourceState = types.DocumentSourceMissing
+		case types.DocumentStatusDeleting:
+			document.SourceState = types.DocumentSourceDeleting
+		default:
+			document.SourceState = types.DocumentSourceAvailable
+		}
+	}
+	if document.Status == types.DocumentStatusReady && document.MarkdownStatus == "" {
+		document.MarkdownStatus = types.DocumentStageSucceeded
+	}
+	return document
 }
 
 func (r *paperDocumentRepoStub) DeleteUnknownIfUnreferenced(
@@ -94,13 +168,37 @@ func (r *paperDocumentRepoStub) PromoteUnknown(_ context.Context, document types
 	return true, nil
 }
 
+func (r *paperDocumentRepoStub) MergeIntoCanonical(_ context.Context, loserID, canonicalID uuid.UUID) error {
+	document := r.documents[loserID]
+	document.SourceState = types.DocumentSourceMerged
+	document.CanonicalDocumentID = &canonicalID
+	r.documents[loserID] = document
+	return nil
+}
+
 func (r *paperDocumentRepoStub) Search(
 	_ context.Context, search types.DocumentSearch,
 ) (types.DocumentPage, error) {
 	if r.search != nil {
 		return r.search(search)
 	}
-	return types.DocumentPage{}, nil
+	page := types.DocumentPage{Page: search.Page, PageSize: search.PageSize}
+	for id, stored := range r.documents {
+		document := normalizeTestDocumentSource(stored)
+		r.documents[id] = document
+		if search.DOI != "" && !strings.EqualFold(document.DOI, search.DOI) {
+			continue
+		}
+		if search.FileSHA256 != "" && !strings.EqualFold(document.FileSHA256, search.FileSHA256) {
+			continue
+		}
+		if search.SourceState != "" && document.SourceState != search.SourceState {
+			continue
+		}
+		page.Items = append(page.Items, document)
+	}
+	page.Total = int64(len(page.Items))
+	return page, nil
 }
 
 func (r *paperDocumentRepoStub) GetMarkdown(
@@ -113,7 +211,7 @@ func (r *paperDocumentRepoStub) GetMarkdown(
 }
 
 func (*paperDocumentRepoStub) ReplaceParsedOutput(
-	context.Context, types.DocumentMarkdown, []types.Block,
+	context.Context, types.DocumentMarkdown, []types.Block, int64,
 ) error {
 	return nil
 }

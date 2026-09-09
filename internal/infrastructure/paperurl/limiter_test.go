@@ -5,14 +5,16 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"paperMaster/internal/limit"
 )
 
 func newMemoryDownloadLimiter(global, perHost int, spacing time.Duration) *downloadLimiter {
 	return &downloadLimiter{
-		global: global,
-		max:    perHost,
+		global:  global,
+		max:     perHost,
 		spacing: spacing,
-		memory: &memoryDownloadLimiter{state: make(map[string]downloadHostState)},
+		limiter: limit.NewMemoryEngine(),
 	}
 }
 

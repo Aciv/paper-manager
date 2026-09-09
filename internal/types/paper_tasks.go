@@ -19,10 +19,9 @@ type PaperMetadataExtractPayload struct {
 	// RequestID carries HTTP correlation into asynchronous work.
 	RequestID string `json:"request_id,omitempty"`
 	// DocumentID identifies the source document.
-	DocumentID string `json:"document_id"`
-	// Attempt identifies one user-initiated paper-info run. Queue retries retain
-	// the same attempt.
-	Attempt int `json:"attempt,omitempty"`
+	DocumentID string        `json:"document_id"`
+	Stage      DocumentStage `json:"stage,omitempty"`
+	Generation int64         `json:"generation,omitempty"`
 }
 
 // PaperReferenceDispatchPayload is the durable queue message that turns the
@@ -33,33 +32,24 @@ type PaperReferenceDispatchPayload struct {
 	// RequestID carries HTTP correlation into asynchronous work.
 	RequestID string `json:"request_id,omitempty"`
 	// DocumentID identifies the source document that owns the bibliography.
-	DocumentID string `json:"document_id"`
-	// Attempt identifies one user-initiated paper-information run. Queue
-	// retries retain the same value and therefore retain the same run ID.
-	Attempt int `json:"attempt,omitempty"`
-	// ReferenceRunID is a stable ID for this document/attempt. It binds every
-	// batch and fallback emitted by the dispatcher to one cancellable run.
-	ReferenceRunID string `json:"reference_run_id"`
+	DocumentID string        `json:"document_id"`
+	Stage      DocumentStage `json:"stage,omitempty"`
+	Generation int64         `json:"generation,omitempty"`
 }
 
 // PaperCatalogResolvePayload is the durable queue message for one external
 // catalog lookup. Query inputs are always reloaded from durable storage; title,
 // providers, fallback history, and reference-run ownership never enter Redis.
 //
-// When IsReference is false, DocumentID is the uploaded source paper. When it
-// is true, DocumentID is one unresolved cited-paper placeholder. The global
-// reference scheduler owns the placeholder's source/run/provider association.
+// DocumentID is either the current source paper or an independently scheduled
+// citation target; Stage identifies which lookup semantics apply.
 type PaperCatalogResolvePayload struct {
 	// RequestID carries HTTP correlation into asynchronous work.
 	RequestID string `json:"request_id,omitempty"`
 	// DocumentID identifies exactly one document to query.
-	DocumentID string `json:"document_id"`
-	// Attempt is the owning pipeline attempt for source work. Reference work
-	// obtains its attempt from the scheduler owner.
-	Attempt int `json:"attempt,omitempty"`
-	// IsReference selects scheduler-owned reference lookup instead of the
-	// independent source-paper provider fan-out.
-	IsReference bool `json:"is_reference,omitempty"`
+	DocumentID string        `json:"document_id"`
+	Stage      DocumentStage `json:"stage,omitempty"`
+	Generation int64         `json:"generation,omitempty"`
 }
 
 // Validate verifies that the extraction payload is safe to enqueue.
@@ -74,13 +64,13 @@ func (p PaperMetadataExtractPayload) Command() (PaperMetadataExtractCommand, err
 	if err != nil {
 		return PaperMetadataExtractCommand{}, err
 	}
-	if p.Attempt < 0 {
-		return PaperMetadataExtractCommand{}, fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperInfoTaskPayload)
+	if err := ValidateDocumentStageEnvelope(p.Stage, p.Generation, DocumentStageMetadataExtraction); err != nil {
+		return PaperMetadataExtractCommand{}, fmt.Errorf("%w: %w", ErrInvalidPaperInfoTaskPayload, err)
 	}
 	return PaperMetadataExtractCommand{
 		RequestID:  strings.TrimSpace(p.RequestID),
 		DocumentID: documentID,
-		Attempt:    p.Attempt,
+		Stage:      p.Stage, Generation: p.Generation,
 	}, nil
 }
 
@@ -98,18 +88,12 @@ func (p PaperReferenceDispatchPayload) Command() (PaperReferenceDispatchCommand,
 	if err != nil {
 		return PaperReferenceDispatchCommand{}, err
 	}
-	if p.Attempt < 0 {
-		return PaperReferenceDispatchCommand{}, fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperInfoTaskPayload)
-	}
-	runID, err := parsePaperTaskUUID("reference_run_id", p.ReferenceRunID)
-	if err != nil {
-		return PaperReferenceDispatchCommand{}, err
+	if err := ValidateDocumentStageEnvelope(p.Stage, p.Generation, DocumentStageReferenceLookup); err != nil {
+		return PaperReferenceDispatchCommand{}, fmt.Errorf("%w: %w", ErrInvalidPaperInfoTaskPayload, err)
 	}
 	return PaperReferenceDispatchCommand{
-		RequestID:      strings.TrimSpace(p.RequestID),
-		DocumentID:     documentID,
-		Attempt:        p.Attempt,
-		ReferenceRunID: runID,
+		RequestID: strings.TrimSpace(p.RequestID), DocumentID: documentID,
+		Stage: p.Stage, Generation: p.Generation,
 	}, nil
 }
 
@@ -125,11 +109,13 @@ func (p PaperCatalogResolvePayload) Command() (PaperCatalogResolveCommand, error
 	if err != nil {
 		return PaperCatalogResolveCommand{}, err
 	}
+	if err := ValidateDocumentStageEnvelope(p.Stage, p.Generation, DocumentStageSourceLookup); err != nil {
+		return PaperCatalogResolveCommand{}, fmt.Errorf("%w: %w", ErrInvalidPaperInfoTaskPayload, err)
+	}
 	return PaperCatalogResolveCommand{
-		RequestID:   strings.TrimSpace(p.RequestID),
-		DocumentID:  documentID,
-		IsReference: p.IsReference,
-		Attempt:     p.Attempt,
+		RequestID:  strings.TrimSpace(p.RequestID),
+		DocumentID: documentID,
+		Stage:      p.Stage, Generation: p.Generation,
 	}, nil
 }
 

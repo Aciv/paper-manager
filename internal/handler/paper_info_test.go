@@ -39,10 +39,6 @@ func (*paperInfoControlHandlerStub) DispatchReferences(
 ) error {
 	return nil
 }
-func (*paperInfoControlHandlerStub) DispatchReferenceDownloads(context.Context, types.PaperReferenceDownloadDispatchPayload) error {
-	return nil
-}
-
 func (s *paperInfoControlHandlerStub) RetryExtraction(context.Context, string) error {
 	s.extractions++
 	return nil
@@ -55,14 +51,8 @@ func (s *paperInfoControlHandlerStub) RetryReferenceResolution(context.Context, 
 	s.references++
 	return nil
 }
-func (*paperInfoControlHandlerStub) StartReferenceDownloads(context.Context, string) error {
-	return nil
-}
 func (s *paperInfoControlHandlerStub) Cancel(context.Context, string) error {
 	s.cancellations++
-	return nil
-}
-func (*paperInfoControlHandlerStub) CancelReferenceDownloads(context.Context, string) error {
 	return nil
 }
 

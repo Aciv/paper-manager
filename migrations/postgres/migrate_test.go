@@ -41,6 +41,36 @@ func TestCancelledMigrationAddsCancelledStatus(t *testing.T) {
 	}
 }
 
+func TestProcessingRunItemsMigrationSeparatesFanoutControlAndIndexesView(t *testing.T) {
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS processing_run_items",
+		"ADD COLUMN IF NOT EXISTS items_sealed_at",
+		"idx_processing_run_items_active",
+		"idx_document_processing_spans_current_view",
+		"idx_processing_runs_owner_view",
+	} {
+		if !strings.Contains(processingRunItemsAndSpanViewUp, fragment) {
+			t.Fatalf("processing run items migration does not include %q", fragment)
+		}
+	}
+}
+
+func TestDocumentStageControlMigrationAddsFourIndependentStages(t *testing.T) {
+	for _, fragment := range []string{
+		"markdown_status TEXT NOT NULL DEFAULT 'not_started'",
+		"metadata_extraction_generation BIGINT NOT NULL DEFAULT 0",
+		"source_lookup_updated_at TIMESTAMPTZ NOT NULL",
+		"reference_lookup_status TEXT NOT NULL DEFAULT 'not_started'",
+		"idx_documents_markdown_stage_active",
+		"metadata_source = 'extraction'",
+		"scope = 'reference_run'",
+	} {
+		if !strings.Contains(documentStageControlUp, fragment) {
+			t.Fatalf("document stage control migration does not include %q", fragment)
+		}
+	}
+}
+
 func TestPaperMetadataAndBasesMigrationCreatesNormalizedTables(t *testing.T) {
 	for _, fragment := range []string{
 		"RENAME COLUMN filename TO original_filename",
@@ -217,6 +247,59 @@ func TestDocumentProcessingSpanParentsMigrationAddsCascadeLink(t *testing.T) {
 	} {
 		if !strings.Contains(documentProcessingSpanParentsUp, fragment) {
 			t.Fatalf("processing span parent migration does not include %q", fragment)
+		}
+	}
+}
+
+func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testing.T) {
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS processing_runs",
+		"uq_processing_runs_idempotency",
+		"idx_processing_runs_active_owner_workflow",
+		"idx_processing_runs_terminal_retention",
+		"ALTER COLUMN attempt TYPE BIGINT",
+		"ADD COLUMN IF NOT EXISTS run_id UUID NULL",
+		"REFERENCES processing_runs(id) ON DELETE CASCADE",
+	} {
+		if !strings.Contains(processingRunsUp, fragment) {
+			t.Fatalf("processing runs migration does not include %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"DROP COLUMN IF EXISTS run_id",
+		"DROP TABLE IF EXISTS processing_runs",
+		"attempt intentionally remains BIGINT",
+	} {
+		if !strings.Contains(processingRunsDown, fragment) {
+			t.Fatalf("processing runs rollback does not include %q", fragment)
+		}
+	}
+	if got := migrations[len(migrations)-1].version; got != 22 {
+		t.Fatalf("latest migration version = %d, want 22", got)
+	}
+}
+
+func TestDocumentSourceLifecycleMigrationAddsCanonicalFenceAndBoundedErrors(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS source_state TEXT NOT NULL DEFAULT 'available'",
+		"ADD COLUMN IF NOT EXISTS canonical_document_id UUID NULL",
+		"REFERENCES documents(id) ON DELETE RESTRICT",
+		"source_state IN ('missing', 'available', 'deleting', 'merged')",
+		"source_state = 'merged' AND canonical_document_id IS NOT NULL",
+		"length(COALESCE(reference_lookup_error_message, '')) <= 512",
+		"idx_documents_canonical_document_id",
+	} {
+		if !strings.Contains(documentSourceLifecycleUp, fragment) {
+			t.Fatalf("document source lifecycle migration does not include %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"DROP CONSTRAINT IF EXISTS fk_documents_canonical_document",
+		"DROP COLUMN IF EXISTS source_state",
+		"DROP COLUMN IF EXISTS canonical_document_id",
+	} {
+		if !strings.Contains(documentSourceLifecycleDown, fragment) {
+			t.Fatalf("document source lifecycle rollback does not include %q", fragment)
 		}
 	}
 }

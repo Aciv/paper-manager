@@ -345,7 +345,7 @@ func (s *paperService) applyReferenceCandidate(
 	if err != nil {
 		return err
 	}
-	if document.Status != types.DocumentStatusUnknown {
+	if document.SourceState != types.DocumentSourceMissing {
 		return nil
 	}
 	if doi := strings.TrimSpace(candidate.DOI); doi != "" {
@@ -486,7 +486,7 @@ func (s *paperService) ResolveCitation(
 	if err != nil {
 		return nil, err
 	}
-	if resolved.Status == types.DocumentStatusUnknown {
+	if resolved.SourceState != types.DocumentSourceAvailable {
 		return nil, ErrCitationTargetNotResolved
 	}
 	rawReference, err = validateRawReference(rawReference)
@@ -498,7 +498,7 @@ func (s *paperService) ResolveCitation(
 	if err != nil {
 		return nil, err
 	}
-	if placeholder.Status != types.DocumentStatusUnknown {
+	if placeholder.SourceState != types.DocumentSourceMissing {
 		return nil, types.ErrUnknownDocumentConflict
 	}
 	if err := s.citations.RepointCitation(
@@ -534,7 +534,7 @@ func (s *paperService) requireCitingDocument(
 	if err != nil {
 		return uuid.Nil, types.Document{}, err
 	}
-	if document.Status == types.DocumentStatusUnknown {
+	if document.SourceState != types.DocumentSourceAvailable {
 		return uuid.Nil, types.Document{}, ErrUnknownPaperCannotCite
 	}
 	return id, document, nil

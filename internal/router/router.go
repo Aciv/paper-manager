@@ -135,8 +135,6 @@ func ServerPaperMetadata(
 		router.POST("/api/paper/:documentID/info/extraction/retry", infoHandler.RetryExtraction)
 		router.POST("/api/paper/:documentID/info/catalog/retry", infoHandler.RetryCatalog)
 		router.POST("/api/paper/:documentID/info/reference/retry", infoHandler.RetryReference)
-		router.POST("/api/paper/:documentID/references/download", infoHandler.StartReferenceDownloads)
-		router.POST("/api/paper/:documentID/references/download/cancel", infoHandler.CancelReferenceDownloads)
 		router.POST("/api/paper/:documentID/info/cancel", infoHandler.Cancel)
 	}
 }

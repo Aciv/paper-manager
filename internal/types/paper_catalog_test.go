@@ -67,7 +67,7 @@ func TestPaperCatalogCandidateValidate(t *testing.T) {
 
 func TestPaperCatalogResolveCommandValidate(t *testing.T) {
 	command := PaperCatalogResolveCommand{
-		DocumentID: uuid.New(),
+		DocumentID: uuid.New(), Stage: DocumentStageSourceLookup, Generation: 1,
 	}
 	if err := command.Validate(); err != nil {
 		t.Fatalf("valid catalog command rejected: %v", err)
@@ -79,10 +79,10 @@ func TestPaperCatalogResolveCommandValidate(t *testing.T) {
 	}
 }
 
-func TestPaperCatalogResolveCommandAllowsUnknownWithoutRevision(t *testing.T) {
+func TestPaperCatalogResolveCommandAllowsDirectInternalCallWithoutFence(t *testing.T) {
 	command := PaperCatalogResolveCommand{DocumentID: uuid.New()}
 	if err := command.Validate(); err != nil {
-		t.Fatalf("source-free catalog command rejected: %v", err)
+		t.Fatalf("direct command rejected: %v", err)
 	}
 }
 

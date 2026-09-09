@@ -30,10 +30,6 @@ type PaperInfoService interface {
 		ctx context.Context,
 		command types.PaperReferenceDispatchCommand,
 	) error
-	// DispatchReferenceDownloads selects resolved bibliography targets with a
-	// trusted source identity and enqueues one isolated remote-import task per
-	// target. It never downloads bytes itself.
-	DispatchReferenceDownloads(ctx context.Context, payload types.PaperReferenceDownloadDispatchPayload) error
 	// RetryExtraction enqueues extraction for the current durable Markdown
 	// revision. It rejects source-free placeholders, unparsed documents, and
 	// active span attempts.
@@ -44,13 +40,7 @@ type PaperInfoService interface {
 	// RetryReferenceResolution requeues only the citation dispatcher for the
 	// source document's current Markdown revision.
 	RetryReferenceResolution(ctx context.Context, documentID string) error
-	// StartReferenceDownloads begins one opt-in bibliography PDF acquisition
-	// run without repeating extraction or catalog resolution.
-	StartReferenceDownloads(ctx context.Context, documentID string) error
 	// Cancel stops queued/active paper-information work without changing a
 	// ready document's parse lifecycle state.
 	Cancel(ctx context.Context, documentID string) error
-	// CancelReferenceDownloads stops active bibliography acquisition spans.
-	// Already completed document processing remains untouched.
-	CancelReferenceDownloads(ctx context.Context, documentID string) error
 }

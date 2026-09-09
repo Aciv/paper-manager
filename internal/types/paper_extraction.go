@@ -47,7 +47,8 @@ func (status PaperExtractionStatus) IsValid() bool {
 type PaperMetadataExtractCommand struct {
 	RequestID  string
 	DocumentID uuid.UUID
-	Attempt    int
+	Stage      DocumentStage
+	Generation int64
 }
 
 // Validate verifies identifiers and attempt information on the command.
@@ -55,8 +56,10 @@ func (command PaperMetadataExtractCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperExtraction)
 	}
-	if command.Attempt < 0 {
-		return fmt.Errorf("%w: attempt cannot be negative", ErrInvalidPaperExtraction)
+	if command.Stage != "" || command.Generation != 0 {
+		if err := ValidateDocumentStageEnvelope(command.Stage, command.Generation, DocumentStageMetadataExtraction); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidPaperExtraction, err)
+		}
 	}
 	return nil
 }

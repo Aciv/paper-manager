@@ -9,10 +9,8 @@ import (
 	"math"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -56,10 +54,6 @@ var (
 	// ErrPaperInfoAttemptActive prevents a retry from overlapping queued or
 	// running work for the same durable document stage.
 	ErrPaperInfoAttemptActive = errors.New("paper information attempt is still active")
-
-	// paperInfoManualAttempt distinguishes operator-initiated retries from an
-	// initial task and from Asynq's retries of that task.
-	paperInfoManualAttempt atomic.Int64
 )
 
 var (
@@ -94,7 +88,9 @@ type paperInfoService struct {
 	inspector          interfaces.TaskInspector
 	referenceLimiter   interfaces.PaperReferenceCatalogLimiter
 	referenceScheduler interfaces.PaperReferenceScheduler
-	spans              interfaces.SpanTracker
+	spans              interfaces.SpanRecorder
+	runs               interfaces.ProcessingRunRepository
+	cancellations      interfaces.WorkflowCancellationService
 	maxConcurrency     int
 }
 
@@ -118,9 +114,9 @@ func NewPaperInfoService(
 	return svc
 }
 
-// NewPaperInfoServiceWithSpanTracker is the production DI constructor with
+// NewPaperInfoServiceWithSpanRecorder is the production DI constructor with
 // persistent processing-span support.
-func NewPaperInfoServiceWithSpanTracker(
+func NewPaperInfoServiceWithSpanRecorder(
 	cfg config.Config,
 	documents interfaces.DocumentRepository,
 	storage interfaces.FileStorage,
@@ -131,10 +127,14 @@ func NewPaperInfoServiceWithSpanTracker(
 	inspector interfaces.TaskInspector,
 	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
 	referenceScheduler interfaces.PaperReferenceScheduler,
-	spans interfaces.SpanTracker,
+	spans interfaces.SpanRecorder,
+	runs interfaces.ProcessingRunRepository,
+	cancellations interfaces.WorkflowCancellationService,
 ) interfaces.PaperInfoService {
 	svc := newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, spans).(*paperInfoService)
 	svc.referenceScheduler = referenceScheduler
+	svc.runs = runs
+	svc.cancellations = cancellations
 	return svc
 }
 
@@ -142,7 +142,7 @@ func newPaperInfoService(
 	cfg config.Config, documents interfaces.DocumentRepository, storage interfaces.FileStorage,
 	extractor interfaces.PaperMetadataExtractor, catalogs interfaces.PaperCatalogRegistry,
 	papers interfaces.PaperService, tasks interfaces.TaskEnqueuer, inspector interfaces.TaskInspector,
-	referenceLimiter interfaces.PaperReferenceCatalogLimiter, spans interfaces.SpanTracker,
+	referenceLimiter interfaces.PaperReferenceCatalogLimiter, spans interfaces.SpanRecorder,
 ) interfaces.PaperInfoService {
 	concurrency := cfg.PaperCatalogConcurrency
 	if concurrency <= 0 {
@@ -173,25 +173,28 @@ func (s *paperInfoService) ExtractMetadata(
 	if err := command.Validate(); err != nil {
 		return false, err
 	}
+	_, err := startDocumentStageTask(ctx, s.documents, command.DocumentID, command.Stage, command.Generation)
+	if err != nil {
+		return false, err
+	}
+	defer func() {
+		finishDocumentStageTask(ctx, s.documents, command.DocumentID, command.Stage, command.Generation, outputErr)
+	}()
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
 	logger.Info(ctx, "paper metadata extraction started")
 	var spanID uuid.UUID
 	if s.spans != nil {
 		var spanErr error
-		if processID := documentProcessSpanID(ctx); processID != uuid.Nil {
-			spanID, spanErr = s.spans.BeginChild(ctx, processID, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanMetadataExtract, processID.String()), 0)
-		} else {
-			spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanMetadataExtract, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanMetadataExtract, command.DocumentID.String()), 0)
-		}
+		spanID, spanErr = s.spans.BeginSpan(ctx, command.DocumentID, stageAttempt(command.Generation, 0), types.ProcessingSpanMetadataExtract, types.ProcessingSpanScopeDocument, types.ComposeProcessingSpanScopeID(types.ProcessingSpanMetadataExtract, command.DocumentID.String()), 0)
 		if spanErr != nil {
 			logger.Warn(ctx, "start metadata extraction span failed", "error", spanErr)
 		}
 		defer func() {
 			if outputErr != nil {
 				code, reason := spanFailure(outputErr)
-				_ = s.spans.Fail(context.WithoutCancel(ctx), spanID, code, reason)
+				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanFailed, code, reason)
 			} else {
-				_ = s.spans.Succeed(context.WithoutCancel(ctx), spanID)
+				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanSucceeded, "", "")
 			}
 		}()
 	}
@@ -199,6 +202,9 @@ func (s *paperInfoService) ExtractMetadata(
 	stopHeartbeat := keepSpanAlive(ctx, s.spans, spanID)
 	defer stopHeartbeat()
 
+	if err := ensureDocumentStageWork(ctx, s.documents, command.DocumentID, command.Stage, command.Generation); err != nil {
+		return false, err
+	}
 	markdown, blocks, sourceStorageKey, err := s.loadExtractionSource(ctx, command)
 	if err != nil {
 		logger.Error(ctx, "paper metadata extraction source unavailable", "error", err)
@@ -216,6 +222,9 @@ func (s *paperInfoService) ExtractMetadata(
 	if result == nil {
 		return false, errors.New("paper metadata extractor returned nil result")
 	}
+	if err := ensureDocumentStageWork(ctx, s.documents, command.DocumentID, command.Stage, command.Generation); err != nil {
+		return false, err
+	}
 	if err := result.Validate(); err != nil {
 		return false, err
 	}
@@ -223,6 +232,9 @@ func (s *paperInfoService) ExtractMetadata(
 	update := extractionMetadataUpdate(result)
 	references := extractionCitationInputs(result.References, result.ReferenceCandidates)
 	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
+		return false, err
+	}
+	if err := ensureDocumentStageWork(ctx, s.documents, command.DocumentID, command.Stage, command.Generation); err != nil {
 		return false, err
 	}
 	var updatedMetadata *types.PaperMetadata
@@ -249,6 +261,9 @@ func (s *paperInfoService) ExtractMetadata(
 	if err := s.ensureDocumentReady(ctx, command.DocumentID); err != nil {
 		return false, err
 	}
+	if err := ensureDocumentStageWork(ctx, s.documents, command.DocumentID, command.Stage, command.Generation); err != nil {
+		return false, err
+	}
 	if result.ReferencesDetected {
 		if _, err := s.papers.MergeExtractedCitations(
 			ctx,
@@ -273,20 +288,17 @@ func (s *paperInfoService) ExtractMetadata(
 		"metadata_applied", updatedMetadata.MetadataSource == types.PaperMetadataSourceExtraction,
 		"catalog_resolvable", catalogResolvable,
 		"extractor", result.ExtractorName)
+	if err := s.enqueueSourceLookupIfNeeded(ctx, command.DocumentID, command.RequestID); err != nil {
+		logger.Warn(ctx, "queue source lookup after extraction failed", "document_id", command.DocumentID, "error", err)
+	}
+	if err := s.enqueueReferenceLookupIfNeeded(ctx, command.DocumentID, command.RequestID); err != nil {
+		logger.Warn(ctx, "queue reference lookup after extraction failed", "document_id", command.DocumentID, "error", err)
+	}
 	return catalogResolvable, nil
 }
 
 func hasUsablePaperLookupIdentity(doi, title string) bool {
 	return strings.TrimSpace(doi) != "" || strings.TrimSpace(title) != ""
-}
-
-// paperReferenceRunID deterministically identifies one bibliography dispatch
-// for a document and user-initiated attempt. Re-running the same
-// Asynq task therefore emits the same provider batch task IDs instead of
-// creating duplicate reference work.
-func paperReferenceRunID(documentID uuid.UUID, attempt int) uuid.UUID {
-	key := documentID.String() + "\x00" + strconv.Itoa(attempt)
-	return uuid.NewSHA1(uuid.NameSpaceURL, []byte("paper-reference-run\x00"+key))
 }
 
 // ResolveMetadata performs one source-paper or one scheduler-owned reference
@@ -298,26 +310,29 @@ func (s *paperInfoService) ResolveMetadata(
 	if err := command.Validate(); err != nil {
 		return err
 	}
+	_, err := startDocumentStageTask(ctx, s.documents, command.DocumentID, command.Stage, command.Generation)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		finishDocumentStageTask(ctx, s.documents, command.DocumentID, command.Stage, command.Generation, outputErr)
+	}()
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
-	ctx = logger.WithAttrs(ctx, "catalog_scope", map[bool]string{true: "reference", false: "source"}[command.IsReference])
+	ctx = logger.WithAttrs(ctx, "catalog_scope", "source")
 	logger.Info(ctx, "paper catalog resolution started")
 	var spanID uuid.UUID
-	if s.spans != nil && !command.IsReference {
+	if s.spans != nil {
 		var spanErr error
-		if processID := documentProcessSpanID(ctx); processID != uuid.Nil {
-			spanID, spanErr = s.spans.BeginChild(ctx, processID, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogSource, types.ProcessingSpanScopeCatalogSource, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, processID.String()), 0)
-		} else {
-			spanID, spanErr = s.spans.Begin(ctx, command.DocumentID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogSource, types.ProcessingSpanScopeCatalogSource, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, command.DocumentID.String()), 0)
-		}
+		spanID, spanErr = s.spans.BeginSpan(ctx, command.DocumentID, stageAttempt(command.Generation, 0), types.ProcessingSpanCatalogSource, types.ProcessingSpanScopeCatalogSource, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, command.DocumentID.String()), 0)
 		if spanErr != nil {
 			logger.Warn(ctx, "start catalog resolution span failed", "error", spanErr)
 		}
 		defer func() {
 			if outputErr != nil {
 				code, reason := spanFailure(outputErr)
-				_ = s.spans.Fail(context.WithoutCancel(ctx), spanID, code, reason)
+				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanFailed, code, reason)
 			} else {
-				_ = s.spans.Succeed(context.WithoutCancel(ctx), spanID)
+				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanSucceeded, "", "")
 			}
 		}()
 	}
@@ -327,11 +342,14 @@ func (s *paperInfoService) ResolveMetadata(
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusDeleting {
+	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return fmt.Errorf("%w: document is being deleted", ErrStalePaperInfo)
 	}
-	if command.IsReference {
-		return s.resolveScheduledReference(ctx, document)
+	if document.SourceState == types.DocumentSourceMissing {
+		return s.resolveScheduledReference(ctx, document, command)
+	}
+	if err := ensureDocumentStageWork(ctx, s.documents, command.DocumentID, command.Stage, command.Generation); err != nil {
+		return err
 	}
 	return s.resolveSourceMetadata(ctx, document, command, spanID)
 }
@@ -347,7 +365,7 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 	// Unknown rows are bibliographic placeholders only. They have no source
 	// document of their own, so catalog work must always be rooted at the
 	// uploaded document that cited them (reference scope).
-	if document.Status == types.DocumentStatusUnknown {
+	if document.SourceState == types.DocumentSourceMissing {
 		return ErrPaperInfoCatalogUnavailable
 	}
 	metadata, err := s.papers.GetMetadata(ctx, document.ID.String())
@@ -359,11 +377,14 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 		logger.Info(ctx, "source catalog lookup skipped", "document_id", document.ID, "reason", "title and DOI are unavailable")
 		return nil
 	}
+	if err := ensureDocumentStageWork(ctx, s.documents, document.ID, command.Stage, command.Generation); err != nil {
+		return err
+	}
 	selected, found, err := s.selectCatalogCandidate(
 		ctx,
 		query,
 		document.ID,
-		paperAttempt(command.Attempt),
+		stageAttempt(command.Generation, 0),
 		types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogSource, document.ID.String()),
 		spanID,
 	)
@@ -373,6 +394,9 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 	if !found {
 		logger.Info(ctx, "source catalog lookup completed without match", "document_id", document.ID)
 		return nil
+	}
+	if err := ensureDocumentStageWork(ctx, s.documents, document.ID, command.Stage, command.Generation); err != nil {
+		return err
 	}
 	if err := s.ensureCatalogSourceCurrent(ctx, document); err != nil {
 		return err
@@ -396,32 +420,44 @@ func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document t
 func (s *paperInfoService) DispatchReferences(
 	ctx context.Context,
 	command types.PaperReferenceDispatchCommand,
-) error {
+) (outputErr error) {
 	if err := command.Validate(); err != nil {
 		return err
 	}
+	_, err := startDocumentStageTask(ctx, s.documents, command.DocumentID, command.Stage, command.Generation)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		finishDocumentStageTask(ctx, s.documents, command.DocumentID, command.Stage, command.Generation, outputErr)
+	}()
 	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
-	ctx = logger.WithAttrs(ctx, "reference_run_id", command.ReferenceRunID)
 	logger.Info(ctx, "paper reference dispatch started")
 
 	document, err := s.documents.Get(ctx, command.DocumentID)
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusUnknown {
+	if document.SourceState == types.DocumentSourceMissing {
 		return ErrPaperInfoCatalogUnavailable
 	}
 	if err := s.ensureCatalogSourceCurrent(ctx, document); err != nil {
 		return err
 	}
-	return s.enqueueReferenceCatalogTasks(ctx, document, command)
+	if err := ensureDocumentStageWork(ctx, s.documents, command.DocumentID, command.Stage, command.Generation); err != nil {
+		return err
+	}
+	if err := s.enqueueReferenceCatalogTasks(ctx, document, command); err != nil {
+		return err
+	}
+	return nil
 }
 
 // resolveScheduledReference claims exactly one provider for an unresolved
 // placeholder, then reports the result to the global scheduler. All source
 // documents that cite the placeholder are updated together when it resolves.
-func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited types.Document) (outputErr error) {
-	if cited.Status != types.DocumentStatusUnknown || s.referenceScheduler == nil {
+func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited types.Document, command types.PaperCatalogResolveCommand) (outputErr error) {
+	if cited.SourceState != types.DocumentSourceMissing || s.referenceScheduler == nil {
 		return nil
 	}
 	claim, err := s.referenceScheduler.Claim(ctx, cited.ID)
@@ -431,36 +467,16 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 	if !claim.Ready() {
 		return nil
 	}
-	owner, activeOwner := claim.Job.ActiveOwner()
-	if !activeOwner {
-		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
-		return context.Canceled
-	}
-	if err := s.ensureReferenceRunActive(ctx, owner.SourceDocumentID, owner.RunID); err != nil {
-		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
-		if errors.Is(err, context.Canceled) {
-			return asynq.RevokeTask
-		}
-		return err
-	}
-	var runSpanID, referenceSpanID uuid.UUID
+	var referenceSpanID uuid.UUID
 	if s.spans != nil {
 		var spanErr error
-		runSpanID, spanErr = s.spans.Begin(
-			ctx, owner.SourceDocumentID, paperAttempt(owner.Attempt),
-			types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun,
-			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String()), 0,
-		)
-		if spanErr != nil {
-			logger.Warn(ctx, "start reference run parent span failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", spanErr)
-		}
-		referenceSpanID, spanErr = s.spans.BeginChild(
-			ctx, runSpanID, cited.ID, paperAttempt(owner.Attempt),
+		referenceSpanID, spanErr = s.spans.BeginSpan(
+			ctx, cited.ID, 1,
 			types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeCatalogReference,
-			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String(), cited.ID.String()), 0,
+			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, cited.ID.String()), 0,
 		)
 		if spanErr != nil {
-			logger.Warn(ctx, "start reference target span failed", "document_id", cited.ID, "reference_run_id", owner.RunID, "error", spanErr)
+			logger.Warn(ctx, "start reference target span failed", "document_id", cited.ID, "error", spanErr)
 		}
 	}
 	stopHeartbeat := keepSpanAlive(ctx, s.spans, referenceSpanID)
@@ -471,14 +487,13 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 		}
 		if outputErr != nil {
 			code, reason := spanFailure(outputErr)
-			_ = s.spans.Fail(context.WithoutCancel(ctx), referenceSpanID, code, reason)
+			_ = s.spans.FinishSpan(context.WithoutCancel(ctx), referenceSpanID, types.ProcessingSpanFailed, code, reason)
 			return
 		}
-		_ = s.spans.Succeed(context.WithoutCancel(ctx), referenceSpanID)
-		_ = s.spans.Heartbeat(context.WithoutCancel(ctx), runSpanID)
+		_ = s.spans.FinishSpan(context.WithoutCancel(ctx), referenceSpanID, types.ProcessingSpanSucceeded, "", "")
 	}()
 	if s.referenceLimiter != nil {
-		release, acquireErr := s.referenceLimiter.AcquireReference(ctx, owner.SourceDocumentID.String())
+		release, acquireErr := s.referenceLimiter.AcquireReference(ctx, cited.ID.String())
 		if acquireErr != nil {
 			return acquireErr
 		}
@@ -492,20 +507,20 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 	// citations and for extractors that could not identify a usable lookup key.
 	incoming, err := s.papers.ListCitedBy(ctx, cited.ID.String())
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
 	if len(incoming) == 0 {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeTerminalFailure, nil)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
 	}
 	metadata, err := s.papers.GetMetadata(ctx, cited.ID.String())
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
 
 	// get query
 	query, querySource := scheduledReferenceLookupQuery(cited, metadata, incoming[0].RawReference)
 	if err := query.Validate(); err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeTerminalFailure, nil)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
 	}
 	logger.Debug(ctx, "reference catalog lookup query selected",
 		"document_id", cited.ID,
@@ -518,76 +533,72 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 
 	provider, ok := s.catalogs.Get(claim.Provider.String())
 	if !ok {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
 	}
-	selected, found, err := s.selectCatalogCandidateFromProviders(ctx, query, cited.ID, paperAttempt(owner.Attempt), types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, owner.RunID.String(), cited.ID.String()), referenceSpanID, []interfaces.PaperCatalogProvider{provider})
+	selected, found, err := s.selectCatalogCandidateFromProviders(ctx, query, cited.ID, 1, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, cited.ID.String()), referenceSpanID, []interfaces.PaperCatalogProvider{provider})
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
 	if !found {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeNoMatch, nil)
-	}
-	active, err := s.referenceScheduler.IsTargetActive(ctx, cited.ID)
-	if err != nil {
-		return err
-	}
-	if !active {
-		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
-		return context.Canceled
-	}
-	if err := s.ensureReferenceRunActive(ctx, owner.SourceDocumentID, owner.RunID); err != nil {
-		_, _ = s.referenceScheduler.Report(context.WithoutCancel(ctx), cited.ID, claim.Provider, types.PaperReferenceOutcomeCancelled)
-		if errors.Is(err, context.Canceled) {
-			return asynq.RevokeTask
-		}
-		return err
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeNoMatch, nil)
 	}
 
 	if selected.DOI == "" && query.DOI != "" {
 		selected.DOI = query.DOI
 	}
+	if err := ensureDocumentStageWork(ctx, s.documents, cited.ID, command.Stage, command.Generation); err != nil {
+		return err
+	}
 
 	// dedup
 	resolvedID, err := s.findStoredCatalogDocument(ctx, selected, incoming[0].CitingDocumentID)
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
 	}
-	for _, citation := range incoming {
-		if resolvedID != uuid.Nil {
-			if _, citationErr := s.papers.ResolveCitation(ctx, citation.CitingDocumentID.String(), resolvedID.String(), citation.RawReference); citationErr != nil {
-				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, citationErr)
+	if resolvedID != uuid.Nil {
+		if err := s.documents.MergeIntoCanonical(ctx, cited.ID, resolvedID); err != nil {
+			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+		}
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
+	}
+	if _, metadataErr := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); metadataErr != nil {
+		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, metadataErr)
+	}
+	doi := normalizePaperDOI(selected.DOI)
+	if doi != "" {
+		applied, doiErr := s.documents.SetDOIIfEmpty(ctx, cited.ID, doi)
+		if errors.Is(doiErr, types.ErrDuplicateDOI) {
+			canonicalID, lookupErr := s.findStoredCatalogDocument(ctx, selected, incoming[0].CitingDocumentID)
+			if lookupErr != nil {
+				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, lookupErr)
 			}
-		}
-	}
-	if resolvedID == uuid.Nil {
-		if _, metadataErr := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); metadataErr != nil {
-			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeRetryableFailure, metadataErr)
-		}
-		doi := normalizePaperDOI(selected.DOI)
-		if doi != "" {
-			applied, err := s.documents.SetDOIIfEmpty(ctx, cited.ID, doi)
-			switch {
-			case err != nil:
-				logger.Warn(ctx,
-					"persist catalog DOI to referenced document failed",
-					"document_id", cited.ID,
-					"doi", doi,
-					"provider", claim.Provider,
-					"error", err,
-				)
-			case applied:
-				logger.Info(ctx, "catalog DOI applied to referenced document",
-					"document_id", cited.ID,
-					"doi", doi,
-					"provider", claim.Provider,
-				)
+			if canonicalID != uuid.Nil {
+				if mergeErr := s.documents.MergeIntoCanonical(ctx, cited.ID, canonicalID); mergeErr != nil {
+					return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, mergeErr)
+				}
+				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
 			}
+		} else if doiErr != nil {
+			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, doiErr)
+		} else if applied {
+			logger.Info(ctx, "catalog DOI applied to referenced document", "document_id", cited.ID, "doi", doi, "provider", claim.Provider)
 		}
 	}
-	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, claim.Job.Owners, types.PaperReferenceOutcomeMatched, nil)
+	if strings.TrimSpace(selected.SourceURL) != "" {
+		task, options, taskErr := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
+			RequestID: command.RequestID, DocumentID: cited.ID.String(), Generation: command.Generation,
+		}, s.cfg.RemotePDFTaskTimeout, s.cfg.RemotePDFTaskMaxRetry)
+		if taskErr == nil {
+			taskErr = enqueueManagedTask(ctx, s.tasks, task, options, cited.ID.String())
+		}
+		if taskErr != nil && !errors.Is(taskErr, asynq.ErrTaskIDConflict) {
+			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, taskErr)
+		}
+	}
+	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
 }
 
-func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uuid.UUID, provider types.PaperCatalogProvider, _ []types.PaperReferenceOwner, outcome types.PaperReferenceOutcome, cause error) error {
+func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uuid.UUID, provider types.PaperCatalogProvider, outcome types.PaperReferenceOutcome, cause error) error {
 	if cause != nil && outcome == types.PaperReferenceOutcomeRetryableFailure {
 		var retryable interface{ TaskRetryable() bool }
 		if errors.As(cause, &retryable) && retryable.TaskRetryable() {
@@ -612,16 +623,10 @@ func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uu
 		logger.Warn(ctx, "reference catalog provider attempt failed", "document_id", target, "provider", provider, "error", cause)
 	}
 	if report.Requeue {
-		task, options, err := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{DocumentID: target.String(), IsReference: true}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
-		if err != nil {
-			return err
+		if cause != nil {
+			return cause
 		}
-		if err := enqueueManagedTask(ctx, s.tasks, task, options, target.String()); err != nil {
-			return err
-		}
-	}
-	if report.Completed || report.Cancelled {
-		s.finishReferenceRunParents(ctx, report.Owners)
+		return errors.New("reference provider fallback required")
 	}
 	// Provider failures have already been converted into scheduler-owned
 	// fallback work. Returning the original error here would make Asynq retry
@@ -630,56 +635,30 @@ func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uu
 	return nil
 }
 
-// finishReferenceRunParents closes a run root only after the scheduler says
-// every target still owned by that source/run has reached a terminal state.
-// This makes the root a real aggregate rather than a short-lived dispatch log.
-func (s *paperInfoService) finishReferenceRunParents(ctx context.Context, owners []types.PaperReferenceOwner) {
-	if s.spans == nil || s.referenceScheduler == nil {
-		return
-	}
-	seen := make(map[string]struct{}, len(owners))
-	for _, owner := range owners {
-		if owner.Cancelled || owner.SourceDocumentID == uuid.Nil || owner.RunID == uuid.Nil {
-			continue
-		}
-		key := owner.SourceDocumentID.String() + ":" + owner.RunID.String()
-		if _, duplicate := seen[key]; duplicate {
-			continue
-		}
-		seen[key] = struct{}{}
-		active, err := s.referenceScheduler.IsRunActive(ctx, owner.SourceDocumentID, owner.RunID)
-		if err != nil {
-			logger.Warn(ctx, "check reference run completion failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", err)
-			continue
-		}
-		if active {
-			continue
-		}
-		rootID, err := s.spans.Begin(ctx,
-			owner.SourceDocumentID,
-			paperAttempt(owner.Attempt),
-			types.ProcessingSpanCatalogReference,
-			types.ProcessingSpanScopeReferenceRun,
-			types.ComposeProcessingSpanScopeID(
-				types.ProcessingSpanCatalogReference,
-				owner.RunID.String(),
-			),
-			0)
-		if err != nil {
-			logger.Warn(ctx, "load reference run parent span failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", err)
-			continue
-		}
-		if err := s.spans.Succeed(context.WithoutCancel(ctx), rootID); err != nil {
-			logger.Warn(ctx, "finish reference run parent span failed", "document_id", owner.SourceDocumentID, "reference_run_id", owner.RunID, "error", err)
-		}
-	}
-}
-
 func (s *paperInfoService) applySourceCatalogCandidate(
 	ctx context.Context,
 	document types.Document,
 	selected types.PaperCatalogCandidate,
 ) (bool, error) {
+	doi := normalizePaperDOI(selected.DOI)
+	if strings.TrimSpace(document.DOI) == "" && doi != "" {
+		page, err := s.documents.Search(ctx, types.DocumentSearch{
+			DOI: doi, SourceState: types.DocumentSourceAvailable, Page: 1, PageSize: 2,
+		})
+		if err != nil {
+			return false, err
+		}
+		for _, canonical := range page.Items {
+			if canonical.ID == document.ID {
+				continue
+			}
+			if err := s.documents.MergeIntoCanonical(ctx, document.ID, canonical.ID); err != nil {
+				return false, err
+			}
+			s.deleteMergedSourceObject(ctx, document)
+			return true, nil
+		}
+	}
 	updated, err := s.papers.UpdateMetadata(
 		ctx,
 		document.ID.String(),
@@ -699,11 +678,27 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 			"current_source", updated.MetadataSource)
 		return false, nil
 	}
-	if strings.TrimSpace(document.DOI) == "" && strings.TrimSpace(selected.DOI) != "" {
-		applied, doiErr := s.documents.SetDOIIfEmpty(ctx, document.ID, normalizePaperDOI(selected.DOI))
+	if strings.TrimSpace(document.DOI) == "" && doi != "" {
+		applied, doiErr := s.documents.SetDOIIfEmpty(ctx, document.ID, doi)
 		if doiErr != nil {
 			if errors.Is(doiErr, types.ErrDuplicateDOI) {
-				logger.Warn(ctx, "catalog DOI belongs to another document; metadata retained", "document_id", document.ID, "doi", normalizePaperDOI(selected.DOI))
+				page, lookupErr := s.documents.Search(ctx, types.DocumentSearch{
+					DOI: doi, SourceState: types.DocumentSourceAvailable, Page: 1, PageSize: 2,
+				})
+				if lookupErr != nil {
+					return false, lookupErr
+				}
+				for _, canonical := range page.Items {
+					if canonical.ID == document.ID {
+						continue
+					}
+					if mergeErr := s.documents.MergeIntoCanonical(ctx, document.ID, canonical.ID); mergeErr != nil {
+						return false, mergeErr
+					}
+					s.deleteMergedSourceObject(ctx, document)
+					return true, nil
+				}
+				return false, fmt.Errorf("backfill catalog DOI: %w", doiErr)
 			} else {
 				return false, fmt.Errorf("backfill catalog DOI: %w", doiErr)
 			}
@@ -712,6 +707,15 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 		}
 	}
 	return true, nil
+}
+
+func (s *paperInfoService) deleteMergedSourceObject(ctx context.Context, document types.Document) {
+	if s.storage == nil || strings.TrimSpace(document.StorageKey) == "" || strings.HasPrefix(document.StorageKey, types.UnknownDocumentStorageScheme) {
+		return
+	}
+	if err := s.storage.Delete(context.WithoutCancel(ctx), document.StorageKey); err != nil {
+		logger.Warn(ctx, "delete merged document source failed", "document_id", document.ID, "storage_key", document.StorageKey, "error", err)
+	}
 }
 
 // enqueueReferenceCatalogTasks registers each unique unresolved placeholder
@@ -749,7 +753,7 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		if err != nil {
 			return err
 		}
-		if cited.Status != types.DocumentStatusUnknown {
+		if cited.SourceState != types.DocumentSourceMissing {
 			continue
 		}
 		// Automatic catalog lookup covers only placeholders created by Python
@@ -773,51 +777,48 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		seen[key] = struct{}{}
 		candidates = append(candidates, cited.ID)
 	}
-	runID := command.ReferenceRunID
-	var runSpanID uuid.UUID
-	if s.spans != nil {
-		runSpanID, err = s.spans.Begin(ctx, document.ID, paperAttempt(command.Attempt), types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeReferenceRun, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()), 0)
-		if err != nil {
-			return fmt.Errorf("start reference catalog run span: %w", err)
-		}
-		if runSpanID == uuid.Nil {
-			return errors.New("start reference catalog run span returned empty id")
-		}
-	}
 	if len(candidates) == 0 {
-		if runSpanID != uuid.Nil {
-			_ = s.spans.Succeed(context.WithoutCancel(ctx), runSpanID)
-		}
-		logger.Info(ctx, "reference dispatch completed without unresolved citations", "document_id", document.ID, "reference_run_id", runID)
+		logger.Info(ctx, "reference dispatch completed without unresolved citations", "document_id", document.ID)
 		return nil
 	}
 	queued := 0
 	for _, citedID := range candidates {
-		shouldQueue, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
-			TargetDocumentID: citedID,
-			Owners: []types.PaperReferenceOwner{{
-				SourceDocumentID: document.ID,
-				RunID:            runID,
-				Attempt:          command.Attempt,
-				RequestID:        command.RequestID,
-			}},
-		})
+		stage, stageErr := s.documents.GetStage(ctx, citedID, types.DocumentStageSourceLookup)
+		if stageErr != nil {
+			return stageErr
+		}
+		if stage.Status.Active() || stage.Status == types.DocumentStageSucceeded {
+			continue
+		}
+		stage, applied, stageErr := s.documents.QueueStageNewGeneration(ctx, citedID, types.DocumentStageSourceLookup)
+		if stageErr != nil {
+			return stageErr
+		}
+		if !applied {
+			continue
+		}
+		shouldQueue, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{TargetDocumentID: citedID})
 		if registerErr != nil {
 			return registerErr
 		}
 		if !shouldQueue {
 			continue
 		}
-		task, options, buildErr := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{RequestID: command.RequestID, DocumentID: citedID.String(), IsReference: true}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+		task, options, buildErr := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{
+			RequestID: command.RequestID, DocumentID: citedID.String(),
+			Stage: types.DocumentStageSourceLookup, Generation: stage.Generation,
+		}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
 		if buildErr != nil {
 			return fmt.Errorf("build reference catalog task: %w", buildErr)
 		}
-		if enqueueErr := enqueueManagedTask(ctx, s.tasks, task, options, citedID.String()); enqueueErr != nil {
+		if enqueueErr := enqueueDocumentStageTask(ctx, s.tasks, task, options, citedID.String()); enqueueErr != nil {
+			_, _, _ = s.documents.FinishStage(context.WithoutCancel(ctx), citedID, types.DocumentStageSourceLookup,
+				stage.Generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
 			return enqueueErr
 		}
 		queued++
 	}
-	logger.Info(ctx, "scheduler-owned reference catalog tasks queued", "document_id", document.ID, "reference_run_id", runID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
+	logger.Info(ctx, "independent reference targets queued", "document_id", document.ID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
 	return nil
 }
 
@@ -901,18 +902,18 @@ func (s *paperInfoService) loadExtractionSource(
 }
 
 // ensureDocumentReady prevents late extraction results from being persisted
-// after the document has been cancelled, deleted, or otherwise left the
-// parsed state. It deliberately does not compare Markdown content revisions.
+// after the source or Markdown stage has left the required state.
 func (s *paperInfoService) ensureDocumentReady(ctx context.Context, documentID uuid.UUID) error {
 	document, err := s.documents.Get(ctx, documentID)
 	if err != nil {
 		return err
 	}
-	if document.Status != types.DocumentStatusReady {
+	if document.SourceState != types.DocumentSourceAvailable || document.MarkdownStatus != types.DocumentStageSucceeded {
 		return fmt.Errorf(
-			"%w: document status is %s",
+			"%w: source state is %s and Markdown stage is %s",
 			ErrStalePaperInfo,
-			document.Status,
+			document.SourceState,
+			document.MarkdownStatus,
 		)
 	}
 	return nil
@@ -926,7 +927,7 @@ func (s *paperInfoService) ensureCatalogSourceCurrent(
 	if err != nil {
 		return err
 	}
-	if current.Status == types.DocumentStatusDeleting {
+	if current.SourceState == types.DocumentSourceDeleting || current.SourceState == types.DocumentSourceMerged {
 		return fmt.Errorf(
 			"%w: document is being deleted",
 			ErrStalePaperInfo,
@@ -941,34 +942,20 @@ func (s *paperInfoService) ensureCatalogSourceCurrent(
 			ErrStalePaperInfo,
 		)
 	}
-	if initialDocument.Status == types.DocumentStatusUnknown &&
-		current.Status != types.DocumentStatusUnknown {
+	if initialDocument.SourceState == types.DocumentSourceMissing &&
+		current.SourceState != types.DocumentSourceMissing {
 		return fmt.Errorf(
-			"%w: source-free paper status changed from unknown to %s",
+			"%w: source state changed from missing to %s",
 			ErrStalePaperInfo,
-			current.Status,
+			current.SourceState,
 		)
 	}
-	if initialDocument.Status != types.DocumentStatusUnknown &&
-		current.Status == types.DocumentStatusUnknown {
+	if initialDocument.SourceState != types.DocumentSourceMissing &&
+		current.SourceState == types.DocumentSourceMissing {
 		return fmt.Errorf(
 			"%w: source document changed to a source-free placeholder",
 			ErrStalePaperInfo,
 		)
-	}
-	return nil
-}
-
-func (s *paperInfoService) ensureReferenceRunActive(ctx context.Context, documentID, runID uuid.UUID) error {
-	if runID == uuid.Nil || s.spans == nil {
-		return nil
-	}
-	active, err := s.spans.ReferenceRunActive(ctx, documentID, runID)
-	if err != nil {
-		return err
-	}
-	if !active {
-		return context.Canceled
 	}
 	return nil
 }
@@ -1148,9 +1135,9 @@ func (s *paperInfoService) selectCatalogCandidateFromProviders(
 			var providerSpan uuid.UUID
 			if s.spans != nil {
 				if parentSpanID != uuid.Nil {
-					providerSpan, _ = s.spans.BeginChild(ctx, parentSpanID, documentID, attempt, types.ProcessingSpanCatalogProvider, types.ProcessingSpanScopeProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()), 0)
+					providerSpan, _ = s.spans.BeginChildSpan(ctx, parentSpanID, documentID, attempt, types.ProcessingSpanCatalogProvider, types.ProcessingSpanScopeProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()), 0)
 				} else {
-					providerSpan, _ = s.spans.Begin(ctx, documentID, attempt, types.ProcessingSpanCatalogProvider, types.ProcessingSpanScopeProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()), 0)
+					providerSpan, _ = s.spans.BeginSpan(ctx, documentID, attempt, types.ProcessingSpanCatalogProvider, types.ProcessingSpanScopeProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, spanScopeID.String(), types.NormalizePaperCatalogProvider(provider.Name()).String()), 0)
 				}
 			}
 			stopProviderHeartbeat := keepSpanAlive(ctx, s.spans, providerSpan)
@@ -1168,9 +1155,9 @@ func (s *paperInfoService) selectCatalogCandidateFromProviders(
 			if s.spans != nil {
 				if results[index].err != nil {
 					code, reason := spanFailure(results[index].err)
-					_ = s.spans.Fail(context.WithoutCancel(ctx), providerSpan, code, reason)
+					_ = s.spans.FinishSpan(context.WithoutCancel(ctx), providerSpan, types.ProcessingSpanFailed, code, reason)
 				} else {
-					_ = s.spans.Succeed(context.WithoutCancel(ctx), providerSpan)
+					_ = s.spans.FinishSpan(context.WithoutCancel(ctx), providerSpan, types.ProcessingSpanSucceeded, "", "")
 				}
 			}
 		}(index, provider)
@@ -1523,8 +1510,7 @@ func (s *paperInfoService) findStoredCatalogDocument(
 		if err != nil {
 			return uuid.Nil, err
 		}
-		if document.Status == types.DocumentStatusUnknown ||
-			document.Status == types.DocumentStatusDeleting {
+		if document.SourceState != types.DocumentSourceAvailable {
 			continue
 		}
 		if len(candidate.Authors) > 0 &&

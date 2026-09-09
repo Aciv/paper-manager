@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"paperMaster/internal/config"
+	"paperMaster/internal/limit"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
 )
@@ -60,7 +61,7 @@ func TestNewRegistryFromConfigSelectsProviders(t *testing.T) {
 		PaperCatalogProviders: []string{OpenAlexProvider, CrossrefProvider},
 		PaperCatalogTimeout:   defaultCatalogTimeout,
 		PaperCatalogUserAgent: "catalog-test/1.0",
-	})
+	}, limit.NewMemoryEngine())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestNewRegistryFromConfigRejectsUnknownProvider(t *testing.T) {
 	_, err := NewRegistryFromConfig(config.Config{
 		PaperCatalogProviders: []string{"unknown"},
 		PaperCatalogTimeout:   defaultCatalogTimeout,
-	})
+	}, limit.NewMemoryEngine())
 	if err == nil {
 		t.Fatal("expected unknown provider error")
 	}
@@ -85,7 +86,7 @@ func TestNewRegistryFromConfigRejectsUnknownProvider(t *testing.T) {
 func TestNewRegistryFromConfigRejectsUnboundedClient(t *testing.T) {
 	_, err := NewRegistryFromConfig(config.Config{
 		PaperCatalogProviders: []string{OpenAlexProvider},
-	})
+	}, limit.NewMemoryEngine())
 	if err == nil {
 		t.Fatal("expected non-positive timeout error")
 	}

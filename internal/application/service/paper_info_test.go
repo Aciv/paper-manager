@@ -19,6 +19,7 @@ import (
 	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
 
 // newPaperInfoServiceForTest keeps test setup concise while still injecting
@@ -64,10 +65,6 @@ func registerReferenceJobForTest(
 	}
 	if _, err := implementation.referenceScheduler.Register(context.Background(), types.PaperReferenceJob{
 		TargetDocumentID: targetDocumentID,
-		Owners: []types.PaperReferenceOwner{{
-			SourceDocumentID: sourceDocumentID,
-			RunID:            uuid.New(),
-		}},
 	}); err != nil {
 		t.Fatalf("register reference job: %v", err)
 	}
@@ -165,7 +162,7 @@ type paperInfoSpanStub struct {
 	starts []paperInfoSpanStart
 }
 
-func (s *paperInfoSpanStub) Begin(
+func (s *paperInfoSpanStub) BeginSpan(
 	_ context.Context,
 	documentID uuid.UUID,
 	attempt int,
@@ -196,7 +193,7 @@ func (s *paperInfoSpanStub) record(
 	s.mu.Unlock()
 	return uuid.New(), nil
 }
-func (s *paperInfoSpanStub) BeginChild(
+func (s *paperInfoSpanStub) BeginChildSpan(
 	ctx context.Context,
 	parentSpanID uuid.UUID,
 	documentID uuid.UUID,
@@ -211,33 +208,23 @@ func (s *paperInfoSpanStub) BeginChild(
 	return s.record(parentSpanID, documentID, attempt, kind, scope, scopeID)
 }
 func (*paperInfoSpanStub) Heartbeat(context.Context, uuid.UUID) error { return nil }
-func (*paperInfoSpanStub) Succeed(context.Context, uuid.UUID) error   { return nil }
-func (*paperInfoSpanStub) Fail(context.Context, uuid.UUID, string, string) error {
+func (*paperInfoSpanStub) FinishSpan(context.Context, uuid.UUID, types.ProcessingSpanStatus, string, string) error {
 	return nil
 }
-func (*paperInfoSpanStub) CancelDocument(context.Context, uuid.UUID, string, string) error {
+func (*paperInfoSpanStub) CancelSpansForRun(context.Context, uuid.UUID, string, string) error {
 	return nil
-}
-func (*paperInfoSpanStub) CancelReferenceRuns(context.Context, uuid.UUID, string, string) ([]uuid.UUID, error) {
-	return nil, nil
-}
-func (*paperInfoSpanStub) CancelReferenceDownloadRuns(context.Context, uuid.UUID, string, string) ([]uuid.UUID, error) {
-	return nil, nil
 }
 func (*paperInfoSpanStub) ScopeCancelled(context.Context, uuid.UUID, types.ProcessingSpanKind, types.ProcessingSpanScope, types.ProcessingSpanScopeID) (bool, error) {
 	return false, nil
 }
-func (*paperInfoSpanStub) FinalizeParent(context.Context, uuid.UUID) error { return nil }
-func (*paperInfoSpanStub) ReferenceRunActive(context.Context, uuid.UUID, uuid.UUID) (bool, error) {
-	return true, nil
+func (*paperInfoSpanStub) AggregateParentDisplay(context.Context, uuid.UUID) (types.ProcessingSpanStatus, error) {
+	return "", nil
 }
-func (*paperInfoSpanStub) GetView(context.Context, types.Document) (types.DocumentProcessingView, error) {
+func (*paperInfoSpanStub) GetRunView(context.Context, types.Document) (types.DocumentProcessingView, error) {
 	return types.DocumentProcessingView{}, nil
 }
 func (*paperInfoSpanStub) HasActive(context.Context, uuid.UUID, ...types.ProcessingSpanKind) (bool, error) {
 	return false, nil
-}
-func (*paperInfoSpanStub) FinalizeAttempt(context.Context, string, int, string, error, string, string) {
 }
 
 type paperInfoMetadataWrite struct {
@@ -510,6 +497,59 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 	}
 }
 
+func TestPaperInfoExtractMetadataQueuesIndependentDownstreamStages(t *testing.T) {
+	documentID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: documentID, Status: types.DocumentStatusReady,
+		MetadataExtractionStatus: types.DocumentStageQueued, MetadataExtractionGeneration: 3,
+	})
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/test.md"}
+	papers := newPaperInfoPaperServiceStub()
+	queue := &paperInfoQueueStub{}
+	service := newPaperInfoServiceForTest(
+		config.Config{}, documents,
+		&paperInfoStorageStub{content: map[string][]byte{"markdown/test.md": []byte("# Paper\n")}},
+		&paperInfoExtractorStub{extract: func(*types.PaperExtractionRequest) (*types.PaperExtractionResult, error) {
+			return &types.PaperExtractionResult{
+				Title:              &types.PaperTextCandidate{Value: "Paper", Confidence: 1},
+				ReferencesDetected: true, ExtractorName: "test",
+			}, nil
+		}},
+		&paperInfoRegistryStub{}, papers, queue, nil, nil,
+	)
+
+	_, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
+		DocumentID: documentID, Stage: types.DocumentStageMetadataExtraction, Generation: 3,
+	})
+	if err != nil {
+		t.Fatalf("ExtractMetadata() error = %v", err)
+	}
+	document := documents.documents[documentID]
+	if document.MetadataExtractionStatus != types.DocumentStageSucceeded ||
+		document.MetadataExtractionGeneration != 3 {
+		t.Fatalf("metadata stage = %s generation=%d", document.MetadataExtractionStatus, document.MetadataExtractionGeneration)
+	}
+	if document.SourceLookupStatus != types.DocumentStageQueued || document.SourceLookupGeneration != 1 ||
+		document.ReferenceLookupStatus != types.DocumentStageQueued || document.ReferenceLookupGeneration != 1 {
+		t.Fatalf("downstream stages were not queued: %#v", document)
+	}
+	if len(queue.tasks) != 2 {
+		t.Fatalf("queued task count = %d, want 2", len(queue.tasks))
+	}
+	var source types.PaperCatalogResolvePayload
+	if err := json.Unmarshal(queue.tasks[0].Payload(), &source); err != nil {
+		t.Fatal(err)
+	}
+	var references types.PaperReferenceDispatchPayload
+	if err := json.Unmarshal(queue.tasks[1].Payload(), &references); err != nil {
+		t.Fatal(err)
+	}
+	if source.Stage != types.DocumentStageSourceLookup || source.Generation != 1 ||
+		references.Stage != types.DocumentStageReferenceLookup || references.Generation != 1 {
+		t.Fatalf("downstream payloads = source:%#v references:%#v", source, references)
+	}
+}
+
 func TestPaperInfoExtractMetadataDoesNotClearExistingMetadataForEmptyResult(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# Existing paper\n")
@@ -614,7 +654,7 @@ func TestCatalogMetadataUpdateOmitsEmptyAutomaticFields(t *testing.T) {
 	}
 }
 
-func TestPaperInfoExtractMetadataRejectsStatusChangedDuringRPC(t *testing.T) {
+func TestPaperInfoExtractMetadataRejectsSourceDeletingDuringRPC(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# Original\n")
 	documents := newPaperDocumentRepoStub(types.Document{
@@ -629,7 +669,7 @@ func TestPaperInfoExtractMetadataRejectsStatusChangedDuringRPC(t *testing.T) {
 	extractor := &paperInfoExtractorStub{
 		extract: func(*types.PaperExtractionRequest) (*types.PaperExtractionResult, error) {
 			document := documents.documents[documentID]
-			document.Status = types.DocumentStatusCancelled
+			document.SourceState = types.DocumentSourceDeleting
 			documents.documents[documentID] = document
 			return &types.PaperExtractionResult{
 				Title: &types.PaperTextCandidate{
@@ -661,6 +701,40 @@ func TestPaperInfoExtractMetadataRejectsStatusChangedDuringRPC(t *testing.T) {
 	if len(papers.updates) != 0 || len(papers.replacements) != 0 {
 		t.Fatalf("stale extraction wrote data: updates=%d replacements=%d",
 			len(papers.updates), len(papers.replacements))
+	}
+}
+
+func TestPaperInfoExtractMetadataRejectsCancelledGenerationAfterRPC(t *testing.T) {
+	documentID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: documentID, Status: types.DocumentStatusReady,
+		MetadataExtractionStatus: types.DocumentStageQueued, MetadataExtractionGeneration: 1,
+	})
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/original.md"}
+	papers := newPaperInfoPaperServiceStub()
+	extractor := &paperInfoExtractorStub{extract: func(*types.PaperExtractionRequest) (*types.PaperExtractionResult, error) {
+		if _, applied, err := documents.CancelStage(context.Background(), documentID,
+			types.DocumentStageMetadataExtraction, 1); err != nil || !applied {
+			t.Fatalf("cancel metadata stage applied=%t error=%v", applied, err)
+		}
+		return &types.PaperExtractionResult{
+			Title: &types.PaperTextCandidate{Value: "Late title", Confidence: 1}, ExtractorName: "test",
+		}, nil
+	}}
+	service := newPaperInfoServiceForTest(
+		config.Config{}, documents,
+		&paperInfoStorageStub{content: map[string][]byte{"markdown/original.md": []byte("# Original\n")}},
+		extractor, &paperInfoRegistryStub{}, papers, nil, nil, nil,
+	)
+
+	_, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
+		DocumentID: documentID, Stage: types.DocumentStageMetadataExtraction, Generation: 1,
+	})
+	if !errors.Is(err, asynq.RevokeTask) {
+		t.Fatalf("ExtractMetadata() error = %v, want RevokeTask", err)
+	}
+	if len(papers.updates) != 0 || len(papers.merges) != 0 {
+		t.Fatalf("cancelled generation wrote data: updates=%d merges=%d", len(papers.updates), len(papers.merges))
 	}
 }
 
@@ -843,15 +917,14 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 	// must not synchronously inspect an entire bibliography.
 	registerReferenceJobForTest(t, service, placeholderID, documentID)
 	err = service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: placeholderID, IsReference: true,
+		DocumentID: placeholderID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(papers.resolutions) != 1 ||
-		papers.resolutions[0].CitedDocumentID != resolvedID ||
-		papers.resolutions[0].RawReference != rawReference {
-		t.Fatalf("unexpected citation resolutions: %#v", papers.resolutions)
+	merged, _ := documents.Get(context.Background(), placeholderID)
+	if merged.SourceState != types.DocumentSourceMerged || merged.CanonicalDocumentID == nil || *merged.CanonicalDocumentID != resolvedID {
+		t.Fatalf("unexpected merged target: %#v", merged)
 	}
 }
 
@@ -892,8 +965,7 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 		t.Fatalf("source catalog task queued reference work = %d, want 0", len(queue.tasks))
 	}
 	if err := service.DispatchReferences(context.Background(), types.PaperReferenceDispatchCommand{
-		DocumentID:     documentID,
-		ReferenceRunID: paperReferenceRunID(documentID, 0),
+		DocumentID: documentID,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -906,9 +978,6 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 		if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 			t.Fatal(err)
 		}
-		if !payload.IsReference {
-			t.Fatalf("reference task payload = %#v", payload)
-		}
 		seen[payload.DocumentID] = true
 	}
 	if !seen[first.String()] || !seen[second.String()] || seen[duplicate.String()] {
@@ -916,15 +985,74 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 	}
 }
 
+func TestPaperInfoReferenceDispatcherSharesTargetGenerationAcrossSources(t *testing.T) {
+	firstSource, secondSource, target := uuid.New(), uuid.New(), uuid.New()
+	documents := newPaperDocumentRepoStub(
+		types.Document{ID: firstSource, Status: types.DocumentStatusReady,
+			ReferenceLookupStatus: types.DocumentStageQueued, ReferenceLookupGeneration: 1},
+		types.Document{ID: secondSource, Status: types.DocumentStatusReady,
+			ReferenceLookupStatus: types.DocumentStageQueued, ReferenceLookupGeneration: 1},
+		types.Document{ID: target, Status: types.DocumentStatusUnknown},
+	)
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[target.String()] = types.PaperMetadata{
+		DocumentID: target, MetadataSource: types.PaperMetadataSourceExtraction,
+	}
+	for _, sourceID := range []uuid.UUID{firstSource, secondSource} {
+		papers.metadata[sourceID.String()] = types.PaperMetadata{DocumentID: sourceID}
+		papers.citations[sourceID.String()] = []types.PaperCitation{{
+			CitingDocumentID: sourceID, CitedDocumentID: target, RawReference: "Shared target",
+		}}
+	}
+	queue := &paperInfoQueueStub{}
+	service := newPaperInfoServiceForTest(config.Config{}, documents, nil, nil,
+		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}},
+		papers, queue, nil, nil)
+
+	for _, sourceID := range []uuid.UUID{firstSource, secondSource} {
+		if err := service.DispatchReferences(context.Background(), types.PaperReferenceDispatchCommand{
+			DocumentID: sourceID, Stage: types.DocumentStageReferenceLookup, Generation: 1,
+		}); err != nil {
+			t.Fatalf("DispatchReferences(%s): %v", sourceID, err)
+		}
+	}
+	if len(queue.tasks) != 1 {
+		t.Fatalf("target tasks = %d, want one", len(queue.tasks))
+	}
+	targetState, err := documents.GetStage(context.Background(), target, types.DocumentStageSourceLookup)
+	if err != nil || targetState.Status != types.DocumentStageQueued || targetState.Generation != 1 {
+		t.Fatalf("shared target stage = %#v, error %v", targetState, err)
+	}
+	for _, sourceID := range []uuid.UUID{firstSource, secondSource} {
+		sourceState, stateErr := documents.GetStage(context.Background(), sourceID, types.DocumentStageReferenceLookup)
+		if stateErr != nil || sourceState.Status != types.DocumentStageSucceeded {
+			t.Fatalf("source dispatch stage = %#v, error %v", sourceState, stateErr)
+		}
+	}
+
+	implementation := service.(*paperInfoService)
+	first := documents.documents[firstSource]
+	first.ReferenceLookupStatus = types.DocumentStageQueued
+	first.ReferenceLookupGeneration = 2
+	documents.documents[firstSource] = first
+	if err := implementation.Cancel(context.Background(), firstSource.String()); err != nil {
+		t.Fatalf("Cancel(first source): %v", err)
+	}
+	targetAfterCancel, err := documents.GetStage(context.Background(), target, types.DocumentStageSourceLookup)
+	if err != nil || targetAfterCancel.Status != types.DocumentStageQueued || targetAfterCancel.Generation != 1 {
+		t.Fatalf("source cancellation changed target stage = %#v, error %v", targetAfterCancel, err)
+	}
+}
+
 func TestPaperInfoReferenceTaskCarriesOnlyTarget(t *testing.T) {
-	payload := types.PaperCatalogResolvePayload{DocumentID: uuid.NewString(), IsReference: true}
+	payload := types.PaperCatalogResolvePayload{DocumentID: uuid.NewString(), Stage: types.DocumentStageSourceLookup, Generation: 1}
 	command, err := payload.Command()
-	if err != nil || !command.IsReference || command.DocumentID.String() != payload.DocumentID {
+	if err != nil || command.DocumentID.String() != payload.DocumentID {
 		t.Fatalf("single-target reference command = %#v, err=%v", command, err)
 	}
 }
 
-func TestPaperInfoResolveSourceBackfillsBlankDOIWithoutOverwritingConflict(t *testing.T) {
+func TestPaperInfoResolveSourceMergesDOIConflictIntoCanonical(t *testing.T) {
 	documentID := uuid.New()
 	otherID := uuid.New()
 	documents := newPaperDocumentRepoStub(
@@ -940,11 +1068,12 @@ func TestPaperInfoResolveSourceBackfillsBlankDOIWithoutOverwritingConflict(t *te
 	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
 		t.Fatal(err)
 	}
-	if got := documents.documents[documentID].DOI; got != "" {
-		t.Fatalf("conflicting provider DOI overwrote document: %q", got)
+	merged := documents.documents[documentID]
+	if merged.SourceState != types.DocumentSourceMerged || merged.CanonicalDocumentID == nil || *merged.CanonicalDocumentID != otherID {
+		t.Fatalf("DOI conflict loser = %#v", merged)
 	}
-	if len(papers.updates) != 1 {
-		t.Fatalf("catalog metadata should survive DOI conflict, updates=%d", len(papers.updates))
+	if len(papers.updates) != 0 {
+		t.Fatalf("canonicalized loser received metadata updates=%d", len(papers.updates))
 	}
 }
 
@@ -961,6 +1090,7 @@ func TestPaperInfoResolveMetadataRejectsStatusChangedDuringLookup(t *testing.T) 
 		search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
 			document := documents.documents[documentID]
 			document.Status = types.DocumentStatusDeleting
+			document.SourceState = types.DocumentSourceDeleting
 			documents.documents[documentID] = document
 			return []types.PaperCatalogCandidate{
 				testCatalogCandidate("crossref", "10.1000/new", "Original", 1),
@@ -1076,7 +1206,7 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 
 	registerReferenceJobForTest(t, service, unknownID, citingID)
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: unknownID, IsReference: true,
+		DocumentID: unknownID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1146,7 +1276,7 @@ func TestPaperInfoResolveUnknownReferencePrefersStoredExtractionMetadata(t *test
 
 	registerReferenceJobForTest(t, service, unknownID, citingID)
 	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: unknownID, IsReference: true,
+		DocumentID: unknownID,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1184,7 +1314,7 @@ func TestPaperInfoResolveUnknownReferenceRequiresRegisteredJob(t *testing.T) {
 	)
 
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: unknownID, IsReference: true,
+		DocumentID: unknownID,
 	})
 	if err == nil {
 		t.Fatal("unregistered reference job unexpectedly resolved")
@@ -1194,7 +1324,7 @@ func TestPaperInfoResolveUnknownReferenceRequiresRegisteredJob(t *testing.T) {
 	}
 }
 
-func TestPaperInfoResolveUnknownSourceScopeIsUnavailable(t *testing.T) {
+func TestPaperInfoResolveUnknownRequiresRegisteredTarget(t *testing.T) {
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID: unknownID, Status: types.DocumentStatusUnknown,
@@ -1211,8 +1341,8 @@ func TestPaperInfoResolveUnknownSourceScopeIsUnavailable(t *testing.T) {
 		nil,
 	)
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: unknownID})
-	if !errors.Is(err, ErrPaperInfoCatalogUnavailable) {
-		t.Fatalf("unknown source-scope resolve error = %v, want ErrPaperInfoCatalogUnavailable", err)
+	if err == nil {
+		t.Fatal("unregistered target unexpectedly resolved")
 	}
 }
 
@@ -1266,15 +1396,14 @@ func TestPaperInfoResolveUnknownReferenceRepointsCitationToStoredPaper(t *testin
 
 	registerReferenceJobForTest(t, service, unknownID, citingID)
 	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: unknownID, IsReference: true,
+		DocumentID: unknownID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(papers.resolutions) != 1 ||
-		papers.resolutions[0].CitingDocumentID != citingID ||
-		papers.resolutions[0].CitedDocumentID != storedID {
-		t.Fatalf("incoming citation was not repointed: %#v", papers.resolutions)
+	merged, _ := documents.Get(context.Background(), unknownID)
+	if merged.SourceState != types.DocumentSourceMerged || merged.CanonicalDocumentID == nil || *merged.CanonicalDocumentID != storedID {
+		t.Fatalf("incoming target was not canonicalized: %#v", merged)
 	}
 	if len(papers.updates) != 0 {
 		t.Fatalf("matched local paper should not update placeholder: %#v", papers.updates)

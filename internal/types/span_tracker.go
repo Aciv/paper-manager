@@ -19,6 +19,28 @@ const (
 	ProcessingSpanCancelled ProcessingSpanStatus = "cancelled"
 )
 
+// Processing span error codes form the public persistence allowlist. Unknown
+// internal errors are collapsed to ProcessingErrorTaskFailed before storage or
+// API serialization.
+const (
+	ProcessingErrorTaskFailed         = "TASK_FAILED"
+	ProcessingErrorCancelled          = "CANCELLED"
+	ProcessingErrorUserCancelled      = "USER_CANCELLED"
+	ProcessingErrorTimeout            = "TIMEOUT"
+	ProcessingErrorNotFound           = "NOT_FOUND"
+	ProcessingErrorUnsupportedContent = "UNSUPPORTED_CONTENT"
+	ProcessingErrorServiceUnavailable = "SERVICE_UNAVAILABLE"
+	ProcessingErrorInvalidInput       = "INVALID_INPUT"
+	ProcessingErrorNoMatch            = "NO_MATCH"
+	ProcessingErrorQueue              = "QUEUE_ERROR"
+	ProcessingErrorTaskBuild          = "TASK_BUILD_ERROR"
+	ProcessingErrorSpanStart          = "SPAN_START_FAILED"
+	ProcessingErrorDocumentProcess    = "DOCUMENT_PROCESS_FAILED"
+	ProcessingErrorReferenceDispatch  = "REFERENCE_DISPATCH_FAILED"
+	ProcessingErrorDownloadDispatch   = "REFERENCE_DOWNLOAD_DISPATCH_FAILED"
+	ProcessingErrorChildFailed        = "CHILD_FAILED"
+)
+
 // Active reports whether a span is still awaiting execution or currently
 // executing. Callers use it to decide whether the UI should poll and whether
 // a retry action must be rejected in favour of cancellation.
@@ -128,24 +150,29 @@ func SplitProcessingSpanScopeID(value ProcessingSpanScopeID) []string {
 type DocumentProcessingSpan struct {
 	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 	DocumentID uuid.UUID `gorm:"column:document_id;type:uuid;not null;index" json:"documentId"`
+	// RunID is nullable while legacy queued tasks and pre-migration rows remain.
+	// New producers attach spans to the durable control-plane run in Phase 2.
+	RunID *uuid.UUID `gorm:"column:run_id;type:uuid;index" json:"runId,omitempty"`
 	// ParentSpanID links a fine-grained operation (for example, one provider
 	// request) to the durable stage that scheduled it. A child may belong to a
 	// different document: reference placeholders are shared by several source
 	// papers, while their run root belongs to the source document.
-	ParentSpanID *uuid.UUID            `gorm:"column:parent_span_id;type:uuid;index" json:"parentSpanId,omitempty"`
-	Attempt      int                   `gorm:"not null;default:1" json:"attempt"`
-	Kind         ProcessingSpanKind    `gorm:"type:text;not null" json:"kind"`
-	Scope        ProcessingSpanScope   `gorm:"type:text;not null;default:'document'" json:"scope"`
-	ScopeID      ProcessingSpanScopeID `gorm:"type:text;not null;default:''" json:"scopeId,omitempty"`
-	Status       ProcessingSpanStatus  `gorm:"type:text;not null" json:"status"`
-	RetryCount   int                   `gorm:"not null;default:0" json:"retryCount"`
-	ErrorCode    string                `gorm:"type:text;not null;default:''" json:"errorCode,omitempty"`
-	ErrorReason  string                `gorm:"type:text;not null;default:''" json:"errorReason,omitempty"`
-	Attributes   JSON                  `gorm:"type:jsonb;not null;default:'{}'" json:"attributes,omitempty"`
-	StartedAt    time.Time             `gorm:"not null" json:"startedAt"`
-	FinishedAt   *time.Time            `json:"finishedAt,omitempty"`
-	CreatedAt    time.Time             `json:"createdAt"`
-	UpdatedAt    time.Time             `json:"updatedAt"`
+	ParentSpanID *uuid.UUID `gorm:"column:parent_span_id;type:uuid;index" json:"parentSpanId,omitempty"`
+	// Go int is 64-bit on supported deployments; migration 19 widens the
+	// PostgreSQL column to BIGINT so Unix-nanosecond manual attempts fit.
+	Attempt     int                   `gorm:"not null;default:1" json:"attempt"`
+	Kind        ProcessingSpanKind    `gorm:"type:text;not null" json:"kind"`
+	Scope       ProcessingSpanScope   `gorm:"type:text;not null;default:'document'" json:"scope"`
+	ScopeID     ProcessingSpanScopeID `gorm:"type:text;not null;default:''" json:"scopeId,omitempty"`
+	Status      ProcessingSpanStatus  `gorm:"type:text;not null" json:"status"`
+	RetryCount  int                   `gorm:"not null;default:0" json:"retryCount"`
+	ErrorCode   string                `gorm:"type:text;not null;default:''" json:"errorCode,omitempty"`
+	ErrorReason string                `gorm:"type:text;not null;default:''" json:"errorReason,omitempty"`
+	Attributes  JSON                  `gorm:"type:jsonb;not null;default:'{}'" json:"attributes,omitempty"`
+	StartedAt   time.Time             `gorm:"not null" json:"startedAt"`
+	FinishedAt  *time.Time            `json:"finishedAt,omitempty"`
+	CreatedAt   time.Time             `json:"createdAt"`
+	UpdatedAt   time.Time             `json:"updatedAt"`
 }
 
 // TableName pins the GORM model to the document_processing_spans table instead
@@ -158,6 +185,7 @@ type DocumentProcessingView struct {
 	DocumentID        uuid.UUID                `json:"documentId"`
 	DocumentStatus    DocumentStatus           `json:"documentStatus"`
 	LatestAttempt     int                      `json:"latestAttempt"`
+	Runs              []ProcessingRun          `json:"runs,omitempty"`
 	Stages            []DocumentProcessingSpan `json:"stages"`
 	ReferenceProgress *PaperReferenceProgress  `json:"referenceProgress,omitempty"`
 }

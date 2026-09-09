@@ -119,7 +119,6 @@ function App() {
   const extractionActive = paperInfoStages.some((stage) => stage.kind === 'metadata_extraction' && isActiveSpan(stage));
   const sourceCatalogActive = paperInfoStages.some((stage) => stage.kind === 'catalog_source' && isActiveSpan(stage));
   const referenceCatalogActive = paperInfoStages.some((stage) => stage.kind === 'catalog_reference' && isActiveSpan(stage));
-  const referenceDownloadActive = paperInfoStages.some((stage) => stage.kind === 'reference_download' && isActiveSpan(stage));
   const documentStatus = processing?.documentStatus ?? selected?.status ?? 'uploaded';
   const remoteURLs = useMemo(() => remoteURL.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), [remoteURL]);
 
@@ -547,11 +546,6 @@ function App() {
     }
   }
 
-  async function cancelReferenceDownloads() {
-    if (!selected || !window.confirm('取消当前引用 PDF 获取任务？已经成功保存的论文不会被删除。')) return;
-    await runPaperControl(api.cancelReferenceDownloads, '已取消仍在等待或下载中的引用 PDF 获取任务。');
-  }
-
   async function cancelPaperInfo() {
     if (!selected || !window.confirm('取消当前引用论文查询任务？已解析文档、元数据提取和源论文查询不会被删除。')) return;
     setBusy(true);
@@ -822,9 +816,9 @@ function App() {
 					<div><strong>元数据提取</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperExtraction, '已提交元数据提取重试。')} disabled={busy || extractionActive || pipelineActive}>重试</button></div>
 					<div><strong>源论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperCatalog, '已提交源论文查询重试。')} disabled={busy || sourceCatalogActive || pipelineActive}>重试</button></div>
 					<div><strong>引用论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperReferences, '已提交引用论文查询重试。')} disabled={busy || referenceCatalogActive}>重试</button></div>
-					<div><strong>引用 PDF 获取</strong><span className="paper-stage">独立下载队列</span><button type="button" onClick={() => void runPaperControl(api.startReferenceDownloads, '已提交引用 PDF 获取任务。')} disabled={busy || referenceDownloadActive}>开始</button>{referenceDownloadActive && <button type="button" className="warning" onClick={() => void cancelReferenceDownloads()} disabled={busy}>取消</button>}</div>
+					<div><strong>引用 PDF 获取</strong><span className="paper-stage">由目标源查询自动派发</span></div>
 				  </div>
-			  {processing?.referenceProgress && <p className="hint">引用查询：排队 {processing.referenceProgress.queued} · 运行 {processing.referenceProgress.running} · 完成 {processing.referenceProgress.completed} · 已取消 {processing.referenceProgress.cancelled}</p>}
+			  {processing?.referenceProgress && <p className="hint">引用目标源查询：排队 {processing.referenceProgress.queued} · 运行 {processing.referenceProgress.running} · 完成 {processing.referenceProgress.completed} · 失败 {processing.referenceProgress.failed} · 已取消 {processing.referenceProgress.cancelled}</p>}
 			  {referenceCatalogActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消引用论文查询</button>}
 			  <p className="hint">状态来自持久化处理 span；元数据来源来自已落库的论文信息。历史失败请查看 Asynq 死信记录。</p>
 			</section>

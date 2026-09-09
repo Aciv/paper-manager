@@ -18,9 +18,6 @@ var (
 	// ErrRemotePDFUnavailable means the supplied landing/source information
 	// cannot be converted into a trusted downloadable PDF URL.
 	ErrRemotePDFUnavailable = errors.New("remote PDF is unavailable")
-	// ErrRemotePDFRunCancelled means a bibliography acquisition run was stopped
-	// before a pending target could be persisted.
-	ErrRemotePDFRunCancelled = errors.New("remote PDF acquisition was cancelled")
 )
 
 var remoteDOIPattern = regexp.MustCompile(`(?i)10\.[0-9]{4,9}/[-._;()/:a-z0-9]+`)
@@ -119,37 +116,21 @@ func SuggestedPDFFilename(rawURL string) string {
 	return "paper.pdf"
 }
 
-// PaperReferenceDownloadDispatchPayload identifies one bibliography-scoped
-// acquisition run. It contains no reference text or remote credentials.
-type PaperReferenceDownloadDispatchPayload struct {
-	RequestID        string `json:"request_id,omitempty"`
-	SourceDocumentID string `json:"source_document_id"`
-	ReferenceRunID   string `json:"reference_run_id"`
-	Attempt          int    `json:"attempt,omitempty"`
-}
-
-func (payload PaperReferenceDownloadDispatchPayload) Validate() error {
-	if id, err := uuid.Parse(strings.TrimSpace(payload.SourceDocumentID)); err != nil || id == uuid.Nil {
-		return errors.New("source document id is required")
-	}
-	if id, err := uuid.Parse(strings.TrimSpace(payload.ReferenceRunID)); err != nil || id == uuid.Nil {
-		return errors.New("reference run id is required")
-	}
-	return nil
-}
-
 // DocumentRemoteImportPayload deliberately carries only durable local
 // identity. Each retry reloads current metadata and resolves a fresh URL.
 type DocumentRemoteImportPayload struct {
 	RequestID  string `json:"request_id,omitempty"`
 	DocumentID string `json:"document_id"`
-	Attempt    int    `json:"attempt,omitempty"`
+	Generation int64  `json:"generation"`
 }
 
 func (payload DocumentRemoteImportPayload) Validate() error {
 	id, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
 	if err != nil || id == uuid.Nil {
 		return fmt.Errorf("document id is required")
+	}
+	if payload.Generation <= 0 {
+		return fmt.Errorf("generation must be positive")
 	}
 	return nil
 }

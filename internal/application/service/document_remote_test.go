@@ -29,6 +29,14 @@ type documentBatchRepoStub struct {
 	searchErr    error
 }
 
+func (*documentBatchRepoStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
+	return types.PaperReferenceProgress{}, nil
+}
+
+func (s *documentBatchRepoStub) MergeIntoCanonical(context.Context, uuid.UUID, uuid.UUID) error {
+	return nil
+}
+
 func (s *documentBatchRepoStub) Create(_ context.Context, document types.Document) (types.Document, error) {
 	if s.documents == nil {
 		s.documents = make(map[uuid.UUID]types.Document)
@@ -177,7 +185,7 @@ func TestCreateDocumentFromURLStoresPDFAndStartsPipeline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateDocumentFromURL() error = %v", err)
 	}
-	if created.DOI != "10.1000/remote" || created.FileSHA256 == "" || created.Status != types.DocumentStatusQueued {
+	if created.DOI != "10.1000/remote" || created.FileSHA256 == "" || created.SourceState != types.DocumentSourceAvailable || created.MarkdownStatus != types.DocumentStageQueued {
 		t.Fatalf("created = %#v", created)
 	}
 	if len(tasks.documents) != 1 || tasks.documents[0].DocumentID != created.ID.String() {
@@ -233,7 +241,7 @@ func TestImportRemoteDocumentCleansDuplicateObjectAndRedirectsCitation(t *testin
 	)
 	repo.search = func(search types.DocumentSearch) (types.DocumentPage, error) {
 		if search.FileSHA256 != "" {
-			return types.DocumentPage{Items: []types.Document{{ID: canonicalID, Status: types.DocumentStatusReady}}, Total: 1}, nil
+			return types.DocumentPage{Items: []types.Document{{ID: canonicalID, Status: types.DocumentStatusReady, SourceState: types.DocumentSourceAvailable}}, Total: 1}, nil
 		}
 		return types.DocumentPage{}, nil
 	}
@@ -248,12 +256,12 @@ func TestImportRemoteDocumentCleansDuplicateObjectAndRedirectsCitation(t *testin
 	papers.citations[sourceID.String()] = []types.PaperCitation{{CitingDocumentID: sourceID,
 		CitedDocumentID: placeholderID, RawReference: "duplicate paper"}}
 	service := &documentService{repo: repo, storage: storage, papers: papers, urlResolver: paperurl.NewResolver()}
-	task, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: placeholderID.String(), Attempt: 3}, 0, 0)
+	task, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: placeholderID.String(), Generation: 3}, 0, 0)
 	if err := service.ImportRemoteDocument(context.Background(), task); err != nil {
 		t.Fatalf("ImportRemoteDocument() error = %v", err)
 	}
-	if len(papers.resolutions) != 1 || papers.resolutions[0].CitedDocumentID != canonicalID {
-		t.Fatalf("resolutions = %#v", papers.resolutions)
+	if merged, _ := repo.Get(context.Background(), placeholderID); merged.SourceState != types.DocumentSourceMerged || merged.CanonicalDocumentID == nil || *merged.CanonicalDocumentID != canonicalID {
+		t.Fatalf("merged document = %#v", merged)
 	}
 	entries, err := os.ReadDir(filepath.Join(storageDir, string(interfaces.StorageCategoryPDF)))
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -277,31 +285,16 @@ func TestRemoteImportFailureDoesNotBlockAnotherDocument(t *testing.T) {
 	papers.metadata[goodID.String()] = types.PaperMetadata{DocumentID: goodID, SourceURL: server.URL + "/paper.pdf"}
 	service := &documentService{repo: repo, storage: storage, papers: papers,
 		taskEnqueuer: &documentTaskEnqueuerStub{}, urlResolver: paperurl.NewResolver()}
-	badTask, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: badID.String(), Attempt: 1}, 0, 0)
+	badTask, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: badID.String(), Generation: 1}, 0, 0)
 	if err := service.ImportRemoteDocument(context.Background(), badTask); !errors.Is(err, asynq.SkipRetry) {
 		t.Fatalf("bad import error = %v, want SkipRetry", err)
 	}
-	goodTask, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: goodID.String(), Attempt: 1}, 0, 0)
+	goodTask, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: goodID.String(), Generation: 1}, 0, 0)
 	if err := service.ImportRemoteDocument(context.Background(), goodTask); err != nil {
 		t.Fatalf("good import error = %v", err)
 	}
-	if document, _ := repo.Get(context.Background(), goodID); document.Status != types.DocumentStatusQueued {
+	if document, _ := repo.Get(context.Background(), goodID); document.SourceState != types.DocumentSourceAvailable || document.MarkdownStatus != types.DocumentStageQueued {
 		t.Fatalf("good document = %#v", document)
-	}
-}
-
-type cancelledRemoteSpanStub struct{ paperInfoSpanStub }
-
-func (*cancelledRemoteSpanStub) ScopeCancelled(context.Context, uuid.UUID, types.ProcessingSpanKind, types.ProcessingSpanScope, types.ProcessingSpanScopeID) (bool, error) {
-	return true, nil
-}
-
-func TestImportRemoteDocumentStopsBeforeIOWhenRunCancelled(t *testing.T) {
-	documentID := uuid.New()
-	service := &documentService{spans: &cancelledRemoteSpanStub{}}
-	task, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: documentID.String(), Attempt: 9}, 0, 0)
-	if err := service.ImportRemoteDocument(context.Background(), task); !errors.Is(err, asynq.RevokeTask) {
-		t.Fatalf("ImportRemoteDocument() error = %v, want RevokeTask", err)
 	}
 }
 
@@ -328,7 +321,7 @@ func TestImportRemoteDocumentPromotesUnknownAndQueuesExistingPipeline(t *testing
 		papers: papers, urlResolver: paperurl.NewResolver(),
 	}
 	task, _, err := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
-		DocumentID: documentID.String(), Attempt: 2,
+		DocumentID: documentID.String(), Generation: 2,
 	}, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -336,7 +329,7 @@ func TestImportRemoteDocumentPromotesUnknownAndQueuesExistingPipeline(t *testing
 	if err := service.ImportRemoteDocument(context.Background(), task); err != nil {
 		t.Fatalf("ImportRemoteDocument() error = %v", err)
 	}
-	if repo.document.Status != types.DocumentStatusQueued || repo.document.FileSHA256 == "" || repo.document.StorageKey == "" {
+	if repo.document.SourceState != types.DocumentSourceAvailable || repo.document.MarkdownStatus != types.DocumentStageQueued || repo.document.FileSHA256 == "" || repo.document.StorageKey == "" {
 		t.Fatalf("promoted document = %#v", repo.document)
 	}
 	if len(tasks.documents) != 1 {

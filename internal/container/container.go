@@ -11,6 +11,7 @@ import (
 	"paperMaster/internal/infrastructure/papercatalog"
 	"paperMaster/internal/infrastructure/paperextraction"
 	"paperMaster/internal/infrastructure/paperurl"
+	"paperMaster/internal/limit"
 	"paperMaster/internal/router"
 
 	"go.uber.org/dig"
@@ -27,28 +28,31 @@ func Build() *dig.Container {
 	must(dependencies.Provide(repository.NewPaperCitationRepository))
 	must(dependencies.Provide(repository.NewDocumentBaseRepository))
 	must(dependencies.Provide(repository.NewDocumentProcessingSpanRepository))
-	must(dependencies.Provide(appservice.NewSpanTracker))
+	must(dependencies.Provide(repository.NewProcessingRunRepository))
+	must(dependencies.Provide(appservice.NewSpanRecorder))
+	must(dependencies.Provide(appservice.NewWorkflowCancellationService))
 	must(dependencies.Provide(router.NewAsyncqClient))
 	must(dependencies.Provide(router.NewTaskEnqueuer))
 	must(dependencies.Provide(router.NewAsynqServer))
 	must(dependencies.Provide(router.NewTaskInspector))
 	must(dependencies.Provide(docrecognition.NewRecognizer))
 	must(dependencies.Provide(paperextraction.NewExtractor))
+	must(dependencies.Provide(limit.NewEngine))
 	must(dependencies.Provide(papercatalog.NewRegistryFromConfig))
 	must(dependencies.Provide(papercatalog.NewReferenceCatalogLimiter))
 	must(dependencies.Provide(papercatalog.NewReferenceScheduler))
 	must(dependencies.Provide(paperurl.NewResolver))
 	must(dependencies.Provide(paperurl.NewDownloadLimiter))
-	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessingAndSpanTracker))
+	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessingAndSpanRecorder))
 	must(dependencies.Provide(appservice.NewDocumentSelectionProcessor))
 	must(dependencies.Provide(appservice.NewPaperService))
-	must(dependencies.Provide(appservice.NewPaperInfoServiceWithSpanTracker))
+	must(dependencies.Provide(appservice.NewPaperInfoServiceWithSpanRecorder))
 	must(dependencies.Provide(appservice.NewDocumentBaseService))
 	must(dependencies.Provide(appservice.NewDocumentHousekeepingService))
 	must(dependencies.Provide(repository.NewTaskDeadLetterRepository))
 	must(dependencies.Provide(fileservice.NewStorage))
 	must(dependencies.Provide(handler.NewDocumentHandler))
-	must(dependencies.Provide(handler.NewDocumentProcessHandlerWithSpanTracker))
+	must(dependencies.Provide(handler.NewDocumentProcessHandlerWithSpanRecorder))
 	must(dependencies.Provide(handler.NewDocumentSelectionHandler))
 	must(dependencies.Provide(handler.NewPaperMetadataHandler))
 	must(dependencies.Provide(handler.NewPaperCitationHandler))

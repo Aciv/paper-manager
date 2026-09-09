@@ -145,39 +145,13 @@ func prepareReferenceJob(job types.PaperReferenceJob) (types.PaperReferenceJob, 
 	job.Provider = ""
 	job.InFlight = false
 	job.Completed = false
-	job.Cancelled = false
 	job.TriedProviders = nil
 	return job, nil
 }
 
-func addReferenceOwner(job *types.PaperReferenceJob, candidate types.PaperReferenceOwner) {
-	for _, owner := range job.Owners {
-		if owner.SourceDocumentID == candidate.SourceDocumentID && owner.RunID == candidate.RunID {
-			return
-		}
-	}
-	job.Owners = append(job.Owners, candidate)
-}
-func hasActiveReferenceOwner(job types.PaperReferenceJob) bool {
-	for _, owner := range job.Owners {
-		if !owner.Cancelled {
-			return true
-		}
-	}
-	return false
-}
-func jobHasActiveSourceOwner(job types.PaperReferenceJob, source uuid.UUID) bool {
-	for _, owner := range job.Owners {
-		if owner.SourceDocumentID == source && !owner.Cancelled {
-			return true
-		}
-	}
-	return false
-}
-
 // get provide, claim job in flight
 func applyClaim(job types.PaperReferenceJob, providers []types.PaperCatalogProvider, turn uint64, cooling func(types.PaperCatalogProvider) bool) (types.PaperReferenceJob, types.PaperReferenceClaim) {
-	if job.Cancelled || job.Completed || job.InFlight {
+	if job.Completed || job.InFlight {
 		return job, types.PaperReferenceClaim{Job: job}
 	}
 	provider := chooseReferenceProvider(job, providers, turn, cooling)
@@ -200,21 +174,17 @@ func applyReport(job types.PaperReferenceJob, provider types.PaperCatalogProvide
 	job.InFlight = false
 	job.Provider = ""
 	job.UpdatedAt = time.Now().UTC()
-	if outcome == types.PaperReferenceOutcomeCancelled || job.Cancelled {
-		job.Cancelled = true
-		return job, types.PaperReferenceReport{Cancelled: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
-	}
 	if outcome == types.PaperReferenceOutcomeMatched || outcome == types.PaperReferenceOutcomeTerminalFailure {
 		job.Completed = true
-		return job, types.PaperReferenceReport{Completed: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
+		return job, types.PaperReferenceReport{Completed: true}, nil
 	}
 	for _, tried := range job.TriedProviders {
 		if tried == provider {
-			return job, types.PaperReferenceReport{Requeue: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
+			return job, types.PaperReferenceReport{Requeue: true}, nil
 		}
 	}
 	job.TriedProviders = append(job.TriedProviders, provider)
-	return job, types.PaperReferenceReport{Requeue: true, Owners: append([]types.PaperReferenceOwner(nil), job.Owners...)}, nil
+	return job, types.PaperReferenceReport{Requeue: true}, nil
 }
 
 type memoryReferenceScheduler struct {
@@ -232,10 +202,7 @@ func (s *memoryReferenceScheduler) Register(_ context.Context, job types.PaperRe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing, ok := s.jobs[job.TargetDocumentID]; ok && !existing.Completed && !existing.Cancelled {
-		for _, owner := range job.Owners {
-			addReferenceOwner(&existing, owner)
-		}
+	if existing, ok := s.jobs[job.TargetDocumentID]; ok && !existing.Completed {
 		existing.UpdatedAt = time.Now().UTC()
 		s.jobs[job.TargetDocumentID] = existing
 		return false, nil
@@ -291,75 +258,6 @@ func (s *memoryReferenceScheduler) Cooldown(_ context.Context, provider types.Pa
 	}
 	return nil
 }
-func (s *memoryReferenceScheduler) CancelRun(_ context.Context, source, run uuid.UUID) ([]uuid.UUID, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ids := make([]uuid.UUID, 0)
-	for id, job := range s.jobs {
-		matched := false
-		for index := range job.Owners {
-			if job.Owners[index].SourceDocumentID == source && job.Owners[index].RunID == run {
-				job.Owners[index].Cancelled = true
-				matched = true
-			}
-		}
-		if matched && !job.Completed && !hasActiveReferenceOwner(job) {
-			job.Cancelled, job.InFlight = true, false
-			job.UpdatedAt = time.Now().UTC()
-			s.jobs[id] = job
-			if job.Cancelled {
-				ids = append(ids, id)
-			}
-		}
-	}
-	return ids, nil
-}
-func (s *memoryReferenceScheduler) IsRunActive(_ context.Context, source, run uuid.UUID) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, job := range s.jobs {
-		for _, owner := range job.Owners {
-			if owner.SourceDocumentID == source && owner.RunID == run && !owner.Cancelled && !job.Completed {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-func (s *memoryReferenceScheduler) IsTargetActive(_ context.Context, target uuid.UUID) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	job, ok := s.jobs[target]
-	return ok && !job.Completed && !job.Cancelled && hasActiveReferenceOwner(job), nil
-}
-func (s *memoryReferenceScheduler) Progress(_ context.Context, source uuid.UUID) (types.PaperReferenceProgress, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	var progress types.PaperReferenceProgress
-	for _, job := range s.jobs {
-		owned := false
-		for _, owner := range job.Owners {
-			if owner.SourceDocumentID == source && !owner.Cancelled {
-				owned = true
-				break
-			}
-		}
-		if !owned {
-			continue
-		}
-		switch {
-		case job.Cancelled:
-			progress.Cancelled++
-		case job.Completed:
-			progress.Completed++
-		case job.InFlight:
-			progress.Running++
-		default:
-			progress.Queued++
-		}
-	}
-	return progress, nil
-}
 
 type redisReferenceScheduler struct {
 	client    *redis.Client
@@ -368,12 +266,6 @@ type redisReferenceScheduler struct {
 
 func referenceSchedulerJobKey(id uuid.UUID) string {
 	return "papers:reference:scheduler:job:" + id.String()
-}
-func referenceSchedulerRunKey(source, run uuid.UUID) string {
-	return "papers:reference:scheduler:run:" + source.String() + ":" + run.String()
-}
-func referenceSchedulerSourceKey(source uuid.UUID) string {
-	return "papers:reference:scheduler:source:" + source.String()
 }
 func referenceSchedulerLockKey(id uuid.UUID) string {
 	return "papers:reference:scheduler:lock:" + id.String()
@@ -403,7 +295,7 @@ func (s *redisReferenceScheduler) Register(ctx context.Context, job types.PaperR
 		// The job key outlives its document: deleting a source document never
 		// cleans it up, so a re-uploaded paper can reuse the same unknown
 		// placeholder target while the 24h key still exists. A terminal job
-		// (cancelled run or completed lookup) must therefore be replaceable:
+		// completed lookup must therefore be replaceable:
 		// the new owner takes it over instead of being silently deduplicated.
 		resurrected := false
 		if err := s.withJobLock(ctx, job.TargetDocumentID, func() error {
@@ -411,12 +303,9 @@ func (s *redisReferenceScheduler) Register(ctx context.Context, job types.PaperR
 			if err != nil {
 				return err
 			}
-			if existing.Completed || existing.Cancelled {
+			if existing.Completed {
 				resurrected = true
 				return s.save(ctx, job)
-			}
-			for _, owner := range job.Owners {
-				addReferenceOwner(&existing, owner)
 			}
 			existing.UpdatedAt = time.Now().UTC()
 			return s.save(ctx, existing)
@@ -426,16 +315,6 @@ func (s *redisReferenceScheduler) Register(ctx context.Context, job types.PaperR
 		if resurrected {
 			created = true
 		}
-	}
-	for _, owner := range job.Owners {
-		if err := s.client.SAdd(ctx, referenceSchedulerRunKey(owner.SourceDocumentID, owner.RunID), job.TargetDocumentID.String()).Err(); err != nil {
-			return false, err
-		}
-		if err := s.client.SAdd(ctx, referenceSchedulerSourceKey(owner.SourceDocumentID), job.TargetDocumentID.String()).Err(); err != nil {
-			return false, err
-		}
-		_ = s.client.Expire(ctx, referenceSchedulerRunKey(owner.SourceDocumentID, owner.RunID), referenceSchedulerTTL).Err()
-		_ = s.client.Expire(ctx, referenceSchedulerSourceKey(owner.SourceDocumentID), referenceSchedulerTTL).Err()
 	}
 	return created, nil
 }
@@ -471,11 +350,23 @@ func (s *redisReferenceScheduler) withJobLock(ctx context.Context, id uuid.UUID,
 			defer s.client.Del(context.Background(), key)
 			return work()
 		}
-		if err := waitForProviderThrottle(ctx, 25*time.Millisecond); err != nil {
+		if err := waitForReferenceSchedulerLock(ctx, 25*time.Millisecond); err != nil {
 			return err
 		}
 	}
 }
+
+func waitForReferenceSchedulerLock(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (s *redisReferenceScheduler) Claim(ctx context.Context, target uuid.UUID) (types.PaperReferenceClaim, error) {
 	var claim types.PaperReferenceClaim
 	err := s.withJobLock(ctx, target, func() error {
@@ -515,127 +406,6 @@ func (s *redisReferenceScheduler) Cooldown(ctx context.Context, provider types.P
 		return nil
 	}
 	return s.client.Set(ctx, referenceSchedulerCooldownKey(provider), "1", delay).Err()
-}
-func (s *redisReferenceScheduler) CancelRun(ctx context.Context, source, run uuid.UUID) ([]uuid.UUID, error) {
-	members, err := s.client.SMembers(ctx, referenceSchedulerRunKey(source, run)).Result()
-	if err != nil {
-		if err == redis.Nil {
-			return nil, nil
-		}
-		return nil, err
-	}
-	ids := make([]uuid.UUID, 0, len(members))
-	for _, value := range members {
-		id, err := uuid.Parse(value)
-		if err != nil {
-			continue
-		}
-		cancelTask := false
-		// set job's status
-		err = s.withJobLock(ctx, id, func() error {
-			job, err := s.load(ctx, id)
-			if err != nil {
-				return err
-			}
-			if job.Completed {
-				return nil
-			}
-			for index := range job.Owners {
-				if job.Owners[index].SourceDocumentID == source && job.Owners[index].RunID == run {
-					job.Owners[index].Cancelled = true
-				}
-			}
-			if !hasActiveReferenceOwner(job) {
-				job.Cancelled, job.InFlight, cancelTask = true, false, true
-			}
-			job.UpdatedAt = time.Now().UTC()
-			if cancelTask {
-				// No owner remains active: delete the job key outright so a
-				// later upload of the same paper can re-register immediately
-				// instead of waiting for the 24h TTL.
-				return s.client.Del(ctx, referenceSchedulerJobKey(id)).Err()
-			}
-			return s.save(ctx, job)
-		})
-		if err != nil {
-			return ids, err
-		}
-		if cancelTask {
-			ids = append(ids, id)
-			// Drop the target from this run's membership sets; the keys then
-			// expire naturally once the last member is gone.
-			_ = s.client.SRem(ctx, referenceSchedulerRunKey(source, run), id.String()).Err()
-			_ = s.client.SRem(ctx, referenceSchedulerSourceKey(source), id.String()).Err()
-		}
-	}
-	return ids, nil
-}
-func (s *redisReferenceScheduler) IsRunActive(ctx context.Context, source, run uuid.UUID) (bool, error) {
-	members, err := s.client.SMembers(ctx, referenceSchedulerRunKey(source, run)).Result()
-	if err != nil {
-		if err == redis.Nil {
-			return false, nil
-		}
-		return false, err
-	}
-	for _, value := range members {
-		id, err := uuid.Parse(value)
-		if err != nil {
-			continue
-		}
-		job, err := s.load(ctx, id)
-		if err == nil && !job.Completed {
-			for _, owner := range job.Owners {
-				if owner.SourceDocumentID == source && owner.RunID == run && !owner.Cancelled {
-					return true, nil
-				}
-			}
-		}
-	}
-	return false, nil
-}
-func (s *redisReferenceScheduler) IsTargetActive(ctx context.Context, target uuid.UUID) (bool, error) {
-	job, err := s.load(ctx, target)
-	if err == redis.Nil {
-		return false, nil
-	}
-	if err != nil {
-		return false, err
-	}
-	return !job.Completed && !job.Cancelled && hasActiveReferenceOwner(job), nil
-}
-func (s *redisReferenceScheduler) Progress(ctx context.Context, source uuid.UUID) (types.PaperReferenceProgress, error) {
-	members, err := s.client.SMembers(ctx, referenceSchedulerSourceKey(source)).Result()
-	if err != nil {
-		if err == redis.Nil {
-			return types.PaperReferenceProgress{}, nil
-		}
-		return types.PaperReferenceProgress{}, err
-	}
-	var progress types.PaperReferenceProgress
-	for _, value := range members {
-		id, err := uuid.Parse(value)
-		if err != nil {
-			continue
-		}
-		job, err := s.load(ctx, id)
-		if err != nil {
-			continue
-		}
-		switch {
-		case !jobHasActiveSourceOwner(job, source):
-			continue
-		case job.Cancelled:
-			progress.Cancelled++
-		case job.Completed:
-			progress.Completed++
-		case job.InFlight:
-			progress.Running++
-		default:
-			progress.Queued++
-		}
-	}
-	return progress, nil
 }
 
 var _ interfaces.PaperReferenceScheduler = (*memoryReferenceScheduler)(nil)

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"paperMaster/internal/config"
+	"paperMaster/internal/limit"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
 )
@@ -45,14 +46,14 @@ func NewRegistry(providers ...interfaces.PaperCatalogProvider) (*Registry, error
 // NewRegistryFromConfig creates only the providers selected by environment
 // configuration. Each provider owns a timeout-bounded HTTP client so later
 // provider-specific transport policy cannot leak into another adapter.
-func NewRegistryFromConfig(cfg config.Config) (interfaces.PaperCatalogRegistry, error) {
+func NewRegistryFromConfig(cfg config.Config, shared *limit.Engine) (interfaces.PaperCatalogRegistry, error) {
 	if cfg.PaperCatalogTimeout <= 0 {
 		return nil, fmt.Errorf("paper catalog timeout must be positive")
 	}
 	newClient := func(provider string) *http.Client {
 		return &http.Client{Timeout: cfg.PaperCatalogTimeoutFor(provider)}
 	}
-	throttle := newProviderThrottle()
+	throttle := newProviderThrottle(shared)
 	providers := make([]interfaces.PaperCatalogProvider, 0, len(cfg.PaperCatalogProviders))
 	for _, configuredName := range cfg.PaperCatalogProviders {
 		name := types.NormalizePaperCatalogProvider(configuredName)

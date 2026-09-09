@@ -64,30 +64,6 @@ func (h *PaperInfoHandler) RetryReference(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"accepted": true})
 }
 
-func (h *PaperInfoHandler) StartReferenceDownloads(c *gin.Context) {
-	if !validPaperDocumentParam(c, h.writeError) {
-		return
-	}
-	if err := h.info.StartReferenceDownloads(c.Request.Context(), c.Param("documentID")); err != nil {
-		h.handleServiceError(c, err)
-		return
-	}
-	logger.Info(c.Request.Context(), "reference PDF acquisition accepted", "document_id", c.Param("documentID"))
-	c.JSON(http.StatusAccepted, gin.H{"accepted": true})
-}
-
-func (h *PaperInfoHandler) CancelReferenceDownloads(c *gin.Context) {
-	if !validPaperDocumentParam(c, h.writeError) {
-		return
-	}
-	if err := h.info.CancelReferenceDownloads(c.Request.Context(), c.Param("documentID")); err != nil {
-		h.handleServiceError(c, err)
-		return
-	}
-	logger.Info(c.Request.Context(), "reference PDF acquisition cancellation accepted", "document_id", c.Param("documentID"))
-	c.JSON(http.StatusAccepted, gin.H{"accepted": true})
-}
-
 func (h *PaperInfoHandler) Cancel(c *gin.Context) {
 	if !validPaperDocumentParam(c, h.writeError) {
 		return

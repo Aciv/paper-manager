@@ -26,6 +26,7 @@ type DocumentRepository interface {
 	DeleteUnknownIfUnreferenced(ctx context.Context, id uuid.UUID) (deleted bool, err error)
 	// Search returns a paginated document result using ID or DOI filters.
 	Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
+	CitationTargetProgress(ctx context.Context, citingDocumentID uuid.UUID) (types.PaperReferenceProgress, error)
 	// GetMarkdown returns the current parsed Markdown source for a document.
 	// It returns sql.ErrNoRows when the document has not been parsed yet.
 	GetMarkdown(ctx context.Context, documentID uuid.UUID) (types.DocumentMarkdown, error)
@@ -33,7 +34,7 @@ type DocumentRepository interface {
 	// manifest and source-map Blocks, then marks a processing document ready.
 	// It returns types.ErrDocumentNotProcessing if cancellation/deletion won
 	// the status race before the result could be committed.
-	ReplaceParsedOutput(ctx context.Context, markdown types.DocumentMarkdown, blocks []types.Block) error
+	ReplaceParsedOutput(ctx context.Context, markdown types.DocumentMarkdown, blocks []types.Block, markdownGeneration int64) error
 	// ListBlocks returns a document's persisted source-map blocks. pageNumber
 	// of zero returns all pages; a positive value returns one PDF page.
 	ListBlocks(ctx context.Context, documentID uuid.UUID, pageNumber int) ([]types.Block, error)
@@ -60,6 +61,23 @@ type DocumentRepository interface {
 	// bibliographic placeholder. It returns false if another worker already
 	// promoted or deleted the placeholder.
 	PromoteUnknown(ctx context.Context, document types.Document) (bool, error)
+	// MergeIntoCanonical atomically redirects all citation edges from loser to
+	// canonical and retains loser as a canonical tombstone.
+	MergeIntoCanonical(ctx context.Context, loserID, canonicalID uuid.UUID) error
+	// GetStage returns one stage's durable control-plane snapshot.
+	GetStage(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, error)
+	// QueueStageNewGeneration increments a non-active stage generation and queues it atomically.
+	QueueStageNewGeneration(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, bool, error)
+	// TryStartStage moves queued to running for the exact generation.
+	TryStartStage(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error)
+	// MarkStageRetryQueued moves running back to queued without changing generation.
+	MarkStageRetryQueued(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error)
+	// FinishStage writes succeeded, failed, or skipped using a generation fence.
+	FinishStage(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64, status types.DocumentStageStatus, errorCode, errorMessage string) (types.DocumentStageState, bool, error)
+	// CancelStage moves queued or running to cancelled using a generation fence.
+	CancelStage(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error)
+	// AllowsStageWork is true only while the exact generation is running.
+	AllowsStageWork(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64) (bool, error)
 }
 
 // DocumentService contains document lifecycle and storage orchestration.
@@ -80,6 +98,7 @@ type DocumentService interface {
 	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
 	// GetDocumentStatus returns the current lifecycle status for a document.
 	GetDocumentStatus(ctx context.Context, id string) (types.DocumentStatus, error)
+	GetReferenceProgress(ctx context.Context, id string) (types.PaperReferenceProgress, error)
 	// SetDocumentStatus updates a document lifecycle status and optional error message.
 	SetDocumentStatus(ctx context.Context, id string, status types.DocumentStatus, message *string) error
 	// UpdateDocumentInfo updates original-file and DOI fields. Nil fields keep
@@ -113,9 +132,6 @@ type DocumentService interface {
 	// DeleteDocumentList removes multiple documents sequentially.
 	DeleteDocumentList(ctx context.Context, ids []string) error
 
-	// ProcessDocument advances one persistent document pipeline. It chooses and
-	// queues the next incomplete stage but never performs recognition itself.
-	ProcessDocument(ctx context.Context, task *asynq.Task) error
 	// RecognizeDocument performs only the asynchronous recognition stage.
 	RecognizeDocument(ctx context.Context, task *asynq.Task) error
 	// ImportRemoteDocument reloads one unknown placeholder's current metadata,

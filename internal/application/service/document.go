@@ -10,7 +10,6 @@ import (
 	"io"
 	"mime/multipart"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"unicode/utf8"
 
@@ -32,7 +31,9 @@ type documentService struct {
 	taskEnqueuer  interfaces.TaskEnqueuer
 	recognizer    interfaces.DocumentRecognizer
 	paperInfo     interfaces.PaperInfoService
-	spans         interfaces.SpanTracker
+	spans         interfaces.SpanRecorder
+	runs          interfaces.ProcessingRunRepository
+	cancellations interfaces.WorkflowCancellationService
 	papers        interfaces.PaperService
 	urlResolver   interfaces.PaperURLResolver
 	downloads     interfaces.RemoteDownloadLimiter
@@ -93,9 +94,9 @@ func NewDocumentServiceWithProcessing(
 	return newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, nil, nil)
 }
 
-// NewDocumentServiceWithProcessingAndSpanTracker is the DI constructor used
+// NewDocumentServiceWithProcessingAndSpanRecorder is the DI constructor used
 // in production. The legacy constructor remains for focused service tests.
-func NewDocumentServiceWithProcessingAndSpanTracker(
+func NewDocumentServiceWithProcessingAndSpanRecorder(
 	cfg config.Config,
 	repo interfaces.DocumentRepository,
 	storage interfaces.FileStorage,
@@ -103,22 +104,26 @@ func NewDocumentServiceWithProcessingAndSpanTracker(
 	taskEnqueuer interfaces.TaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer,
 	paperInfo interfaces.PaperInfoService,
-	spans interfaces.SpanTracker,
+	spans interfaces.SpanRecorder,
 	papers interfaces.PaperService,
 	urlResolver interfaces.PaperURLResolver,
 	downloads interfaces.RemoteDownloadLimiter,
+	runs interfaces.ProcessingRunRepository,
+	cancellations interfaces.WorkflowCancellationService,
 ) interfaces.DocumentService {
 	service := newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, paperInfo, spans).(*documentService)
 	service.papers = papers
 	service.urlResolver = urlResolver
 	service.downloads = downloads
+	service.runs = runs
+	service.cancellations = cancellations
 	return service
 }
 
 func newDocumentServiceWithProcessing(
 	cfg config.Config, repo interfaces.DocumentRepository, storage interfaces.FileStorage,
 	taskInspector interfaces.TaskInspector, taskEnqueuer interfaces.TaskEnqueuer,
-	recognizer interfaces.DocumentRecognizer, paperInfo interfaces.PaperInfoService, spans interfaces.SpanTracker,
+	recognizer interfaces.DocumentRecognizer, paperInfo interfaces.PaperInfoService, spans interfaces.SpanRecorder,
 ) interfaces.DocumentService {
 	return &documentService{
 		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer,
@@ -172,7 +177,8 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 		return nil, errors.New("stored file hash differs from uploaded file hash")
 	}
 	doc := types.Document{ID: uuid.New(), OriginalFilename: stored.Filename, ContentType: stored.ContentType,
-		SizeBytes: stored.Size, DOI: doi, FileSHA256: fileHash, StorageKey: stored.Key, Status: types.DocumentStatusUploaded}
+		SizeBytes: stored.Size, DOI: doi, FileSHA256: fileHash, StorageKey: stored.Key,
+		Status: types.DocumentStatusUploaded, SourceState: types.DocumentSourceAvailable}
 	created, err := s.repo.Create(ctx, doc)
 	if err != nil {
 		logger.Error(ctx, "create document record failed", "document_id", doc.ID, "error", err)
@@ -263,26 +269,30 @@ func (s *documentService) existingDocument(ctx context.Context, doi, hash string
 	return &document, nil
 }
 
-// enqueueDocumentRecognition starts a durable pipeline root and queues its
-// direct ProcessDocument execution. Recognition is its first idempotent stage;
-// later stages reuse committed Markdown when the document is already ready.
-func (s *documentService) enqueueDocumentRecognition(ctx context.Context, documentID uuid.UUID, attempts ...int) error {
-	transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, documentID, types.DocumentStatusQueued, nil,
-		[]types.DocumentStatus{types.DocumentStatusUploaded, types.DocumentStatusFailed, types.DocumentStatusCancelled, types.DocumentStatusReady})
+// enqueueDocumentRecognition creates one durable Markdown generation before
+// publishing the dedicated recognition task.
+func (s *documentService) enqueueDocumentRecognition(ctx context.Context, documentID uuid.UUID, _ ...int) error {
+	stage, applied, err := s.repo.QueueStageNewGeneration(ctx, documentID, types.DocumentStageMarkdown)
 	if err != nil {
-		return fmt.Errorf("mark document queued: %w", err)
+		return fmt.Errorf("queue Markdown stage: %w", err)
 	}
-	if !transitioned {
-		return fmt.Errorf("document cannot be queued from its current status")
+	if !applied {
+		return ErrDocumentParseActive
 	}
-	attempt := 1
-	if len(attempts) > 0 && attempts[0] > 0 {
-		attempt = attempts[0]
+	payload := types.DocumentProcessPayload{
+		DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown,
+		Generation: stage.Generation,
 	}
-	if err := s.startDocumentProcess(ctx, documentID, attempt); err != nil {
+	task, options, err := NewDocumentRecognitionTask(payload)
+	if err == nil {
+		err = enqueueManagedTask(ctx, s.taskEnqueuer, task, options, documentID.String())
+	}
+	if err != nil {
+		_, _, _ = s.repo.FinishStage(context.WithoutCancel(ctx), documentID, types.DocumentStageMarkdown, stage.Generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
 		s.markDocumentQueueFailure(ctx, documentID)
 		return err
 	}
+	logger.Info(ctx, "document recognition queued", "document_id", documentID, "generation", stage.Generation)
 	return nil
 }
 
@@ -294,37 +304,6 @@ func (s *documentService) markDocumentQueueFailure(ctx context.Context, document
 	if err := s.repo.UpdateStatus(context.WithoutCancel(ctx), documentID, types.DocumentStatusFailed, &message); err != nil {
 		logger.Error(ctx, "record document queue failure failed", "document_id", documentID, "error", err)
 	}
-}
-
-func (s *documentService) startDocumentProcess(ctx context.Context, documentID uuid.UUID, attempt int) error {
-	processID := uuid.New()
-	if s.spans != nil {
-		var spanErr error
-		processID, spanErr = s.spans.Begin(ctx, documentID, attempt,
-			types.ProcessingSpanPipeline, types.ProcessingSpanScopeProcess,
-			types.ComposeProcessingSpanScopeID(types.ProcessingSpanPipeline, documentID.String(), strconv.Itoa(attempt)), 0)
-		if spanErr != nil {
-			return fmt.Errorf("start document process root: %w", spanErr)
-		}
-	}
-	task, options, err := NewDocumentProcessTask(types.DocumentProcessPayload{
-		DocumentID: documentID.String(), ProcessID: processID.String(), Attempt: attempt,
-	})
-	if err != nil {
-		return err
-	}
-	if err := enqueueManagedTask(
-		ctx,
-		s.taskEnqueuer,
-		task,
-		options,
-		documentID.String(),
-	); err != nil {
-		_ = s.finishDocumentProcess(context.WithoutCancel(ctx), processID, types.ProcessingSpanFailed, "QUEUE_ERROR", "document process could not be queued")
-		return err
-	}
-	logger.Info(ctx, "document process started", "document_id", documentID, "process_id", processID, "attempt", attempt)
-	return nil
 }
 
 // RetryDocumentProcess resumes the direct document pipeline through one clear
@@ -339,46 +318,33 @@ func (s *documentService) RetryDocumentProcess(ctx context.Context, id string) (
 	if document.Status == types.DocumentStatusDeleting {
 		return nil, ErrDocumentDeleting
 	}
-	attempt := 1
-	if s.spans != nil {
-		view, viewErr := s.spans.GetView(ctx, *document)
-		if viewErr != nil {
-			return nil, fmt.Errorf("load document process timeline: %w", viewErr)
-		}
-		for _, stage := range view.Stages {
-			if stage.Kind == types.ProcessingSpanPipeline {
-				if stage.Status.Active() {
-					return nil, ErrDocumentParseActive
-				}
-				if stage.Attempt >= attempt {
-					attempt = stage.Attempt + 1
-				}
-			}
-		}
+	markdownStage, err := s.repo.GetStage(ctx, document.ID, types.DocumentStageMarkdown)
+	if err != nil {
+		return nil, err
 	}
-	if document.Status != types.DocumentStatusReady {
-		if document.Status != types.DocumentStatusFailed && document.Status != types.DocumentStatusCancelled {
-			return nil, ErrDocumentParseFinished
-		}
-		queued, err := s.repo.UpdateStatusIfCurrent(ctx, document.ID, types.DocumentStatusQueued, nil,
-			[]types.DocumentStatus{types.DocumentStatusFailed, types.DocumentStatusCancelled})
-		if err != nil {
-			return nil, fmt.Errorf("mark document queued for process retry: %w", err)
-		}
-		if !queued {
-			return nil, ErrDocumentParseActive
-		}
-		document.Status = types.DocumentStatusQueued
-		document.ErrorMessage = nil
+	if markdownStage.Status.Active() {
+		return nil, ErrDocumentParseActive
 	}
-	if err := s.startDocumentProcess(ctx, document.ID, attempt); err != nil {
-		s.markDocumentQueueFailure(ctx, document.ID)
+	if document.Status == types.DocumentStatusReady {
+		if s.paperInfo == nil {
+			return nil, errors.New("paper information service is not configured")
+		}
+		if err := s.paperInfo.RetryExtraction(ctx, document.ID.String()); err != nil {
+			return nil, err
+		}
+		logger.Info(ctx, "document metadata retry started", "document_id", document.ID)
+		return document, nil
+	}
+	if document.Status != types.DocumentStatusFailed && document.Status != types.DocumentStatusCancelled {
+		return nil, ErrDocumentParseFinished
+	}
+	if err := s.enqueueDocumentRecognition(ctx, document.ID); err != nil {
 		failed := s.loadCreatedDocumentAfterQueue(ctx, *document)
 		logger.Warn(ctx, "document process retry was not queued",
 			"document_id", failed.ID, "status", failed.Status, "error", err)
 		return &failed, fmt.Errorf("%w: %w", ErrDocumentProcessQueue, err)
 	}
-	logger.Info(ctx, "document process retry started", "document_id", document.ID, "attempt", attempt)
+	logger.Info(ctx, "document process retry started", "document_id", document.ID)
 	return document, nil
 }
 
@@ -393,27 +359,17 @@ func (s *documentService) RetryDocumentParse(ctx context.Context, id string) (*t
 	if document.Status == types.DocumentStatusDeleting {
 		return nil, ErrDocumentDeleting
 	}
-	if s.spans != nil {
-		active, spanErr := s.spans.HasActive(ctx, document.ID, types.ProcessingSpanRecognition)
-		if spanErr != nil {
-			return nil, fmt.Errorf("check active document processing span: %w", spanErr)
-		}
-		if active {
-			return nil, ErrDocumentParseActive
-		}
+	stage, err := s.repo.GetStage(ctx, document.ID, types.DocumentStageMarkdown)
+	if err != nil {
+		return nil, err
+	}
+	if stage.Status.Active() {
+		return nil, ErrDocumentParseActive
 	}
 	if document.Status != types.DocumentStatusFailed && document.Status != types.DocumentStatusCancelled {
 		return nil, ErrDocumentParseFinished
 	}
-	attempt := 1
-	if s.spans != nil {
-		view, viewErr := s.spans.GetView(ctx, *document)
-		if viewErr != nil {
-			return nil, fmt.Errorf("load document processing timeline: %w", viewErr)
-		}
-		attempt = view.LatestAttempt + 1
-	}
-	if err := s.enqueueDocumentRecognition(ctx, document.ID, attempt); err != nil {
+	if err := s.enqueueDocumentRecognition(ctx, document.ID); err != nil {
 		failed := s.loadCreatedDocumentAfterQueue(ctx, *document)
 		return &failed, fmt.Errorf("%w: %w", ErrDocumentProcessQueue, err)
 	}
@@ -421,7 +377,7 @@ func (s *documentService) RetryDocumentParse(ctx context.Context, id string) (*t
 	if err != nil {
 		return nil, err
 	}
-	logger.Info(ctx, "document recognition retry queued", "document_id", queued.ID, "attempt", attempt)
+	logger.Info(ctx, "document recognition retry queued", "document_id", queued.ID, "generation", queued.MarkdownGeneration)
 	return queued, nil
 }
 
@@ -479,6 +435,14 @@ func (s *documentService) GetDocumentStatus(ctx context.Context, id string) (typ
 		return "", err
 	}
 	return doc.Status, nil
+}
+
+func (s *documentService) GetReferenceProgress(ctx context.Context, id string) (types.PaperReferenceProgress, error) {
+	documentID, err := uuid.Parse(strings.TrimSpace(id))
+	if err != nil || documentID == uuid.Nil {
+		return types.PaperReferenceProgress{}, errors.New("invalid document id")
+	}
+	return s.repo.CitationTargetProgress(ctx, documentID)
 }
 
 func (s *documentService) SetDocumentStatus(ctx context.Context, id string, status types.DocumentStatus, message *string) error {
@@ -549,7 +513,7 @@ func (s *documentService) GetDocumentFile(ctx context.Context, id string) (io.Re
 	if err != nil {
 		return nil, "", err
 	}
-	if doc.Status == types.DocumentStatusUnknown {
+	if doc.SourceState != types.DocumentSourceAvailable {
 		return nil, "", sql.ErrNoRows
 	}
 	rc, err := s.storage.Open(ctx, doc.StorageKey)
@@ -646,7 +610,7 @@ func (s *documentService) deleteDocumentRelations(
 	ctx context.Context, document *types.Document, markdown *types.DocumentMarkdown,
 	blocks []types.Block,
 ) error {
-	if document.Status != types.DocumentStatusUnknown {
+	if document.SourceState != types.DocumentSourceMissing {
 		if s.storage == nil {
 			return errors.New("file storage is not configured")
 		}

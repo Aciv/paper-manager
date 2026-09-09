@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
@@ -83,6 +84,7 @@ func (r *documentRepository) EnsureUnknown(
 		DOI:              "",
 		StorageKey:       types.UnknownDocumentStorageScheme + id.String(),
 		Status:           types.DocumentStatusUnknown,
+		SourceState:      types.DocumentSourceMissing,
 	}
 	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&placeholder)
 	if result.Error != nil {
@@ -93,7 +95,7 @@ func (r *documentRepository) EnsureUnknown(
 	if err != nil {
 		return types.Document{}, false, err
 	}
-	if document.Status != types.DocumentStatusUnknown {
+	if document.SourceState != types.DocumentSourceMissing {
 		return types.Document{}, false, fmt.Errorf("%w: %s", types.ErrUnknownDocumentConflict, id)
 	}
 	created := result.RowsAffected > 0
@@ -108,12 +110,12 @@ func (r *documentRepository) DeleteUnknownIfUnreferenced(
 ) (bool, error) {
 	result := r.db.WithContext(ctx).
 		Where(
-			`id = ? AND status = ? AND NOT EXISTS (
+			`id = ? AND source_state = ? AND NOT EXISTS (
 				SELECT 1 FROM paper_citations
 				WHERE citing_document_id = documents.id OR cited_document_id = documents.id
 			)`,
 			id,
-			types.DocumentStatusUnknown,
+			types.DocumentSourceMissing,
 		).
 		Delete(&types.Document{})
 	if result.Error != nil {
@@ -156,8 +158,11 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	if search.Status != "" {
 		query = query.Where("documents.status = ?", search.Status)
 	}
+	if search.SourceState != "" {
+		query = query.Where("documents.source_state = ?", search.SourceState)
+	}
 	if search.ExcludeUnknown {
-		query = query.Where("documents.status <> ?", types.DocumentStatusUnknown)
+		query = query.Where("documents.source_state = ?", types.DocumentSourceAvailable)
 	}
 
 	result := types.DocumentPage{Page: page, PageSize: pageSize, Items: []types.Document{}}
@@ -172,6 +177,23 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	return result, err
 }
 
+func (r *documentRepository) CitationTargetProgress(ctx context.Context, citingDocumentID uuid.UUID) (types.PaperReferenceProgress, error) {
+	var progress types.PaperReferenceProgress
+	err := r.db.WithContext(ctx).Raw(`SELECT
+		COUNT(*) FILTER (WHERE d.source_state = 'missing' AND d.source_lookup_status IN ('not_started','queued')) AS queued,
+		COUNT(*) FILTER (WHERE d.source_state = 'missing' AND d.source_lookup_status = 'running') AS running,
+		COUNT(*) FILTER (WHERE d.source_state IN ('available','merged') OR (d.source_state = 'missing' AND d.source_lookup_status IN ('succeeded','skipped'))) AS completed,
+		COUNT(*) FILTER (WHERE d.source_state = 'missing' AND d.source_lookup_status = 'failed') AS failed,
+		COUNT(*) FILTER (WHERE d.source_state = 'deleting' OR (d.source_state = 'missing' AND d.source_lookup_status = 'cancelled')) AS cancelled
+	FROM paper_citations c
+	JOIN documents d ON d.id = c.cited_document_id
+	WHERE c.citing_document_id = ?`, citingDocumentID).Scan(&progress).Error
+	if err != nil {
+		logger.Error(ctx, "load citation target progress failed", "document_id", citingDocumentID, "error", err)
+	}
+	return progress, err
+}
+
 func (r *documentRepository) GetMarkdown(ctx context.Context, documentID uuid.UUID) (types.DocumentMarkdown, error) {
 	var markdown types.DocumentMarkdown
 	err := repositoryError(r.db.WithContext(ctx).First(&markdown, "document_id = ?", documentID).Error)
@@ -182,15 +204,25 @@ func (r *documentRepository) GetMarkdown(ctx context.Context, documentID uuid.UU
 }
 
 func (r *documentRepository) ReplaceParsedOutput(
-	ctx context.Context, markdown types.DocumentMarkdown, blocks []types.Block,
+	ctx context.Context, markdown types.DocumentMarkdown, blocks []types.Block, markdownGeneration int64,
 ) error {
 	if markdown.DocumentID == uuid.Nil {
 		return errors.New("markdown document id is required")
 	}
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&types.Document{}).
-			Where("id = ? AND status = ?", markdown.DocumentID, types.DocumentStatusProcessing).
-			Updates(map[string]interface{}{"status": types.DocumentStatusReady, "error_message": nil})
+		query := tx.Model(&types.Document{}).Where("id = ? AND source_state = ?", markdown.DocumentID, types.DocumentSourceAvailable)
+		updates := map[string]interface{}{
+			"markdown_status":        types.DocumentStageSucceeded,
+			"markdown_updated_at":    time.Now().UTC(),
+			"markdown_error_code":    nil,
+			"markdown_error_message": nil,
+		}
+		if markdownGeneration > 0 {
+			query = query.Where("markdown_status = ? AND markdown_generation = ?", types.DocumentStageRunning, markdownGeneration)
+		} else {
+			return types.ErrDocumentNotProcessing
+		}
+		result := query.Updates(updates)
 		if result.Error != nil {
 			return result.Error
 		}
@@ -278,8 +310,13 @@ func (r *documentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 }
 
 func (r *documentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status types.DocumentStatus, message *string) error {
-	result := r.db.WithContext(ctx).Model(&types.Document{}).Where("id = ?", id).
-		Updates(map[string]interface{}{"status": status, "error_message": message})
+	changes := map[string]interface{}{"status": status, "error_message": message}
+	query := r.db.WithContext(ctx).Model(&types.Document{}).Where("id = ?", id)
+	if status == types.DocumentStatusDeleting {
+		changes["source_state"] = types.DocumentSourceDeleting
+		query = query.Where("source_state <> ?", types.DocumentSourceMerged)
+	}
+	result := query.Updates(changes)
 	if result.Error != nil {
 		logger.Error(ctx, "update document status failed", "document_id", id, "status", status, "error", result.Error)
 		return result.Error
@@ -295,8 +332,13 @@ func (r *documentRepository) UpdateStatusIfCurrent(ctx context.Context, id uuid.
 	if len(expected) == 0 {
 		return false, nil
 	}
-	result := r.db.WithContext(ctx).Model(&types.Document{}).Where("id = ? AND status IN ?", id, expected).
-		Updates(map[string]interface{}{"status": status, "error_message": message})
+	changes := map[string]interface{}{"status": status, "error_message": message}
+	query := r.db.WithContext(ctx).Model(&types.Document{}).Where("id = ? AND status IN ?", id, expected)
+	if status == types.DocumentStatusDeleting {
+		changes["source_state"] = types.DocumentSourceDeleting
+		query = query.Where("source_state <> ?", types.DocumentSourceMerged)
+	}
+	result := query.Updates(changes)
 	if result.Error != nil {
 		logger.Error(ctx, "conditionally update document status failed", "document_id", id, "status", status, "error", result.Error)
 		return false, result.Error
@@ -372,7 +414,7 @@ func (r *documentRepository) PromoteUnknown(
 		return false, errors.New("promoted document source fields are required")
 	}
 	result := r.db.WithContext(ctx).Model(&types.Document{}).
-		Where("id = ? AND status = ?", document.ID, types.DocumentStatusUnknown).
+		Where("id = ? AND source_state = ?", document.ID, types.DocumentSourceMissing).
 		Updates(map[string]interface{}{
 			"original_filename": document.OriginalFilename,
 			"content_type":      document.ContentType,
@@ -380,6 +422,7 @@ func (r *documentRepository) PromoteUnknown(
 			"doi":               strings.ToLower(strings.TrimSpace(document.DOI)),
 			"file_sha256":       strings.ToLower(strings.TrimSpace(document.FileSHA256)),
 			"storage_key":       document.StorageKey,
+			"source_state":      types.DocumentSourceAvailable,
 			"status":            types.DocumentStatusUploaded,
 			"error_message":     nil,
 		})
@@ -398,6 +441,87 @@ func (r *documentRepository) PromoteUnknown(
 		return true, nil
 	}
 	return false, nil
+}
+
+func (r *documentRepository) MergeIntoCanonical(ctx context.Context, loserID, canonicalID uuid.UUID) error {
+	if loserID == uuid.Nil || canonicalID == uuid.Nil || loserID == canonicalID {
+		return errors.New("distinct loser and canonical document ids are required")
+	}
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		ids := []uuid.UUID{loserID, canonicalID}
+		if ids[0].String() > ids[1].String() {
+			ids[0], ids[1] = ids[1], ids[0]
+		}
+		var locked []types.Document
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", ids).Order("id").Find(&locked).Error; err != nil {
+			return err
+		}
+		if len(locked) != 2 {
+			return sql.ErrNoRows
+		}
+		var loser, canonical types.Document
+		for _, document := range locked {
+			if document.ID == loserID {
+				loser = document
+			} else {
+				canonical = document
+			}
+		}
+		if loser.SourceState == types.DocumentSourceMerged {
+			if loser.CanonicalDocumentID != nil && *loser.CanonicalDocumentID == canonicalID {
+				return nil
+			}
+			return fmt.Errorf("document already merged into another canonical document")
+		}
+		if canonical.SourceState != types.DocumentSourceAvailable {
+			return fmt.Errorf("canonical document source is not available")
+		}
+		// Redirect both directions before tombstoning. ON CONFLICT preserves an
+		// existing canonical edge and prevents a duplicate shared citation.
+		if err := tx.Exec(`INSERT INTO paper_citations
+			(citing_document_id, cited_document_id, raw_reference, origin, created_at)
+			SELECT citing_document_id, ?, raw_reference, origin, created_at
+			FROM paper_citations WHERE cited_document_id = ? AND citing_document_id <> ?
+			ON CONFLICT (citing_document_id, cited_document_id) DO NOTHING`, canonicalID, loserID, canonicalID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`INSERT INTO paper_citations
+			(citing_document_id, cited_document_id, raw_reference, origin, created_at)
+			SELECT ?, cited_document_id, raw_reference, origin, created_at
+			FROM paper_citations WHERE citing_document_id = ? AND cited_document_id <> ?
+			ON CONFLICT (citing_document_id, cited_document_id) DO NOTHING`, canonicalID, loserID, canonicalID).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("citing_document_id = ? OR cited_document_id = ?", loserID, loserID).Delete(&types.PaperCitation{}).Error; err != nil {
+			return err
+		}
+		updates := map[string]interface{}{
+			"source_state":               types.DocumentSourceMerged,
+			"canonical_document_id":      canonicalID,
+			"markdown_status":            types.DocumentStageCancelled,
+			"metadata_extraction_status": types.DocumentStageCancelled,
+			"source_lookup_status":       types.DocumentStageCancelled,
+			"reference_lookup_status":    types.DocumentStageCancelled,
+			"markdown_error_code":        nil, "markdown_error_message": nil,
+			"metadata_extraction_error_code": nil, "metadata_extraction_error_message": nil,
+			"source_lookup_error_code": nil, "source_lookup_error_message": nil,
+			"reference_lookup_error_code": nil, "reference_lookup_error_message": nil,
+		}
+		result := tx.Model(&types.Document{}).Where("id = ? AND source_state <> ?", loserID, types.DocumentSourceMerged).Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return types.ErrDocumentNotProcessing
+		}
+		return nil
+	})
+	if err != nil {
+		logger.Error(ctx, "merge document into canonical failed", "document_id", loserID, "canonical_document_id", canonicalID, "error", err)
+		return err
+	}
+	logger.Info(ctx, "document merged into canonical", "document_id", loserID, "canonical_document_id", canonicalID)
+	return nil
 }
 
 func valueOrEmpty(value *string) string {

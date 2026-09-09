@@ -18,10 +18,10 @@ type documentQueueProbeStub struct {
 func (*documentQueueProbeStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
 	return 0, 0, nil
 }
-
-func (*documentQueueProbeStub) CancelReferenceTasksForRun(context.Context, string, string) (int, int, error) {
+func (*documentQueueProbeStub) CancelTasksForRun(context.Context, string, string, types.ProcessingWorkflowKind) (int, int, error) {
 	return 0, 0, nil
 }
+
 func (*documentQueueProbeStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
 	return 0, 0, nil
 }

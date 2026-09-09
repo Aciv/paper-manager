@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -15,17 +17,17 @@ import (
 
 const processingSpanHeartbeatInterval = 15 * time.Second
 
-type spanTracker struct {
+type spanRecorder struct {
 	repo interfaces.DocumentProcessingSpanRepository
+	runs interfaces.ProcessingRunRepository
 }
 
-// NewSpanTracker creates the durable application implementation of
-// interfaces.SpanTracker.
-func NewSpanTracker(repo interfaces.DocumentProcessingSpanRepository) interfaces.SpanTracker {
-	return &spanTracker{repo: repo}
+// NewSpanRecorder creates the durable, observation-only span implementation.
+func NewSpanRecorder(repo interfaces.DocumentProcessingSpanRepository, runs interfaces.ProcessingRunRepository) interfaces.SpanRecorder {
+	return &spanRecorder{repo: repo, runs: runs}
 }
 
-func (s *spanTracker) Begin(ctx context.Context, documentID uuid.UUID,
+func (s *spanRecorder) BeginSpan(ctx context.Context, documentID uuid.UUID,
 	attempt int, kind types.ProcessingSpanKind,
 	scope types.ProcessingSpanScope,
 	scopeID types.ProcessingSpanScopeID,
@@ -33,7 +35,7 @@ func (s *spanTracker) Begin(ctx context.Context, documentID uuid.UUID,
 	return s.begin(ctx, uuid.Nil, documentID, attempt, kind, scope, scopeID, retryCount)
 }
 
-func (s *spanTracker) BeginChild(ctx context.Context, parentSpanID uuid.UUID,
+func (s *spanRecorder) BeginChildSpan(ctx context.Context, parentSpanID uuid.UUID,
 	documentID uuid.UUID, attempt int,
 	kind types.ProcessingSpanKind,
 	scope types.ProcessingSpanScope,
@@ -42,7 +44,7 @@ func (s *spanTracker) BeginChild(ctx context.Context, parentSpanID uuid.UUID,
 	return s.begin(ctx, parentSpanID, documentID, attempt, kind, scope, scopeID, retryCount)
 }
 
-func (s *spanTracker) begin(ctx context.Context,
+func (s *spanRecorder) begin(ctx context.Context,
 	parentSpanID uuid.UUID,
 	documentID uuid.UUID,
 	attempt int,
@@ -59,12 +61,18 @@ func (s *spanTracker) begin(ctx context.Context,
 		Scope:      scope,
 		ScopeID:    scopeID,
 		RetryCount: retryCount}
+	if runID := processingRunID(ctx); runID != uuid.Nil {
+		span.RunID = &runID
+	}
 	if parentSpanID != uuid.Nil {
 		span.ParentSpanID = &parentSpanID
 	}
 	row, err := s.repo.UpsertRunning(ctx, span)
 	if err != nil {
 		return uuid.Nil, err
+	}
+	if !row.Status.Active() {
+		return row.ID, fmt.Errorf("processing span is already terminal: %s", row.Status)
 	}
 	logger.Info(ctx, "processing span started",
 		"document_id", documentID,
@@ -76,152 +84,37 @@ func (s *spanTracker) begin(ctx context.Context,
 	return row.ID, nil
 }
 
-func (s *spanTracker) Heartbeat(ctx context.Context, spanID uuid.UUID) error {
+func (s *spanRecorder) Heartbeat(ctx context.Context, spanID uuid.UUID) error {
 	if s == nil || s.repo == nil || spanID == uuid.Nil {
 		return nil
 	}
 	return s.repo.Heartbeat(ctx, spanID)
 }
 
-func (s *spanTracker) Succeed(ctx context.Context, spanID uuid.UUID) error {
+func (s *spanRecorder) FinishSpan(ctx context.Context, spanID uuid.UUID, status types.ProcessingSpanStatus, code, reason string) error {
 	if s == nil || s.repo == nil || spanID == uuid.Nil {
 		return nil
 	}
-	return s.repo.Finish(ctx, spanID, types.ProcessingSpanSucceeded, "", "")
+	switch status {
+	case types.ProcessingSpanSucceeded:
+		code, reason = "", ""
+	case types.ProcessingSpanFailed, types.ProcessingSpanCancelled:
+		code, reason = safeSpanOutcome(code, reason)
+	default:
+		return fmt.Errorf("processing span terminal status %q is invalid", status)
+	}
+	return s.repo.Finish(ctx, spanID, status, code, reason)
 }
 
-func (s *spanTracker) Fail(ctx context.Context, spanID uuid.UUID, code, reason string) error {
-	if s == nil || s.repo == nil || spanID == uuid.Nil {
+func (s *spanRecorder) CancelSpansForRun(ctx context.Context, runID uuid.UUID, code, reason string) error {
+	if s == nil || s.repo == nil || runID == uuid.Nil {
 		return nil
 	}
-	return s.repo.Finish(ctx, spanID, types.ProcessingSpanFailed, code, safeSpanReason(reason))
+	code, reason = safeSpanOutcome(code, reason)
+	return s.repo.CancelActiveRun(ctx, runID, code, reason)
 }
 
-func (s *spanTracker) CancelDocument(ctx context.Context, documentID uuid.UUID, code, reason string) error {
-	if s == nil || s.repo == nil || documentID == uuid.Nil {
-		return nil
-	}
-	return s.repo.CancelActive(ctx, documentID, code, safeSpanReason(reason))
-}
-
-func (s *spanTracker) CancelReferenceRuns(ctx context.Context, documentID uuid.UUID, code, reason string) ([]uuid.UUID, error) {
-	if s == nil || s.repo == nil || documentID == uuid.Nil {
-		return nil, nil
-	}
-	values, err := s.repo.ListActiveScopeIDs(
-		ctx,
-		documentID,
-		types.ProcessingSpanCatalogReference,
-		types.ProcessingSpanScopeReferenceBatch)
-	if err != nil {
-		return nil, err
-	}
-	runs := make([]uuid.UUID, 0, len(values))
-	seen := make(map[uuid.UUID]struct{}, len(values))
-	for _, value := range values {
-		parts := types.SplitProcessingSpanScopeID(value)
-		if len(parts) < 3 || parts[0] != string(types.ProcessingSpanCatalogReference) {
-			continue
-		}
-		runID, parseErr := uuid.Parse(parts[1])
-		if parseErr != nil || runID == uuid.Nil {
-			continue
-		}
-		if _, duplicate := seen[runID]; duplicate {
-			continue
-		}
-		seen[runID] = struct{}{}
-		if err := s.repo.ForceCancelScope(
-			ctx,
-			documentID,
-			types.ProcessingSpanCatalogReference,
-			types.ProcessingSpanScopeReferenceRun,
-			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, runID.String()),
-			code,
-			safeSpanReason(reason)); err != nil {
-			return runs, err
-		}
-		batchPrefix := types.ProcessingSpanScopeID(
-			types.ComposeProcessingSpanScopeID(
-				types.ProcessingSpanCatalogReference,
-				runID.String(),
-			).String() + ":")
-		if err := s.repo.CancelActiveScopePrefix(
-			ctx,
-			documentID,
-			types.ProcessingSpanCatalogReference,
-			types.ProcessingSpanScopeReferenceBatch,
-			batchPrefix,
-			code,
-			safeSpanReason(reason)); err != nil {
-			return runs, err
-		}
-		providerPrefix := types.ProcessingSpanScopeID(
-			types.ComposeProcessingSpanScopeID(
-				types.ProcessingSpanCatalogProvider,
-				string(types.ProcessingSpanCatalogReference),
-				runID.String(),
-			).String() + ":")
-		if err := s.repo.CancelActiveScopePrefix(
-			ctx,
-			documentID,
-			types.ProcessingSpanCatalogProvider,
-			types.ProcessingSpanScopeProvider,
-			providerPrefix,
-			code,
-			safeSpanReason(reason)); err != nil {
-			return runs, err
-		}
-		runs = append(runs, runID)
-	}
-	return runs, nil
-}
-
-func (s *spanTracker) CancelReferenceDownloadRuns(
-	ctx context.Context, documentID uuid.UUID, code, reason string,
-) ([]uuid.UUID, error) {
-	if s == nil || s.repo == nil || documentID == uuid.Nil {
-		return nil, nil
-	}
-	values, err := s.repo.ListActiveScopeIDs(ctx, documentID,
-		types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeReferenceDownloadRun)
-	if err != nil {
-		return nil, err
-	}
-	rows, err := s.repo.ListLatestAttempt(ctx, documentID)
-	if err != nil {
-		return nil, err
-	}
-	runs := make([]uuid.UUID, 0, len(values))
-	for _, value := range values {
-		parts := types.SplitProcessingSpanScopeID(value)
-		if len(parts) != 2 || parts[0] != string(types.ProcessingSpanReferenceDownload) {
-			continue
-		}
-		runID, parseErr := uuid.Parse(parts[1])
-		if parseErr != nil || runID == uuid.Nil {
-			continue
-		}
-		for _, row := range rows {
-			if row.Kind == types.ProcessingSpanReferenceDownload &&
-				row.Scope == types.ProcessingSpanScopeReferenceDownloadRun && row.ScopeID == value {
-				if err := s.repo.CancelDescendants(ctx, row.ID, code, safeSpanReason(reason)); err != nil {
-					return runs, err
-				}
-				break
-			}
-		}
-		if err := s.repo.CancelActiveScope(ctx, documentID,
-			types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeReferenceDownloadRun,
-			value, code, safeSpanReason(reason)); err != nil {
-			return runs, err
-		}
-		runs = append(runs, runID)
-	}
-	return runs, nil
-}
-
-func (s *spanTracker) ScopeCancelled(
+func (s *spanRecorder) ScopeCancelled(
 	ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind,
 	scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID,
 ) (bool, error) {
@@ -231,52 +124,51 @@ func (s *spanTracker) ScopeCancelled(
 	return s.repo.IsScopeCancelled(ctx, documentID, kind, scope, scopeID)
 }
 
-func (s *spanTracker) FinalizeParent(ctx context.Context, childSpanID uuid.UUID) error {
+func (s *spanRecorder) AggregateParentDisplay(ctx context.Context, childSpanID uuid.UUID) (types.ProcessingSpanStatus, error) {
 	if s == nil || s.repo == nil || childSpanID == uuid.Nil {
-		return nil
+		return "", nil
 	}
-	return s.repo.FinalizeParentFromChildren(ctx, childSpanID)
+	return s.repo.AggregateParentDisplay(ctx, childSpanID)
 }
 
-func (s *spanTracker) ReferenceRunActive(ctx context.Context, documentID, runID uuid.UUID) (bool, error) {
-	if s == nil || s.repo == nil || documentID == uuid.Nil || runID == uuid.Nil {
-		return false, nil
-	}
-	cancelled, err := s.repo.IsScopeCancelled(
-		ctx,
-		documentID,
-		types.ProcessingSpanCatalogReference,
-		types.ProcessingSpanScopeReferenceRun,
-		types.ComposeProcessingSpanScopeID(
-			types.ProcessingSpanCatalogReference,
-			runID.String()))
-	return !cancelled, err
-}
-
-func (s *spanTracker) GetView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error) {
+func (s *spanRecorder) GetRunView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error) {
 	view := types.DocumentProcessingView{DocumentID: document.ID,
 		DocumentStatus: document.Status,
 		Stages:         []types.DocumentProcessingSpan{}}
 	if s == nil || s.repo == nil {
 		return view, nil
 	}
-	rows, err := s.repo.ListLatestAttempt(ctx, document.ID)
+	runIDs := []uuid.UUID{}
+	if s.runs != nil {
+		runs, err := s.runs.ListRecent(ctx, document.ID, 20)
+		if err != nil {
+			return view, err
+		}
+		for index := range runs {
+			runs[index].ErrorCode, runs[index].ErrorReason = safeSpanOutcome(runs[index].ErrorCode, runs[index].ErrorReason)
+			runIDs = append(runIDs, runs[index].ID)
+		}
+		view.Runs = runs
+	}
+	rows, err := s.repo.ListCurrent(ctx, document.ID, runIDs, 100)
 	if err != nil {
 		return view, err
 	}
+	for index := range rows {
+		rows[index].ErrorCode, rows[index].ErrorReason = safeSpanOutcome(rows[index].ErrorCode, rows[index].ErrorReason)
+		// Attributes are internal diagnostics. No attribute key is currently in
+		// the public allowlist, so legacy/high-cardinality values stay server-side.
+		rows[index].Attributes = types.JSON(`{}`)
+	}
 	view.Stages = rows
-	for _, row := range rows {
-		// The top-level attempt label belongs to source recognition. Paper-info
-		// retries use their own attempt sequence and must not make a completed
-		// parse disappear or misleadingly relabel it in the UI.
-		if row.Kind == types.ProcessingSpanRecognition && row.Attempt > view.LatestAttempt {
-			view.LatestAttempt = row.Attempt
-		}
+	view.LatestAttempt, err = s.repo.LatestAttempt(ctx, document.ID, types.ProcessingSpanRecognition)
+	if err != nil {
+		return view, err
 	}
 	return view, nil
 }
 
-func (s *spanTracker) HasActive(ctx context.Context,
+func (s *spanRecorder) HasActive(ctx context.Context,
 	documentID uuid.UUID,
 	kinds ...types.ProcessingSpanKind) (bool, error) {
 	if s == nil || s.repo == nil || documentID == uuid.Nil {
@@ -285,42 +177,10 @@ func (s *spanTracker) HasActive(ctx context.Context,
 	return s.repo.HasActive(ctx, documentID, kinds...)
 }
 
-// FinalizeAttempt keeps dead-letter callbacks compatible with the original
-// minimal tracker contract while closing every active stage in that attempt.
-func (s *spanTracker) FinalizeAttempt(ctx context.Context,
-	documentID string,
-	attempt int,
-	status string,
-	cause error,
-	code,
-	reason string) {
-	if s == nil || s.repo == nil || attempt <= 0 {
-		return
-	}
-	id, err := uuid.Parse(documentID)
-	if err != nil {
-		return
-	}
-	terminal := types.ProcessingSpanFailed
-	if status == string(types.ProcessingSpanCancelled) {
-		terminal = types.ProcessingSpanCancelled
-	}
-	if err := s.repo.FinishAttempt(ctx, id, attempt, terminal, code, safeSpanReason(reason)); err != nil {
-		logger.Warn(ctx, "finalize processing span attempt failed", "document_id", documentID, "attempt", attempt, "error", err)
-	}
-}
-
-func safeSpanReason(reason string) string {
-	if len(reason) > 512 {
-		return reason[:512]
-	}
-	return reason
-}
-
 // keepSpanAlive refreshes an active span while a bounded external operation is
 // running. It stops with the operation context, never revives a terminal row,
 // and intentionally treats telemetry failure as non-fatal.
-func keepSpanAlive(ctx context.Context, tracker interfaces.SpanTracker, spanID uuid.UUID) func() {
+func keepSpanAlive(ctx context.Context, tracker interfaces.SpanRecorder, spanID uuid.UUID) func() {
 	if tracker == nil || spanID == uuid.Nil {
 		return func() {}
 	}
@@ -349,7 +209,66 @@ func spanFailure(err error) (string, string) {
 	if err == nil {
 		return "", ""
 	}
-	return "TASK_FAILED", safeSpanReason(fmt.Sprint(err))
+	switch {
+	case errors.Is(err, context.Canceled):
+		return types.ProcessingErrorCancelled, "processing task was cancelled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return types.ProcessingErrorTimeout, "processing task timed out"
+	case errors.Is(err, sql.ErrNoRows):
+		return types.ProcessingErrorNotFound, "required processing data was not found"
+	case errors.Is(err, types.ErrUnsupportedRecognitionContentType):
+		return types.ProcessingErrorUnsupportedContent, "document content type is not supported"
+	case errors.Is(err, types.ErrRecognitionServiceUnavailable),
+		errors.Is(err, ErrPaperInfoExtractionUnavailable),
+		errors.Is(err, ErrPaperInfoCatalogUnavailable),
+		errors.Is(err, types.ErrRemotePDFUnavailable):
+		return types.ProcessingErrorServiceUnavailable, "a required processing service is unavailable"
+	case errors.Is(err, types.ErrInvalidRecognitionRequest),
+		errors.Is(err, types.ErrInvalidPaperInfoTaskPayload),
+		errors.Is(err, types.ErrInvalidPaperExtraction),
+		errors.Is(err, types.ErrInvalidPaperCatalogData),
+		errors.Is(err, types.ErrInvalidRemotePDFRequest),
+		errors.Is(err, ErrInvalidPaperMetadata):
+		return types.ProcessingErrorInvalidInput, "processing input is invalid"
+	case errors.Is(err, ErrPaperCatalogNoMatch):
+		return types.ProcessingErrorNoMatch, "no satisfactory catalog match was found"
+	default:
+		return types.ProcessingErrorTaskFailed, "processing task failed"
+	}
 }
 
-var _ interfaces.SpanTracker = (*spanTracker)(nil)
+func safeSpanOutcome(code, _ string) (string, string) {
+	switch code {
+	case "":
+		return "", ""
+	case types.ProcessingErrorCancelled, types.ProcessingErrorUserCancelled:
+		return code, "processing task was cancelled"
+	case types.ProcessingErrorTimeout:
+		return code, "processing task timed out"
+	case types.ProcessingErrorNotFound:
+		return code, "required processing data was not found"
+	case types.ProcessingErrorUnsupportedContent:
+		return code, "document content type is not supported"
+	case types.ProcessingErrorServiceUnavailable:
+		return code, "a required processing service is unavailable"
+	case types.ProcessingErrorInvalidInput:
+		return code, "processing input is invalid"
+	case types.ProcessingErrorNoMatch:
+		return code, "no satisfactory catalog match was found"
+	case types.ProcessingErrorQueue:
+		return code, "processing task could not be queued"
+	case types.ProcessingErrorTaskBuild:
+		return code, "processing task could not be created"
+	case types.ProcessingErrorSpanStart:
+		return code, "processing observation could not start"
+	case types.ProcessingErrorDocumentProcess, types.ProcessingErrorReferenceDispatch,
+		types.ProcessingErrorDownloadDispatch, types.ProcessingErrorTaskFailed:
+		return code, "processing task failed"
+	case types.ProcessingErrorChildFailed:
+		return code, "one or more workflow items failed"
+	default:
+		return types.ProcessingErrorTaskFailed, "processing task failed"
+	}
+}
+
+var _ interfaces.SpanRecorder = (*spanRecorder)(nil)

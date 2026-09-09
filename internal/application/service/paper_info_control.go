@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
@@ -15,9 +14,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// The methods in this file are part of paperInfoService's HTTP-facing control
-// plane. Processing state is deliberately read from the persistent span
-// timeline, rather than inferred from an Asynq queue snapshot.
+// The methods in this file are paperInfoService's HTTP-facing control plane.
+// Current execution state comes from the four durable document stages; queue
+// and span data are cleanup and observation inputs only.
 
 func (s *paperInfoService) RetryExtraction(
 	ctx context.Context,
@@ -27,15 +26,17 @@ func (s *paperInfoService) RetryExtraction(
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusDeleting {
+	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return ErrPaperInfoDeleting
 	}
-	if document.Status == types.DocumentStatusUnknown {
+	if document.SourceState != types.DocumentSourceAvailable {
 		return ErrPaperInfoExtractionUnavailable
 	}
-	if active, err := s.paperStageActive(ctx, document.ID, types.ProcessingSpanMetadataExtract, types.TypePaperMetadataExtract); err != nil {
+	stage, err := s.documents.GetStage(ctx, document.ID, types.DocumentStageMetadataExtraction)
+	if err != nil {
 		return err
-	} else if active {
+	}
+	if stage.Status.Active() {
 		return ErrPaperInfoAttemptActive
 	}
 	_, err = s.documents.GetMarkdown(ctx, document.ID)
@@ -45,22 +46,16 @@ func (s *paperInfoService) RetryExtraction(
 	if err != nil {
 		return err
 	}
-	task, options, err := NewPaperMetadataExtractTask(
-		types.PaperMetadataExtractPayload{
-			DocumentID: document.ID.String(),
-			Attempt:    nextPaperInfoManualAttempt(),
-		},
-		s.cfg.PaperExtractionTaskTimeout,
-		s.cfg.PaperExtractionTaskMaxRetry,
-	)
+	stage, applied, err := s.documents.QueueStageNewGeneration(ctx, document.ID, types.DocumentStageMetadataExtraction)
 	if err != nil {
-		return fmt.Errorf("build paper metadata extraction task: %w", err)
-	}
-	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
 		return err
 	}
+	if !applied {
+		return ErrPaperInfoAttemptActive
+	}
+	err = s.enqueueMetadataStage(ctx, document.ID, "", stage.Generation)
 	logger.Info(ctx, "paper metadata extraction retry queued", "document_id", document.ID)
-	return nil
+	return err
 }
 
 func (s *paperInfoService) RetryCatalogResolution(
@@ -71,37 +66,29 @@ func (s *paperInfoService) RetryCatalogResolution(
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusDeleting {
+	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return ErrPaperInfoDeleting
 	}
-	// Unknown placeholders do not own source-paper metadata. Their bibliography
-	// work is retried through RetryReferenceResolution on the citing document.
-	if document.Status == types.DocumentStatusUnknown {
-		return ErrPaperInfoCatalogUnavailable
-	}
-	if active, err := s.paperStageActive(ctx, document.ID, types.ProcessingSpanCatalogSource, types.TypePaperCatalogResolve); err != nil {
+	stage, err := s.documents.GetStage(ctx, document.ID, types.DocumentStageSourceLookup)
+	if err != nil {
 		return err
-	} else if active {
+	}
+	if stage.Status.Active() {
 		return ErrPaperInfoAttemptActive
 	}
 	if !hasUsablePaperLookupIdentity(document.DOI, metadata.Title) {
 		return ErrPaperInfoCatalogUnavailable
 	}
-	task, options, err := NewPaperCatalogResolveTask(
-		types.PaperCatalogResolvePayload{
-			DocumentID: document.ID.String(),
-		},
-		s.cfg.PaperCatalogTaskTimeout,
-		s.cfg.PaperCatalogTaskMaxRetry,
-	)
+	stage, applied, err := s.documents.QueueStageNewGeneration(ctx, document.ID, types.DocumentStageSourceLookup)
 	if err != nil {
-		return fmt.Errorf("build paper catalog resolution task: %w", err)
-	}
-	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
 		return err
 	}
+	if !applied {
+		return ErrPaperInfoAttemptActive
+	}
+	err = s.enqueueSourceStage(ctx, document.ID, "", stage.Generation)
 	logger.Info(ctx, "paper catalog resolution retry queued", "document_id", document.ID)
-	return nil
+	return err
 }
 
 // RetryReferenceResolution retries only the bibliography dispatcher for a
@@ -113,15 +100,17 @@ func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documen
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusDeleting {
+	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return ErrPaperInfoDeleting
 	}
-	if document.Status == types.DocumentStatusUnknown {
+	if document.SourceState != types.DocumentSourceAvailable {
 		return ErrPaperInfoCatalogUnavailable
 	}
-	if active, err := s.paperStageActive(ctx, document.ID, types.ProcessingSpanCatalogReference, types.TypePaperReferenceDispatch); err != nil {
+	stage, err := s.documents.GetStage(ctx, document.ID, types.DocumentStageReferenceLookup)
+	if err != nil {
 		return err
-	} else if active {
+	}
+	if stage.Status.Active() {
 		return ErrPaperInfoAttemptActive
 	}
 	_, err = s.documents.GetMarkdown(ctx, document.ID)
@@ -131,134 +120,133 @@ func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documen
 	if err != nil {
 		return err
 	}
-	payload := types.PaperReferenceDispatchPayload{
-		DocumentID: document.ID.String(),
-		Attempt:    nextPaperInfoManualAttempt(),
-	}
-	task, options, err := NewPaperReferenceDispatchTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+	stage, applied, err := s.documents.QueueStageNewGeneration(ctx, document.ID, types.DocumentStageReferenceLookup)
 	if err != nil {
-		return fmt.Errorf("build paper reference dispatch task: %w", err)
+		return err
 	}
-	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
+	if !applied {
+		return ErrPaperInfoAttemptActive
+	}
+	if err := s.enqueueReferenceStage(ctx, document.ID, "", stage.Generation); err != nil {
 		return err
 	}
 	logger.Info(ctx, "paper reference resolution retry queued", "document_id", document.ID)
 	return nil
 }
 
-func (s *paperInfoService) StartReferenceDownloads(ctx context.Context, documentID string) error {
-	document, _, err := s.loadPaperStatusSource(ctx, documentID)
+func (s *paperInfoService) enqueueSourceLookupIfNeeded(ctx context.Context, documentID uuid.UUID, requestID string) error {
+	state, err := s.documents.GetStage(ctx, documentID, types.DocumentStageSourceLookup)
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusDeleting {
-		return ErrPaperInfoDeleting
-	}
-	if document.Status == types.DocumentStatusUnknown {
-		return ErrPaperInfoCatalogUnavailable
-	}
-	if s.spans != nil {
-		active, activeErr := s.spans.HasActive(ctx, document.ID, types.ProcessingSpanReferenceDownload)
-		if activeErr != nil {
-			return activeErr
-		}
-		if active {
-			return ErrPaperInfoAttemptActive
+	if state.Status == types.DocumentStageNotStarted {
+		state, _, err = s.documents.QueueStageNewGeneration(ctx, documentID, types.DocumentStageSourceLookup)
+		if err != nil {
+			return err
 		}
 	}
-	runID := uuid.New()
-	payload := types.PaperReferenceDownloadDispatchPayload{
-		SourceDocumentID: document.ID.String(), ReferenceRunID: runID.String(),
-		Attempt: remoteDownloadAttempt(runID),
+	if state.Status != types.DocumentStageQueued {
+		return nil
 	}
-	task, options, err := NewPaperReferenceDownloadDispatchTask(payload,
-		s.cfg.RemotePDFTaskTimeout, s.cfg.RemotePDFTaskMaxRetry)
-	if err != nil {
-		return err
-	}
-	if err := enqueueManagedTask(ctx, s.tasks, task, options, document.ID.String()); err != nil {
-		return err
-	}
-	logger.Info(ctx, "reference PDF acquisition queued", "document_id", document.ID, "reference_run_id", runID)
-	return nil
+	return s.enqueueSourceStage(ctx, documentID, requestID, state.Generation)
 }
 
-// Cancel stops only active reference-catalog runs. Metadata extraction and
-// source-paper lookup deliberately run to their terminal state, and the ready
-// document remains ready throughout.
+func (s *paperInfoService) enqueueReferenceLookupIfNeeded(ctx context.Context, documentID uuid.UUID, requestID string) error {
+	state, err := s.documents.GetStage(ctx, documentID, types.DocumentStageReferenceLookup)
+	if err != nil {
+		return err
+	}
+	if state.Status == types.DocumentStageNotStarted {
+		state, _, err = s.documents.QueueStageNewGeneration(ctx, documentID, types.DocumentStageReferenceLookup)
+		if err != nil {
+			return err
+		}
+	}
+	if state.Status != types.DocumentStageQueued {
+		return nil
+	}
+	return s.enqueueReferenceStage(ctx, documentID, requestID, state.Generation)
+}
+
+func (s *paperInfoService) enqueueMetadataStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
+	payload := types.PaperMetadataExtractPayload{
+		RequestID: requestID, DocumentID: documentID.String(),
+		Stage: types.DocumentStageMetadataExtraction, Generation: generation,
+	}
+	task, options, err := NewPaperMetadataExtractTask(payload, s.cfg.PaperExtractionTaskTimeout, s.cfg.PaperExtractionTaskMaxRetry)
+	if err == nil {
+		err = enqueueDocumentStageTask(ctx, s.tasks, task, options, documentID.String())
+	}
+	if err != nil {
+		_, _, _ = s.documents.FinishStage(context.WithoutCancel(ctx), documentID,
+			types.DocumentStageMetadataExtraction, generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
+	}
+	return err
+}
+
+func (s *paperInfoService) enqueueSourceStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
+	payload := types.PaperCatalogResolvePayload{
+		RequestID: requestID, DocumentID: documentID.String(),
+		Stage: types.DocumentStageSourceLookup, Generation: generation,
+	}
+	task, options, err := NewPaperCatalogResolveTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+	if err == nil {
+		err = enqueueDocumentStageTask(ctx, s.tasks, task, options, documentID.String())
+	}
+	if err != nil {
+		_, _, _ = s.documents.FinishStage(context.WithoutCancel(ctx), documentID,
+			types.DocumentStageSourceLookup, generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
+	}
+	return err
+}
+
+func (s *paperInfoService) enqueueReferenceStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
+	payload := types.PaperReferenceDispatchPayload{
+		RequestID: requestID, DocumentID: documentID.String(),
+		Stage: types.DocumentStageReferenceLookup, Generation: generation,
+	}
+	task, options, err := NewPaperReferenceDispatchTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+	if err == nil {
+		err = enqueueDocumentStageTask(ctx, s.tasks, task, options, documentID.String())
+	}
+	if err != nil {
+		_, _, _ = s.documents.FinishStage(context.WithoutCancel(ctx), documentID,
+			types.DocumentStageReferenceLookup, generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
+	}
+	return err
+}
+
+// Cancel fences only the source document's active reference-lookup stage.
+// Metadata extraction, source lookup, and already-dispatched target work are
+// independent and continue to their own terminal states.
 func (s *paperInfoService) Cancel(ctx context.Context, documentID string) error {
 	document, _, err := s.loadPaperStatusSource(ctx, documentID)
 	if err != nil {
 		return err
 	}
-	if document.Status == types.DocumentStatusDeleting {
+	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return ErrPaperInfoDeleting
 	}
-	if s.spans == nil {
-		return ErrPaperInfoCatalogUnavailable
-	}
-	runs, err := s.spans.CancelReferenceRuns(context.WithoutCancel(ctx), document.ID, "USER_CANCELLED", "reference catalog run cancelled by user")
+	stage, err := s.documents.GetStage(ctx, document.ID, types.DocumentStageReferenceLookup)
 	if err != nil {
 		return err
 	}
-	for _, runID := range runs {
-		if s.referenceScheduler != nil {
-			targets, cancelErr := s.referenceScheduler.CancelRun(context.WithoutCancel(ctx), document.ID, runID)
-			if cancelErr != nil {
-				return cancelErr
-			}
-			if s.inspector != nil && len(targets) > 0 {
-				ids := make([]string, 0, len(targets))
-				for _, target := range targets {
-					ids = append(ids, target.String())
-				}
-				if _, _, cancelErr := s.inspector.CancelReferenceTasksForDocuments(ctx, ids); cancelErr != nil {
-					logger.Warn(ctx, "cancel scheduler-owned reference tasks failed", "document_id", document.ID, "reference_run_id", runID, "error", cancelErr)
-				}
-			}
-		}
-		if s.inspector == nil {
-			continue
-		}
-		if _, _, err := s.inspector.CancelReferenceTasksForRun(ctx, document.ID.String(), runID.String()); err != nil {
-			logger.Warn(ctx, "cancel reference catalog run tasks failed", "document_id", document.ID, "reference_run_id", runID, "error", err)
+	if stage.Status.Active() {
+		if _, _, err := s.documents.CancelStage(ctx, document.ID, types.DocumentStageReferenceLookup, stage.Generation); err != nil {
+			return err
 		}
 	}
-	logger.Info(ctx, "reference catalog runs cancelled", "document_id", document.ID, "run_count", len(runs))
+	if s.cancellations == nil {
+		return nil
+	}
+	result, err := s.cancellations.CancelActiveRuns(ctx, document.ID, types.ProcessingWorkflowCatalogReference)
+	if err != nil {
+		return err
+	}
+	logger.Info(ctx, "reference catalog runs cancelled", "document_id", document.ID,
+		"run_count", len(result.RunIDs), "deleted_tasks", result.DeletedTasks,
+		"signalled_tasks", result.SignalledTasks, "released_targets", result.ReleasedTargets)
 	return nil
-}
-
-func (s *paperInfoService) paperStageActive(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, taskType string) (bool, error) {
-	if s.spans != nil {
-		active, err := s.spans.HasActive(ctx, documentID, kind)
-		if err != nil {
-			return false, err
-		}
-		if active {
-			return true, nil
-		}
-	}
-	if s.inspector == nil {
-		return false, nil
-	}
-	return s.inspector.HasQueuedTaskTypeForDocument(ctx, documentID.String(), taskType)
-}
-
-// nextPaperInfoManualAttempt yields a positive, process-monotonic ID for an
-// operator retry. Attempt zero remains the deterministic initial task; this
-// avoids a collision with a retained dead-letter task for the same Markdown.
-func nextPaperInfoManualAttempt() int {
-	now := time.Now().UnixNano()
-	for {
-		previous := paperInfoManualAttempt.Load()
-		candidate := now
-		if candidate <= previous {
-			candidate = previous + 1
-		}
-		if paperInfoManualAttempt.CompareAndSwap(previous, candidate) {
-			return int(candidate)
-		}
-	}
 }
 
 func (s *paperInfoService) loadPaperStatusSource(

@@ -36,7 +36,7 @@ type paperInfoInspectorStub struct{ queued map[string]bool }
 func (*paperInfoInspectorStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
 	return 0, 0, nil
 }
-func (*paperInfoInspectorStub) CancelReferenceTasksForRun(context.Context, string, string) (int, int, error) {
+func (*paperInfoInspectorStub) CancelTasksForRun(context.Context, string, string, types.ProcessingWorkflowKind) (int, int, error) {
 	return 0, 0, nil
 }
 func (*paperInfoInspectorStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
@@ -95,8 +95,23 @@ func TestPaperInfoControlRetries(t *testing.T) {
 	if err := json.Unmarshal(queue.tasks[1].Payload(), &catalog); err != nil {
 		t.Fatal(err)
 	}
-	if extraction.Attempt <= 0 || catalog.DocumentID != documentID.String() || catalog.IsReference {
+	if extraction.Stage != types.DocumentStageMetadataExtraction || extraction.Generation != 1 ||
+		catalog.DocumentID != documentID.String() ||
+		catalog.Stage != types.DocumentStageSourceLookup || catalog.Generation != 1 {
 		t.Fatalf("manual retries = extraction:%#v catalog:%#v", extraction, catalog)
+	}
+	document := documents.documents[documentID]
+	document.MetadataExtractionStatus = types.DocumentStageFailed
+	documents.documents[documentID] = document
+	if err := controls.RetryExtraction(ctx, documentID.String()); err != nil {
+		t.Fatalf("RetryExtraction(second generation) error = %v", err)
+	}
+	var secondExtraction types.PaperMetadataExtractPayload
+	if err := json.Unmarshal(queue.tasks[2].Payload(), &secondExtraction); err != nil {
+		t.Fatal(err)
+	}
+	if secondExtraction.Generation != 2 {
+		t.Fatalf("second user retry generation = %d, want 2", secondExtraction.Generation)
 	}
 }
 
@@ -119,6 +134,19 @@ func TestEnqueueManagedTaskReturnsTaskIDConflict(t *testing.T) {
 	)
 	if !errors.Is(err, asynq.ErrTaskIDConflict) {
 		t.Fatalf("enqueueManagedTask() error = %v, want ErrTaskIDConflict", err)
+	}
+}
+
+func TestEnqueueDocumentStageTaskTreatsSameGenerationConflictAsSuccess(t *testing.T) {
+	err := enqueueDocumentStageTask(
+		context.Background(),
+		&paperInfoQueueStub{err: asynq.ErrTaskIDConflict},
+		asynq.NewTask(types.TypePaperCatalogResolve, nil),
+		nil,
+		"document-id",
+	)
+	if err != nil {
+		t.Fatalf("enqueueDocumentStageTask() error = %v", err)
 	}
 }
 
@@ -175,7 +203,8 @@ func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
 	if err := json.Unmarshal(queue.tasks[0].Payload(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload.DocumentID != documentID.String() || payload.ReferenceRunID == "" {
+	if payload.DocumentID != documentID.String() ||
+		payload.Stage != types.DocumentStageReferenceLookup || payload.Generation != 1 {
 		t.Fatalf("reference retry payload = %#v", payload)
 	}
 }
