@@ -1,6 +1,6 @@
 import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentURLImport, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
+import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
 import { PdfReader } from './PdfReader';
 import { PaperLibraryPage } from './PaperLibraryPage';
 import './PaperInfo.css';
@@ -44,8 +44,14 @@ function processingStateLabel(state: ProcessingSpanStatus) {
   return labels[state];
 }
 
+function stageStateLabel(state: DocumentStageStatus) {
+  const labels: Record<DocumentStageStatus, string> = { not_started: '未开始', queued: '排队中', running: '运行中', succeeded: '已完成', failed: '失败', cancelled: '已取消', skipped: '已跳过' };
+  return labels[state];
+}
+
 function processingKindLabel(kind: string) {
   const labels: Record<string, string> = {
+	markdown: '文档解析为 Markdown',
     pipeline: '处理流程',
     recognition: '文档识别',
     metadata_extraction: '元数据提取',
@@ -112,19 +118,19 @@ function App() {
   const pageCount = Math.max(1, Math.ceil(page.total / page.pageSize));
   const hasPreviousPage = page.page > 1;
   const hasNextPage = page.page < pageCount;
-  const parseStages = processing?.stages.filter((stage) => stage.kind === 'recognition') ?? [];
-  const pipelineStages = processing?.stages.filter((stage) => stage.kind === 'pipeline') ?? [];
-  const paperInfoStages = processing?.stages.filter((stage) => stage.kind !== 'recognition' && stage.kind !== 'pipeline') ?? [];
-  const pipelineActive = pipelineStages.some(isActiveSpan);
-  const extractionActive = paperInfoStages.some((stage) => stage.kind === 'metadata_extraction' && isActiveSpan(stage));
-  const sourceCatalogActive = paperInfoStages.some((stage) => stage.kind === 'catalog_source' && isActiveSpan(stage));
-  const referenceCatalogActive = paperInfoStages.some((stage) => stage.kind === 'catalog_reference' && isActiveSpan(stage));
-  const documentStatus = processing?.documentStatus ?? selected?.status ?? 'uploaded';
+  const stageStates = processing?.stageStates ?? [];
+  const stageState = (stage: string) => stageStates.find((item) => item.stage === stage);
+  const pipelineActive = stageStates.some((stage) => stage.status === 'queued' || stage.status === 'running');
+  const extractionActive = ['queued', 'running'].includes(stageState('metadata_extraction')?.status ?? 'not_started');
+  const sourceCatalogActive = ['queued', 'running'].includes(stageState('source_lookup')?.status ?? 'not_started');
+  const referenceCatalogActive = ['queued', 'running'].includes(stageState('reference_lookup')?.status ?? 'not_started');
+  const markdownState = stageState('markdown');
+	const documentStatus = processing?.sourceState === 'deleting' ? 'deleting' : processing?.sourceState === 'merged' ? 'merged' : pipelineActive ? 'processing' : markdownState?.status === 'failed' ? 'failed' : markdownState?.status === 'cancelled' ? 'cancelled' : markdownState?.status === 'succeeded' ? 'ready' : selected?.sourceState ?? 'available';
   const remoteURLs = useMemo(() => remoteURL.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), [remoteURL]);
 
   function applyProcessingView(view: DocumentProcessingView) {
-    setProcessing(view);
-    setSelected((prev) => (prev ? { ...prev, status: view.documentStatus } : prev));
+	setProcessing(view);
+	setSelected((prev) => (prev ? { ...prev, sourceState: view.sourceState } : prev));
   }
 
   function openCitationSourceInfo(documentID: string, rawReference: string) {
@@ -219,7 +225,7 @@ function App() {
   }, [selected?.id]);
 
   useEffect(() => {
-    const hasActive = processing?.stages.some((stage) => stage.status === 'queued' || stage.status === 'running');
+    const hasActive = processing?.stageStates.some((stage) => stage.status === 'queued' || stage.status === 'running');
     const watchingQueuedTask = selected?.id === processingWatchDocumentID.current && Date.now() < processingWatchUntil.current;
     if (!selected || (!hasActive && !watchingQueuedTask)) return;
     const visible = document.visibilityState === 'visible';
@@ -237,12 +243,12 @@ function App() {
       });
     }, delay);
     return () => window.clearTimeout(timer);
-  }, [selected?.id, processing?.stages, processingPollRevision]);
+  }, [selected?.id, processing?.stageStates, processingPollRevision]);
 
-  // Poll document list periodically while any document is in a transient state,
-  // so status badges in the list stay current without a manual refresh.
+  // Poll document list while a source deletion is in progress. Per-stage
+  // progress is refreshed from the selected document's processing projection.
   useEffect(() => {
-    const hasActive = page.items.some((item) => ['uploaded', 'queued', 'processing'].includes(item.status));
+	const hasActive = page.items.some((item) => item.sourceState === 'deleting');
     if (!hasActive) return;
     const timer = window.setTimeout(() => {
       api.searchDocuments(filters)
@@ -546,6 +552,18 @@ function App() {
     }
   }
 
+  async function downloadReferencePDF(documentID: string) {
+    setBusy(true);
+    try {
+      await api.downloadReferencePDF(documentID);
+      setMessage('已提交该引用文献的 PDF 下载。');
+    } catch (error) {
+      setMessage(error instanceof Error ? `引用文献下载未提交：${error.message}` : '引用文献下载未提交。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function cancelPaperInfo() {
     if (!selected || !window.confirm('取消当前引用论文查询任务？已解析文档、元数据提取和源论文查询不会被删除。')) return;
     setBusy(true);
@@ -645,13 +663,13 @@ function App() {
       : [...current, baseID]);
   }
 
-  const selectedDescription = useMemo(() => {
+	const selectedDescription = useMemo(() => {
 	if (!selected) return '选择左侧列表中的文档，可查看其 ID、DOI、状态及删除操作。';
-	if (selected.errorMessage) return selected.errorMessage;
+	if (markdownState?.errorMessage) return markdownState.errorMessage;
 	if (selected.contentType === 'application/pdf' && documentStatus === 'ready') return '可在下方切换文本选择和解析 Block 选择模式。';
 	if (selected.contentType === 'application/pdf') return 'PDF 解析完成后可在下方阅读原文并选择解析 Block。';
 	return '该文件可管理和解析；PDF 阅读器仅对 PDF 文件显示。';
-  }, [selected]);
+	}, [selected, markdownState?.errorMessage, documentStatus]);
 
   return <main className="document-console">
     <aside className="document-sidebar">
@@ -707,17 +725,13 @@ function App() {
         <input id="search-id" value={filters.id ?? ''} onChange={(event) => setFilters({ ...filters, id: event.target.value })} placeholder="UUID" disabled={busy} />
         <label htmlFor="search-doi">DOI</label>
         <input id="search-doi" value={filters.doi ?? ''} onChange={(event) => setFilters({ ...filters, doi: event.target.value })} placeholder="精确匹配，不区分大小写" disabled={busy} />
-        <label htmlFor="search-status">文档状态</label>
-        <select id="search-status" value={filters.status ?? ''} onChange={(event) => setFilters({ ...filters, status: event.target.value as DocumentSearch['status'] })} disabled={busy}>
-          <option value="">全部状态</option>
-          <option value="unknown">仅 unknown 占位论文</option>
-          <option value="uploaded">uploaded</option>
-          <option value="queued">queued</option>
-          <option value="processing">processing</option>
-          <option value="cancelled">cancelled</option>
-          <option value="deleting">deleting</option>
-          <option value="ready">ready</option>
-          <option value="failed">failed</option>
+		<label htmlFor="search-source-state">源状态</label>
+		<select id="search-source-state" value={filters.sourceState ?? ''} onChange={(event) => setFilters({ ...filters, sourceState: event.target.value as DocumentSearch['sourceState'] })} disabled={busy}>
+		  <option value="">全部源状态</option>
+		  <option value="missing">missing</option>
+		  <option value="available">available</option>
+		  <option value="deleting">deleting</option>
+		  <option value="merged">merged</option>
         </select>
         <div className="form-actions"><button type="submit" disabled={busy}>查询</button><button type="button" onClick={() => { const next = { page: 1 }; setFilters(next); void load(next); }} disabled={busy}>重置</button></div>
       </form>
@@ -768,7 +782,7 @@ function App() {
           <div className="panel-heading"><h3>结果</h3><span>{page.total} 个文档</span></div>
           <div className="document-list">
             {page.items.length === 0 ? <p className="empty-list">没有匹配的文档。</p> : page.items.map((item) => <button type="button" key={item.id} className={selected?.id === item.id ? 'document-row active' : 'document-row'} onClick={() => setSelected(item)}>
-              <span className="filename">{documentLabel(item)}</span><span className={`status status-${item.status}`}>{item.status}</span><small>{formatBytes(item.sizeBytes)} · {item.doi || '无 DOI'}</small>
+			  <span className="filename">{documentLabel(item)}</span><span className={`status status-${item.sourceState}`}>{item.sourceState}</span><small>{formatBytes(item.sizeBytes)} · {item.doi || '无 DOI'}</small>
             </button>)}
           </div>
           <div className="pagination"><button type="button" disabled={busy || !hasPreviousPage} onClick={() => void load({ ...filters, page: page.page - 1 })}>上一页</button><span>{page.page} / {pageCount}</span><button type="button" disabled={busy || !hasNextPage} onClick={() => void load({ ...filters, page: page.page + 1 })}>下一页</button></div>
@@ -803,20 +817,18 @@ function App() {
               <button type="submit" disabled={busy || (editOriginalFilename === selected.originalFilename && editDoi === (selected.doi ?? '') && editTitle === (paperMetadata?.title ?? '') && editTags === (paperMetadata?.tags.join(', ') ?? ''))}>保存修改</button>
             </form>
 			<section className="paper-info-panel">
-			  <div className="panel-heading"><h4>文档处理流程</h4><span>{processing?.latestAttempt ? `尝试 ${processing.latestAttempt}` : '尚未开始'}</span></div>
-			  {pipelineStages.length ? <div className="paper-info-stages">{pipelineStages.map((stage) => <div key={stage.id}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || ''}</small></div>)}</div> : null}
+			  <div className="panel-heading"><h4>文档处理流程</h4><span>{processing?.sourceState ?? '尚未加载'}</span></div>
 			  <div className="paper-info-stages">
-				{parseStages.length ? parseStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">暂无持久化解析记录。</p>}
+				{stageStates.length ? stageStates.map((stage) => <div key={stage.stage}><strong>{processingKindLabel(stage.stage)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{stageStateLabel(stage.status)}</span><small>{stage.errorMessage || `第 ${stage.generation} 代`}</small></div>) : <p className="hint">尚未产生阶段状态。</p>}
 			  </div>
 			</section>
 				<section className="paper-info-panel">
-				  <div className="panel-heading"><h4>论文信息任务</h4><span>由统一处理流程编排</span></div>
+				  <div className="panel-heading"><h4>论文信息任务</h4><span>由四阶段状态控制</span></div>
 				  <div className="paper-info-stages">
-					{paperInfoStages.length ? paperInfoStages.map((stage) => <div key={stage.id} className={stage.parentSpanId ? 'processing-child' : ''}><strong>{processingKindLabel(stage.kind)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{processingStateLabel(stage.status)}</span><small>{stage.errorReason || (stage.retryCount ? `重试 ${stage.retryCount}` : '')}</small></div>) : <p className="hint">尚未产生论文信息处理 span。</p>}
 					<div><strong>元数据提取</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperExtraction, '已提交元数据提取重试。')} disabled={busy || extractionActive || pipelineActive}>重试</button></div>
 					<div><strong>源论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperCatalog, '已提交源论文查询重试。')} disabled={busy || sourceCatalogActive || pipelineActive}>重试</button></div>
 					<div><strong>引用论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperReferences, '已提交引用论文查询重试。')} disabled={busy || referenceCatalogActive}>重试</button></div>
-					<div><strong>引用 PDF 获取</strong><span className="paper-stage">由目标源查询自动派发</span></div>
+					<div><strong>引用 PDF 获取</strong><span className="paper-stage">仅在引用条目中手动触发</span></div>
 				  </div>
 			  {processing?.referenceProgress && <p className="hint">引用目标源查询：排队 {processing.referenceProgress.queued} · 运行 {processing.referenceProgress.running} · 完成 {processing.referenceProgress.completed} · 失败 {processing.referenceProgress.failed} · 已取消 {processing.referenceProgress.cancelled}</p>}
 			  {referenceCatalogActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消引用论文查询</button>}
@@ -825,7 +837,7 @@ function App() {
 			<section className="citation-panel">
 			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>
 			  <div className="citation-columns">
-				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference)}>查看第 {index + 1} 条的 Python 提取信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
+				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference)}>查看第 {index + 1} 条的 Python 提取信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.citedDocumentId)} disabled={busy}>下载 PDF</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference)}>查看第 {index + 1} 条的已落库信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 			  </div>
 			</section>

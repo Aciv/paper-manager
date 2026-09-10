@@ -71,6 +71,31 @@ func TestDocumentStageControlMigrationAddsFourIndependentStages(t *testing.T) {
 	}
 }
 
+func TestProcessingSpanRetentionMigrationUsesTerminalAndParentIndexes(t *testing.T) {
+	for _, fragment := range []string{"idx_document_processing_spans_terminal_retention", "finished_at ASC, id ASC", "idx_document_processing_spans_parent_active"} {
+		if !strings.Contains(processingSpanRetentionUp, fragment) {
+			t.Fatalf("processing span retention migration does not include %q", fragment)
+		}
+	}
+}
+
+func TestLegacyProcessingControlRemovalIsExplicitAndIrreversible(t *testing.T) {
+	for _, fragment := range []string{
+		"DROP COLUMN IF EXISTS run_id",
+		"DROP TABLE IF EXISTS processing_run_items",
+		"DROP TABLE IF EXISTS processing_runs",
+		"DROP COLUMN IF EXISTS error_message",
+		"DROP COLUMN IF EXISTS status",
+	} {
+		if !strings.Contains(removeLegacyProcessingControlUp, fragment) {
+			t.Fatalf("legacy control removal migration does not include %q", fragment)
+		}
+	}
+	if !strings.Contains(removeLegacyProcessingControlDown, "Intentionally irreversible") {
+		t.Fatal("legacy control removal migration must document its irreversible rollback")
+	}
+}
+
 func TestPaperMetadataAndBasesMigrationCreatesNormalizedTables(t *testing.T) {
 	for _, fragment := range []string{
 		"RENAME COLUMN filename TO original_filename",
@@ -274,8 +299,8 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 22 {
-		t.Fatalf("latest migration version = %d, want 22", got)
+	if got := migrations[len(migrations)-1].version; got != 24 {
+		t.Fatalf("latest migration version = %d, want 24", got)
 	}
 }
 

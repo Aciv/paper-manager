@@ -157,7 +157,7 @@ func NewAsynqServer() *asynq.Server {
 				types.QueueCritical: 6, // Highest priority queue
 				types.QueueDefault:  3, // Default priority queue
 				types.QueueLow:      1, // Lowest priority queue
-				types.QueueDownload: 1, // Isolated remote PDF acquisition lane
+				types.QueueDownload: 1, // Explicit user-requested reference downloads
 				//types.QueueMultimodal: 1, // Isolated lane for high-volume slow VLM image tasks
 				//types.QueueGraph:      1, // Isolated lane for high-volume slow graph-extraction tasks
 				//types.QueueQuestion:   1, // Isolated lane for high-volume slow question-generation tasks
@@ -500,20 +500,9 @@ func newDeadLetterDocumentFailer(documents interfaces.DocumentService) asynqdl.O
 		if len(errMsg) > 8192 {
 			errMsg = errMsg[:8192]
 		}
-		if documents != nil {
-			updated, err := documents.FailDocumentIfProcessing(ctx, probe.DocumentID, errMsg)
-			if err != nil {
-				logger.Warn(ctx, "dead-letter callback failed to mark document", "document_id", probe.DocumentID, "error", err)
-				return
-			}
-			if !updated {
-				logger.Info(ctx, "dead-letter callback left document status unchanged", "document_id", probe.DocumentID, "task_type", t.Type())
-				return
-			}
-		}
-		// ProcessDocument owns the root span and closes it from its deferred
-		// result handler. This callback only supplies the durable document
-		// failure state when its direct Asynq task exhausts retries.
-		logger.Info(ctx, "dead-letter callback marked document failed", "document_id", probe.DocumentID, "task_type", t.Type())
+		// Stage workers persist their own terminal stage failure before Asynq
+		// archives a task. The dead-letter row is diagnostic only and must not
+		// overwrite an independent document-stage result.
+		logger.Info(ctx, "document task archived after retries", "document_id", probe.DocumentID, "task_type", t.Type(), "error", errMsg)
 	}
 }

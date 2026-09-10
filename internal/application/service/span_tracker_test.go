@@ -45,7 +45,7 @@ func (s *spanRepositoryStub) Finish(_ context.Context, _ uuid.UUID, status types
 	s.finishedStatus, s.finishedCode, s.finishedReason = status, code, reason
 	return nil
 }
-func (s *spanRepositoryStub) ListCurrent(context.Context, uuid.UUID, []uuid.UUID, int) ([]types.DocumentProcessingSpan, error) {
+func (s *spanRepositoryStub) ListCurrent(context.Context, uuid.UUID, int) ([]types.DocumentProcessingSpan, error) {
 	return append([]types.DocumentProcessingSpan(nil), s.rows...), nil
 }
 func (*spanRepositoryStub) ListTimeline(context.Context, uuid.UUID, int) ([]types.DocumentProcessingSpan, error) {
@@ -60,14 +60,8 @@ func (s *spanRepositoryStub) LatestAttempt(_ context.Context, documentID uuid.UU
 	}
 	return latest, nil
 }
-func (*spanRepositoryStub) HasActive(context.Context, uuid.UUID, ...types.ProcessingSpanKind) (bool, error) {
-	return false, nil
-}
-func (*spanRepositoryStub) CancelActiveRun(context.Context, uuid.UUID, string, string) error {
+func (*spanRepositoryStub) CancelActiveStage(context.Context, uuid.UUID, types.DocumentStage, int64, string, string) error {
 	return nil
-}
-func (*spanRepositoryStub) IsScopeCancelled(context.Context, uuid.UUID, types.ProcessingSpanKind, types.ProcessingSpanScope, types.ProcessingSpanScopeID) (bool, error) {
-	return false, nil
 }
 func (*spanRepositoryStub) AggregateParentDisplay(context.Context, uuid.UUID) (types.ProcessingSpanStatus, error) {
 	return "", nil
@@ -77,7 +71,7 @@ var _ interfaces.DocumentProcessingSpanRepository = (*spanRepositoryStub)(nil)
 
 func TestSpanRecorderBeginChildPersistsParentAndHeartbeats(t *testing.T) {
 	repo := &spanRepositoryStub{}
-	tracker := NewSpanRecorder(repo, nil)
+	tracker := NewSpanTracker(repo)
 	parentID, documentID := uuid.New(), uuid.New()
 	spanID, err := tracker.BeginChildSpan(
 		context.Background(), parentID, documentID, 3,
@@ -98,41 +92,51 @@ func TestSpanRecorderBeginChildPersistsParentAndHeartbeats(t *testing.T) {
 	}
 }
 
-func TestSpanRecorderPersistsProcessingRunFromContext(t *testing.T) {
-	repo := &spanRepositoryStub{}
-	tracker := NewSpanRecorder(repo, nil)
-	runID := uuid.New()
-	if _, err := tracker.BeginSpan(withProcessingRun(context.Background(), runID), uuid.New(), 1,
-		types.ProcessingSpanPipeline, types.ProcessingSpanScopeProcess,
-		types.ComposeProcessingSpanScopeID(types.ProcessingSpanPipeline, runID.String()), 0); err != nil {
-		t.Fatal(err)
-	}
-	if repo.stored.RunID == nil || *repo.stored.RunID != runID {
-		t.Fatalf("stored run id = %v, want %v", repo.stored.RunID, runID)
+func TestSpanTrackerExposesNarrowWriterAndReaderViewsOfSameInstance(t *testing.T) {
+	tracker := NewSpanTracker(&spanRepositoryStub{})
+	if NewSpanRecorder(tracker) != tracker || NewProcessingViewQuery(tracker) != tracker {
+		t.Fatal("SpanTracker adapters must preserve the single implementation instance")
 	}
 }
 
-func TestSpanRecorderViewUsesRecognitionAttemptNotPaperRetryAttempt(t *testing.T) {
+func TestProcessingQueryKeepsBoundedObservationRows(t *testing.T) {
 	documentID := uuid.New()
-	tracker := NewSpanRecorder(&spanRepositoryStub{rows: []types.DocumentProcessingSpan{
+	tracker := NewSpanTracker(&spanRepositoryStub{rows: []types.DocumentProcessingSpan{
 		{DocumentID: documentID, Attempt: 2, Kind: types.ProcessingSpanRecognition},
 		{DocumentID: documentID, Attempt: 99, Kind: types.ProcessingSpanMetadataExtract},
-	}}, nil)
-	view, err := tracker.GetRunView(context.Background(), types.Document{ID: documentID})
+	}})
+	view, err := tracker.GetView(context.Background(), types.Document{ID: documentID})
 	if err != nil {
 		t.Fatalf("GetView() error = %v", err)
-	}
-	if view.LatestAttempt != 2 {
-		t.Fatalf("latest recognition attempt = %d, want 2", view.LatestAttempt)
 	}
 	if len(view.Stages) != 2 {
 		t.Fatalf("view stages = %d, want independently retained parse and paper stages", len(view.Stages))
 	}
 }
 
+func TestProcessingQueryUsesCurrentStageControlState(t *testing.T) {
+	documentID, canonicalID := uuid.New(), uuid.New()
+	raw := "private provider response"
+	view, err := NewSpanTracker(&spanRepositoryStub{}).GetView(context.Background(), types.Document{
+		ID: documentID, SourceState: types.DocumentSourceMerged, CanonicalDocumentID: &canonicalID,
+		MarkdownStatus: types.DocumentStageFailed, MarkdownGeneration: 4, MarkdownErrorCode: ptr("PROVIDER_BODY"), MarkdownErrorMessage: &raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if view.SourceState != types.DocumentSourceMerged || view.CanonicalDocumentID == nil || *view.CanonicalDocumentID != canonicalID || len(view.StageStates) != 4 {
+		t.Fatalf("current control projection = %#v", view)
+	}
+	if view.StageStates[0].ErrorCode == nil || *view.StageStates[0].ErrorCode != types.ProcessingErrorTaskFailed || view.StageStates[0].ErrorMessage == nil || *view.StageStates[0].ErrorMessage != "processing task failed" {
+		t.Fatalf("stage error was not sanitized: %#v", view.StageStates[0])
+	}
+}
+
+func ptr(value string) *string { return &value }
+
 func TestSpanRecorderDoesNotReopenTerminalSpan(t *testing.T) {
 	repo := &spanRepositoryStub{upsertStatus: types.ProcessingSpanCancelled}
-	recorder := NewSpanRecorder(repo, nil)
+	recorder := NewSpanTracker(repo)
 	spanID, err := recorder.BeginSpan(context.Background(), uuid.New(), 1,
 		types.ProcessingSpanRecognition, types.ProcessingSpanScopeDocument,
 		types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, uuid.NewString()), 1)
@@ -143,7 +147,7 @@ func TestSpanRecorderDoesNotReopenTerminalSpan(t *testing.T) {
 
 func TestSpanRecorderPersistsOnlyCanonicalFailure(t *testing.T) {
 	repo := &spanRepositoryStub{}
-	recorder := NewSpanRecorder(repo, nil)
+	recorder := NewSpanTracker(repo)
 	raw := "postgres://admin:secret@db.internal/papers provider body=<html>private</html>"
 	if err := recorder.FinishSpan(context.Background(), uuid.New(), types.ProcessingSpanFailed, "DATABASE_FAILURE", raw); err != nil {
 		t.Fatal(err)
@@ -158,20 +162,15 @@ func TestSpanRecorderPersistsOnlyCanonicalFailure(t *testing.T) {
 	}
 }
 
-func TestSpanRecorderRunViewRedactsPersistedLegacyErrors(t *testing.T) {
-	documentID, runID := uuid.New(), uuid.New()
+func TestProcessingQueryRedactsPersistedErrors(t *testing.T) {
+	documentID := uuid.New()
 	raw := "https://token@example.internal/api response body private"
-	runs := newProcessingRunMemoryRepository()
-	runs.runs[runID] = types.ProcessingRun{
-		ID: runID, OwnerDocumentID: documentID, WorkflowKind: types.ProcessingWorkflowDocument,
-		State: types.ProcessingRunFailed, ErrorCode: "DATABASE_ERROR", ErrorReason: raw,
-	}
-	recorder := NewSpanRecorder(&spanRepositoryStub{rows: []types.DocumentProcessingSpan{{
+	recorder := NewSpanTracker(&spanRepositoryStub{rows: []types.DocumentProcessingSpan{{
 		ID: uuid.New(), DocumentID: documentID, Attempt: 1, Kind: types.ProcessingSpanRecognition,
 		Status: types.ProcessingSpanFailed, ErrorCode: "PROVIDER_BODY", ErrorReason: raw,
 		Attributes: types.JSON(`{"providerResponse":"private"}`),
-	}}}, runs)
-	view, err := recorder.GetRunView(context.Background(), types.Document{ID: documentID})
+	}}})
+	view, err := recorder.GetView(context.Background(), types.Document{ID: documentID})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +181,7 @@ func TestSpanRecorderRunViewRedactsPersistedLegacyErrors(t *testing.T) {
 	if strings.Contains(string(encoded), "token") || strings.Contains(string(encoded), "example.internal") || strings.Contains(string(encoded), "private") {
 		t.Fatalf("processing view leaked persisted error: %s", encoded)
 	}
-	if len(view.Runs) != 1 || len(view.Stages) != 1 || view.Runs[0].ErrorCode != "TASK_FAILED" || view.Stages[0].ErrorCode != "TASK_FAILED" {
+	if len(view.Stages) != 1 || view.Stages[0].ErrorCode != "TASK_FAILED" {
 		t.Fatalf("sanitized processing view = %#v", view)
 	}
 }

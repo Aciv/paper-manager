@@ -15,17 +15,16 @@ type documentQueueProbeStub struct {
 	errs   map[string]error
 }
 
+func (s *documentQueueProbeStub) HasQueuedTaskForStage(_ context.Context, documentID string, _ types.DocumentStage, _ int64) (bool, error) {
+	return s.queued[documentID], s.errs[documentID]
+}
+
 func (*documentQueueProbeStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
 	return 0, 0, nil
 }
-func (*documentQueueProbeStub) CancelTasksForRun(context.Context, string, string, types.ProcessingWorkflowKind) (int, int, error) {
+func (*documentQueueProbeStub) CancelTasksForStage(context.Context, string, types.DocumentStage, int64) (int, int, error) {
 	return 0, 0, nil
 }
-
-func (*documentQueueProbeStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
-	return 0, 0, nil
-}
-
 func (s *documentQueueProbeStub) HasQueuedTasksForDocument(_ context.Context, documentID string) (bool, error) {
 	return s.queued[documentID], s.errs[documentID]
 }
@@ -38,22 +37,41 @@ func (s *documentQueueProbeStub) HasQueuedTaskTypeForDocument(
 	return s.queued[documentID], s.errs[documentID]
 }
 
-func TestDocumentHousekeepingFilterOutQueued(t *testing.T) {
-	queuedDocument := types.Document{ID: uuid.New(), Status: types.DocumentStatusQueued}
-	orphanedDocument := types.Document{ID: uuid.New(), Status: types.DocumentStatusProcessing}
-	probeFailureDocument := types.Document{ID: uuid.New(), Status: types.DocumentStatusProcessing}
+func TestDocumentHousekeepingStageProbeStub(t *testing.T) {
+	queuedDocument := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	orphanedDocument := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	probeFailureDocument := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service := &DocumentHousekeepingService{inspector: &documentQueueProbeStub{
 		queued: map[string]bool{queuedDocument.ID.String(): true},
 		errs:   map[string]error{probeFailureDocument.ID.String(): errors.New("redis unavailable")},
 	}}
 
-	kept, skipped := service.filterOutQueued(context.Background(), []types.Document{
-		queuedDocument, orphanedDocument, probeFailureDocument,
-	})
-	if skipped != 1 {
-		t.Fatalf("skipped = %d, want 1", skipped)
+	queued, err := service.inspector.HasQueuedTaskForStage(context.Background(), queuedDocument.ID.String(), types.DocumentStageMarkdown, 1)
+	if err != nil || !queued {
+		t.Fatalf("queued stage = %t, error=%v", queued, err)
 	}
-	if len(kept) != 2 || kept[0].ID != orphanedDocument.ID || kept[1].ID != probeFailureDocument.ID {
-		t.Fatalf("kept = %#v, want orphaned and probe-failure documents", kept)
+	queued, err = service.inspector.HasQueuedTaskForStage(context.Background(), orphanedDocument.ID.String(), types.DocumentStageMarkdown, 1)
+	if err != nil || queued {
+		t.Fatalf("orphaned stage = %t, error=%v", queued, err)
+	}
+	if _, err = service.inspector.HasQueuedTaskForStage(context.Background(), probeFailureDocument.ID.String(), types.DocumentStageMarkdown, 1); err == nil {
+		t.Fatal("queue probe error was lost")
+	}
+}
+
+func TestDocumentStageColumnMapping(t *testing.T) {
+	cases := map[types.DocumentStage]string{
+		types.DocumentStageMarkdown:           "markdown_status",
+		types.DocumentStageMetadataExtraction: "metadata_extraction_status",
+		types.DocumentStageSourceLookup:       "source_lookup_status",
+		types.DocumentStageReferenceLookup:    "reference_lookup_status",
+	}
+	for stage, want := range cases {
+		if got := stageStateColumn(stage); got != want {
+			t.Fatalf("stageStateColumn(%s) = %q, want %q", stage, got, want)
+		}
+	}
+	if got := stageStateColumn("unknown"); got != "" {
+		t.Fatalf("unknown stage column = %q", got)
 	}
 }

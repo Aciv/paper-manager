@@ -13,13 +13,13 @@ import (
 )
 
 func TestDocumentStageRepositoryPostgres(t *testing.T) {
-	db, cleanup := openProcessingRunTestDatabase(t)
+	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
 	documentID := uuid.New()
 	if err := db.Exec(`INSERT INTO documents
-		(id, original_filename, content_type, size_bytes, storage_key, status, updated_at)
-		VALUES (?, 'stages.pdf', 'application/pdf', 1, ?, 'uploaded', ?)`,
+		(id, original_filename, content_type, size_bytes, storage_key, updated_at)
+		VALUES (?, 'stages.pdf', 'application/pdf', 1, ?, ?)`,
 		documentID, "stages/"+documentID.String(), time.Now().UTC().Add(-time.Hour)).Error; err != nil {
 		t.Fatalf("insert document: %v", err)
 	}
@@ -27,7 +27,7 @@ func TestDocumentStageRepositoryPostgres(t *testing.T) {
 	repo := NewDocumentRepository(db)
 	created, err := repo.Create(ctx, types.Document{
 		ID: uuid.New(), OriginalFilename: "created.pdf", ContentType: "application/pdf",
-		SizeBytes: 1, StorageKey: "stages/created", Status: types.DocumentStatusUploaded,
+		SizeBytes: 1, StorageKey: "stages/created", SourceState: types.DocumentSourceAvailable,
 	})
 	if err != nil {
 		t.Fatalf("Create(with stage defaults): %v", err)

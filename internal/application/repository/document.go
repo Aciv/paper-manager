@@ -83,7 +83,6 @@ func (r *documentRepository) EnsureUnknown(
 		SizeBytes:        0,
 		DOI:              "",
 		StorageKey:       types.UnknownDocumentStorageScheme + id.String(),
-		Status:           types.DocumentStatusUnknown,
 		SourceState:      types.DocumentSourceMissing,
 	}
 	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&placeholder)
@@ -142,9 +141,6 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 		pageSize = types.DocumentPageSize
 	}
 
-	// <> 是不等于
-	//query := r.db.WithContext(ctx).Model(&types.Document{}).
-	//	Where("documents.status <> ?", types.DocumentStatusUnknown)
 	query := r.db.WithContext(ctx).Model(&types.Document{})
 	if search.ID != nil {
 		query = query.Where("documents.id = ?", *search.ID)
@@ -154,9 +150,6 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	}
 	if search.FileSHA256 != "" {
 		query = query.Where("documents.file_sha256 = ?", strings.ToLower(strings.TrimSpace(search.FileSHA256)))
-	}
-	if search.Status != "" {
-		query = query.Where("documents.status = ?", search.Status)
 	}
 	if search.SourceState != "" {
 		query = query.Where("documents.source_state = ?", search.SourceState)
@@ -309,45 +302,46 @@ func (r *documentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (r *documentRepository) UpdateStatus(ctx context.Context, id uuid.UUID, status types.DocumentStatus, message *string) error {
-	changes := map[string]interface{}{"status": status, "error_message": message}
-	query := r.db.WithContext(ctx).Model(&types.Document{}).Where("id = ?", id)
-	if status == types.DocumentStatusDeleting {
-		changes["source_state"] = types.DocumentSourceDeleting
-		query = query.Where("source_state <> ?", types.DocumentSourceMerged)
+func (r *documentRepository) MarkDeleting(ctx context.Context, id uuid.UUID) (types.DocumentSourceState, bool, error) {
+	var document types.Document
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&document, "id = ?", id).Error; err != nil {
+			return err
+		}
+		if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
+			return nil
+		}
+		result := tx.Model(&types.Document{}).Where("id = ? AND source_state = ?", id, document.SourceState).
+			Update("source_state", types.DocumentSourceDeleting)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return types.ErrDocumentNotProcessing
+		}
+		return nil
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", false, sql.ErrNoRows
 	}
-	result := query.Updates(changes)
-	if result.Error != nil {
-		logger.Error(ctx, "update document status failed", "document_id", id, "status", status, "error", result.Error)
-		return result.Error
+	if err != nil {
+		logger.Error(ctx, "mark document deleting failed", "document_id", id, "error", err)
+		return "", false, err
 	}
-	if result.RowsAffected == 0 {
-		return sql.ErrNoRows
-	}
-	logger.Info(ctx, "document status updated", "document_id", id, "status", status)
-	return nil
+	return document.SourceState, document.SourceState != types.DocumentSourceDeleting && document.SourceState != types.DocumentSourceMerged, nil
 }
 
-func (r *documentRepository) UpdateStatusIfCurrent(ctx context.Context, id uuid.UUID, status types.DocumentStatus, message *string, expected []types.DocumentStatus) (bool, error) {
-	if len(expected) == 0 {
-		return false, nil
+func (r *documentRepository) RestoreSourceState(ctx context.Context, id uuid.UUID, state types.DocumentSourceState) error {
+	if state != types.DocumentSourceMissing && state != types.DocumentSourceAvailable {
+		return nil
 	}
-	changes := map[string]interface{}{"status": status, "error_message": message}
-	query := r.db.WithContext(ctx).Model(&types.Document{}).Where("id = ? AND status IN ?", id, expected)
-	if status == types.DocumentStatusDeleting {
-		changes["source_state"] = types.DocumentSourceDeleting
-		query = query.Where("source_state <> ?", types.DocumentSourceMerged)
-	}
-	result := query.Updates(changes)
+	result := r.db.WithContext(ctx).Model(&types.Document{}).
+		Where("id = ? AND source_state = ?", id, types.DocumentSourceDeleting).
+		Update("source_state", state)
 	if result.Error != nil {
-		logger.Error(ctx, "conditionally update document status failed", "document_id", id, "status", status, "error", result.Error)
-		return false, result.Error
+		logger.Error(ctx, "restore document source state failed", "document_id", id, "error", result.Error)
 	}
-	if result.RowsAffected > 0 {
-		logger.Info(ctx, "document status conditionally updated", "document_id", id, "status", status)
-		return true, nil
-	}
-	return false, nil
+	return result.Error
 }
 
 func (r *documentRepository) UpdateDocumentInfo(
@@ -423,8 +417,6 @@ func (r *documentRepository) PromoteUnknown(
 			"file_sha256":       strings.ToLower(strings.TrimSpace(document.FileSHA256)),
 			"storage_key":       document.StorageKey,
 			"source_state":      types.DocumentSourceAvailable,
-			"status":            types.DocumentStatusUploaded,
-			"error_message":     nil,
 		})
 	if isDuplicateDOIError(result.Error) {
 		return false, fmt.Errorf("%w: %s", types.ErrDuplicateDOI, document.DOI)

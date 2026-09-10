@@ -232,20 +232,25 @@ func (s *paperInfoService) Cancel(ctx context.Context, documentID string) error 
 		return err
 	}
 	if stage.Status.Active() {
-		if _, _, err := s.documents.CancelStage(ctx, document.ID, types.DocumentStageReferenceLookup, stage.Generation); err != nil {
+		cancelledStage, applied, err := s.documents.CancelStage(ctx, document.ID, types.DocumentStageReferenceLookup, stage.Generation)
+		if err != nil {
 			return err
 		}
+		if applied {
+			stage = cancelledStage
+		} else {
+			stage, err = s.documents.GetStage(ctx, document.ID, types.DocumentStageReferenceLookup)
+			if err != nil {
+				return err
+			}
+		}
 	}
-	if s.cancellations == nil {
-		return nil
+	// Do not touch target source/PDF tasks: the source stage owns only this
+	// document's reference discovery/dispatch envelope.
+	if stage.Status == types.DocumentStageCancelled {
+		cancelStageProjectionAndTasks(ctx, s.inspector, s.spans, document.ID, types.DocumentStageReferenceLookup, stage.Generation)
 	}
-	result, err := s.cancellations.CancelActiveRuns(ctx, document.ID, types.ProcessingWorkflowCatalogReference)
-	if err != nil {
-		return err
-	}
-	logger.Info(ctx, "reference catalog runs cancelled", "document_id", document.ID,
-		"run_count", len(result.RunIDs), "deleted_tasks", result.DeletedTasks,
-		"signalled_tasks", result.SignalledTasks, "released_targets", result.ReleasedTargets)
+	logger.Info(ctx, "reference lookup cancellation completed", "document_id", document.ID, "generation", stage.Generation)
 	return nil
 }
 

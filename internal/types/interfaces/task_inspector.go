@@ -15,6 +15,11 @@ import (
 // queued document tasks and signals active workers to stop at their next
 // checkpoint.
 type TaskInspector interface {
+	// CancelTasksForStage removes or signals only tasks carrying this exact
+	// document/stage/generation envelope. The business service must persist the
+	// stage cancellation fence first; this is a best-effort latency optimisation.
+	CancelTasksForStage(ctx context.Context, documentID string, stage types.DocumentStage, generation int64) (deleted int, cancelled int, err error)
+
 	// CancelTasksForDocument removes pending/scheduled/retry tasks
 	// whose payload references the given document ID, and signals
 	// active workers running such tasks to stop. Returns rough
@@ -23,16 +28,6 @@ type TaskInspector interface {
 	// best-effort: the row-level abort flag remains the source of
 	// truth, this just prevents wasted work.
 	CancelTasksForDocument(ctx context.Context, documentID string) (deleted int, cancelled int, err error)
-
-	// CancelTasksForRun removes pending/scheduled/retry tasks and signals active
-	// tasks belonging to one exact processing run. Matching rules depend on the
-	// workflow kind and never cancel another run for the same document.
-	CancelTasksForRun(ctx context.Context, ownerDocumentID, runID string, kind types.ProcessingWorkflowKind) (deleted int, cancelled int, err error)
-
-	// CancelReferenceTasksForDocuments removes scheduler-owned reference catalog
-	// tasks for the listed target placeholders. The ownership/run information is
-	// intentionally held by PaperReferenceScheduler rather than task JSON.
-	CancelReferenceTasksForDocuments(ctx context.Context, documentIDs []string) (deleted int, cancelled int, err error)
 
 	// HasQueuedTasksForDocument reports whether any pending / scheduled
 	// / retry / active task referencing the given document ID still
@@ -59,4 +54,9 @@ type TaskInspector interface {
 		documentID string,
 		taskType string,
 	) (bool, error)
+
+	// HasQueuedTaskForStage reports whether the exact durable task envelope is
+	// still pending, scheduled, retrying, or active. Stage recovery must never
+	// let another generation mask an orphaned one.
+	HasQueuedTaskForStage(ctx context.Context, documentID string, stage types.DocumentStage, generation int64) (bool, error)
 }

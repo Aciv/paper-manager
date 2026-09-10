@@ -77,7 +77,7 @@ func finishDocumentStageTask(
 	if errors.Is(taskErr, asynq.RevokeTask) {
 		return
 	}
-	if errors.Is(taskErr, asynq.SkipRetry) || processingRunErrorTerminal(taskErr) || finalAsynqAttempt(ctx) {
+	if errors.Is(taskErr, asynq.SkipRetry) || documentStageErrorTerminal(taskErr) || finalAsynqAttempt(ctx) {
 		code, message := spanFailure(taskErr)
 		if _, _, err := documents.FinishStage(finishCtx, documentID, stage, generation, types.DocumentStageFailed, code, message); err != nil {
 			logger.Warn(ctx, "fail document stage failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
@@ -87,6 +87,17 @@ func finishDocumentStageTask(
 	if _, _, err := documents.MarkStageRetryQueued(finishCtx, documentID, stage, generation); err != nil {
 		logger.Warn(ctx, "queue document stage retry failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
 	}
+}
+
+func documentStageErrorTerminal(err error) bool {
+	return errors.Is(err, types.ErrInvalidRecognitionRequest) ||
+		errors.Is(err, types.ErrInvalidPaperInfoTaskPayload) ||
+		errors.Is(err, types.ErrInvalidPaperExtraction) ||
+		errors.Is(err, types.ErrInvalidPaperCatalogData) ||
+		errors.Is(err, types.ErrInvalidRemotePDFRequest) ||
+		errors.Is(err, types.ErrUnsupportedRecognitionContentType) ||
+		errors.Is(err, ErrInvalidPaperMetadata) ||
+		errors.Is(err, ErrPaperCatalogNoMatch)
 }
 
 func stageAttempt(generation int64, legacyAttempt int) int {

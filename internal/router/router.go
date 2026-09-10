@@ -87,6 +87,7 @@ func ServerFile(router gin.IRoutes, documentHandler *handler.DocumentHandler) {
 	router.POST("/api/document/import-url", documentHandler.ImportURL)
 	router.POST("/api/document/batch-upload", documentHandler.UploadBatch)
 	router.POST("/api/document/batch-import-url", documentHandler.ImportURLBatch)
+	router.POST("/api/document/:id/download-reference-pdf", documentHandler.DownloadReferencePDF)
 	router.GET("/api/document/search", documentHandler.Search)
 	router.GET("/api/document/:id/content", documentHandler.Content)
 	router.GET("/api/document/:id/blocks", documentHandler.ListBlocks)

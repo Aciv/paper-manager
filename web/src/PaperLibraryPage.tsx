@@ -34,7 +34,7 @@ export function PaperLibraryPage() {
   const citationInfoRequest = useRef(0);
 
   const pageCount = Math.max(1, Math.ceil(page.total / page.pageSize));
-  const visibleItems = useMemo(() => page.items.filter((item) => item.status !== 'unknown'), [page.items]);
+  const visibleItems = useMemo(() => page.items.filter((item) => item.sourceState === 'available'), [page.items]);
   const activeBase = bases.find((base) => base.id === baseID);
 
   useEffect(() => {

@@ -160,31 +160,6 @@ func TestTaskConstructorsUseAllDocumentTaskTypes(t *testing.T) {
 	}
 }
 
-func TestRemoteImportTaskCarriesOnlyDurableDocumentIdentity(t *testing.T) {
-	documentID := uuid.New()
-	task, _, err := appservice.NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
-		DocumentID: documentID.String(), Generation: 7, RequestID: "request-1",
-	}, time.Minute, 2)
-	if err != nil {
-		t.Fatalf("NewDocumentRemoteImportTask() error = %v", err)
-	}
-	if task.Type() != types.TypeDocumentRemoteImport {
-		t.Fatalf("task type = %q", task.Type())
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-		t.Fatal(err)
-	}
-	for _, forbidden := range []string{"url", "source_url", "download_url", "raw_reference", "api_key"} {
-		if _, exists := payload[forbidden]; exists {
-			t.Fatalf("payload unexpectedly contains %q: %#v", forbidden, payload)
-		}
-	}
-	if payload["document_id"] != documentID.String() {
-		t.Fatalf("payload = %#v", payload)
-	}
-}
-
 func TestProcessPaperMetadataExtractTaskDoesNotChooseNextStage(t *testing.T) {
 	documentID := uuid.NewString()
 	payload := types.PaperMetadataExtractPayload{

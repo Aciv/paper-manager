@@ -37,22 +37,6 @@ func (state DocumentSourceState) Valid() bool {
 	}
 }
 
-// DocumentStatus is the lifecycle state persisted in documents.status.
-type DocumentStatus string
-
-const (
-	// DocumentStatusUnknown identifies a bibliographic placeholder without a
-	// source file. It must not be queued for document recognition.
-	DocumentStatusUnknown    DocumentStatus = "unknown"
-	DocumentStatusUploaded   DocumentStatus = "uploaded"
-	DocumentStatusQueued     DocumentStatus = "queued"
-	DocumentStatusProcessing DocumentStatus = "processing"
-	DocumentStatusCancelled  DocumentStatus = "cancelled"
-	DocumentStatusDeleting   DocumentStatus = "deleting"
-	DocumentStatusReady      DocumentStatus = "ready"
-	DocumentStatusFailed     DocumentStatus = "failed"
-)
-
 const (
 	// UnknownDocumentContentType distinguishes bibliographic placeholders from
 	// uploaded source files.
@@ -71,8 +55,6 @@ type Document struct {
 	DOI                            string              `gorm:"column:doi;type:text;not null;default:'';index:idx_documents_doi" json:"doi,omitempty"`
 	FileSHA256                     string              `gorm:"column:file_sha256;type:char(64);not null;default:''" json:"-"`
 	StorageKey                     string              `gorm:"column:storage_key;type:text;not null;uniqueIndex" json:"-"`
-	Status                         DocumentStatus      `gorm:"column:status;type:text;not null;default:uploaded;check:chk_documents_status,status IN ('unknown','uploaded','queued','processing','cancelled','deleting','ready','failed')" json:"status"`
-	ErrorMessage                   *string             `gorm:"column:error_message;type:text" json:"errorMessage,omitempty"`
 	SourceState                    DocumentSourceState `gorm:"column:source_state;type:text;not null;default:available" json:"sourceState"`
 	CanonicalDocumentID            *uuid.UUID          `gorm:"column:canonical_document_id;type:uuid" json:"canonicalDocumentId,omitempty"`
 	MarkdownStatus                 DocumentStageStatus `gorm:"column:markdown_status;type:text;not null;default:not_started" json:"markdownStatus"`
@@ -106,12 +88,10 @@ const MaxDocumentSearchPage = 10000
 
 // DocumentSearch describes source-document lookup. Bibliographic title and
 // tag filtering belongs to PaperSearch and PaperMetadataRepository.
-// A zero-value Status means "all statuses".
 type DocumentSearch struct {
 	ID          *uuid.UUID
 	DOI         string
 	FileSHA256  string
-	Status      DocumentStatus
 	SourceState DocumentSourceState
 	// ExcludeUnknown omits bibliography placeholders that do not have a
 	// locally stored source file. It is primarily used by reading views.

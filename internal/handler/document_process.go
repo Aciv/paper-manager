@@ -18,17 +18,17 @@ import (
 // processing. It is separate from DocumentHandler so retry, reparse, task
 // progress, and parser controls can be added without growing file endpoints.
 type DocumentProcessHandler struct {
-	documents interfaces.DocumentService
-	spans     interfaces.SpanRecorder
+	documents  interfaces.DocumentService
+	processing interfaces.ProcessingViewQuery
 }
 
 func NewDocumentProcessHandler(documents interfaces.DocumentService) *DocumentProcessHandler {
 	return &DocumentProcessHandler{documents: documents}
 }
 
-// NewDocumentProcessHandlerWithSpanRecorder is the production DI constructor.
-func NewDocumentProcessHandlerWithSpanRecorder(documents interfaces.DocumentService, spans interfaces.SpanRecorder) *DocumentProcessHandler {
-	return &DocumentProcessHandler{documents: documents, spans: spans}
+// NewDocumentProcessHandlerWithProcessingViewQuery is the production DI constructor.
+func NewDocumentProcessHandlerWithProcessingViewQuery(documents interfaces.DocumentService, processing interfaces.ProcessingViewQuery) *DocumentProcessHandler {
+	return &DocumentProcessHandler{documents: documents, processing: processing}
 }
 
 // Status returns user-safe persistent processing state for a document.
@@ -47,11 +47,17 @@ func (h *DocumentProcessHandler) Status(c *gin.Context) {
 		}
 		return
 	}
-	if h.spans == nil {
-		c.JSON(http.StatusOK, gin.H{"processing": types.DocumentProcessingView{DocumentID: document.ID, DocumentStatus: document.Status, Stages: []types.DocumentProcessingSpan{}}})
+	if h.processing == nil {
+		states := make([]types.DocumentStageState, 0, 4)
+		for _, stage := range []types.DocumentStage{types.DocumentStageMarkdown, types.DocumentStageMetadataExtraction, types.DocumentStageSourceLookup, types.DocumentStageReferenceLookup} {
+			if state, stateErr := document.StageState(stage); stateErr == nil {
+				states = append(states, state)
+			}
+		}
+		c.JSON(http.StatusOK, gin.H{"processing": types.DocumentProcessingView{DocumentID: document.ID, SourceState: document.SourceState, CanonicalDocumentID: document.CanonicalDocumentID, StageStates: states, Stages: []types.DocumentProcessingSpan{}}})
 		return
 	}
-	view, err := h.spans.GetRunView(c.Request.Context(), *document)
+	view, err := h.processing.GetView(c.Request.Context(), *document)
 	if err != nil {
 		h.writeError(c, apperrors.NewInternalServerError("load document processing state"), err)
 		return
@@ -102,7 +108,7 @@ func (h *DocumentProcessHandler) RetryDocumentParse(c *gin.Context) {
 	if err != nil {
 		if document != nil && errors.Is(err, appservice.ErrDocumentProcessQueue) {
 			logger.Warn(c.Request.Context(), "document process retry could not be queued",
-				"document_id", document.ID, "status", document.Status)
+				"document_id", document.ID, "markdown_status", document.MarkdownStatus)
 			c.JSON(http.StatusAccepted, gin.H{
 				"document":         document,
 				"processingQueued": false,

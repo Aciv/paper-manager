@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS idx_document_processing_spans_parent_active;
+DROP INDEX IF EXISTS idx_document_processing_spans_terminal_retention;

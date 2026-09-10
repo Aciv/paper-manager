@@ -21,7 +21,6 @@ import (
 	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
 )
 
 const (
@@ -89,8 +88,6 @@ type paperInfoService struct {
 	referenceLimiter   interfaces.PaperReferenceCatalogLimiter
 	referenceScheduler interfaces.PaperReferenceScheduler
 	spans              interfaces.SpanRecorder
-	runs               interfaces.ProcessingRunRepository
-	cancellations      interfaces.WorkflowCancellationService
 	maxConcurrency     int
 }
 
@@ -128,13 +125,9 @@ func NewPaperInfoServiceWithSpanRecorder(
 	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
 	referenceScheduler interfaces.PaperReferenceScheduler,
 	spans interfaces.SpanRecorder,
-	runs interfaces.ProcessingRunRepository,
-	cancellations interfaces.WorkflowCancellationService,
 ) interfaces.PaperInfoService {
 	svc := newPaperInfoService(cfg, documents, storage, extractor, catalogs, papers, tasks, inspector, referenceLimiter, spans).(*paperInfoService)
 	svc.referenceScheduler = referenceScheduler
-	svc.runs = runs
-	svc.cancellations = cancellations
 	return svc
 }
 
@@ -582,17 +575,6 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, doiErr)
 		} else if applied {
 			logger.Info(ctx, "catalog DOI applied to referenced document", "document_id", cited.ID, "doi", doi, "provider", claim.Provider)
-		}
-	}
-	if strings.TrimSpace(selected.SourceURL) != "" {
-		task, options, taskErr := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
-			RequestID: command.RequestID, DocumentID: cited.ID.String(), Generation: command.Generation,
-		}, s.cfg.RemotePDFTaskTimeout, s.cfg.RemotePDFTaskMaxRetry)
-		if taskErr == nil {
-			taskErr = enqueueManagedTask(ctx, s.tasks, task, options, cited.ID.String())
-		}
-		if taskErr != nil && !errors.Is(taskErr, asynq.ErrTaskIDConflict) {
-			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, taskErr)
 		}
 	}
 	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)

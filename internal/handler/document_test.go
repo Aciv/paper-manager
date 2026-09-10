@@ -100,9 +100,9 @@ func (s *documentCreatorStub) EnsureUnknown(
 	}
 	s.deleted = false
 	s.document = types.Document{
-		ID:         id,
-		StorageKey: types.UnknownDocumentStorageScheme + id.String(),
-		Status:     types.DocumentStatusUnknown,
+		ID:          id,
+		StorageKey:  types.UnknownDocumentStorageScheme + id.String(),
+		SourceState: types.DocumentSourceMissing,
 	}
 	return s.document, true, nil
 }
@@ -110,7 +110,7 @@ func (s *documentCreatorStub) EnsureUnknown(
 func (s *documentCreatorStub) DeleteUnknownIfUnreferenced(
 	_ context.Context, id uuid.UUID,
 ) (bool, error) {
-	if s.deleted || s.document.ID != id || s.document.Status != types.DocumentStatusUnknown {
+	if s.deleted || s.document.ID != id || s.document.SourceState != types.DocumentSourceMissing {
 		return false, nil
 	}
 	s.deleted = true
@@ -138,6 +138,25 @@ func (s *documentCreatorStub) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
+func (s *documentCreatorStub) MarkDeleting(_ context.Context, id uuid.UUID) (types.DocumentSourceState, bool, error) {
+	if s.deleted || s.document.ID != id {
+		return "", false, sql.ErrNoRows
+	}
+	previous := s.document.SourceState
+	if previous == types.DocumentSourceDeleting || previous == types.DocumentSourceMerged {
+		return previous, false, nil
+	}
+	s.document.SourceState = types.DocumentSourceDeleting
+	return previous, true, nil
+}
+
+func (s *documentCreatorStub) RestoreSourceState(_ context.Context, id uuid.UUID, state types.DocumentSourceState) error {
+	if !s.deleted && s.document.ID == id && s.document.SourceState == types.DocumentSourceDeleting {
+		s.document.SourceState = state
+	}
+	return nil
+}
+
 func (*documentCreatorStub) GetMarkdown(context.Context, uuid.UUID) (types.DocumentMarkdown, error) {
 	return types.DocumentMarkdown{}, sql.ErrNoRows
 }
@@ -157,27 +176,6 @@ func (s *documentCreatorStub) GetBlock(_ context.Context, documentID, blockID uu
 		}
 	}
 	return types.Block{}, sql.ErrNoRows
-}
-
-func (s *documentCreatorStub) UpdateStatus(_ context.Context, id uuid.UUID, status types.DocumentStatus, message *string) error {
-	if s.deleted || s.document.ID != id {
-		return sql.ErrNoRows
-	}
-	s.document.Status, s.document.ErrorMessage = status, message
-	return nil
-}
-
-func (s *documentCreatorStub) UpdateStatusIfCurrent(_ context.Context, id uuid.UUID, status types.DocumentStatus, message *string, expected []types.DocumentStatus) (bool, error) {
-	if s.deleted || s.document.ID != id {
-		return false, nil
-	}
-	for _, current := range expected {
-		if s.document.Status == current {
-			s.document.Status, s.document.ErrorMessage = status, message
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 func (s *documentCreatorStub) UpdateDocumentInfo(_ context.Context, id uuid.UUID, originalFilename, doi *string) (types.Document, error) {
@@ -202,10 +200,10 @@ func (s *documentCreatorStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, doi
 }
 
 func (s *documentCreatorStub) PromoteUnknown(_ context.Context, document types.Document) (bool, error) {
-	if s.document.ID != document.ID || s.document.Status != types.DocumentStatusUnknown {
+	if s.document.ID != document.ID || s.document.SourceState != types.DocumentSourceMissing {
 		return false, nil
 	}
-	document.Status = types.DocumentStatusUploaded
+	document.SourceState = types.DocumentSourceAvailable
 	s.document = document
 	return true, nil
 }
@@ -253,7 +251,7 @@ func TestUploadRouteStoresDocument(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if documents.document.OriginalFilename != "readme.txt" || documents.document.DOI != "10.1000/example-paper" || documents.document.Status != types.DocumentStatusUploaded {
+	if documents.document.OriginalFilename != "readme.txt" || documents.document.DOI != "10.1000/example-paper" || documents.document.SourceState != types.DocumentSourceAvailable {
 		t.Fatalf("unexpected document: %+v", documents.document)
 	}
 
@@ -276,16 +274,6 @@ func TestUploadRouteStoresDocument(t *testing.T) {
 	engine.ServeHTTP(blocksResponse, blocksRequest)
 	if blocksResponse.Code != http.StatusOK || !strings.Contains(blocksResponse.Body.String(), `"items":[]`) {
 		t.Fatalf("blocks status = %d, body = %s", blocksResponse.Code, blocksResponse.Body.String())
-	}
-
-	cancelRequest := httptest.NewRequest(http.MethodPost, "/api/document/"+documents.document.ID.String()+"/cancel", nil)
-	cancelResponse := httptest.NewRecorder()
-	engine.ServeHTTP(cancelResponse, cancelRequest)
-	if cancelResponse.Code != http.StatusOK {
-		t.Fatalf("cancel status = %d, body = %s", cancelResponse.Code, cancelResponse.Body.String())
-	}
-	if documents.document.Status != types.DocumentStatusCancelled {
-		t.Fatalf("document status = %q, want cancelled", documents.document.Status)
 	}
 
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/api/document/"+documents.document.ID.String(), nil)
@@ -340,8 +328,8 @@ func TestUploadRouteReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
 	if response.Code != http.StatusCreated {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
-	if documents.document.ID == uuid.Nil || documents.document.Status != types.DocumentStatusFailed {
-		t.Fatalf("persisted document = %#v, want failed durable document", documents.document)
+	if documents.document.ID == uuid.Nil || documents.document.MarkdownStatus != types.DocumentStageFailed {
+		t.Fatalf("persisted document = %#v, want failed markdown stage", documents.document)
 	}
 	if !strings.Contains(response.Body.String(), documents.document.ID.String()) ||
 		!strings.Contains(response.Body.String(), `"processingQueued":false`) ||
@@ -356,7 +344,7 @@ func TestUploadRouteReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
 	engine.ServeHTTP(retryResponse, retryRequest)
 	if retryResponse.Code != http.StatusAccepted ||
 		!strings.Contains(retryResponse.Body.String(), `"processingQueued":false`) ||
-		documents.document.Status != types.DocumentStatusFailed {
+		documents.document.MarkdownStatus != types.DocumentStageFailed {
 		t.Fatalf("retry queue failure response=%d body=%s document=%#v", retryResponse.Code, retryResponse.Body.String(), documents.document)
 	}
 }

@@ -12,7 +12,7 @@ import (
 )
 
 func TestDocumentCanonicalizationPostgres(t *testing.T) {
-	db, cleanup := openProcessingRunTestDatabase(t)
+	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
 	repo := NewDocumentRepository(db)
@@ -90,7 +90,7 @@ func TestDocumentCanonicalizationPostgres(t *testing.T) {
 }
 
 func TestConcurrentPlaceholderPromotionUsesHashCanonical(t *testing.T) {
-	db, cleanup := openProcessingRunTestDatabase(t)
+	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
 	repo := NewDocumentRepository(db)
@@ -147,7 +147,7 @@ func TestConcurrentPlaceholderPromotionUsesHashCanonical(t *testing.T) {
 }
 
 func TestCitationTargetProgressIsBoundedAndDisjointPostgres(t *testing.T) {
-	db, cleanup := openProcessingRunTestDatabase(t)
+	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
 	repo := NewDocumentRepository(db)
@@ -192,7 +192,7 @@ func TestCitationTargetProgressIsBoundedAndDisjointPostgres(t *testing.T) {
 func sourceDocumentForCanonicalTest(id uuid.UUID, filename, storageKey, hash string) types.Document {
 	return types.Document{
 		ID: id, OriginalFilename: filename, ContentType: "application/pdf", SizeBytes: 1,
-		StorageKey: storageKey, FileSHA256: hash, Status: types.DocumentStatusUploaded,
+		StorageKey: storageKey, FileSHA256: hash,
 		SourceState: types.DocumentSourceAvailable,
 	}
 }

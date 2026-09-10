@@ -116,8 +116,8 @@ func SuggestedPDFFilename(rawURL string) string {
 	return "paper.pdf"
 }
 
-// DocumentRemoteImportPayload deliberately carries only durable local
-// identity. Each retry reloads current metadata and resolves a fresh URL.
+// DocumentRemoteImportPayload is emitted only by an explicit user request to
+// download one bibliographic placeholder. Reference parsing never creates it.
 type DocumentRemoteImportPayload struct {
 	RequestID  string `json:"request_id,omitempty"`
 	DocumentID string `json:"document_id"`

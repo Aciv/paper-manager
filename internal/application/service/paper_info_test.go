@@ -211,20 +211,11 @@ func (*paperInfoSpanStub) Heartbeat(context.Context, uuid.UUID) error { return n
 func (*paperInfoSpanStub) FinishSpan(context.Context, uuid.UUID, types.ProcessingSpanStatus, string, string) error {
 	return nil
 }
-func (*paperInfoSpanStub) CancelSpansForRun(context.Context, uuid.UUID, string, string) error {
+func (*paperInfoSpanStub) CancelStageProjection(context.Context, uuid.UUID, types.DocumentStage, int64, string, string) error {
 	return nil
-}
-func (*paperInfoSpanStub) ScopeCancelled(context.Context, uuid.UUID, types.ProcessingSpanKind, types.ProcessingSpanScope, types.ProcessingSpanScopeID) (bool, error) {
-	return false, nil
 }
 func (*paperInfoSpanStub) AggregateParentDisplay(context.Context, uuid.UUID) (types.ProcessingSpanStatus, error) {
 	return "", nil
-}
-func (*paperInfoSpanStub) GetRunView(context.Context, types.Document) (types.DocumentProcessingView, error) {
-	return types.DocumentProcessingView{}, nil
-}
-func (*paperInfoSpanStub) HasActive(context.Context, uuid.UUID, ...types.ProcessingSpanKind) (bool, error) {
-	return false, nil
 }
 
 type paperInfoMetadataWrite struct {
@@ -414,8 +405,8 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# A Reliable Paper\n\nAda Lovelace\n")
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID:     documentID,
-		Status: types.DocumentStatusReady,
+		ID:          documentID,
+		SourceState: types.DocumentSourceAvailable,
 	})
 	documents.markdowns[documentID] = types.DocumentMarkdown{
 		DocumentID: documentID,
@@ -500,7 +491,7 @@ func TestPaperInfoExtractMetadataPersistsCurrentSnapshot(t *testing.T) {
 func TestPaperInfoExtractMetadataQueuesIndependentDownstreamStages(t *testing.T) {
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID: documentID, Status: types.DocumentStatusReady,
+		ID: documentID, SourceState: types.DocumentSourceAvailable,
 		MetadataExtractionStatus: types.DocumentStageQueued, MetadataExtractionGeneration: 3,
 	})
 	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/test.md"}
@@ -553,7 +544,7 @@ func TestPaperInfoExtractMetadataQueuesIndependentDownstreamStages(t *testing.T)
 func TestPaperInfoExtractMetadataDoesNotClearExistingMetadataForEmptyResult(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# Existing paper\n")
-	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, Status: types.DocumentStatusReady})
+	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable})
 	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/existing.md"}
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{
@@ -593,7 +584,7 @@ func TestPaperInfoExtractMetadataDoesNotClearExistingMetadataForEmptyResult(t *t
 
 func TestPaperInfoExtractMetadataClearsOnlyAutomaticCitationsForDetectedEmptyBibliography(t *testing.T) {
 	documentID := uuid.New()
-	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, Status: types.DocumentStatusReady})
+	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable})
 	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/empty-refs.md"}
 	papers := newPaperInfoPaperServiceStub()
 	service := newPaperInfoServiceForTest(
@@ -658,8 +649,8 @@ func TestPaperInfoExtractMetadataRejectsSourceDeletingDuringRPC(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# Original\n")
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID:     documentID,
-		Status: types.DocumentStatusReady,
+		ID:          documentID,
+		SourceState: types.DocumentSourceAvailable,
 	})
 	documents.markdowns[documentID] = types.DocumentMarkdown{
 		DocumentID: documentID,
@@ -707,7 +698,7 @@ func TestPaperInfoExtractMetadataRejectsSourceDeletingDuringRPC(t *testing.T) {
 func TestPaperInfoExtractMetadataRejectsCancelledGenerationAfterRPC(t *testing.T) {
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID: documentID, Status: types.DocumentStatusReady,
+		ID: documentID, SourceState: types.DocumentSourceAvailable,
 		MetadataExtractionStatus: types.DocumentStageQueued, MetadataExtractionGeneration: 1,
 	})
 	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/original.md"}
@@ -742,9 +733,9 @@ func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
 	documentID := uuid.New()
 	documents := readyPaperInfoDocumentRepo(documentID)
 	documents.documents[documentID] = types.Document{
-		ID:     documentID,
-		DOI:    "10.1000/exact",
-		Status: types.DocumentStatusReady,
+		ID:          documentID,
+		DOI:         "10.1000/exact",
+		SourceState: types.DocumentSourceAvailable,
 	}
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{
@@ -857,13 +848,13 @@ func TestPaperInfoResolveMetadataRepointsMatchedCitation(t *testing.T) {
 	resolvedID := uuid.New()
 	documents := readyPaperInfoDocumentRepo(documentID)
 	documents.documents[placeholderID] = types.Document{
-		ID:     placeholderID,
-		Status: types.DocumentStatusUnknown,
+		ID:          placeholderID,
+		SourceState: types.DocumentSourceMissing,
 	}
 	documents.documents[resolvedID] = types.Document{
-		ID:     resolvedID,
-		DOI:    "10.2000/cited",
-		Status: types.DocumentStatusReady,
+		ID:          resolvedID,
+		DOI:         "10.2000/cited",
+		SourceState: types.DocumentSourceAvailable,
 	}
 	documents.search = func(search types.DocumentSearch) (types.DocumentPage, error) {
 		if search.DOI == "10.2000/cited" {
@@ -935,7 +926,7 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 	duplicate := uuid.New()
 	documents := readyPaperInfoDocumentRepo(documentID)
 	for _, id := range []uuid.UUID{first, second, duplicate} {
-		documents.documents[id] = types.Document{ID: id, Status: types.DocumentStatusUnknown}
+		documents.documents[id] = types.Document{ID: id, SourceState: types.DocumentSourceMissing}
 	}
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
@@ -946,7 +937,7 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 	}
 	// A manually added unknown reference must never be auto-dispatched.
 	manual := uuid.New()
-	documents.documents[manual] = types.Document{ID: manual, Status: types.DocumentStatusUnknown}
+	documents.documents[manual] = types.Document{ID: manual, SourceState: types.DocumentSourceMissing}
 	papers.metadata[manual.String()] = types.PaperMetadata{DocumentID: manual, MetadataSource: types.PaperMetadataSourceManual}
 	papers.citations[documentID.String()] = []types.PaperCitation{
 		{CitingDocumentID: documentID, CitedDocumentID: first, RawReference: "Ada. 2024. One. doi:10.1000/one"},
@@ -988,11 +979,11 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedDeduplicatedReferences(t *test
 func TestPaperInfoReferenceDispatcherSharesTargetGenerationAcrossSources(t *testing.T) {
 	firstSource, secondSource, target := uuid.New(), uuid.New(), uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: firstSource, Status: types.DocumentStatusReady,
+		types.Document{ID: firstSource, SourceState: types.DocumentSourceAvailable,
 			ReferenceLookupStatus: types.DocumentStageQueued, ReferenceLookupGeneration: 1},
-		types.Document{ID: secondSource, Status: types.DocumentStatusReady,
+		types.Document{ID: secondSource, SourceState: types.DocumentSourceAvailable,
 			ReferenceLookupStatus: types.DocumentStageQueued, ReferenceLookupGeneration: 1},
-		types.Document{ID: target, Status: types.DocumentStatusUnknown},
+		types.Document{ID: target, SourceState: types.DocumentSourceMissing},
 	)
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[target.String()] = types.PaperMetadata{
@@ -1056,8 +1047,8 @@ func TestPaperInfoResolveSourceMergesDOIConflictIntoCanonical(t *testing.T) {
 	documentID := uuid.New()
 	otherID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: documentID, Status: types.DocumentStatusProcessing},
-		types.Document{ID: otherID, Status: types.DocumentStatusReady, DOI: "10.1000/owned"},
+		types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable},
+		types.Document{ID: otherID, SourceState: types.DocumentSourceAvailable, DOI: "10.1000/owned"},
 	)
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
@@ -1089,7 +1080,7 @@ func TestPaperInfoResolveMetadataRejectsStatusChangedDuringLookup(t *testing.T) 
 		name: "crossref",
 		search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
 			document := documents.documents[documentID]
-			document.Status = types.DocumentStatusDeleting
+			document.SourceState = types.DocumentSourceDeleting
 			document.SourceState = types.DocumentSourceDeleting
 			documents.documents[documentID] = document
 			return []types.PaperCatalogCandidate{
@@ -1123,9 +1114,9 @@ func TestPaperInfoResolveMetadataRejectsStatusChangedDuringLookup(t *testing.T) 
 func TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup(t *testing.T) {
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID:     documentID,
-		Status: types.DocumentStatusProcessing,
-		DOI:    "10.1000/original",
+		ID:          documentID,
+		SourceState: types.DocumentSourceAvailable,
+		DOI:         "10.1000/original",
 	})
 	papers := newPaperInfoPaperServiceStub()
 	provider := &paperInfoProviderStub{
@@ -1166,8 +1157,8 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 	citingID := uuid.New()
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: citingID, Status: types.DocumentStatusReady},
-		types.Document{ID: unknownID, Status: types.DocumentStatusUnknown},
+		types.Document{ID: citingID, SourceState: types.DocumentSourceAvailable},
+		types.Document{ID: unknownID, SourceState: types.DocumentSourceMissing},
 	)
 	papers := newPaperInfoPaperServiceStub()
 	rawReference := "Ada Lovelace. 2024. Source-Free Paper. Journal. doi:10.3000/source-free"
@@ -1219,15 +1210,39 @@ func TestPaperInfoResolveUnknownReferenceWithoutMarkdown(t *testing.T) {
 	}
 }
 
+func TestPaperInfoResolveUnknownReferenceNeverQueuesPDFDownload(t *testing.T) {
+	citingID, targetID := uuid.New(), uuid.New()
+	documents := newPaperDocumentRepoStub(
+		types.Document{ID: citingID, SourceState: types.DocumentSourceAvailable},
+		types.Document{ID: targetID, SourceState: types.DocumentSourceMissing},
+	)
+	papers := newPaperInfoPaperServiceStub()
+	papers.citations[citingID.String()] = []types.PaperCitation{{CitingDocumentID: citingID, CitedDocumentID: targetID, RawReference: "Ada. Downloadable Paper. doi:10.3000/downloadable"}}
+	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+		candidate := testCatalogCandidate("crossref", "10.3000/downloadable", "Downloadable Paper", 1)
+		candidate.SourceURL = "https://example.test/paper.pdf"
+		return []types.PaperCatalogCandidate{candidate}, nil
+	}}
+	queue := &paperInfoQueueStub{}
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, queue, nil, nil)
+	registerReferenceJobForTest(t, service, targetID, citingID)
+	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: targetID}); err != nil {
+		t.Fatal(err)
+	}
+	if len(queue.tasks) != 0 {
+		t.Fatalf("reference lookup queued unexpected tasks: %#v", queue.tasks)
+	}
+}
+
 func TestPaperInfoResolveUnknownReferencePrefersStoredExtractionMetadata(t *testing.T) {
 	citingID := uuid.New()
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: citingID, Status: types.DocumentStatusReady},
+		types.Document{ID: citingID, SourceState: types.DocumentSourceAvailable},
 		types.Document{
-			ID:     unknownID,
-			DOI:    "10.4000/structured-reference",
-			Status: types.DocumentStatusUnknown,
+			ID:          unknownID,
+			DOI:         "10.4000/structured-reference",
+			SourceState: types.DocumentSourceMissing,
 		},
 	)
 	papers := newPaperInfoPaperServiceStub()
@@ -1298,7 +1313,7 @@ func TestPaperArXivIDAcceptsBareAndWrappedIDsWithoutDamagingLegacyIDs(t *testing
 func TestPaperInfoResolveUnknownReferenceRequiresRegisteredJob(t *testing.T) {
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID: unknownID, Status: types.DocumentStatusUnknown,
+		ID: unknownID, SourceState: types.DocumentSourceMissing,
 	})
 	papers := newPaperInfoPaperServiceStub()
 	service := newPaperInfoServiceForTest(
@@ -1327,7 +1342,7 @@ func TestPaperInfoResolveUnknownReferenceRequiresRegisteredJob(t *testing.T) {
 func TestPaperInfoResolveUnknownRequiresRegisteredTarget(t *testing.T) {
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID: unknownID, Status: types.DocumentStatusUnknown,
+		ID: unknownID, SourceState: types.DocumentSourceMissing,
 	})
 	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
@@ -1351,12 +1366,12 @@ func TestPaperInfoResolveUnknownReferenceRepointsCitationToStoredPaper(t *testin
 	unknownID := uuid.New()
 	storedID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: citingID, Status: types.DocumentStatusReady},
-		types.Document{ID: unknownID, Status: types.DocumentStatusUnknown},
+		types.Document{ID: citingID, SourceState: types.DocumentSourceAvailable},
+		types.Document{ID: unknownID, SourceState: types.DocumentSourceMissing},
 		types.Document{
-			ID:     storedID,
-			DOI:    "10.4000/stored",
-			Status: types.DocumentStatusReady,
+			ID:          storedID,
+			DOI:         "10.4000/stored",
+			SourceState: types.DocumentSourceAvailable,
 		},
 	)
 	documents.search = func(search types.DocumentSearch) (types.DocumentPage, error) {
@@ -1413,8 +1428,8 @@ func TestPaperInfoResolveUnknownReferenceRepointsCitationToStoredPaper(t *testin
 func TestPaperInfoResolveMetadataAllowsProcessingDocumentWithoutMarkdown(t *testing.T) {
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID:     documentID,
-		Status: types.DocumentStatusProcessing,
+		ID:          documentID,
+		SourceState: types.DocumentSourceAvailable,
 	})
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{
@@ -1467,8 +1482,8 @@ func TestPaperInfoResolveMetadataAllowsProcessingDocumentWithoutMarkdown(t *test
 func TestPaperInfoResolveMetadataRejectsDeletingDocument(t *testing.T) {
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID:     documentID,
-		Status: types.DocumentStatusDeleting,
+		ID:          documentID,
+		SourceState: types.DocumentSourceDeleting,
 	})
 	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
@@ -1574,11 +1589,11 @@ func TestFindStoredCatalogDocumentFallsBackToNormalizedTitle(t *testing.T) {
 	citingDocumentID := uuid.New()
 	storedDocumentID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: citingDocumentID, Status: types.DocumentStatusProcessing},
+		types.Document{ID: citingDocumentID, SourceState: types.DocumentSourceAvailable},
 		types.Document{
-			ID:     storedDocumentID,
-			DOI:    "10.1000/local-doi",
-			Status: types.DocumentStatusReady,
+			ID:          storedDocumentID,
+			DOI:         "10.1000/local-doi",
+			SourceState: types.DocumentSourceAvailable,
 		},
 	)
 	papers := newPaperInfoPaperServiceStub()
@@ -1620,8 +1635,8 @@ func TestFindStoredCatalogDocumentRejectsTitleWithDifferentAuthors(t *testing.T)
 	citingDocumentID := uuid.New()
 	storedDocumentID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: citingDocumentID, Status: types.DocumentStatusProcessing},
-		types.Document{ID: storedDocumentID, Status: types.DocumentStatusReady},
+		types.Document{ID: citingDocumentID, SourceState: types.DocumentSourceAvailable},
+		types.Document{ID: storedDocumentID, SourceState: types.DocumentSourceAvailable},
 	)
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[storedDocumentID.String()] = types.PaperMetadata{
@@ -1659,8 +1674,8 @@ func TestFindStoredCatalogDocumentRejectsTitleWithDifferentAuthors(t *testing.T)
 
 func readyPaperInfoDocumentRepo(documentID uuid.UUID) *paperDocumentRepoStub {
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID:     documentID,
-		Status: types.DocumentStatusReady,
+		ID:          documentID,
+		SourceState: types.DocumentSourceAvailable,
 	})
 	documents.markdowns[documentID] = types.DocumentMarkdown{
 		DocumentID: documentID,

@@ -32,8 +32,6 @@ type documentService struct {
 	recognizer    interfaces.DocumentRecognizer
 	paperInfo     interfaces.PaperInfoService
 	spans         interfaces.SpanRecorder
-	runs          interfaces.ProcessingRunRepository
-	cancellations interfaces.WorkflowCancellationService
 	papers        interfaces.PaperService
 	urlResolver   interfaces.PaperURLResolver
 	downloads     interfaces.RemoteDownloadLimiter
@@ -108,15 +106,11 @@ func NewDocumentServiceWithProcessingAndSpanRecorder(
 	papers interfaces.PaperService,
 	urlResolver interfaces.PaperURLResolver,
 	downloads interfaces.RemoteDownloadLimiter,
-	runs interfaces.ProcessingRunRepository,
-	cancellations interfaces.WorkflowCancellationService,
 ) interfaces.DocumentService {
 	service := newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, paperInfo, spans).(*documentService)
 	service.papers = papers
 	service.urlResolver = urlResolver
 	service.downloads = downloads
-	service.runs = runs
-	service.cancellations = cancellations
 	return service
 }
 
@@ -178,7 +172,7 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 	}
 	doc := types.Document{ID: uuid.New(), OriginalFilename: stored.Filename, ContentType: stored.ContentType,
 		SizeBytes: stored.Size, DOI: doi, FileSHA256: fileHash, StorageKey: stored.Key,
-		Status: types.DocumentStatusUploaded, SourceState: types.DocumentSourceAvailable}
+		SourceState: types.DocumentSourceAvailable}
 	created, err := s.repo.Create(ctx, doc)
 	if err != nil {
 		logger.Error(ctx, "create document record failed", "document_id", doc.ID, "error", err)
@@ -216,7 +210,7 @@ func (s *documentService) startCreatedDocumentProcessing(
 		persisted := s.loadCreatedDocumentAfterQueue(ctx, created)
 		logger.Warn(ctx, "document created but initial process was not queued",
 			"document_id", persisted.ID,
-			"status", persisted.Status,
+			"markdown_status", persisted.MarkdownStatus,
 			"error", err)
 		return &persisted, fmt.Errorf("%w: %w", ErrDocumentProcessQueue, err)
 	}
@@ -289,33 +283,20 @@ func (s *documentService) enqueueDocumentRecognition(ctx context.Context, docume
 	}
 	if err != nil {
 		_, _, _ = s.repo.FinishStage(context.WithoutCancel(ctx), documentID, types.DocumentStageMarkdown, stage.Generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
-		s.markDocumentQueueFailure(ctx, documentID)
 		return err
 	}
 	logger.Info(ctx, "document recognition queued", "document_id", documentID, "generation", stage.Generation)
 	return nil
 }
 
-// markDocumentQueueFailure restores a terminal, retryable state when an
-// Asynq handoff fails. It deliberately persists no transport detail because
-// Document.ErrorMessage is returned to API clients.
-func (s *documentService) markDocumentQueueFailure(ctx context.Context, documentID uuid.UUID) {
-	message := "document processing was not queued; retry this document"
-	if err := s.repo.UpdateStatus(context.WithoutCancel(ctx), documentID, types.DocumentStatusFailed, &message); err != nil {
-		logger.Error(ctx, "record document queue failure failed", "document_id", documentID, "error", err)
-	}
-}
-
-// RetryDocumentProcess resumes the direct document pipeline through one clear
-// control surface. A ready document retains its expensive recognized output
-// and starts at metadata extraction; a failed/cancelled document starts at
-// recognition.
+// RetryDocumentProcess retries the next failed/cancelled stage without using
+// the legacy aggregate document status.
 func (s *documentService) RetryDocumentProcess(ctx context.Context, id string) (*types.Document, error) {
 	document, err := s.GetDocumentByID(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if document.Status == types.DocumentStatusDeleting {
+	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return nil, ErrDocumentDeleting
 	}
 	markdownStage, err := s.repo.GetStage(ctx, document.ID, types.DocumentStageMarkdown)
@@ -325,7 +306,7 @@ func (s *documentService) RetryDocumentProcess(ctx context.Context, id string) (
 	if markdownStage.Status.Active() {
 		return nil, ErrDocumentParseActive
 	}
-	if document.Status == types.DocumentStatusReady {
+	if markdownStage.Status == types.DocumentStageSucceeded {
 		if s.paperInfo == nil {
 			return nil, errors.New("paper information service is not configured")
 		}
@@ -335,13 +316,13 @@ func (s *documentService) RetryDocumentProcess(ctx context.Context, id string) (
 		logger.Info(ctx, "document metadata retry started", "document_id", document.ID)
 		return document, nil
 	}
-	if document.Status != types.DocumentStatusFailed && document.Status != types.DocumentStatusCancelled {
+	if markdownStage.Status != types.DocumentStageFailed && markdownStage.Status != types.DocumentStageCancelled && markdownStage.Status != types.DocumentStageSkipped {
 		return nil, ErrDocumentParseFinished
 	}
 	if err := s.enqueueDocumentRecognition(ctx, document.ID); err != nil {
 		failed := s.loadCreatedDocumentAfterQueue(ctx, *document)
 		logger.Warn(ctx, "document process retry was not queued",
-			"document_id", failed.ID, "status", failed.Status, "error", err)
+			"document_id", failed.ID, "markdown_status", failed.MarkdownStatus, "error", err)
 		return &failed, fmt.Errorf("%w: %w", ErrDocumentProcessQueue, err)
 	}
 	logger.Info(ctx, "document process retry started", "document_id", document.ID)
@@ -356,7 +337,7 @@ func (s *documentService) RetryDocumentParse(ctx context.Context, id string) (*t
 	if err != nil {
 		return nil, err
 	}
-	if document.Status == types.DocumentStatusDeleting {
+	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return nil, ErrDocumentDeleting
 	}
 	stage, err := s.repo.GetStage(ctx, document.ID, types.DocumentStageMarkdown)
@@ -366,7 +347,7 @@ func (s *documentService) RetryDocumentParse(ctx context.Context, id string) (*t
 	if stage.Status.Active() {
 		return nil, ErrDocumentParseActive
 	}
-	if document.Status != types.DocumentStatusFailed && document.Status != types.DocumentStatusCancelled {
+	if stage.Status != types.DocumentStageFailed && stage.Status != types.DocumentStageCancelled && stage.Status != types.DocumentStageSkipped {
 		return nil, ErrDocumentParseFinished
 	}
 	if err := s.enqueueDocumentRecognition(ctx, document.ID); err != nil {
@@ -429,35 +410,12 @@ func (s *documentService) GetDocumentByID(ctx context.Context, id string) (*type
 	return &doc, nil
 }
 
-func (s *documentService) GetDocumentStatus(ctx context.Context, id string) (types.DocumentStatus, error) {
-	doc, err := s.GetDocumentByID(ctx, id)
-	if err != nil {
-		return "", err
-	}
-	return doc.Status, nil
-}
-
 func (s *documentService) GetReferenceProgress(ctx context.Context, id string) (types.PaperReferenceProgress, error) {
 	documentID, err := uuid.Parse(strings.TrimSpace(id))
 	if err != nil || documentID == uuid.Nil {
 		return types.PaperReferenceProgress{}, errors.New("invalid document id")
 	}
 	return s.repo.CitationTargetProgress(ctx, documentID)
-}
-
-func (s *documentService) SetDocumentStatus(ctx context.Context, id string, status types.DocumentStatus, message *string) error {
-	parsed, err := uuid.Parse(strings.TrimSpace(id))
-	if err != nil {
-		return fmt.Errorf("invalid document id: %w", err)
-	}
-	if !isDocumentStatus(status) {
-		return fmt.Errorf("invalid document status %q", status)
-	}
-	if err := s.repo.UpdateStatus(ctx, parsed, status, message); err != nil {
-		logger.Error(ctx, "set document status failed", "document_id", id, "status", status, "error", err)
-		return err
-	}
-	return nil
 }
 
 func (s *documentService) UpdateDocumentInfo(
@@ -492,15 +450,6 @@ func (s *documentService) UpdateDocumentInfo(
 		return nil, err
 	}
 	return &updated, nil
-}
-
-func (s *documentService) FailDocumentIfProcessing(ctx context.Context, id string, message string) (bool, error) {
-	parsed, err := uuid.Parse(strings.TrimSpace(id))
-	if err != nil {
-		return false, fmt.Errorf("invalid document id: %w", err)
-	}
-	return s.repo.UpdateStatusIfCurrent(ctx, parsed, types.DocumentStatusFailed, &message,
-		[]types.DocumentStatus{types.DocumentStatusQueued, types.DocumentStatusProcessing})
 }
 
 func (s *documentService) SearchDocument(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
@@ -576,18 +525,17 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 			logger.Warn(ctx, "cancel reference runs before document deletion failed", "document_id", doc.ID, "error", cancelErr)
 		}
 	}
-	transitioned, err := s.repo.UpdateStatusIfCurrent(ctx, doc.ID, types.DocumentStatusDeleting, nil,
-		[]types.DocumentStatus{types.DocumentStatusUnknown, types.DocumentStatusUploaded, types.DocumentStatusQueued, types.DocumentStatusProcessing, types.DocumentStatusCancelled, types.DocumentStatusReady, types.DocumentStatusFailed})
+	previousSourceState, transitioned, err := s.repo.MarkDeleting(ctx, doc.ID)
 	if err != nil {
 		return err
 	}
-	if !transitioned && doc.Status != types.DocumentStatusDeleting {
-		return fmt.Errorf("document cannot be deleted while status is %q", doc.Status)
+	if !transitioned && doc.SourceState != types.DocumentSourceDeleting {
+		return fmt.Errorf("document cannot be deleted while source state is %q", doc.SourceState)
 	}
 
 	markdown, err := s.repo.GetMarkdown(ctx, doc.ID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		s.restoreDocumentStatusAfterDeleteFailure(ctx, doc)
+		s.restoreDocumentSourceStateAfterDeleteFailure(ctx, doc.ID, previousSourceState)
 		return err
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -595,11 +543,11 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 	}
 	blocks, err := s.repo.ListBlocks(ctx, doc.ID, 0)
 	if err != nil {
-		s.restoreDocumentStatusAfterDeleteFailure(ctx, doc)
+		s.restoreDocumentSourceStateAfterDeleteFailure(ctx, doc.ID, previousSourceState)
 		return err
 	}
 
-	return s.deleteDocumentRelations(ctx, doc, &markdown, blocks)
+	return s.deleteDocumentRelations(ctx, doc, &markdown, blocks, previousSourceState)
 }
 
 // deleteDocumentRelations performs the non-database portion of document
@@ -608,14 +556,14 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 // membership rows atomically.
 func (s *documentService) deleteDocumentRelations(
 	ctx context.Context, document *types.Document, markdown *types.DocumentMarkdown,
-	blocks []types.Block,
+	blocks []types.Block, previousSourceState types.DocumentSourceState,
 ) error {
 	if document.SourceState != types.DocumentSourceMissing {
 		if s.storage == nil {
 			return errors.New("file storage is not configured")
 		}
 		if err := s.storage.Delete(ctx, document.StorageKey); err != nil {
-			s.restoreDocumentStatusAfterDeleteFailure(ctx, document)
+			s.restoreDocumentSourceStateAfterDeleteFailure(ctx, document.ID, previousSourceState)
 			return err
 		}
 		logger.Info(ctx, "document source file deleted", "document_id", document.ID, "storage_key", document.StorageKey)
@@ -658,19 +606,27 @@ func (s *documentService) deleteDocumentRelations(
 	return nil
 }
 
-func (s *documentService) restoreDocumentStatusAfterDeleteFailure(ctx context.Context, document *types.Document) {
-	if restoreErr := s.repo.UpdateStatus(context.WithoutCancel(ctx), document.ID, document.Status, document.ErrorMessage); restoreErr != nil {
-		logger.Warn(ctx, "restore document status after storage delete failure", "document_id", document.ID, "error", restoreErr)
+// dequeueDocumentTasks is reserved for document deletion, where every stage
+// is fenced by source_state=deleting and broad queue cleanup is therefore safe.
+func (s *documentService) dequeueDocumentTasks(ctx context.Context, documentID string) {
+	if s.taskInspector == nil {
+		return
+	}
+	if _, _, err := s.taskInspector.CancelTasksForDocument(context.WithoutCancel(ctx), documentID); err != nil {
+		logger.Warn(ctx, "dequeue deleting document tasks failed", "document_id", documentID, "error", err)
+	}
+}
+
+func (s *documentService) restoreDocumentSourceStateAfterDeleteFailure(ctx context.Context, documentID uuid.UUID, state types.DocumentSourceState) {
+	if restoreErr := s.repo.RestoreSourceState(context.WithoutCancel(ctx), documentID, state); restoreErr != nil {
+		logger.Warn(ctx, "restore document source state after storage delete failure", "document_id", documentID, "error", restoreErr)
 	}
 }
 
 func (s *documentService) recordIncompleteDocumentDeletion(
 	ctx context.Context, document *types.Document, prefix string, cause error,
 ) {
-	message := prefix + ": " + cause.Error()
-	if updateErr := s.repo.UpdateStatus(context.WithoutCancel(ctx), document.ID, types.DocumentStatusDeleting, &message); updateErr != nil {
-		logger.Error(ctx, "record document deletion recovery state failed", "document_id", document.ID, "error", updateErr)
-	}
+	logger.Error(ctx, "document deletion requires recovery", "document_id", document.ID, "reason", prefix, "error", cause)
 }
 
 func (s *documentService) DeleteDocumentList(ctx context.Context, ids []string) error {
@@ -680,16 +636,6 @@ func (s *documentService) DeleteDocumentList(ctx context.Context, ids []string) 
 		}
 	}
 	return nil
-}
-
-func isDocumentStatus(status types.DocumentStatus) bool {
-	switch status {
-	case types.DocumentStatusUploaded, types.DocumentStatusQueued, types.DocumentStatusProcessing,
-		types.DocumentStatusCancelled, types.DocumentStatusDeleting, types.DocumentStatusReady, types.DocumentStatusFailed:
-		return true
-	default:
-		return false
-	}
 }
 
 // Compile-time checks for accidental interface drift.

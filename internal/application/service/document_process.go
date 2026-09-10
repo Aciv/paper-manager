@@ -519,100 +519,61 @@ func isCompletePDFBlockLocation(location types.PDFBlockLocation) bool {
 		*location.MarkdownCodepointEnd >= *location.MarkdownCodepointStart
 }
 
-// CancelDocumentParse changes a cancellable document state to cancelled and
-// asks the task backend to discard queued work. Queue cleanup is deliberately
-// best-effort: the durable cancelled status remains the source of truth.
+// CancelDocumentParse fences only the Markdown stage. The fence is committed
+// before queue cleanup, so a Redis outage cannot permit a late worker write.
 func (s *documentService) CancelDocumentParse(ctx context.Context, id string) (*types.Document, error) {
 	existing, err := s.GetDocumentByID(ctx, id)
 	if err != nil {
 		logger.Error(ctx, "load document for cancellation failed", "document_id", id, "error", err)
 		return nil, err
 	}
-	markdownStage, stageErr := s.repo.GetStage(ctx, existing.ID, types.DocumentStageMarkdown)
-	if stageErr != nil {
-		return nil, stageErr
+	if existing.SourceState == types.DocumentSourceDeleting || existing.SourceState == types.DocumentSourceMerged {
+		return nil, ErrDocumentDeleting
 	}
-	if markdownStage.Status.Active() {
-		if _, _, stageErr = s.repo.CancelStage(ctx, existing.ID, types.DocumentStageMarkdown, markdownStage.Generation); stageErr != nil {
-			return nil, stageErr
-		}
+	stage, err := s.repo.GetStage(ctx, existing.ID, types.DocumentStageMarkdown)
+	if err != nil {
+		return nil, err
 	}
-
-	switch existing.Status {
-	case types.DocumentStatusCancelled:
-		if err := s.cancelDocumentWorkflow(ctx, existing.ID); err != nil {
+	if stage.Status.Active() {
+		cancelledStage, applied, err := s.repo.CancelStage(ctx, existing.ID, stage.Stage, stage.Generation)
+		if err != nil {
 			return nil, err
 		}
-		logger.Info(ctx, "document cancellation already applied", "document_id", existing.ID)
-		return existing, nil
-	case types.DocumentStatusReady, types.DocumentStatusFailed:
-		return nil, ErrDocumentParseFinished
-	case types.DocumentStatusDeleting:
-		return nil, ErrDocumentDeleting
-	case types.DocumentStatusUploaded, types.DocumentStatusQueued, types.DocumentStatusProcessing:
-		// Cancellable states.
-	default:
-		logger.Warn(ctx, "cancel document with unexpected status", "document_id", existing.ID, "status", existing.Status)
-	}
-
-	message := "document parsing cancelled by user"
-	updated, err := s.repo.UpdateStatusIfCurrent(ctx, existing.ID, types.DocumentStatusCancelled, &message,
-		[]types.DocumentStatus{types.DocumentStatusUploaded, types.DocumentStatusQueued, types.DocumentStatusProcessing})
-	if err != nil {
-		logger.Error(ctx, "mark document cancelled failed", "document_id", existing.ID, "error", err)
-		return nil, err
-	}
-	if !updated {
-		current, loadErr := s.GetDocumentByID(ctx, id)
-		if loadErr != nil {
-			return nil, loadErr
-		}
-		if current.Status == types.DocumentStatusCancelled {
-			if err := s.cancelDocumentWorkflow(ctx, current.ID); err != nil {
+		if applied {
+			stage = cancelledStage
+		} else {
+			stage, err = s.repo.GetStage(ctx, existing.ID, stage.Stage)
+			if err != nil {
 				return nil, err
 			}
-			return current, nil
 		}
-		if current.Status == types.DocumentStatusReady || current.Status == types.DocumentStatusFailed {
-			return nil, ErrDocumentParseFinished
-		}
-		if current.Status == types.DocumentStatusDeleting {
-			return nil, ErrDocumentDeleting
-		}
-		return current, nil
 	}
-	existing.Status = types.DocumentStatusCancelled
-	existing.ErrorMessage = &message
-	logger.Info(ctx, "document marked cancelled", "document_id", existing.ID)
-	if err := s.cancelDocumentWorkflow(ctx, existing.ID); err != nil {
+	if stage.Status != types.DocumentStageCancelled {
+		return nil, ErrDocumentParseFinished
+	}
+	s.cancelStageProjectionAndTasks(ctx, existing.ID, stage.Stage, stage.Generation)
+	updated, err := s.GetDocumentByID(ctx, id)
+	if err != nil {
 		return nil, err
 	}
-	return existing, nil
+	logger.Info(ctx, "document markdown cancellation completed", "document_id", existing.ID, "generation", stage.Generation)
+	return updated, nil
 }
 
-func (s *documentService) cancelDocumentWorkflow(ctx context.Context, documentID uuid.UUID) error {
-	if s.cancellations != nil {
-		result, err := s.cancellations.CancelActiveRuns(ctx, documentID, types.ProcessingWorkflowDocument)
-		if err != nil {
-			return err
-		}
-		// A zero-run result is expected while draining legacy payloads. Their
-		// document-status fence is already durable; broad cleanup is restricted
-		// to this compatibility path.
-		if len(result.RunIDs) > 0 {
-			return nil
-		}
-	}
-	s.dequeueDocumentTasks(ctx, documentID.String())
-	return nil
+func (s *documentService) cancelStageProjectionAndTasks(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64) {
+	cancelStageProjectionAndTasks(ctx, s.taskInspector, s.spans, documentID, stage, generation)
 }
 
-func (s *documentService) dequeueDocumentTasks(ctx context.Context, documentID string) {
-	if s.taskInspector == nil {
-		return
+func cancelStageProjectionAndTasks(ctx context.Context, inspector interfaces.TaskInspector, spans interfaces.SpanRecorder, documentID uuid.UUID, stage types.DocumentStage, generation int64) {
+	if inspector != nil {
+		if _, _, err := inspector.CancelTasksForStage(context.WithoutCancel(ctx), documentID.String(), stage, generation); err != nil {
+			logger.Warn(ctx, "cancel document stage tasks failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+		}
 	}
-	if _, _, err := s.taskInspector.CancelTasksForDocument(ctx, documentID); err != nil {
-		logger.Warn(ctx, "dequeue document tasks failed", "document_id", documentID, "error", err)
+	if spans != nil {
+		if err := spans.CancelStageProjection(context.WithoutCancel(ctx), documentID, stage, generation, types.ProcessingErrorUserCancelled, "processing cancelled by user"); err != nil {
+			logger.Warn(ctx, "cancel stage span projection failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+		}
 	}
 }
 
@@ -744,30 +705,19 @@ func NewPaperCatalogResolveTask(
 	return task, options, nil
 }
 
-// NewDocumentRemoteImportTask creates one isolated remote-PDF acquisition.
-// The payload intentionally contains no URL; every retry reloads metadata.
-func NewDocumentRemoteImportTask(
-	payload types.DocumentRemoteImportPayload,
-	timeout time.Duration,
-	maxRetry int,
-) (*asynq.Task, []asynq.Option, error) {
+// NewDocumentRemoteImportTask is intentionally used only by the explicit
+// reference-download action, never by reference parsing or catalog lookup.
+func NewDocumentRemoteImportTask(payload types.DocumentRemoteImportPayload) (*asynq.Task, []asynq.Option, error) {
 	if err := payload.Validate(); err != nil {
 		return nil, nil, err
-	}
-	if timeout <= 0 {
-		timeout = defaultRemotePDFTaskTimeout
-	}
-	if maxRetry <= 0 {
-		maxRetry = defaultRemotePDFTaskMaxRetry
 	}
 	task, err := newPaperInfoJSONTask(types.TypeDocumentRemoteImport, payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode remote document import task: %w", err)
 	}
 	return task, []asynq.Option{
-		asynq.Queue(types.QueueDownload), asynq.Timeout(timeout), asynq.MaxRetry(maxRetry),
-		asynq.TaskID(paperInfoTaskID(types.TypeDocumentRemoteImport,
-			payload.DocumentID, 0, strconv.FormatInt(payload.Generation, 10))),
+		asynq.Queue(types.QueueDownload), asynq.Timeout(defaultRemotePDFTaskTimeout), asynq.MaxRetry(defaultRemotePDFTaskMaxRetry),
+		asynq.TaskID(paperInfoTaskID(types.TypeDocumentRemoteImport, payload.DocumentID, 0, strconv.FormatInt(payload.Generation, 10))),
 	}, nil
 }
 

@@ -8,7 +8,7 @@ import (
 )
 
 // ProcessingSpanStatus is the durable, user-safe state of one asynchronous
-// document operation. It is intentionally separate from DocumentStatus.
+// document operation. It is intentionally separate from document source state.
 type ProcessingSpanStatus string
 
 const (
@@ -150,13 +150,10 @@ func SplitProcessingSpanScopeID(value ProcessingSpanScopeID) []string {
 type DocumentProcessingSpan struct {
 	ID         uuid.UUID `gorm:"type:uuid;primaryKey" json:"id"`
 	DocumentID uuid.UUID `gorm:"column:document_id;type:uuid;not null;index" json:"documentId"`
-	// RunID is nullable while legacy queued tasks and pre-migration rows remain.
-	// New producers attach spans to the durable control-plane run in Phase 2.
-	RunID *uuid.UUID `gorm:"column:run_id;type:uuid;index" json:"runId,omitempty"`
 	// ParentSpanID links a fine-grained operation (for example, one provider
-	// request) to the durable stage that scheduled it. A child may belong to a
-	// different document: reference placeholders are shared by several source
-	// papers, while their run root belongs to the source document.
+	// request) to the stage execution that directly invoked it. It represents
+	// runtime containment within that execution, not cross-queue workflow
+	// ownership or document-stage dependency.
 	ParentSpanID *uuid.UUID `gorm:"column:parent_span_id;type:uuid;index" json:"parentSpanId,omitempty"`
 	// Go int is 64-bit on supported deployments; migration 19 widens the
 	// PostgreSQL column to BIGINT so Unix-nanosecond manual attempts fit.
@@ -182,10 +179,10 @@ func (DocumentProcessingSpan) TableName() string { return "document_processing_s
 
 // DocumentProcessingView is the compact API representation used by the UI.
 type DocumentProcessingView struct {
-	DocumentID        uuid.UUID                `json:"documentId"`
-	DocumentStatus    DocumentStatus           `json:"documentStatus"`
-	LatestAttempt     int                      `json:"latestAttempt"`
-	Runs              []ProcessingRun          `json:"runs,omitempty"`
-	Stages            []DocumentProcessingSpan `json:"stages"`
-	ReferenceProgress *PaperReferenceProgress  `json:"referenceProgress,omitempty"`
+	DocumentID          uuid.UUID                `json:"documentId"`
+	SourceState         DocumentSourceState      `json:"sourceState"`
+	CanonicalDocumentID *uuid.UUID               `json:"canonicalDocumentId,omitempty"`
+	StageStates         []DocumentStageState     `json:"stageStates"`
+	Stages              []DocumentProcessingSpan `json:"stages"`
+	ReferenceProgress   *PaperReferenceProgress  `json:"referenceProgress,omitempty"`
 }

@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	fileservice "paperMaster/internal/application/service/file"
@@ -72,7 +71,7 @@ func (s *documentService) CreateDocumentFromURL(
 		ID: uuid.New(), OriginalFilename: stored.File.Filename,
 		ContentType: stored.File.ContentType, SizeBytes: stored.File.Size,
 		DOI: resolved.DOI, FileSHA256: stored.File.SHA256,
-		StorageKey: stored.File.Key, Status: types.DocumentStatusUploaded,
+		StorageKey:  stored.File.Key,
 		SourceState: types.DocumentSourceAvailable,
 	}
 	created, err := s.repo.Create(ctx, document)
@@ -107,10 +106,50 @@ func (s *documentService) CreateDocumentFromURL(
 	return processed, nil
 }
 
-// ImportRemoteDocument is the independently retryable worker for one resolved
-// bibliography target. The payload contains no URL; current metadata is
-// reloaded and resolved on every attempt.
-func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.Task) (outputErr error) {
+// RequestReferencePDFDownload queues a download only after an explicit user
+// action on one unresolved bibliography target. Parsing and catalog lookup do
+// not call this method.
+func (s *documentService) RequestReferencePDFDownload(ctx context.Context, id string) error {
+	documentID, err := uuid.Parse(strings.TrimSpace(id))
+	if err != nil || documentID == uuid.Nil {
+		return errors.New("invalid document id")
+	}
+	document, err := s.repo.Get(ctx, documentID)
+	if err != nil {
+		return err
+	}
+	if document.SourceState != types.DocumentSourceMissing {
+		return errors.New("reference already has a source document")
+	}
+	if s.papers == nil || s.taskEnqueuer == nil {
+		return errors.New("reference download is not configured")
+	}
+	metadata, err := s.papers.GetMetadata(ctx, documentID.String())
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(metadata.SourceURL) == "" {
+		return types.ErrRemotePDFUnavailable
+	}
+	generation := document.SourceLookupGeneration
+	if generation < 1 {
+		generation = 1
+	}
+	task, options, err := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
+		DocumentID: documentID.String(), Generation: generation,
+	})
+	if err != nil {
+		return err
+	}
+	if err := enqueueManagedTask(ctx, s.taskEnqueuer, task, options, documentID.String()); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+		return err
+	}
+	logger.Info(ctx, "reference PDF download queued by user", "document_id", documentID)
+	return nil
+}
+
+// ImportRemoteDocument executes only an explicit reference-download task.
+func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.Task) error {
 	if task == nil {
 		return errors.New("remote document import task is required")
 	}
@@ -122,33 +161,9 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 		return err
 	}
 	documentID := uuid.MustParse(payload.DocumentID)
-	attempt := stageAttempt(payload.Generation, 0)
-	ctx = logger.WithAttrs(ctx, "document_id", documentID, "task_type", task.Type())
-	rootScopeID := remoteDocumentScopeID(documentID, attempt)
-	var rootSpan uuid.UUID
-	if s.spans != nil {
-		rootSpan, _ = s.spans.BeginSpan(ctx, documentID, attempt,
-			types.ProcessingSpanReferenceDownload, types.ProcessingSpanScopeRemoteDocument, rootScopeID, retryCount(ctx))
-		defer func() {
-			if rootSpan == uuid.Nil {
-				return
-			}
-			if outputErr != nil {
-				code, reason := spanFailure(outputErr)
-				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), rootSpan, types.ProcessingSpanFailed, code, reason)
-			} else {
-				_ = s.spans.FinishSpan(context.WithoutCancel(ctx), rootSpan, types.ProcessingSpanSucceeded, "", "")
-			}
-		}()
-	}
-
 	document, err := s.repo.Get(ctx, documentID)
-	if err != nil {
+	if err != nil || document.SourceState != types.DocumentSourceMissing {
 		return err
-	}
-	if document.SourceState != types.DocumentSourceMissing {
-		// A previous attempt or another worker already acquired the object.
-		return nil
 	}
 	if s.papers == nil || s.urlResolver == nil {
 		return errors.New("remote paper dependencies are not configured")
@@ -157,104 +172,40 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 	if err != nil {
 		return err
 	}
-
-	resolved, err := s.resolveRemoteStage(ctx, rootSpan, document, *metadata, attempt)
+	resolved, err := s.urlResolver.Resolve(ctx, types.PaperURLResolveRequest{SourceURL: metadata.SourceURL, ExplicitDOI: document.DOI})
 	if err != nil {
 		return terminalRemoteImportError(err)
 	}
-
-	deduplicateSpan := s.beginRemoteChild(ctx, rootSpan, document.ID, attempt, types.ProcessingSpanDeduplicateDocument)
 	if duplicate, err := s.findDuplicateDocument(ctx, documentID, resolved.DOI, ""); err != nil {
-		s.finishRemoteChild(ctx, deduplicateSpan, err)
 		return err
 	} else if duplicate != uuid.Nil {
-		redirectErr := s.redirectIncomingCitations(ctx, documentID, duplicate)
-		s.finishRemoteChild(ctx, deduplicateSpan, redirectErr)
-		return redirectErr
+		return s.redirectIncomingCitations(ctx, documentID, duplicate)
 	}
-
-	s.finishRemoteChild(ctx, deduplicateSpan, nil)
-	stored, err := s.downloadRemoteStage(ctx, rootSpan, document, resolved, attempt)
+	stored, err := s.downloadResolvedPDF(ctx, resolved.DownloadURL, resolved.Filename)
 	if err != nil {
 		return terminalRemoteImportError(err)
 	}
-
 	cleanup := true
 	defer func() {
 		if cleanup {
 			_ = s.storage.Delete(context.WithoutCancel(ctx), stored.File.Key)
 		}
 	}()
-	deduplicateSpan = s.beginRemoteChild(ctx, rootSpan, document.ID, attempt, types.ProcessingSpanDeduplicateDocument)
 	if duplicate, err := s.findDuplicateDocument(ctx, documentID, "", stored.File.SHA256); err != nil {
-		s.finishRemoteChild(ctx, deduplicateSpan, err)
 		return err
 	} else if duplicate != uuid.Nil {
-		if err := s.redirectIncomingCitations(ctx, documentID, duplicate); err != nil {
-			s.finishRemoteChild(ctx, deduplicateSpan, err)
-			return err
-		}
-		s.finishRemoteChild(ctx, deduplicateSpan, nil)
-		return nil
+		return s.redirectIncomingCitations(ctx, documentID, duplicate)
 	}
-
-	promoted, err := s.repo.PromoteUnknown(ctx, types.Document{
-		ID: documentID, OriginalFilename: stored.File.Filename,
-		ContentType: stored.File.ContentType, SizeBytes: stored.File.Size,
-		DOI: resolved.DOI, FileSHA256: stored.File.SHA256,
-		StorageKey: stored.File.Key, SourceState: types.DocumentSourceAvailable,
-	})
-
-	if errors.Is(err, types.ErrDuplicateDOI) || errors.Is(err, types.ErrDuplicateFileHash) {
-		duplicate, searchErr := s.findDuplicateDocument(ctx, documentID, resolved.DOI, stored.File.SHA256)
-		if searchErr != nil {
-			s.finishRemoteChild(ctx, deduplicateSpan, searchErr)
-			return searchErr
-		}
-		if duplicate != uuid.Nil {
-			redirectErr := s.redirectIncomingCitations(ctx, documentID, duplicate)
-			s.finishRemoteChild(ctx, deduplicateSpan, redirectErr)
-			return redirectErr
-		}
-	}
-	if err != nil {
-		s.finishRemoteChild(ctx, deduplicateSpan, err)
+	promoted, err := s.repo.PromoteUnknown(ctx, types.Document{ID: documentID, OriginalFilename: stored.File.Filename, ContentType: stored.File.ContentType, SizeBytes: stored.File.Size, DOI: resolved.DOI, FileSHA256: stored.File.SHA256, StorageKey: stored.File.Key, SourceState: types.DocumentSourceAvailable})
+	if err != nil || !promoted {
 		return err
 	}
-	if !promoted {
-		s.finishRemoteChild(ctx, deduplicateSpan, nil)
-		return nil
-	}
-	s.finishRemoteChild(ctx, deduplicateSpan, nil)
 	cleanup = false
-
 	if sourceURL := canonicalRemoteLandingURL(resolved, stored); sourceURL != "" {
 		source := types.PaperMetadataSourceCatalog
 		_, _ = s.papers.UpdateMetadata(ctx, documentID.String(), types.PaperMetadataUpdate{SourceURL: &sourceURL, MetadataSource: &source})
 	}
-
-	enqueueSpan := s.beginRemoteChild(ctx, rootSpan, document.ID, attempt, types.ProcessingSpanEnqueueDocumentProcess)
-	if err := s.enqueueDocumentRecognition(ctx, documentID); err != nil {
-		s.finishRemoteChild(ctx, enqueueSpan, err)
-		return err
-	}
-	s.finishRemoteChild(ctx, enqueueSpan, nil)
-	logger.Info(ctx, "remote reference document acquired", "document_id", documentID, "storage_key", stored.File.Key)
-	return nil
-}
-
-func (s *documentService) resolveRemoteStage(ctx context.Context, parent uuid.UUID, document types.Document, metadata types.PaperMetadata, attempt int) (types.ResolvedPaperURL, error) {
-	span := s.beginRemoteChild(ctx, parent, document.ID, attempt, types.ProcessingSpanResolvePDFURL)
-	resolved, err := s.urlResolver.Resolve(ctx, types.PaperURLResolveRequest{SourceURL: metadata.SourceURL, ExplicitDOI: document.DOI})
-	s.finishRemoteChild(ctx, span, err)
-	return resolved, err
-}
-
-func (s *documentService) downloadRemoteStage(ctx context.Context, parent uuid.UUID, document types.Document, resolved types.ResolvedPaperURL, attempt int) (interfaces.SaveFromURLResult, error) {
-	span := s.beginRemoteChild(ctx, parent, document.ID, attempt, types.ProcessingSpanDownloadPDF)
-	result, err := s.downloadResolvedPDF(ctx, resolved.DownloadURL, resolved.Filename)
-	s.finishRemoteChild(ctx, span, err)
-	return result, err
+	return s.enqueueDocumentRecognition(ctx, documentID)
 }
 
 func (s *documentService) downloadResolvedPDF(ctx context.Context, downloadURL, filename string) (interfaces.SaveFromURLResult, error) {
@@ -310,7 +261,7 @@ func (s *documentService) redirectIncomingCitations(ctx context.Context, placeho
 	if err := s.repo.MergeIntoCanonical(ctx, placeholderID, canonicalID); err != nil {
 		return err
 	}
-	logger.Info(ctx, "remote duplicate citations redirected", "placeholder_document_id", placeholderID, "canonical_document_id", canonicalID)
+	logger.Info(ctx, "reference document merged into canonical", "placeholder_document_id", placeholderID, "canonical_document_id", canonicalID)
 	return nil
 }
 
@@ -325,45 +276,12 @@ func terminalRemoteImportError(err error) error {
 	return err
 }
 
-func (s *documentService) beginRemoteChild(ctx context.Context, parent, documentID uuid.UUID, attempt int, kind types.ProcessingSpanKind) uuid.UUID {
-	if s.spans == nil {
-		return uuid.Nil
-	}
-	scopeID := types.ComposeProcessingSpanScopeID(kind, documentID.String())
-	var id uuid.UUID
-	if parent != uuid.Nil {
-		id, _ = s.spans.BeginChildSpan(ctx, parent, documentID, positiveAttempt(attempt), kind, types.ProcessingSpanScopeRemoteDocument, scopeID, retryCount(ctx))
-	} else {
-		id, _ = s.spans.BeginSpan(ctx, documentID, positiveAttempt(attempt), kind, types.ProcessingSpanScopeRemoteDocument, scopeID, retryCount(ctx))
-	}
-	return id
-}
-
-func (s *documentService) finishRemoteChild(ctx context.Context, spanID uuid.UUID, err error) {
-	if s.spans == nil || spanID == uuid.Nil {
-		return
-	}
-	if err == nil {
-		_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanSucceeded, "", "")
-		return
-	}
-	code, reason := spanFailure(err)
-	_ = s.spans.FinishSpan(context.WithoutCancel(ctx), spanID, types.ProcessingSpanFailed, code, reason)
-}
-
-func remoteDocumentScopeID(documentID uuid.UUID, attempt int) types.ProcessingSpanScopeID {
-	return types.ComposeProcessingSpanScopeID(types.ProcessingSpanReferenceDownload,
-		documentID.String(), strconv.Itoa(positiveAttempt(attempt)))
-}
-
 func positiveAttempt(value int) int {
 	if value > 0 {
 		return value
 	}
 	return 1
 }
-func retryCount(ctx context.Context) int { value, _ := asynq.GetRetryCount(ctx); return value }
-
 func finalAsynqAttempt(ctx context.Context) bool {
 	retry, retryOK := asynq.GetRetryCount(ctx)
 	maximum, maxOK := asynq.GetMaxRetry(ctx)

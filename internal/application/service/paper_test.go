@@ -110,7 +110,7 @@ func (r *paperDocumentRepoStub) EnsureUnknown(
 	_ context.Context, id uuid.UUID,
 ) (types.Document, bool, error) {
 	if document, ok := r.documents[id]; ok {
-		if document.Status != types.DocumentStatusUnknown {
+		if document.SourceState != types.DocumentSourceMissing {
 			return types.Document{}, false, types.ErrUnknownDocumentConflict
 		}
 		return document, false, nil
@@ -118,7 +118,6 @@ func (r *paperDocumentRepoStub) EnsureUnknown(
 	document := types.Document{
 		ID:          id,
 		ContentType: types.UnknownDocumentContentType,
-		Status:      types.DocumentStatusUnknown,
 		SourceState: types.DocumentSourceMissing,
 		StorageKey:  types.UnknownDocumentStorageScheme + id.String(),
 	}
@@ -129,16 +128,16 @@ func (r *paperDocumentRepoStub) EnsureUnknown(
 
 func normalizeTestDocumentSource(document types.Document) types.Document {
 	if document.SourceState == "" {
-		switch document.Status {
-		case types.DocumentStatusUnknown:
+		switch document.SourceState {
+		case types.DocumentSourceMissing:
 			document.SourceState = types.DocumentSourceMissing
-		case types.DocumentStatusDeleting:
+		case types.DocumentSourceDeleting:
 			document.SourceState = types.DocumentSourceDeleting
 		default:
 			document.SourceState = types.DocumentSourceAvailable
 		}
 	}
-	if document.Status == types.DocumentStatusReady && document.MarkdownStatus == "" {
+	if document.SourceState == types.DocumentSourceAvailable && document.MarkdownStatus == "" {
 		document.MarkdownStatus = types.DocumentStageSucceeded
 	}
 	return document
@@ -148,7 +147,7 @@ func (r *paperDocumentRepoStub) DeleteUnknownIfUnreferenced(
 	_ context.Context, id uuid.UUID,
 ) (bool, error) {
 	document, ok := r.documents[id]
-	if !ok || document.Status != types.DocumentStatusUnknown {
+	if !ok || document.SourceState != types.DocumentSourceMissing {
 		return false, nil
 	}
 	if r.referenced != nil && r.referenced(id) {
@@ -160,10 +159,10 @@ func (r *paperDocumentRepoStub) DeleteUnknownIfUnreferenced(
 
 func (r *paperDocumentRepoStub) PromoteUnknown(_ context.Context, document types.Document) (bool, error) {
 	current, ok := r.documents[document.ID]
-	if !ok || current.Status != types.DocumentStatusUnknown {
+	if !ok || current.SourceState != types.DocumentSourceMissing {
 		return false, nil
 	}
-	document.Status = types.DocumentStatusUploaded
+	document.SourceState = types.DocumentSourceAvailable
 	r.documents[document.ID] = document
 	return true, nil
 }
@@ -248,39 +247,27 @@ func (r *paperDocumentRepoStub) Delete(_ context.Context, id uuid.UUID) error {
 	return nil
 }
 
-func (r *paperDocumentRepoStub) UpdateStatus(
-	_ context.Context, id uuid.UUID, status types.DocumentStatus, message *string,
-) error {
+func (r *paperDocumentRepoStub) MarkDeleting(_ context.Context, id uuid.UUID) (types.DocumentSourceState, bool, error) {
 	document, ok := r.documents[id]
 	if !ok {
-		return sql.ErrNoRows
+		return "", false, sql.ErrNoRows
 	}
-	document.Status = status
-	document.ErrorMessage = message
+	previous := document.SourceState
+	if previous == types.DocumentSourceDeleting || previous == types.DocumentSourceMerged {
+		return previous, false, nil
+	}
+	document.SourceState = types.DocumentSourceDeleting
 	r.documents[id] = document
-	return nil
+	return previous, true, nil
 }
 
-func (r *paperDocumentRepoStub) UpdateStatusIfCurrent(
-	_ context.Context,
-	id uuid.UUID,
-	status types.DocumentStatus,
-	message *string,
-	expected []types.DocumentStatus,
-) (bool, error) {
+func (r *paperDocumentRepoStub) RestoreSourceState(_ context.Context, id uuid.UUID, state types.DocumentSourceState) error {
 	document, ok := r.documents[id]
-	if !ok {
-		return false, nil
+	if ok && document.SourceState == types.DocumentSourceDeleting {
+		document.SourceState = state
+		r.documents[id] = document
 	}
-	for _, candidate := range expected {
-		if document.Status == candidate {
-			document.Status = status
-			document.ErrorMessage = message
-			r.documents[id] = document
-			return true, nil
-		}
-	}
-	return false, nil
+	return nil
 }
 
 func (r *paperDocumentRepoStub) UpdateDocumentInfo(
@@ -610,7 +597,7 @@ func newPaperServiceForTest(
 }
 
 func TestPaperServiceRejectsMissingCitationEndpoint(t *testing.T) {
-	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, _, _, citations := newPaperServiceForTest(citing)
 	missingID := uuid.New()
 
@@ -627,7 +614,7 @@ func TestPaperServiceRejectsMissingCitationEndpoint(t *testing.T) {
 }
 
 func TestPaperServiceRejectsSelfCitation(t *testing.T) {
-	document := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	document := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, _, _, _ := newPaperServiceForTest(document)
 
 	_, err := service.AddCitation(context.Background(), document.ID.String(), types.PaperCitationInput{
@@ -640,7 +627,7 @@ func TestPaperServiceRejectsSelfCitation(t *testing.T) {
 }
 
 func TestPaperServiceReusesUnknownPlaceholderAndPreservesRawReference(t *testing.T) {
-	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, documents, _, citations := newPaperServiceForTest(citing)
 	rawReference := "  Example Author. 2026. Example Paper.  "
 
@@ -668,13 +655,13 @@ func TestPaperServiceReusesUnknownPlaceholderAndPreservesRawReference(t *testing
 	if first.RawReference != rawReference {
 		t.Fatalf("raw reference = %q, want original %q", first.RawReference, rawReference)
 	}
-	if documents.documents[first.CitedDocumentID].Status != types.DocumentStatusUnknown {
+	if documents.documents[first.CitedDocumentID].SourceState != types.DocumentSourceMissing {
 		t.Fatal("citation target is not an unknown placeholder")
 	}
 }
 
 func TestPaperServiceStoresStructuredCandidateOnUnknownPlaceholder(t *testing.T) {
-	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, documents, metadata, _ := newPaperServiceForTest(citing)
 	raw := "Ada Lovelace. 2024. Structured Citation. Example Venue."
 	_, err := service.AddCitation(context.Background(), citing.ID.String(), types.PaperCitationInput{
@@ -701,8 +688,8 @@ func TestPaperServiceStoresStructuredCandidateOnUnknownPlaceholder(t *testing.T)
 }
 
 func TestPaperServiceResolveCitationRepointsAndCleansPlaceholder(t *testing.T) {
-	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
-	resolved := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	resolved := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, documents, _, _ := newPaperServiceForTest(citing, resolved)
 	rawReference := "Example Author. 2026. Example Paper."
 
@@ -745,8 +732,8 @@ func TestPaperServiceResolveCitationRepointsAndCleansPlaceholder(t *testing.T) {
 }
 
 func TestPaperServiceMergeExtractedCitationsRetainsResolvedTarget(t *testing.T) {
-	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
-	resolved := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	resolved := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, documents, _, _ := newPaperServiceForTest(citing, resolved)
 	raw := "[7] Ada Lovelace. Notes on the analytical engine."
 
@@ -757,8 +744,8 @@ func TestPaperServiceMergeExtractedCitationsRetainsResolvedTarget(t *testing.T) 
 		t.Fatalf("first MergeExtractedCitations() items=%#v err=%v", first, err)
 	}
 	placeholderID := first[0].CitedDocumentID
-	if documents.documents[placeholderID].Status != types.DocumentStatusUnknown {
-		t.Fatalf("first target status = %q, want unknown", documents.documents[placeholderID].Status)
+	if documents.documents[placeholderID].SourceState != types.DocumentSourceMissing {
+		t.Fatalf("first target source state = %q, want missing", documents.documents[placeholderID].SourceState)
 	}
 	if _, err := service.ResolveCitation(context.Background(), citing.ID.String(), resolved.ID.String(), raw); err != nil {
 		t.Fatalf("ResolveCitation() error = %v", err)
@@ -782,8 +769,8 @@ func TestPaperServiceMergeExtractedCitationsRetainsResolvedTarget(t *testing.T) 
 }
 
 func TestPaperServiceMergeExtractedCitationsDoesNotRemoveManualEdge(t *testing.T) {
-	citing := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
-	manualTarget := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	manualTarget := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, _, _, _ := newPaperServiceForTest(citing, manualTarget)
 	if _, err := service.AddCitation(context.Background(), citing.ID.String(), types.PaperCitationInput{
 		CitedDocumentID: &manualTarget.ID,
@@ -803,7 +790,7 @@ func TestPaperServiceMergeExtractedCitationsDoesNotRemoveManualEdge(t *testing.T
 }
 
 func TestPaperServiceNormalizesMetadataUpdateAndSearch(t *testing.T) {
-	document := types.Document{ID: uuid.New(), Status: types.DocumentStatusReady}
+	document := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	service, _, metadata, _ := newPaperServiceForTest(document)
 	title := "  Example Paper  "
 	authors := []types.PaperAuthor{{Name: "  Alice  ", Affiliation: "  Lab  "}}

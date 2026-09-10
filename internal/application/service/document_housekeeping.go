@@ -11,6 +11,7 @@ import (
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
 
@@ -19,11 +20,15 @@ import (
 // backend before marking a stale row failed so normal queue backpressure is
 // never mistaken for an orphaned parse.
 type DocumentHousekeepingService struct {
-	db             *gorm.DB
-	inspector      interfaces.TaskInspector
-	enabled        bool
-	interval       time.Duration
-	staleThreshold time.Duration
+	db                   *gorm.DB
+	inspector            interfaces.TaskInspector
+	enabled              bool
+	interval             time.Duration
+	staleThreshold       time.Duration
+	spanRetentionEnabled bool
+	spanSuccessRetention time.Duration
+	spanFailureRetention time.Duration
+	spanRetentionBatch   int
 
 	mu     sync.Mutex
 	cancel context.CancelFunc
@@ -48,6 +53,10 @@ func NewDocumentHousekeepingService(
 		db: db, inspector: inspector,
 		enabled:  cfg.DocumentHousekeepingEnabled,
 		interval: interval, staleThreshold: staleThreshold,
+		spanRetentionEnabled: cfg.ProcessingSpanRetentionEnabled,
+		spanSuccessRetention: cfg.ProcessingSpanSuccessRetention,
+		spanFailureRetention: cfg.ProcessingSpanFailureRetention,
+		spanRetentionBatch:   cfg.ProcessingSpanRetentionBatch,
 	}
 }
 
@@ -117,78 +126,97 @@ func (h *DocumentHousekeepingService) runSweep(ctx context.Context) {
 	defer cancel()
 	cutoff := time.Now().UTC().Add(-h.staleThreshold)
 
-	var candidates []types.Document
-	if err := h.db.WithContext(sweepCtx).
-		Where("status IN ? AND updated_at < ?", []types.DocumentStatus{
-			types.DocumentStatusQueued, types.DocumentStatusProcessing,
-		}, cutoff).
-		Find(&candidates).Error; err != nil {
-		logger.Warn(ctx, "document housekeeping candidate query failed", "error", err)
+	h.recoverStaleStages(sweepCtx, cutoff)
+	h.cleanupTerminalSpans(sweepCtx)
+}
+
+type staleStageCandidate struct {
+	DocumentID uuid.UUID
+	Stage      types.DocumentStage
+	Generation int64
+}
+
+func (h *DocumentHousekeepingService) recoverStaleStages(ctx context.Context, cutoff time.Time) {
+	const candidateLimit = 200
+	var candidates []staleStageCandidate
+	query := `SELECT id AS document_id, 'markdown' AS stage, markdown_generation AS generation FROM documents WHERE source_state = 'available' AND markdown_status IN ('queued','running') AND markdown_updated_at < ?
+		UNION ALL SELECT id, 'metadata_extraction', metadata_extraction_generation FROM documents WHERE source_state = 'available' AND metadata_extraction_status IN ('queued','running') AND metadata_extraction_updated_at < ?
+		UNION ALL SELECT id, 'source_lookup', source_lookup_generation FROM documents WHERE source_state IN ('available','missing') AND source_lookup_status IN ('queued','running') AND source_lookup_updated_at < ?
+		UNION ALL SELECT id, 'reference_lookup', reference_lookup_generation FROM documents WHERE source_state = 'available' AND reference_lookup_status IN ('queued','running') AND reference_lookup_updated_at < ?
+		LIMIT ?`
+	if err := h.db.WithContext(ctx).Raw(query, cutoff, cutoff, cutoff, cutoff, candidateLimit).Scan(&candidates).Error; err != nil {
+		logger.Warn(ctx, "document stage housekeeping candidate query failed", "error", err)
 		return
 	}
-
-	stuck, queueSkipped := h.filterOutQueued(sweepCtx, candidates)
-	if len(stuck) == 0 {
-		if queueSkipped > 0 {
-			logger.Info(ctx, "document housekeeping skipped queued documents", "count", queueSkipped)
+	for _, candidate := range candidates {
+		queued := false
+		if h.inspector != nil {
+			var err error
+			queued, err = h.inspector.HasQueuedTaskForStage(ctx, candidate.DocumentID.String(), candidate.Stage, candidate.Generation)
+			if err != nil {
+				logger.Warn(ctx, "document stage queue probe failed; treating as stale", "document_id", candidate.DocumentID, "stage", candidate.Stage, "generation", candidate.Generation, "error", err)
+				queued = false
+			}
 		}
-		return
-	}
-
-	ids := make([]string, 0, len(stuck))
-	for _, document := range stuck {
-		ids = append(ids, document.ID.String())
-	}
-	message := "document task became stale without queued work; recovered by housekeeping"
-	result := h.db.WithContext(sweepCtx).Model(&types.Document{}).
-		Where("id IN ? AND status IN ? AND updated_at < ?", ids, []types.DocumentStatus{
-			types.DocumentStatusQueued, types.DocumentStatusProcessing,
-		}, cutoff).
-		Updates(map[string]interface{}{
-			"status":        types.DocumentStatusFailed,
-			"error_message": message,
-		})
-	if result.Error != nil {
-		logger.Warn(ctx, "document housekeeping update failed", "error", result.Error)
-		return
-	}
-	if result.RowsAffected > 0 {
-		logger.Info(ctx, "document housekeeping recovered stale documents",
-			"recovered", result.RowsAffected, "stale_threshold", h.staleThreshold.String())
-	}
-	if queueSkipped > 0 {
-		logger.Info(ctx, "document housekeeping skipped queued documents", "count", queueSkipped)
+		if queued {
+			continue
+		}
+		stateColumn := stageStateColumn(candidate.Stage)
+		if stateColumn == "" {
+			continue
+		}
+		result := h.db.WithContext(ctx).Model(&types.Document{}).
+			Where("id = ? AND source_state NOT IN ('deleting','merged') AND "+stateColumn+" IN ('queued','running') AND "+stageGenerationColumn(candidate.Stage)+" = ? AND "+stageUpdatedAtColumn(candidate.Stage)+" < ?", candidate.DocumentID, candidate.Generation, cutoff).
+			Updates(map[string]interface{}{stateColumn: types.DocumentStageFailed, stageErrorCodeColumn(candidate.Stage): types.ProcessingErrorTaskFailed, stageErrorMessageColumn(candidate.Stage): "processing task became stale without queued work", stageUpdatedAtColumn(candidate.Stage): time.Now().UTC()})
+		if result.Error != nil {
+			logger.Warn(ctx, "document stage housekeeping update failed", "document_id", candidate.DocumentID, "stage", candidate.Stage, "error", result.Error)
+			continue
+		}
+		if result.RowsAffected > 0 {
+			logger.Info(ctx, "document stage recovered as stale", "document_id", candidate.DocumentID, "stage", candidate.Stage, "generation", candidate.Generation)
+		}
 	}
 }
 
-// filterOutQueued removes candidates that still have pending, scheduled,
-// retrying, or active work. An inspector error keeps the row as a candidate:
-// this matches the existing stale-row recovery fail-safe and makes backend
-// visibility failures observable through a later conditional update.
-func (h *DocumentHousekeepingService) filterOutQueued(
-	ctx context.Context, candidates []types.Document,
-) (kept []types.Document, skipped int) {
-	if h.inspector == nil || len(candidates) == 0 {
-		return candidates, 0
+func (h *DocumentHousekeepingService) cleanupTerminalSpans(ctx context.Context) {
+	if !h.spanRetentionEnabled || h.spanRetentionBatch < 1 {
+		return
 	}
-	kept = candidates[:0]
-	for _, document := range candidates {
-		queued, err := h.inspector.HasQueuedTaskTypeForDocument(
-			ctx,
-			document.ID.String(),
-			types.TypeDocumentRecognize,
-		)
-		if err != nil {
-			logger.Warn(ctx, "document housekeeping queue probe failed; treating as stale",
-				"document_id", document.ID, "error", err)
-			kept = append(kept, document)
-			continue
-		}
-		if queued {
-			skipped++
-			continue
-		}
-		kept = append(kept, document)
+	now := time.Now().UTC()
+	result := h.db.WithContext(ctx).Exec(`WITH doomed AS (
+		SELECT s.id FROM document_processing_spans s
+		WHERE s.finished_at IS NOT NULL
+		  AND ((s.status = 'succeeded' AND s.finished_at < ?) OR (s.status IN ('failed','cancelled') AND s.finished_at < ?))
+		  AND NOT EXISTS (SELECT 1 FROM document_processing_spans child WHERE child.parent_span_id = s.id)
+		ORDER BY s.finished_at ASC, s.id ASC LIMIT ?
+	) DELETE FROM document_processing_spans WHERE id IN (SELECT id FROM doomed)`, now.Add(-h.spanSuccessRetention), now.Add(-h.spanFailureRetention), h.spanRetentionBatch)
+	if result.Error != nil {
+		logger.Warn(ctx, "processing span retention failed", "error", result.Error)
+		return
 	}
-	return kept, skipped
+	if result.RowsAffected > 0 {
+		logger.Info(ctx, "terminal processing spans retained", "deleted", result.RowsAffected)
+	}
+}
+
+func stageStateColumn(stage types.DocumentStage) string      { return stageColumn(stage, "status") }
+func stageGenerationColumn(stage types.DocumentStage) string { return stageColumn(stage, "generation") }
+func stageUpdatedAtColumn(stage types.DocumentStage) string  { return stageColumn(stage, "updated_at") }
+func stageErrorCodeColumn(stage types.DocumentStage) string  { return stageColumn(stage, "error_code") }
+func stageErrorMessageColumn(stage types.DocumentStage) string {
+	return stageColumn(stage, "error_message")
+}
+func stageColumn(stage types.DocumentStage, suffix string) string {
+	switch stage {
+	case types.DocumentStageMarkdown:
+		return "markdown_" + suffix
+	case types.DocumentStageMetadataExtraction:
+		return "metadata_extraction_" + suffix
+	case types.DocumentStageSourceLookup:
+		return "source_lookup_" + suffix
+	case types.DocumentStageReferenceLookup:
+		return "reference_lookup_" + suffix
+	default:
+		return ""
+	}
 }

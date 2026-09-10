@@ -119,25 +119,27 @@ func (a *asynqTaskInspector) CancelTasksForDocument(
 	return deleted, cancelled, nil
 }
 
-func (a *asynqTaskInspector) CancelTasksForRun(
-	ctx context.Context, ownerDocumentID, runID string, kind types.ProcessingWorkflowKind,
+// CancelTasksForStage uses the same queue scan as document deletion, but its
+// matcher includes the durable stage generation. This prevents cancelling a
+// newer retry while a stale cancel request is being cleaned up.
+func (a *asynqTaskInspector) CancelTasksForStage(
+	ctx context.Context, documentID string, stage types.DocumentStage, generation int64,
 ) (int, int, error) {
-	if a == nil || a.inspector == nil || ownerDocumentID == "" || runID == "" {
+	if a == nil || a.inspector == nil || documentID == "" || !stage.Valid() || generation < 1 {
 		return 0, 0, nil
 	}
 	deleted, cancelled := 0, 0
 	var cleanupErrors []error
 	for _, queue := range queuesScanned {
-		states := []struct {
+		for _, state := range []struct {
 			name string
 			list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)
 		}{
 			{"pending", a.inspector.ListPendingTasks},
 			{"scheduled", a.inspector.ListScheduledTasks},
 			{"retry", a.inspector.ListRetryTasks},
-		}
-		for _, state := range states {
-			matches, err := a.listRunTaskIDs(ctx, queue, state.name, ownerDocumentID, runID, kind, state.list)
+		} {
+			matches, err := a.listStageTaskIDs(queue, state.name, documentID, stage, generation, state.list)
 			if err != nil {
 				cleanupErrors = append(cleanupErrors, err)
 				continue
@@ -150,7 +152,7 @@ func (a *asynqTaskInspector) CancelTasksForRun(
 				deleted++
 			}
 		}
-		matches, err := a.listRunTaskIDs(ctx, queue, "active", ownerDocumentID, runID, kind, a.inspector.ListActiveTasks)
+		matches, err := a.listStageTaskIDs(queue, "active", documentID, stage, generation, a.inspector.ListActiveTasks)
 		if err != nil {
 			cleanupErrors = append(cleanupErrors, err)
 			continue
@@ -163,18 +165,11 @@ func (a *asynqTaskInspector) CancelTasksForRun(
 			cancelled++
 		}
 	}
-	logger.Info(ctx, "processing run queue cancellation completed",
-		"document_id", ownerDocumentID, "run_id", runID, "workflow", kind,
-		"deleted_from_queue", deleted, "active_cancel_signaled", cancelled)
+	logger.Info(ctx, "document stage task cancellation completed", "document_id", documentID, "stage", stage, "generation", generation, "deleted_from_queue", deleted, "active_cancel_signaled", cancelled)
 	return deleted, cancelled, errors.Join(cleanupErrors...)
 }
 
-func (a *asynqTaskInspector) listRunTaskIDs(
-	ctx context.Context,
-	queue, state, ownerDocumentID, runID string,
-	kind types.ProcessingWorkflowKind,
-	list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error),
-) ([]string, error) {
+func (a *asynqTaskInspector) listStageTaskIDs(queue, state, documentID string, stage types.DocumentStage, generation int64, list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)) ([]string, error) {
 	result := make([]string, 0)
 	for page := 1; ; page++ {
 		tasks, err := list(queue, asynq.PageSize(listPageSize), asynq.Page(page))
@@ -185,7 +180,7 @@ func (a *asynqTaskInspector) listRunTaskIDs(
 			return result, fmt.Errorf("list %s tasks in %s: %w", state, queue, err)
 		}
 		for _, task := range tasks {
-			if matchesProcessingRun(task.Type, task.Payload, ownerDocumentID, runID, kind) {
+			if matchesDocumentStage(task.Type, task.Payload, documentID, stage, generation) {
 				result = append(result, task.ID)
 			}
 		}
@@ -195,99 +190,12 @@ func (a *asynqTaskInspector) listRunTaskIDs(
 	}
 }
 
-func matchesProcessingRun(string, []byte, string, string, types.ProcessingWorkflowKind) bool {
-	// New tasks are fenced by document stage/generation and never carry run
-	// ownership. Historical run rows remain queryable until Phase E, but cannot
-	// match or cancel current work.
-	return false
-}
-
-// CancelReferenceTasksForDocuments removes only the new single-document
-// scheduler-owned reference tasks. Run ownership is looked up by the caller
-// before this best-effort queue sweep, so no run ID needs to leak into JSON.
-func (a *asynqTaskInspector) CancelReferenceTasksForDocuments(ctx context.Context, documentIDs []string) (int, int, error) {
-	if a == nil || a.inspector == nil || len(documentIDs) == 0 {
-		return 0, 0, nil
-	}
-	targets := make(map[string]struct{}, len(documentIDs))
-	for _, id := range documentIDs {
-		if id != "" {
-			targets[id] = struct{}{}
-		}
-	}
-	deleted, cancelled := 0, 0
-	var cleanupErrors []error
-	for _, queue := range queuesScanned {
-		for _, state := range []struct {
-			list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error)
-			name string
-		}{
-			{a.inspector.ListPendingTasks, "pending"}, {a.inspector.ListScheduledTasks, "scheduled"}, {a.inspector.ListRetryTasks, "retry"},
-		} {
-			matches, err := a.listReferenceTargetTaskIDs(queue, state.name, targets, state.list)
-			if err != nil {
-				cleanupErrors = append(cleanupErrors, err)
-				continue
-			}
-			for _, taskID := range matches {
-				if err := a.inspector.DeleteTask(queue, taskID); err != nil {
-					cleanupErrors = append(cleanupErrors, fmt.Errorf("delete scheduler target task %s from %s: %w", taskID, queue, err))
-					continue
-				}
-				deleted++
-			}
-		}
-		matches, err := a.listReferenceTargetTaskIDs(queue, "active", targets, a.inspector.ListActiveTasks)
-		if err != nil {
-			cleanupErrors = append(cleanupErrors, err)
-			continue
-		}
-		for _, taskID := range matches {
-			if err := a.inspector.CancelProcessing(taskID); err != nil {
-				cleanupErrors = append(cleanupErrors, fmt.Errorf("signal scheduler target task %s in %s: %w", taskID, queue, err))
-				continue
-			}
-			cancelled++
-		}
-	}
-	return deleted, cancelled, errors.Join(cleanupErrors...)
-}
-
-func (a *asynqTaskInspector) listReferenceTargetTaskIDs(
-	queue, state string,
-	targets map[string]struct{},
-	list func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error),
-) ([]string, error) {
-	result := make([]string, 0)
-	for page := 1; ; page++ {
-		tasks, err := list(queue, asynq.PageSize(listPageSize), asynq.Page(page))
-		if err != nil {
-			if errors.Is(err, asynq.ErrQueueNotFound) {
-				return result, nil
-			}
-			return result, fmt.Errorf("list %s scheduler target tasks in %s: %w", state, queue, err)
-		}
-		for _, task := range tasks {
-			if matchesSchedulerReferenceTask(task.Type, task.Payload, targets) {
-				result = append(result, task.ID)
-			}
-		}
-		if len(tasks) < listPageSize {
-			return result, nil
-		}
-	}
-}
-
-func matchesSchedulerReferenceTask(taskType string, payload []byte, targets map[string]struct{}) bool {
-	if taskType != types.TypePaperCatalogResolve {
+func matchesDocumentStage(taskType string, payload []byte, documentID string, stage types.DocumentStage, generation int64) bool {
+	if _, ok := taskTypesForDocumentCancel[taskType]; !ok {
 		return false
 	}
 	var probe DocumentIDProbe
-	if json.Unmarshal(payload, &probe) != nil || probe.Stage != types.DocumentStageSourceLookup || probe.Generation <= 0 {
-		return false
-	}
-	_, ok := targets[probe.DocumentID]
-	return ok
+	return json.Unmarshal(payload, &probe) == nil && probe.DocumentID == documentID && probe.Stage == stage && probe.Generation == generation
 }
 
 // HasQueuedTasksForDocument reports whether any pending / scheduled /
@@ -351,6 +259,37 @@ func (a *asynqTaskInspector) HasQueuedTaskTypeForDocument(
 				lister.list,
 			) {
 				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (a *asynqTaskInspector) HasQueuedTaskForStage(ctx context.Context, documentID string, stage types.DocumentStage, generation int64) (bool, error) {
+	if a == nil || a.inspector == nil || documentID == "" || !stage.Valid() || generation < 1 {
+		return false, nil
+	}
+	listers := []func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error){
+		a.inspector.ListPendingTasks, a.inspector.ListScheduledTasks, a.inspector.ListRetryTasks, a.inspector.ListActiveTasks,
+	}
+	for _, queue := range queuesScanned {
+		for _, list := range listers {
+			for page := 1; ; page++ {
+				tasks, err := list(queue, asynq.PageSize(listPageSize), asynq.Page(page))
+				if err != nil {
+					if errors.Is(err, asynq.ErrQueueNotFound) {
+						break
+					}
+					return false, fmt.Errorf("inspect stage tasks in %s: %w", queue, err)
+				}
+				for _, task := range tasks {
+					if matchesDocumentStage(task.Type, task.Payload, documentID, stage, generation) {
+						return true, nil
+					}
+				}
+				if len(tasks) < listPageSize {
+					break
+				}
 			}
 		}
 	}
@@ -556,11 +495,7 @@ func (noopTaskInspector) CancelTasksForDocument(
 	return 0, 0, nil
 }
 
-func (noopTaskInspector) CancelTasksForRun(context.Context, string, string, types.ProcessingWorkflowKind) (int, int, error) {
-	return 0, 0, nil
-}
-
-func (noopTaskInspector) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
+func (noopTaskInspector) CancelTasksForStage(context.Context, string, types.DocumentStage, int64) (int, int, error) {
 	return 0, 0, nil
 }
 
@@ -578,5 +513,9 @@ func (noopTaskInspector) HasQueuedTaskTypeForDocument(
 	documentID string,
 	taskType string,
 ) (bool, error) {
+	return false, nil
+}
+
+func (noopTaskInspector) HasQueuedTaskForStage(context.Context, string, types.DocumentStage, int64) (bool, error) {
 	return false, nil
 }

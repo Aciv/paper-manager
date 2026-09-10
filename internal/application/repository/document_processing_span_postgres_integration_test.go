@@ -14,18 +14,17 @@ import (
 )
 
 func TestDocumentProcessingSpanViewPostgres(t *testing.T) {
-	db, cleanup := openProcessingRunTestDatabase(t)
+	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
 	documentID := uuid.New()
 	if err := db.Exec(`INSERT INTO documents
-		(id, original_filename, content_type, size_bytes, storage_key, status)
-		VALUES (?, 'span-view.pdf', 'application/pdf', 1, ?, 'uploaded')`,
+		(id, original_filename, content_type, size_bytes, storage_key)
+		VALUES (?, 'span-view.pdf', 'application/pdf', 1, ?)`,
 		documentID, "phase4/"+documentID.String()).Error; err != nil {
 		t.Fatalf("insert document: %v", err)
 	}
 	repo := NewDocumentProcessingSpanRepository(db)
-	runRepo := NewProcessingRunRepository(db)
 
 	terminal, err := repo.UpsertRunning(ctx, types.DocumentProcessingSpan{
 		DocumentID: documentID, Attempt: 1, Kind: types.ProcessingSpanRecognition,
@@ -50,39 +49,6 @@ func TestDocumentProcessingSpanViewPostgres(t *testing.T) {
 	if latest, err := repo.LatestAttempt(ctx, documentID, types.ProcessingSpanRecognition); err != nil || latest != 1 {
 		t.Fatalf("LatestAttempt(recognition) = %d, error %v", latest, err)
 	}
-	targetID := uuid.New()
-	if err := db.Exec(`INSERT INTO documents
-		(id, original_filename, content_type, size_bytes, storage_key, status, source_state)
-		VALUES (?, 'target.pdf', 'application/pdf', 1, ?, 'unknown', 'missing')`,
-		targetID, "unknown://"+targetID.String()).Error; err != nil {
-		t.Fatalf("insert target document: %v", err)
-	}
-	run, created, err := runRepo.CreateQueued(ctx, types.ProcessingRun{
-		OwnerDocumentID: documentID, WorkflowKind: types.ProcessingWorkflowReferenceDownload,
-		IdempotencyKey: "span-view-cross-document", Attempt: 1,
-	})
-	if err != nil || !created {
-		t.Fatalf("create view run: created=%t error=%v", created, err)
-	}
-	crossDocument, err := repo.UpsertRunning(ctx, types.DocumentProcessingSpan{
-		DocumentID: targetID, RunID: &run.ID, Attempt: 1, Kind: types.ProcessingSpanDownloadPDF,
-		Scope: types.ProcessingSpanScopeRemoteDocument, ScopeID: "download_pdf:cross-document",
-	})
-	if err != nil {
-		t.Fatalf("insert cross-document stage: %v", err)
-	}
-	linked, err := repo.ListCurrent(ctx, documentID, []uuid.UUID{run.ID}, 100)
-	if err != nil {
-		t.Fatalf("list cross-document current stages: %v", err)
-	}
-	foundCrossDocument := false
-	for _, stage := range linked {
-		foundCrossDocument = foundCrossDocument || stage.ID == crossDocument.ID
-	}
-	if !foundCrossDocument {
-		t.Fatal("processing view omitted cross-document run stage")
-	}
-
 	now := time.Now().UTC()
 	rows := make([]types.DocumentProcessingSpan, 0, 750)
 	for scope := 0; scope < 150; scope++ {
@@ -100,7 +66,7 @@ func TestDocumentProcessingSpanViewPostgres(t *testing.T) {
 	if err := db.CreateInBatches(rows, 100).Error; err != nil {
 		t.Fatalf("insert span history: %v", err)
 	}
-	current, err := repo.ListCurrent(ctx, documentID, nil, 1000)
+	current, err := repo.ListCurrent(ctx, documentID, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}

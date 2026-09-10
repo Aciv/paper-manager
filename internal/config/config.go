@@ -13,14 +13,17 @@ import (
 const DefaultMaxUploadSize int64 = 100 << 20 // 100 MiB
 
 const (
-	defaultDocumentHousekeepingInterval                = 5 * time.Minute
-	defaultDocumentStaleThreshold                      = time.Hour + 10*time.Minute
-	defaultPaperCatalogTimeout                         = 10 * time.Second
-	defaultPaperCatalogConcurrency                     = 4
-	defaultPaperExtractionTaskTimeout                  = 2 * time.Minute
-	defaultPaperExtractionTaskMaxRetry                 = 3
-	defaultPaperCatalogTaskTimeout                     = 10 * time.Minute
-	defaultPaperCatalogTaskMaxRetry                    = 5
+	defaultDocumentHousekeepingInterval   = 5 * time.Minute
+	defaultDocumentStaleThreshold         = time.Hour + 10*time.Minute
+	defaultProcessingSpanSuccessRetention = 30 * 24 * time.Hour
+	defaultProcessingSpanFailureRetention = 90 * 24 * time.Hour
+	defaultProcessingSpanRetentionBatch   = 500
+	defaultPaperCatalogTimeout            = 10 * time.Second
+	defaultPaperCatalogConcurrency        = 4
+	defaultPaperExtractionTaskTimeout     = 2 * time.Minute
+	defaultPaperExtractionTaskMaxRetry    = 3
+	defaultPaperCatalogTaskTimeout        = 10 * time.Minute
+	defaultPaperCatalogTaskMaxRetry       = 5
 	// defaultPaperReferenceCatalogMaxPerDocument is the per-document
 	// registration budget, not a running-concurrency bound: it caps how many
 	// unresolved citations one dispatch registers into the scheduler queue,
@@ -33,12 +36,9 @@ const (
 	defaultPaperReferenceCatalogPerDocumentConcurrency = 1
 	defaultRemotePDFDownloadTimeout                    = 2 * time.Minute
 	defaultRemotePDFMaxRedirects                       = 5
-	defaultRemotePDFTaskTimeout                        = 5 * time.Minute
-	defaultRemotePDFTaskMaxRetry                       = 4
 	defaultRemotePDFDownloadConcurrency                = 2
 	defaultRemotePDFHostConcurrency                    = 1
 	defaultRemotePDFHostSpacing                        = time.Second
-	defaultRemotePDFDispatchLimit                      = 100
 )
 
 // Config contains the infrastructure options selected at process startup.
@@ -52,18 +52,22 @@ type Config struct {
 	// RecognitionOutputDirectory is the shared, trusted root where a
 	// directory-mode recognizer may create an output package. The API copies
 	// only the Markdown file from this directory into durable FileStorage.
-	RecognitionOutputDirectory   string
-	MaxUploadSize                int64
-	AutoMigrate                  bool
-	DocumentHousekeepingEnabled  bool
-	DocumentHousekeepingInterval time.Duration
-	DocumentStaleThreshold       time.Duration
-	DocumentRecognitionDriver    string
-	ParserGRPCAddress            string
-	ParserGRPCMaxMessageSize     int
-	PaperCatalogProviders        []string
-	PaperCatalogTimeout          time.Duration
-	PaperCatalogConcurrency      int
+	RecognitionOutputDirectory     string
+	MaxUploadSize                  int64
+	AutoMigrate                    bool
+	DocumentHousekeepingEnabled    bool
+	DocumentHousekeepingInterval   time.Duration
+	DocumentStaleThreshold         time.Duration
+	ProcessingSpanRetentionEnabled bool
+	ProcessingSpanSuccessRetention time.Duration
+	ProcessingSpanFailureRetention time.Duration
+	ProcessingSpanRetentionBatch   int
+	DocumentRecognitionDriver      string
+	ParserGRPCAddress              string
+	ParserGRPCMaxMessageSize       int
+	PaperCatalogProviders          []string
+	PaperCatalogTimeout            time.Duration
+	PaperCatalogConcurrency        int
 	// Per-provider policies override the legacy shared timeout/concurrency.
 	// Keys use the stable catalog provider name (for example "arxiv").
 	PaperCatalogProviderTimeouts                map[string]time.Duration
@@ -82,12 +86,9 @@ type Config struct {
 	PaperReferenceCatalogPerDocumentConcurrency int
 	RemotePDFDownloadTimeout                    time.Duration
 	RemotePDFMaxRedirects                       int
-	RemotePDFTaskTimeout                        time.Duration
-	RemotePDFTaskMaxRetry                       int
 	RemotePDFDownloadConcurrency                int
 	RemotePDFHostConcurrency                    int
 	RemotePDFHostSpacing                        time.Duration
-	RemotePDFDispatchLimit                      int
 }
 
 func Load() (Config, error) {
@@ -110,6 +111,18 @@ func Load() (Config, error) {
 	}
 	if staleThreshold < housekeepingInterval {
 		return Config{}, fmt.Errorf("DOCUMENT_STALE_THRESHOLD must be at least DOCUMENT_HOUSEKEEPING_INTERVAL")
+	}
+	spanSuccessRetention, err := durationEnv("PROCESSING_SPAN_SUCCESS_RETENTION", defaultProcessingSpanSuccessRetention)
+	if err != nil || spanSuccessRetention <= 0 {
+		return Config{}, fmt.Errorf("PROCESSING_SPAN_SUCCESS_RETENTION must be a positive duration")
+	}
+	spanFailureRetention, err := durationEnv("PROCESSING_SPAN_FAILURE_RETENTION", defaultProcessingSpanFailureRetention)
+	if err != nil || spanFailureRetention < spanSuccessRetention {
+		return Config{}, fmt.Errorf("PROCESSING_SPAN_FAILURE_RETENTION must be at least PROCESSING_SPAN_SUCCESS_RETENTION")
+	}
+	spanRetentionBatch, err := positiveIntEnv("PROCESSING_SPAN_RETENTION_BATCH", defaultProcessingSpanRetentionBatch, 5000)
+	if err != nil {
+		return Config{}, err
 	}
 	parserMessageSize := maxUploadSize + (1 << 20)
 	if value := strings.TrimSpace(os.Getenv("PARSER_GRPC_MAX_MESSAGE_SIZE")); value != "" {
@@ -196,14 +209,6 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	remotePDFTaskTimeout, err := durationEnv("REMOTE_PDF_TASK_TIMEOUT", defaultRemotePDFTaskTimeout)
-	if err != nil {
-		return Config{}, err
-	}
-	remotePDFTaskMaxRetry, err := positiveIntEnv("REMOTE_PDF_TASK_MAX_RETRY", defaultRemotePDFTaskMaxRetry, 20)
-	if err != nil {
-		return Config{}, err
-	}
 	remotePDFDownloadConcurrency, err := positiveIntEnv("REMOTE_PDF_DOWNLOAD_CONCURRENCY", defaultRemotePDFDownloadConcurrency, 32)
 	if err != nil {
 		return Config{}, err
@@ -213,10 +218,6 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	remotePDFHostSpacing, err := durationEnv("REMOTE_PDF_HOST_SPACING", defaultRemotePDFHostSpacing)
-	if err != nil {
-		return Config{}, err
-	}
-	remotePDFDispatchLimit, err := positiveIntEnv("REMOTE_PDF_DISPATCH_LIMIT", defaultRemotePDFDispatchLimit, 1000)
 	if err != nil {
 		return Config{}, err
 	}
@@ -233,6 +234,10 @@ func Load() (Config, error) {
 		DocumentHousekeepingEnabled:                 !strings.EqualFold(env("DOCUMENT_HOUSEKEEPING_ENABLED", "true"), "false"),
 		DocumentHousekeepingInterval:                housekeepingInterval,
 		DocumentStaleThreshold:                      staleThreshold,
+		ProcessingSpanRetentionEnabled:              !strings.EqualFold(env("PROCESSING_SPAN_RETENTION_ENABLED", "true"), "false"),
+		ProcessingSpanSuccessRetention:              spanSuccessRetention,
+		ProcessingSpanFailureRetention:              spanFailureRetention,
+		ProcessingSpanRetentionBatch:                spanRetentionBatch,
 		DocumentRecognitionDriver:                   strings.ToLower(env("DOCUMENT_RECOGNITION_DRIVER", "default")),
 		ParserGRPCAddress:                           env("PARSER_GRPC_ADDR", "127.0.0.1:50051"),
 		ParserGRPCMaxMessageSize:                    int(parserMessageSize),
@@ -255,12 +260,9 @@ func Load() (Config, error) {
 		PaperReferenceCatalogPerDocumentConcurrency: paperReferenceCatalogPerDocumentConcurrency,
 		RemotePDFDownloadTimeout:                    remotePDFDownloadTimeout,
 		RemotePDFMaxRedirects:                       remotePDFMaxRedirects,
-		RemotePDFTaskTimeout:                        remotePDFTaskTimeout,
-		RemotePDFTaskMaxRetry:                       remotePDFTaskMaxRetry,
 		RemotePDFDownloadConcurrency:                remotePDFDownloadConcurrency,
 		RemotePDFHostConcurrency:                    remotePDFHostConcurrency,
 		RemotePDFHostSpacing:                        remotePDFHostSpacing,
-		RemotePDFDispatchLimit:                      remotePDFDispatchLimit,
 	}, nil
 }
 

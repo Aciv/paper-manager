@@ -7,8 +7,7 @@ const (
 	QueueCritical = "critical"
 	QueueDefault  = "default"
 	QueueLow      = "low"
-	// QueueDownload isolates bounded remote PDF traffic from parser and catalog
-	// workers so a slow publisher cannot starve normal document processing.
+	// QueueDownload is reserved for explicit user-requested reference PDF downloads.
 	QueueDownload = "download"
 )
 

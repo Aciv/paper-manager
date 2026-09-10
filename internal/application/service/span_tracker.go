@@ -17,17 +17,23 @@ import (
 
 const processingSpanHeartbeatInterval = 15 * time.Second
 
-type spanRecorder struct {
+type spanTracker struct {
 	repo interfaces.DocumentProcessingSpanRepository
-	runs interfaces.ProcessingRunRepository
 }
 
-// NewSpanRecorder creates the durable, observation-only span implementation.
-func NewSpanRecorder(repo interfaces.DocumentProcessingSpanRepository, runs interfaces.ProcessingRunRepository) interfaces.SpanRecorder {
-	return &spanRecorder{repo: repo, runs: runs}
+// NewSpanTracker creates the single span implementation. Its recorder and
+// view-query interfaces are deliberately injected separately.
+func NewSpanTracker(repo interfaces.DocumentProcessingSpanRepository) interfaces.SpanTracker {
+	return &spanTracker{repo: repo}
 }
 
-func (s *spanRecorder) BeginSpan(ctx context.Context, documentID uuid.UUID,
+func NewSpanRecorder(tracker interfaces.SpanTracker) interfaces.SpanRecorder { return tracker }
+
+func NewProcessingViewQuery(tracker interfaces.SpanTracker) interfaces.ProcessingViewQuery {
+	return tracker
+}
+
+func (s *spanTracker) BeginSpan(ctx context.Context, documentID uuid.UUID,
 	attempt int, kind types.ProcessingSpanKind,
 	scope types.ProcessingSpanScope,
 	scopeID types.ProcessingSpanScopeID,
@@ -35,7 +41,7 @@ func (s *spanRecorder) BeginSpan(ctx context.Context, documentID uuid.UUID,
 	return s.begin(ctx, uuid.Nil, documentID, attempt, kind, scope, scopeID, retryCount)
 }
 
-func (s *spanRecorder) BeginChildSpan(ctx context.Context, parentSpanID uuid.UUID,
+func (s *spanTracker) BeginChildSpan(ctx context.Context, parentSpanID uuid.UUID,
 	documentID uuid.UUID, attempt int,
 	kind types.ProcessingSpanKind,
 	scope types.ProcessingSpanScope,
@@ -44,7 +50,7 @@ func (s *spanRecorder) BeginChildSpan(ctx context.Context, parentSpanID uuid.UUI
 	return s.begin(ctx, parentSpanID, documentID, attempt, kind, scope, scopeID, retryCount)
 }
 
-func (s *spanRecorder) begin(ctx context.Context,
+func (s *spanTracker) begin(ctx context.Context,
 	parentSpanID uuid.UUID,
 	documentID uuid.UUID,
 	attempt int,
@@ -61,9 +67,6 @@ func (s *spanRecorder) begin(ctx context.Context,
 		Scope:      scope,
 		ScopeID:    scopeID,
 		RetryCount: retryCount}
-	if runID := processingRunID(ctx); runID != uuid.Nil {
-		span.RunID = &runID
-	}
 	if parentSpanID != uuid.Nil {
 		span.ParentSpanID = &parentSpanID
 	}
@@ -84,14 +87,14 @@ func (s *spanRecorder) begin(ctx context.Context,
 	return row.ID, nil
 }
 
-func (s *spanRecorder) Heartbeat(ctx context.Context, spanID uuid.UUID) error {
+func (s *spanTracker) Heartbeat(ctx context.Context, spanID uuid.UUID) error {
 	if s == nil || s.repo == nil || spanID == uuid.Nil {
 		return nil
 	}
 	return s.repo.Heartbeat(ctx, spanID)
 }
 
-func (s *spanRecorder) FinishSpan(ctx context.Context, spanID uuid.UUID, status types.ProcessingSpanStatus, code, reason string) error {
+func (s *spanTracker) FinishSpan(ctx context.Context, spanID uuid.UUID, status types.ProcessingSpanStatus, code, reason string) error {
 	if s == nil || s.repo == nil || spanID == uuid.Nil {
 		return nil
 	}
@@ -106,75 +109,64 @@ func (s *spanRecorder) FinishSpan(ctx context.Context, spanID uuid.UUID, status 
 	return s.repo.Finish(ctx, spanID, status, code, reason)
 }
 
-func (s *spanRecorder) CancelSpansForRun(ctx context.Context, runID uuid.UUID, code, reason string) error {
-	if s == nil || s.repo == nil || runID == uuid.Nil {
+func (s *spanTracker) CancelStageProjection(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64, code, reason string) error {
+	if s == nil || s.repo == nil || documentID == uuid.Nil || generation < 1 {
 		return nil
 	}
 	code, reason = safeSpanOutcome(code, reason)
-	return s.repo.CancelActiveRun(ctx, runID, code, reason)
+	return s.repo.CancelActiveStage(ctx, documentID, stage, generation, code, reason)
 }
 
-func (s *spanRecorder) ScopeCancelled(
-	ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind,
-	scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID,
-) (bool, error) {
-	if s == nil || s.repo == nil {
-		return false, nil
-	}
-	return s.repo.IsScopeCancelled(ctx, documentID, kind, scope, scopeID)
-}
-
-func (s *spanRecorder) AggregateParentDisplay(ctx context.Context, childSpanID uuid.UUID) (types.ProcessingSpanStatus, error) {
+func (s *spanTracker) AggregateParentDisplay(ctx context.Context, childSpanID uuid.UUID) (types.ProcessingSpanStatus, error) {
 	if s == nil || s.repo == nil || childSpanID == uuid.Nil {
 		return "", nil
 	}
 	return s.repo.AggregateParentDisplay(ctx, childSpanID)
 }
 
-func (s *spanRecorder) GetRunView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error) {
-	view := types.DocumentProcessingView{DocumentID: document.ID,
-		DocumentStatus: document.Status,
-		Stages:         []types.DocumentProcessingSpan{}}
+func (s *spanTracker) GetView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error) {
+	view := types.DocumentProcessingView{
+		DocumentID: document.ID, SourceState: document.SourceState,
+		CanonicalDocumentID: document.CanonicalDocumentID,
+		StageStates:         documentStageStates(document), Stages: []types.DocumentProcessingSpan{},
+	}
 	if s == nil || s.repo == nil {
 		return view, nil
 	}
-	runIDs := []uuid.UUID{}
-	if s.runs != nil {
-		runs, err := s.runs.ListRecent(ctx, document.ID, 20)
-		if err != nil {
-			return view, err
-		}
-		for index := range runs {
-			runs[index].ErrorCode, runs[index].ErrorReason = safeSpanOutcome(runs[index].ErrorCode, runs[index].ErrorReason)
-			runIDs = append(runIDs, runs[index].ID)
-		}
-		view.Runs = runs
-	}
-	rows, err := s.repo.ListCurrent(ctx, document.ID, runIDs, 100)
+	rows, err := s.repo.ListCurrent(ctx, document.ID, 100)
 	if err != nil {
 		return view, err
 	}
-	for index := range rows {
-		rows[index].ErrorCode, rows[index].ErrorReason = safeSpanOutcome(rows[index].ErrorCode, rows[index].ErrorReason)
-		// Attributes are internal diagnostics. No attribute key is currently in
-		// the public allowlist, so legacy/high-cardinality values stay server-side.
-		rows[index].Attributes = types.JSON(`{}`)
+	for i := range rows {
+		rows[i].ErrorCode, rows[i].ErrorReason = safeSpanOutcome(rows[i].ErrorCode, rows[i].ErrorReason)
+		rows[i].Attributes = types.JSON(`{}`)
 	}
 	view.Stages = rows
-	view.LatestAttempt, err = s.repo.LatestAttempt(ctx, document.ID, types.ProcessingSpanRecognition)
-	if err != nil {
-		return view, err
-	}
 	return view, nil
 }
 
-func (s *spanRecorder) HasActive(ctx context.Context,
-	documentID uuid.UUID,
-	kinds ...types.ProcessingSpanKind) (bool, error) {
-	if s == nil || s.repo == nil || documentID == uuid.Nil {
-		return false, nil
+func documentStageStates(document types.Document) []types.DocumentStageState {
+	stages := []types.DocumentStage{types.DocumentStageMarkdown, types.DocumentStageMetadataExtraction, types.DocumentStageSourceLookup, types.DocumentStageReferenceLookup}
+	states := make([]types.DocumentStageState, 0, len(stages))
+	for _, stage := range stages {
+		state, err := document.StageState(stage)
+		if err != nil {
+			continue
+		}
+		if state.ErrorCode != nil {
+			code, message := safeSpanOutcome(*state.ErrorCode, stringValue(state.ErrorMessage))
+			state.ErrorCode, state.ErrorMessage = &code, &message
+		}
+		states = append(states, state)
 	}
-	return s.repo.HasActive(ctx, documentID, kinds...)
+	return states
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // keepSpanAlive refreshes an active span while a bounded external operation is
@@ -271,4 +263,4 @@ func safeSpanOutcome(code, _ string) (string, string) {
 	}
 }
 
-var _ interfaces.SpanRecorder = (*spanRecorder)(nil)
+var _ interfaces.SpanTracker = (*spanTracker)(nil)

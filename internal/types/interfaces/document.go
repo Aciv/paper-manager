@@ -44,11 +44,12 @@ type DocumentRepository interface {
 	// removed by ON DELETE CASCADE; non-relational diagnostics are handled by
 	// the repository transaction.
 	Delete(ctx context.Context, id uuid.UUID) error
-	// UpdateStatus changes the persisted lifecycle status and error message.
-	UpdateStatus(ctx context.Context, id uuid.UUID, status types.DocumentStatus, message *string) error
-	// UpdateStatusIfCurrent changes status only when its current value is one
-	// of expectedStatuses. It returns false without an error when no row matches.
-	UpdateStatusIfCurrent(ctx context.Context, id uuid.UUID, status types.DocumentStatus, message *string, expectedStatuses []types.DocumentStatus) (bool, error)
+	// MarkDeleting writes the source lifecycle fence before storage deletion.
+	// It returns false when the document is already merged or deleting.
+	MarkDeleting(ctx context.Context, id uuid.UUID) (previous types.DocumentSourceState, applied bool, err error)
+	// RestoreSourceState reopens the source lifecycle only when storage cleanup
+	// failed before the document row could be deleted.
+	RestoreSourceState(ctx context.Context, id uuid.UUID, state types.DocumentSourceState) error
 	// UpdateDocumentInfo changes original-file metadata. Nil fields keep their
 	// stored values; paper metadata is owned by PaperMetadataRepository.
 	UpdateDocumentInfo(ctx context.Context, id uuid.UUID, originalFilename, doi *string) (types.Document, error)
@@ -96,17 +97,10 @@ type DocumentService interface {
 	CreateDocumentsFromURLs(ctx context.Context, commands []types.DocumentURLImportCommand) (types.DocumentBatchResult, error)
 	// GetDocumentByID parses and retrieves a document by its textual UUID.
 	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
-	// GetDocumentStatus returns the current lifecycle status for a document.
-	GetDocumentStatus(ctx context.Context, id string) (types.DocumentStatus, error)
 	GetReferenceProgress(ctx context.Context, id string) (types.PaperReferenceProgress, error)
-	// SetDocumentStatus updates a document lifecycle status and optional error message.
-	SetDocumentStatus(ctx context.Context, id string, status types.DocumentStatus, message *string) error
 	// UpdateDocumentInfo updates original-file and DOI fields. Nil fields keep
 	// their stored value unchanged.
 	UpdateDocumentInfo(ctx context.Context, id string, originalFilename, doi *string) (*types.Document, error)
-	// FailDocumentIfProcessing marks a queued or processing document as failed.
-	// It does not overwrite a newer ready, failed, or deleting state.
-	FailDocumentIfProcessing(ctx context.Context, id string, message string) (bool, error)
 	// CancelDocumentParse cancels a queued or active document parse. It is
 	// idempotent for already-cancelled documents and best-effort dequeues work.
 	CancelDocumentParse(ctx context.Context, id string) (*types.Document, error)
@@ -131,10 +125,12 @@ type DocumentService interface {
 	DeleteDocument(ctx context.Context, id string) error
 	// DeleteDocumentList removes multiple documents sequentially.
 	DeleteDocumentList(ctx context.Context, ids []string) error
+	// RequestReferencePDFDownload queues a user-selected bibliography target;
+	// reference parsing never downloads targets automatically.
+	RequestReferencePDFDownload(ctx context.Context, id string) error
 
 	// RecognizeDocument performs only the asynchronous recognition stage.
 	RecognizeDocument(ctx context.Context, task *asynq.Task) error
-	// ImportRemoteDocument reloads one unknown placeholder's current metadata,
-	// downloads its PDF if available, deduplicates it, and starts processing.
+	// ImportRemoteDocument executes an explicit reference-download task.
 	ImportRemoteDocument(ctx context.Context, task *asynq.Task) error
 }

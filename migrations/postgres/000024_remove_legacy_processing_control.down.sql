@@ -1,0 +1,2 @@
+-- Intentionally irreversible: the removed aggregate status and ProcessingRun
+-- history cannot be reconstructed from the four current stage states.

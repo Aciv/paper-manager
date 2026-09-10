@@ -7,18 +7,15 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	fileservice "paperMaster/internal/application/service/file"
 	"paperMaster/internal/infrastructure/paperurl"
 	"paperMaster/internal/types"
-	"paperMaster/internal/types/interfaces"
 	"paperMaster/internal/utils"
 
 	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
 )
 
 type documentBatchRepoStub struct {
@@ -217,11 +214,11 @@ func TestCreateDocumentFromURLReturnsCreatedDocumentWhenInitialQueueFails(t *tes
 	if !errors.Is(err, ErrDocumentProcessQueue) {
 		t.Fatalf("CreateDocumentFromURL() error = %v, want ErrDocumentProcessQueue", err)
 	}
-	if created == nil || created.ID == uuid.Nil || created.Status != types.DocumentStatusFailed {
+	if created == nil || created.ID == uuid.Nil || created.MarkdownStatus != types.DocumentStageFailed {
 		t.Fatalf("created = %#v, want durable failed document", created)
 	}
-	if created.ErrorMessage == nil || *created.ErrorMessage != "document processing was not queued; retry this document" {
-		t.Fatalf("safe queue failure message = %#v", created.ErrorMessage)
+	if created.MarkdownErrorMessage == nil || *created.MarkdownErrorMessage != "processing task could not be queued" {
+		t.Fatalf("safe queue failure message = %#v", created.MarkdownErrorMessage)
 	}
 	opened, openErr := storage.Open(context.Background(), created.StorageKey)
 	if openErr != nil {
@@ -230,110 +227,20 @@ func TestCreateDocumentFromURLReturnsCreatedDocumentWhenInitialQueueFails(t *tes
 	_ = opened.Close()
 }
 
-func TestImportRemoteDocumentCleansDuplicateObjectAndRedirectsCitation(t *testing.T) {
-	server := remotePDFTestServer(t)
-	sourceID, placeholderID, canonicalID := uuid.New(), uuid.New(), uuid.New()
-	repo := newPaperDocumentRepoStub(
-		types.Document{ID: sourceID, Status: types.DocumentStatusReady},
-		types.Document{ID: placeholderID, Status: types.DocumentStatusUnknown,
-			ContentType: types.UnknownDocumentContentType, StorageKey: types.UnknownDocumentStorageScheme + placeholderID.String()},
-		types.Document{ID: canonicalID, Status: types.DocumentStatusReady, FileSHA256: "canonical-hash", StorageKey: "pdf/canonical.pdf"},
-	)
-	repo.search = func(search types.DocumentSearch) (types.DocumentPage, error) {
-		if search.FileSHA256 != "" {
-			return types.DocumentPage{Items: []types.Document{{ID: canonicalID, Status: types.DocumentStatusReady, SourceState: types.DocumentSourceAvailable}}, Total: 1}, nil
-		}
-		return types.DocumentPage{}, nil
-	}
-	storageDir := t.TempDir()
-	storage, err := fileservice.NewLocalStorage(storageDir, 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
-	papers := newPaperInfoPaperServiceStub()
-	papers.metadata[placeholderID.String()] = types.PaperMetadata{DocumentID: placeholderID,
-		SourceURL: server.URL + "/paper.pdf", Authors: []types.PaperAuthor{}, Tags: []string{}, Metadata: types.JSON(`{}`)}
-	papers.citations[sourceID.String()] = []types.PaperCitation{{CitingDocumentID: sourceID,
-		CitedDocumentID: placeholderID, RawReference: "duplicate paper"}}
-	service := &documentService{repo: repo, storage: storage, papers: papers, urlResolver: paperurl.NewResolver()}
-	task, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: placeholderID.String(), Generation: 3}, 0, 0)
-	if err := service.ImportRemoteDocument(context.Background(), task); err != nil {
-		t.Fatalf("ImportRemoteDocument() error = %v", err)
-	}
-	if merged, _ := repo.Get(context.Background(), placeholderID); merged.SourceState != types.DocumentSourceMerged || merged.CanonicalDocumentID == nil || *merged.CanonicalDocumentID != canonicalID {
-		t.Fatalf("merged document = %#v", merged)
-	}
-	entries, err := os.ReadDir(filepath.Join(storageDir, string(interfaces.StorageCategoryPDF)))
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		t.Fatal(err)
-	}
-	if len(entries) != 0 {
-		t.Fatalf("orphaned PDF files = %#v", entries)
-	}
-}
-
-func TestRemoteImportFailureDoesNotBlockAnotherDocument(t *testing.T) {
-	server := remotePDFTestServer(t)
-	badID, goodID := uuid.New(), uuid.New()
-	repo := newPaperDocumentRepoStub(
-		types.Document{ID: badID, Status: types.DocumentStatusUnknown, StorageKey: types.UnknownDocumentStorageScheme + badID.String()},
-		types.Document{ID: goodID, Status: types.DocumentStatusUnknown, StorageKey: types.UnknownDocumentStorageScheme + goodID.String()},
-	)
-	storage, _ := fileservice.NewLocalStorage(t.TempDir(), 1024)
-	papers := newPaperInfoPaperServiceStub()
-	papers.metadata[badID.String()] = types.PaperMetadata{DocumentID: badID, SourceURL: server.URL + "/landing"}
-	papers.metadata[goodID.String()] = types.PaperMetadata{DocumentID: goodID, SourceURL: server.URL + "/paper.pdf"}
-	service := &documentService{repo: repo, storage: storage, papers: papers,
-		taskEnqueuer: &documentTaskEnqueuerStub{}, urlResolver: paperurl.NewResolver()}
-	badTask, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: badID.String(), Generation: 1}, 0, 0)
-	if err := service.ImportRemoteDocument(context.Background(), badTask); !errors.Is(err, asynq.SkipRetry) {
-		t.Fatalf("bad import error = %v, want SkipRetry", err)
-	}
-	goodTask, _, _ := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{DocumentID: goodID.String(), Generation: 1}, 0, 0)
-	if err := service.ImportRemoteDocument(context.Background(), goodTask); err != nil {
-		t.Fatalf("good import error = %v", err)
-	}
-	if document, _ := repo.Get(context.Background(), goodID); document.SourceState != types.DocumentSourceAvailable || document.MarkdownStatus != types.DocumentStageQueued {
-		t.Fatalf("good document = %#v", document)
-	}
-}
-
-func TestImportRemoteDocumentPromotesUnknownAndQueuesExistingPipeline(t *testing.T) {
-	server := remotePDFTestServer(t)
+func TestRequestReferencePDFDownloadQueuesOnlyExplicitTarget(t *testing.T) {
 	documentID := uuid.New()
-	repo := &documentStatusRepoStub{document: types.Document{
-		ID: documentID, Status: types.DocumentStatusUnknown,
-		StorageKey:  types.UnknownDocumentStorageScheme + documentID.String(),
-		ContentType: types.UnknownDocumentContentType,
-	}}
-	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
-	if err != nil {
-		t.Fatal(err)
-	}
+	repo := newPaperDocumentRepoStub(types.Document{
+		ID: documentID, SourceState: types.DocumentSourceMissing, SourceLookupGeneration: 2,
+	})
 	papers := newPaperInfoPaperServiceStub()
-	papers.metadata[documentID.String()] = types.PaperMetadata{
-		DocumentID: documentID, SourceURL: server.URL + "/paper.pdf",
-		Authors: []types.PaperAuthor{}, Tags: []string{}, Metadata: types.JSON(`{}`),
-	}
+	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, SourceURL: "https://example.test/paper.pdf"}
 	tasks := &documentTaskEnqueuerStub{}
-	service := &documentService{
-		repo: repo, storage: storage, taskEnqueuer: tasks,
-		papers: papers, urlResolver: paperurl.NewResolver(),
-	}
-	task, _, err := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
-		DocumentID: documentID.String(), Generation: 2,
-	}, 0, 0)
-	if err != nil {
+	service := &documentService{repo: repo, papers: papers, taskEnqueuer: tasks}
+	if err := service.RequestReferencePDFDownload(context.Background(), documentID.String()); err != nil {
 		t.Fatal(err)
 	}
-	if err := service.ImportRemoteDocument(context.Background(), task); err != nil {
-		t.Fatalf("ImportRemoteDocument() error = %v", err)
-	}
-	if repo.document.SourceState != types.DocumentSourceAvailable || repo.document.MarkdownStatus != types.DocumentStageQueued || repo.document.FileSHA256 == "" || repo.document.StorageKey == "" {
-		t.Fatalf("promoted document = %#v", repo.document)
-	}
-	if len(tasks.documents) != 1 {
-		t.Fatalf("queued tasks = %#v", tasks.documents)
+	if len(tasks.tasks) != 1 || tasks.tasks[0].Type() != types.TypeDocumentRemoteImport {
+		t.Fatalf("queued tasks = %#v", tasks.tasks)
 	}
 }
 

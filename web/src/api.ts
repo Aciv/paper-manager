@@ -1,4 +1,5 @@
-export type DocumentStatus = 'unknown' | 'uploaded' | 'queued' | 'processing' | 'cancelled' | 'deleting' | 'ready' | 'failed';
+export type DocumentSourceState = 'missing' | 'available' | 'deleting' | 'merged';
+export type DocumentStageStatus = 'not_started' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'skipped';
 
 export type Document = {
   id: string;
@@ -6,8 +7,7 @@ export type Document = {
   contentType: string;
   sizeBytes: number;
   doi?: string;
-  status: DocumentStatus;
-  errorMessage?: string;
+  sourceState: DocumentSourceState;
   createdAt: string;
   updatedAt: string;
 };
@@ -56,25 +56,18 @@ export type ProcessingSpan = {
   startedAt: string;
   finishedAt?: string;
 };
-export type ProcessingRunSummary = {
-  id: string;
-  ownerDocumentId: string;
-  workflowKind: string;
-  attempt: number;
-  state: 'queued' | 'running' | 'cancel_requested' | 'succeeded' | 'failed' | 'cancelled';
-  errorCode?: string;
-  errorReason?: string;
-  cancelRequestedAt?: string;
-  startedAt?: string;
-  terminalAt?: string;
-  createdAt: string;
-  updatedAt: string;
-};
 export type DocumentProcessingView = {
   documentId: string;
-  documentStatus: DocumentStatus;
-  latestAttempt: number;
-  runs?: ProcessingRunSummary[];
+  sourceState: DocumentSourceState;
+  canonicalDocumentId?: string;
+  stageStates: Array<{
+    stage: 'markdown' | 'metadata_extraction' | 'source_lookup' | 'reference_lookup';
+    status: DocumentStageStatus;
+    generation: number;
+    updatedAt: string;
+    errorCode?: string;
+    errorMessage?: string;
+  }>;
   stages: ProcessingSpan[];
   referenceProgress?: {
     queued: number;
@@ -103,7 +96,7 @@ export type DocumentPage = {
 export type DocumentSearch = {
   id?: string;
   doi?: string;
-  status?: DocumentStatus;
+  sourceState?: DocumentSourceState;
   excludeUnknown?: boolean;
   page?: number;
 };
@@ -196,7 +189,7 @@ export const api = {
     const query = new URLSearchParams();
     if (search.id) query.set('id', search.id);
     if (search.doi) query.set('doi', search.doi);
-    if (search.status) query.set('status', search.status);
+	if (search.sourceState) query.set('sourceState', search.sourceState);
     if (search.excludeUnknown) query.set('excludeUnknown', 'true');
     query.set('page', String(search.page ?? 1));
     return request<DocumentPage>(`/search?${query.toString()}`);
@@ -219,6 +212,10 @@ export const api = {
   importFromURLs: (payload: DocumentURLImport[]): Promise<DocumentBatchResult> => request<DocumentBatchResult>(
     '/batch-import-url',
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls: payload }) },
+  ),
+  downloadReferencePDF: (id: string): Promise<void> => request<void>(
+    `/${encodeURIComponent(id)}/download-reference-pdf`,
+    { method: 'POST' },
   ),
   updateDocument: (id: string, payload: { originalFilename?: string; doi?: string }): Promise<{ document: Document }> => request<{ document: Document }>(
     `/${encodeURIComponent(id)}`,

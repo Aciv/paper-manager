@@ -105,6 +105,21 @@ func (h *DocumentHandler) ImportURLBatch(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// DownloadReferencePDF explicitly requests acquisition of one cited
+// placeholder. Reference parsing itself never triggers this operation.
+func (h *DocumentHandler) DownloadReferencePDF(c *gin.Context) {
+	if err := h.documents.RequestReferencePDFDownload(c.Request.Context(), c.Param("id")); err != nil {
+		if errors.Is(err, types.ErrRemotePDFUnavailable) {
+			h.writeError(c, apperrors.NewBadRequestError("reference has no downloadable source"), err)
+			return
+		}
+		h.writeError(c, apperrors.NewInternalServerError("queue reference PDF download"), err)
+		return
+	}
+	logger.Info(c.Request.Context(), "reference PDF download accepted", "document_id", c.Param("id"))
+	c.Status(http.StatusAccepted)
+}
+
 // NewDocumentHandler receives the application service through DI; handlers do
 // not coordinate storage or repositories directly.
 func NewDocumentHandler(cfg config.Config, documents interfaces.DocumentService) *DocumentHandler {
@@ -221,7 +236,7 @@ func batchUploadRequestSize(maxFileSize int64) int64 {
 // 5xx: returning its ID lets the client call the normal retry endpoint.
 func (h *DocumentHandler) writeCreatedButNotQueued(c *gin.Context, document types.Document) {
 	logger.Warn(c.Request.Context(), "document created but processing was not queued",
-		"document_id", document.ID, "status", document.Status)
+		"document_id", document.ID, "markdown_status", document.MarkdownStatus)
 	c.JSON(http.StatusCreated, gin.H{
 		"document":         document,
 		"processingQueued": false,
@@ -324,8 +339,8 @@ func (h *DocumentHandler) Search(c *gin.Context) {
 		}
 		search.ID = &id
 	}
-	if rawStatus := strings.TrimSpace(c.Query("status")); rawStatus != "" {
-		search.Status = types.DocumentStatus(rawStatus)
+	if rawSourceState := strings.TrimSpace(c.Query("sourceState")); rawSourceState != "" {
+		search.SourceState = types.DocumentSourceState(rawSourceState)
 	}
 	if rawExcludeUnknown := strings.TrimSpace(c.Query("excludeUnknown")); rawExcludeUnknown != "" {
 		excludeUnknown, err := strconv.ParseBool(rawExcludeUnknown)

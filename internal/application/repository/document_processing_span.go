@@ -41,7 +41,6 @@ func (r *documentProcessingSpanRepository) UpsertRunning(ctx context.Context, sp
 		Columns: []clause.Column{{Name: "document_id"}, {Name: "attempt"}, {Name: "kind"}, {Name: "scope"}, {Name: "scope_id"}},
 		DoUpdates: clause.Assignments(map[string]interface{}{
 			"status": types.ProcessingSpanRunning, "retry_count": span.RetryCount,
-			"run_id":         gorm.Expr("COALESCE(document_processing_spans.run_id, excluded.run_id)"),
 			"parent_span_id": gorm.Expr("COALESCE(document_processing_spans.parent_span_id, excluded.parent_span_id)"),
 			"error_code":     "", "error_reason": "", "finished_at": nil, "updated_at": now,
 		}),
@@ -78,13 +77,9 @@ func (r *documentProcessingSpanRepository) Finish(ctx context.Context, id uuid.U
 }
 
 func (r *documentProcessingSpanRepository) ListCurrent(
-	ctx context.Context, documentID uuid.UUID, runIDs []uuid.UUID, limit int,
+	ctx context.Context, documentID uuid.UUID, limit int,
 ) ([]types.DocumentProcessingSpan, error) {
 	limit = boundedSpanQueryLimit(limit)
-	where, args := "document_id = ?", []interface{}{documentID}
-	if len(runIDs) > 0 {
-		where, args = "(document_id = ? OR run_id IN ?)", []interface{}{documentID, runIDs}
-	}
 	query := `WITH ranked AS (
 		SELECT document_processing_spans.*,
 			ROW_NUMBER() OVER (
@@ -92,16 +87,15 @@ func (r *documentProcessingSpanRepository) ListCurrent(
 				ORDER BY attempt DESC, updated_at DESC, id DESC
 			) AS stage_rank
 		FROM document_processing_spans
-		WHERE ` + where + `
+		WHERE document_id = ?
 	), limited AS (
 		SELECT * FROM ranked WHERE stage_rank = 1
 		ORDER BY CASE WHEN scope IN ('process','document','source','reference_run','reference_download_run') THEN 0 ELSE 1 END,
 			updated_at DESC, id DESC LIMIT ?
 	)
 	SELECT * FROM limited ORDER BY started_at ASC, id ASC`
-	args = append(args, limit)
 	rows := []types.DocumentProcessingSpan{}
-	if err := r.db.WithContext(ctx).Raw(query, args...).Scan(&rows).Error; err != nil {
+	if err := r.db.WithContext(ctx).Raw(query, documentID, limit).Scan(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
@@ -139,37 +133,37 @@ func boundedSpanQueryLimit(limit int) int {
 	return limit
 }
 
-func (r *documentProcessingSpanRepository) HasActive(ctx context.Context, documentID uuid.UUID, kinds ...types.ProcessingSpanKind) (bool, error) {
-	q := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND status IN ?", documentID, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning})
-	if len(kinds) > 0 {
-		q = q.Where("kind IN ?", kinds)
-	}
-	var count int64
-	err := q.Count(&count).Error
-	return count > 0, err
-}
-
-func (r *documentProcessingSpanRepository) CancelActiveRun(ctx context.Context, runID uuid.UUID, code, reason string) error {
-	if runID == uuid.Nil {
+func (r *documentProcessingSpanRepository) CancelActiveStage(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, generation int64, code, reason string) error {
+	kinds := spanKindsForDocumentStage(stage)
+	if documentID == uuid.Nil || generation < 1 || len(kinds) == 0 {
 		return nil
 	}
 	now := time.Now().UTC()
 	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).
-		Where("run_id = ? AND status IN ?", runID, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).
+		Where("document_id = ? AND attempt = ? AND kind IN ? AND status IN ?", documentID, generation, kinds, []types.ProcessingSpanStatus{types.ProcessingSpanQueued, types.ProcessingSpanRunning}).
 		Updates(map[string]interface{}{
 			"status": types.ProcessingSpanCancelled, "error_code": code,
 			"error_reason": reason, "finished_at": now, "updated_at": now,
 		}).Error
 	if err != nil {
-		logger.Error(ctx, "cancel processing run spans failed", "run_id", runID, "error", err)
+		logger.Error(ctx, "cancel processing stage spans failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
 	}
 	return err
 }
 
-func (r *documentProcessingSpanRepository) IsScopeCancelled(ctx context.Context, documentID uuid.UUID, kind types.ProcessingSpanKind, scope types.ProcessingSpanScope, scopeID types.ProcessingSpanScopeID) (bool, error) {
-	var count int64
-	err := r.db.WithContext(ctx).Model(&types.DocumentProcessingSpan{}).Where("document_id = ? AND kind = ? AND scope = ? AND scope_id = ? AND status = ?", documentID, kind, scope, scopeID, types.ProcessingSpanCancelled).Count(&count).Error
-	return count > 0, err
+func spanKindsForDocumentStage(stage types.DocumentStage) []types.ProcessingSpanKind {
+	switch stage {
+	case types.DocumentStageMarkdown:
+		return []types.ProcessingSpanKind{types.ProcessingSpanRecognition}
+	case types.DocumentStageMetadataExtraction:
+		return []types.ProcessingSpanKind{types.ProcessingSpanMetadataExtract}
+	case types.DocumentStageSourceLookup:
+		return []types.ProcessingSpanKind{types.ProcessingSpanCatalogSource, types.ProcessingSpanCatalogProvider}
+	case types.DocumentStageReferenceLookup:
+		return []types.ProcessingSpanKind{types.ProcessingSpanCatalogReference, types.ProcessingSpanCatalogProvider}
+	default:
+		return nil
+	}
 }
 
 func (r *documentProcessingSpanRepository) AggregateParentDisplay(

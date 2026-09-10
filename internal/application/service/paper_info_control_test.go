@@ -36,10 +36,7 @@ type paperInfoInspectorStub struct{ queued map[string]bool }
 func (*paperInfoInspectorStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
 	return 0, 0, nil
 }
-func (*paperInfoInspectorStub) CancelTasksForRun(context.Context, string, string, types.ProcessingWorkflowKind) (int, int, error) {
-	return 0, 0, nil
-}
-func (*paperInfoInspectorStub) CancelReferenceTasksForDocuments(context.Context, []string) (int, int, error) {
+func (*paperInfoInspectorStub) CancelTasksForStage(context.Context, string, types.DocumentStage, int64) (int, int, error) {
 	return 0, 0, nil
 }
 func (*paperInfoInspectorStub) HasQueuedTasksForDocument(context.Context, string) (bool, error) {
@@ -53,11 +50,15 @@ func (s *paperInfoInspectorStub) HasQueuedTaskTypeForDocument(
 	return s.queued[taskType], nil
 }
 
+func (*paperInfoInspectorStub) HasQueuedTaskForStage(context.Context, string, types.DocumentStage, int64) (bool, error) {
+	return false, nil
+}
+
 func TestPaperInfoControlRetries(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
-		ID: documentID, Status: types.DocumentStatusReady, DOI: "10.1000/example",
+		ID: documentID, SourceState: types.DocumentSourceAvailable, DOI: "10.1000/example",
 	})
 	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/paper.md"}
 	papers := newPaperInfoPaperServiceStub()
@@ -155,8 +156,8 @@ func TestPaperInfoControlRejectsUnknownSourceCatalogRetry(t *testing.T) {
 	placeholderID := uuid.New()
 	citingID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: placeholderID, Status: types.DocumentStatusUnknown},
-		types.Document{ID: citingID, Status: types.DocumentStatusReady},
+		types.Document{ID: placeholderID, SourceState: types.DocumentSourceMissing},
+		types.Document{ID: citingID, SourceState: types.DocumentSourceAvailable},
 	)
 	papers := newPaperInfoPaperServiceStub()
 	papers.citations[citingID.String()] = []types.PaperCitation{{
@@ -186,7 +187,7 @@ func TestPaperInfoControlRejectsUnknownSourceCatalogRetry(t *testing.T) {
 func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()
-	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, Status: types.DocumentStatusReady})
+	documents := newPaperDocumentRepoStub(types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable})
 	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/paper.md"}
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID}
@@ -215,9 +216,9 @@ func TestPaperInfoControlRejectsUnknownReferenceAsSourceRetry(t *testing.T) {
 	firstSourceID := uuid.New()
 	secondSourceID := uuid.New()
 	documents := newPaperDocumentRepoStub(
-		types.Document{ID: placeholderID, Status: types.DocumentStatusUnknown},
-		types.Document{ID: firstSourceID, Status: types.DocumentStatusReady},
-		types.Document{ID: secondSourceID, Status: types.DocumentStatusReady},
+		types.Document{ID: placeholderID, SourceState: types.DocumentSourceMissing},
+		types.Document{ID: firstSourceID, SourceState: types.DocumentSourceAvailable},
+		types.Document{ID: secondSourceID, SourceState: types.DocumentSourceAvailable},
 	)
 	papers := newPaperInfoPaperServiceStub()
 	papers.citations[firstSourceID.String()] = []types.PaperCitation{{
