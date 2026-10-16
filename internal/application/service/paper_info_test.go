@@ -1339,6 +1339,60 @@ func TestPaperInfoResolveUnknownReferenceRequiresRegisteredJob(t *testing.T) {
 	}
 }
 
+func TestPaperInfoReferenceProviderFailureUsesNeutralFallbackRetry(t *testing.T) {
+	tests := []struct {
+		name       string
+		retryable  bool
+		retryAfter time.Duration
+	}{
+		{name: "provider rejects query", retryable: false},
+		{name: "provider rate limited", retryable: true, retryAfter: 24 * time.Hour},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			scheduler := papercatalog.NewMemoryReferenceScheduler(config.Config{
+				PaperCatalogProviders: []string{"openalex", "crossref"},
+			})
+			target := uuid.New()
+			if queued, err := scheduler.Register(context.Background(), types.PaperReferenceJob{
+				TargetDocumentID: target,
+				Generation:       1,
+			}); err != nil || !queued {
+				t.Fatalf("Register() queued=%t err=%v", queued, err)
+			}
+			claim, err := scheduler.Claim(context.Background(), target)
+			if err != nil || !claim.Ready() {
+				t.Fatalf("Claim()=%#v err=%v", claim, err)
+			}
+			cause := &papercatalog.ProviderError{
+				Provider:   claim.Provider.String(),
+				StatusCode: map[bool]int{false: 400, true: 429}[test.retryable],
+				RetryAfter: test.retryAfter,
+				Retryable:  test.retryable,
+			}
+			service := &paperInfoService{cfg: config.Config{}, referenceScheduler: scheduler}
+			err = service.reportReferenceOutcome(
+				context.Background(), target, claim.Provider,
+				types.PaperReferenceOutcomeRetryableFailure, cause,
+			)
+			if !errors.Is(err, errReferenceProviderFallback) {
+				t.Fatalf("report error=%v, want neutral fallback", err)
+			}
+			var delayed interface{ TaskRetryAfter() time.Duration }
+			if errors.As(err, &delayed) {
+				t.Fatalf("fallback retained provider Retry-After=%s", delayed.TaskRetryAfter())
+			}
+			if errors.Is(err, cause) {
+				t.Fatal("fallback retained provider terminal classification")
+			}
+			next, err := scheduler.Claim(context.Background(), target)
+			if err != nil || !next.Ready() || next.Provider == claim.Provider {
+				t.Fatalf("fallback Claim()=%#v err=%v", next, err)
+			}
+		})
+	}
+}
+
 func TestPaperInfoResolveUnknownRequiresRegisteredTarget(t *testing.T) {
 	unknownID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{

@@ -1,4 +1,4 @@
-"""Focused tests for the no-TITLE arXiv/Proceedings fallback title rule."""
+"""Focused tests for citation title fallback and venue-boundary cleanup."""
 from __future__ import annotations
 
 import unittest
@@ -8,6 +8,7 @@ from papers_parser.crf_engine import (
     ShadowPaperExtractionEngine,
     _citation_tokens,
     _fallback_title,
+    _normalize_reference_title_venue,
     _segment_fallback_title,
 )
 from papers_parser.paper_extractor import (
@@ -113,6 +114,100 @@ class SegmentFallbackTitleTest(unittest.TestCase):
         author_through = next(index for index, token in enumerate(tokens) if token.text == "Genini-2")
         labels = _labels_for(tokens, author_through=author_through)
         self.assertEqual(_segment_fallback_title(reference, tokens, labels), "")
+
+
+class ReferenceTitleVenueNormalizationTest(unittest.TestCase):
+    def test_moves_unclosed_markdown_venue_out_of_title(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "Deep learning-based prototyping of android GUI from hand-drawn mockups. _IET Softw",
+            "",
+        )
+        self.assertEqual(
+            title,
+            "Deep learning-based prototyping of android GUI from hand-drawn mockups",
+        )
+        self.assertEqual(venue, "IET Softw")
+
+    def test_moves_closed_markdown_venue_and_preserves_question_mark(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "Design2code: How far are we from automating front-end engineering ? _CoRR_",
+            "",
+        )
+        self.assertEqual(
+            title,
+            "Design2code: How far are we from automating front-end engineering?",
+        )
+        self.assertEqual(venue, "CoRR")
+
+    def test_moves_closed_arxiv_venue_before_abs_identifier(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "Design2Code: How Far Are We From Automating Front-End Engineering ? _ArXiv_ abs / 2403.03163",
+            "",
+        )
+        self.assertEqual(
+            title,
+            "Design2Code: How Far Are We From Automating Front-End Engineering?",
+        )
+        self.assertEqual(venue, "ArXiv")
+
+    def test_keeps_closed_emphasis_with_unrecognized_trailing_text(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "A title. _Emphasized subtitle_ unrelated trailing words",
+            "",
+        )
+        self.assertEqual(
+            title,
+            "A title. _Emphasized subtitle_ unrelated trailing words",
+        )
+        self.assertEqual(venue, "")
+
+    def test_removes_repeated_structured_venue(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "A robust paper title. _Proceedings of Testing_",
+            "Proceedings of Testing",
+        )
+        self.assertEqual(title, "A robust paper title")
+        self.assertEqual(venue, "Proceedings of Testing")
+
+    def test_does_not_split_title_punctuation(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "Design2code: How far are we from automating front-end engineering?",
+            "",
+        )
+        self.assertEqual(
+            title,
+            "Design2code: How far are we from automating front-end engineering?",
+        )
+        self.assertEqual(venue, "")
+
+    def test_does_not_treat_plain_second_sentence_as_venue(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "An analysis. Part II",
+            "",
+        )
+        self.assertEqual(title, "An analysis. Part II")
+        self.assertEqual(venue, "")
+
+    def test_drops_single_word_field_but_keeps_multiword_fields(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "Primary paper title. Noise. Useful subtitle",
+            "",
+        )
+        self.assertEqual(title, "Primary paper title. Useful subtitle")
+        self.assertEqual(venue, "")
+
+    def test_splits_chinese_sentence_punctuation(self) -> None:
+        title, venue = _normalize_reference_title_venue(
+            "主要 标题。冗余。有效 副标题",
+            "",
+        )
+        self.assertEqual(title, "主要 标题。 有效 副标题")
+        self.assertEqual(venue, "")
+
+    def test_keeps_single_word_title_when_every_field_would_be_removed(self) -> None:
+        title, venue = _normalize_reference_title_venue("Webscreenshots.", "")
+        self.assertEqual(title, "Webscreenshots.")
+        self.assertEqual(venue, "")
 
 
 class ShadowEngineTest(unittest.TestCase):

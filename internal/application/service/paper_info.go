@@ -53,6 +53,10 @@ var (
 	// ErrPaperInfoAttemptActive prevents a retry from overlapping queued or
 	// running work for the same durable document stage.
 	ErrPaperInfoAttemptActive = errors.New("paper information attempt is still active")
+	// errReferenceProviderFallback asks Asynq for a short ordinary retry so the
+	// scheduler can claim another provider. It deliberately carries neither the
+	// failed provider's terminal classification nor its long Retry-After value.
+	errReferenceProviderFallback = errors.New("reference provider fallback required")
 )
 
 var (
@@ -605,15 +609,12 @@ func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uu
 		logger.Warn(ctx, "reference catalog provider attempt failed", "document_id", target, "provider", provider, "error", cause)
 	}
 	if report.Requeue {
-		if cause != nil {
-			return cause
-		}
-		return errors.New("reference provider fallback required")
+		return errReferenceProviderFallback
 	}
 	// Provider failures have already been converted into scheduler-owned
-	// fallback work. Returning the original error here would make Asynq retry
-	// this same task as well, racing the next-provider task and causing the
-	// observed repeated 400/429 "flip-flop".
+	// fallback work. A Requeue report returns the neutral error above so this
+	// same stable task can claim the next provider without inheriting the
+	// previous provider's terminal classification or cooldown delay.
 	return nil
 }
 
@@ -779,7 +780,10 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		if !applied {
 			continue
 		}
-		shouldQueue, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{TargetDocumentID: citedID})
+		shouldQueue, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
+			TargetDocumentID: citedID,
+			Generation:       stage.Generation,
+		})
 		if registerErr != nil {
 			return registerErr
 		}

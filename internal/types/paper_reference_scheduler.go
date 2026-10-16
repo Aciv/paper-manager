@@ -12,18 +12,24 @@ import (
 // queue message can remain a stable, single-document command.
 type PaperReferenceJob struct {
 	TargetDocumentID uuid.UUID
-	TriedProviders   []PaperCatalogProvider
-	Provider         PaperCatalogProvider
-	InFlight         bool
-	Completed        bool
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
+	// Generation ties scheduler deduplication to the durable source_lookup
+	// attempt. Zero remains readable for jobs written before this field existed.
+	Generation     int64
+	TriedProviders []PaperCatalogProvider
+	Provider       PaperCatalogProvider
+	InFlight       bool
+	Completed      bool
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
 }
 
 // Validate checks the durable ownership tuple of a reference job.
 func (job PaperReferenceJob) Validate() error {
 	if job.TargetDocumentID == uuid.Nil {
 		return fmt.Errorf("%w: reference target document_id is required", ErrInvalidPaperCatalogData)
+	}
+	if job.Generation < 0 {
+		return fmt.Errorf("%w: reference target generation is invalid", ErrInvalidPaperCatalogData)
 	}
 	return nil
 }

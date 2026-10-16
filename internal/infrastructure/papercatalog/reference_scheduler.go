@@ -149,6 +149,20 @@ func prepareReferenceJob(job types.PaperReferenceJob) (types.PaperReferenceJob, 
 	return job, nil
 }
 
+func applyRegistration(existing types.PaperReferenceJob, incoming types.PaperReferenceJob) (types.PaperReferenceJob, bool) {
+	if incoming.Generation > existing.Generation {
+		return incoming, true
+	}
+	if incoming.Generation < existing.Generation {
+		return existing, false
+	}
+	if existing.Completed {
+		return incoming, true
+	}
+	existing.UpdatedAt = time.Now().UTC()
+	return existing, false
+}
+
 // get provide, claim job in flight
 func applyClaim(job types.PaperReferenceJob, providers []types.PaperCatalogProvider, turn uint64, cooling func(types.PaperCatalogProvider) bool) (types.PaperReferenceJob, types.PaperReferenceClaim) {
 	if job.Completed || job.InFlight {
@@ -202,10 +216,10 @@ func (s *memoryReferenceScheduler) Register(_ context.Context, job types.PaperRe
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if existing, ok := s.jobs[job.TargetDocumentID]; ok && !existing.Completed {
-		existing.UpdatedAt = time.Now().UTC()
-		s.jobs[job.TargetDocumentID] = existing
-		return false, nil
+	if existing, ok := s.jobs[job.TargetDocumentID]; ok {
+		registered, queue := applyRegistration(existing, job)
+		s.jobs[job.TargetDocumentID] = registered
+		return queue, nil
 	}
 	s.jobs[job.TargetDocumentID] = job
 	return true, nil
@@ -292,29 +306,22 @@ func (s *redisReferenceScheduler) Register(ctx context.Context, job types.PaperR
 		return false, fmt.Errorf("register reference scheduler job: %w", err)
 	}
 	if !created {
-		// The job key outlives its document: deleting a source document never
-		// cleans it up, so a re-uploaded paper can reuse the same unknown
-		// placeholder target while the 24h key still exists. A terminal job
-		// completed lookup must therefore be replaceable:
-		// the new owner takes it over instead of being silently deduplicated.
-		resurrected := false
+		// A scheduler key may outlive the Asynq task that owned it. The durable
+		// stage generation distinguishes a duplicate producer from an explicit
+		// retry that must take over stale in-flight/nonterminal state.
+		shouldQueue := false
 		if err := s.withJobLock(ctx, job.TargetDocumentID, func() error {
 			existing, err := s.load(ctx, job.TargetDocumentID)
 			if err != nil {
 				return err
 			}
-			if existing.Completed {
-				resurrected = true
-				return s.save(ctx, job)
-			}
-			existing.UpdatedAt = time.Now().UTC()
-			return s.save(ctx, existing)
+			registered, queue := applyRegistration(existing, job)
+			shouldQueue = queue
+			return s.save(ctx, registered)
 		}); err != nil {
 			return false, err
 		}
-		if resurrected {
-			created = true
-		}
+		created = shouldQueue
 	}
 	return created, nil
 }

@@ -13,8 +13,9 @@ import (
 // It keeps per-target provider history, fallback, and global cooldown outside
 // short-lived Asynq payloads. Stage ownership remains on the target Document.
 type PaperReferenceScheduler interface {
-	// Register creates or refreshes one target job. It returns true only when a
-	// catalog task should be queued; duplicate active jobs return false.
+	// Register creates or refreshes one target job. A newer source_lookup
+	// generation replaces stale scheduler state and returns true; duplicates
+	// from the same generation return false.
 	Register(ctx context.Context, job types.PaperReferenceJob) (queue bool, err error)
 	// Claim atomically chooses the next provider for targetDocumentID. A claim
 	// with Ready false must not issue an external request.

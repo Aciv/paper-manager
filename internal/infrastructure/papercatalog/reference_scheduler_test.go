@@ -22,6 +22,40 @@ func TestReferenceSchedulerDeduplicatesActiveTarget(t *testing.T) {
 	}
 }
 
+func TestReferenceSchedulerNewGenerationReplacesStaleActiveTarget(t *testing.T) {
+	scheduler := newMemoryReferenceScheduler([]types.PaperCatalogProvider{
+		types.PaperCatalogProviderArXiv,
+		types.PaperCatalogProviderOpenAlex,
+	})
+	target := uuid.New()
+	if queued, err := scheduler.Register(context.Background(), types.PaperReferenceJob{
+		TargetDocumentID: target,
+		Generation:       1,
+	}); err != nil || !queued {
+		t.Fatalf("first Register() queued=%t err=%v", queued, err)
+	}
+	first, err := scheduler.Claim(context.Background(), target)
+	if err != nil || !first.Ready() {
+		t.Fatalf("first Claim()=%#v err=%v", first, err)
+	}
+	if queued, err := scheduler.Register(context.Background(), types.PaperReferenceJob{
+		TargetDocumentID: target,
+		Generation:       1,
+	}); err != nil || queued {
+		t.Fatalf("same generation Register() queued=%t err=%v", queued, err)
+	}
+	if queued, err := scheduler.Register(context.Background(), types.PaperReferenceJob{
+		TargetDocumentID: target,
+		Generation:       2,
+	}); err != nil || !queued {
+		t.Fatalf("new generation Register() queued=%t err=%v", queued, err)
+	}
+	second, err := scheduler.Claim(context.Background(), target)
+	if err != nil || !second.Ready() || second.Job.Generation != 2 {
+		t.Fatalf("replacement Claim()=%#v err=%v", second, err)
+	}
+}
+
 func TestReferenceSchedulerFallsBackPerTarget(t *testing.T) {
 	scheduler := newMemoryReferenceScheduler([]types.PaperCatalogProvider{
 		types.PaperCatalogProviderArXiv, types.PaperCatalogProviderOpenAlex,

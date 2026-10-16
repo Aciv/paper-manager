@@ -61,6 +61,28 @@ _ARXIV_RE = re.compile(r"(?:arXiv:\s*)?((?:[a-z-]+(?:\.[a-z-]+)?/)?\d{4}\.\d{4,5
 # venue as a title. No word boundary is used: "_CoRR_" is italic markup whose
 # trailing underscore would defeat "\b".
 _VENUE_START_RE = re.compile(r"_?(?:arXiv|CoRR|Proceedings)", re.I)
+_REFERENCE_FIELD_SPLIT_RE = re.compile(r"(?<=[。？！])|(?<=[.!?])\s+")
+_CLOSED_MARKDOWN_FIELD_RE = re.compile(
+    r"^(?P<marker>_{1,2}|\*{1,2})\s*"
+    r"(?P<venue>[^\n_*]{2,120}?)\s*(?P=marker)(?P<trailer>.*)$",
+    re.S,
+)
+_UNCLOSED_MARKDOWN_FIELD_RE = re.compile(
+    r"^(?:_{1,2}|\*{1,2})\s*(?P<venue>[^\n_*]{2,120})$",
+    re.S,
+)
+_ARXIV_CITATION_TRAILER_RE = re.compile(
+    r"^\s*(?:[,.;]\s*)?(?:(?:abs\s*/\s*)|(?:arxiv\s*:?\s*))?"
+    r"(?:[a-z-]+(?:\.[a-z-]+)?/)?\d{4}\.\d{4,5}(?:v\d+)?"
+    r"(?:\s*[,.;]\s*.*)?\s*$",
+    re.I | re.S,
+)
+_CITATION_REDUNDANCY_RE = re.compile(
+    r"^(?:https?://|www\.|doi\b|arxiv\b|abs\s*/|accessed\b|"
+    r"(?:vol(?:ume)?|no|number|pages?|pp)\b|(?:19|20)\d{2}[a-z]?\b)",
+    re.I,
+)
+_REFERENCE_WORD_RE = re.compile(r"[^\W_]+(?:[-'’][^\W_]+)*", re.UNICODE)
 _ET_AL_TEXT = {"et", "al"}
 # Date-like first segment: "2023", "2023a", "2022a", "2023-03-12", and month
 # forms such as "March 2023". Used to skip year stamps while scanning for a
@@ -192,10 +214,14 @@ class CRFPaperExtractionEngine:
                 title = _fallback_title(reference, tokens, labels)
             if not title.strip():
                 title = _segment_fallback_title(reference, tokens, labels)
+            title, venue = _normalize_reference_title_venue(
+                title,
+                values.get("VENUE", ""),
+            )
             field_confidence = [score for label, score in zip(labels, confidence) if label != "O"]
             authors = tuple(value.strip() for value in values.get("AUTHOR", "").split(",") if value.strip())
             output.append(ReferenceCandidate(
-                raw_reference=reference, authors=authors, title=title, venue=values.get("VENUE", ""),
+                raw_reference=reference, authors=authors, title=title, venue=venue,
                 published_year=_year(values.get("YEAR", "")), doi=_first(_DOI_RE.findall(reference)),
                 arxiv_id=_arxiv(reference), volume=values.get("VOLUME", ""), pages=values.get("PAGES", ""),
                 confidence=sum(field_confidence) / len(field_confidence) if field_confidence else 0.0,
@@ -416,6 +442,62 @@ def _segment_fallback_title(reference: str, tokens: Sequence[CitationToken], lab
             continue
         return segment
     return ""
+
+
+def _normalize_reference_title_venue(title: str, venue: str) -> tuple[str, str]:
+    """Drop sentence-like CRF title fields that are citation noise."""
+    normalized_title = " ".join(title.split()).strip()
+    normalized_venue = _strip_markdown_emphasis(" ".join(venue.split()))
+    if not normalized_title:
+        return "", normalized_venue
+
+    retained: list[str] = []
+    for field in _REFERENCE_FIELD_SPLIT_RE.split(normalized_title):
+        field = field.strip()
+        if not field:
+            continue
+        redundant, detected_venue = _reference_field_is_redundant(field, normalized_venue)
+        if detected_venue and not normalized_venue:
+            normalized_venue = detected_venue
+        if not redundant:
+            retained.append(field)
+
+    # A genuine one-word paper title is preferable to an empty lookup key.
+    if not retained:
+        return normalized_title, normalized_venue
+    return _clean_reference_title(" ".join(retained)), normalized_venue
+
+
+def _reference_field_is_redundant(field: str, venue: str) -> tuple[bool, str]:
+    value = field.strip(" \t\r\n.,;:。？！!?")
+    closed = _CLOSED_MARKDOWN_FIELD_RE.fullmatch(value)
+    if closed and (
+        not closed.group("trailer").strip()
+        or _ARXIV_CITATION_TRAILER_RE.fullmatch(closed.group("trailer"))
+    ):
+        detected = _strip_markdown_emphasis(closed.group("venue"))
+        return bool(detected), detected
+
+    unclosed = _UNCLOSED_MARKDOWN_FIELD_RE.fullmatch(value)
+    if unclosed:
+        detected = _strip_markdown_emphasis(unclosed.group("venue"))
+        return bool(detected), detected
+
+    plain = _strip_markdown_emphasis(value)
+    if venue and plain.casefold() == venue.casefold():
+        return True, ""
+    if _CITATION_REDUNDANCY_RE.match(plain):
+        return True, ""
+    return len(_REFERENCE_WORD_RE.findall(plain)) <= 1, ""
+
+
+def _strip_markdown_emphasis(value: str) -> str:
+    return value.strip(" \t\r\n_*.,;:")
+
+
+def _clean_reference_title(value: str) -> str:
+    value = value.strip(" \t\r\n.,;:")
+    return re.sub(r"\s+([!?])$", r"\1", value)
 
 
 def _training_lines(lines: Sequence[LayoutLine]) -> tuple[TrainingLayoutLine, ...]:
