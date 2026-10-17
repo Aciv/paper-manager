@@ -181,7 +181,12 @@ async function requestFrom<T>(resourceBaseUrl: string, pathname: string, options
   const body = contentType.includes('application/json')
     ? await response.json().catch(() => null) as { error?: { message?: string } } | null
     : null;
-  throw new Error(body?.error?.message ?? response.statusText);
+  if (body?.error?.message) throw new Error(body.error.message);
+  // Non-JSON failures (a proxy, an extension, a truncated response) would
+  // otherwise surface as a bare statusText like "Forbidden"; keep the status
+  // and a snippet of the body so the cause is visible.
+  const detail = contentType.includes('application/json') ? '' : (await response.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 120);
+  throw new Error(`HTTP ${response.status} ${response.statusText}${detail ? ` · ${detail}` : ''}`.trim());
 }
 
 export const api = {

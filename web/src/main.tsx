@@ -867,15 +867,15 @@ function App() {
 }
 
 function Root() {
-  const [showLibrary, setShowLibrary] = useState(window.location.hash === '#/library');
+  const [route, setRoute] = useState(window.location.hash);
 
   useEffect(() => {
-    const syncRoute = () => setShowLibrary(window.location.hash === '#/library');
+    const syncRoute = () => setRoute(window.location.hash);
     window.addEventListener('hashchange', syncRoute);
     return () => window.removeEventListener('hashchange', syncRoute);
   }, []);
 
-  return showLibrary ? <PaperLibraryPage /> : <App />;
+  return route === '#/library' ? <PaperLibraryPage /> : <App />;
 }
 
 createRoot(document.getElementById('root')!).render(<Root />);

@@ -3,7 +3,21 @@
   "type": "module",
   "private": true,
   "version": "0.1.0",
-  "scripts": { "dev": "vite", "build": "tsc -b && vite build", "test:selection": "node --experimental-strip-types --test tests/pdfSelection.test.ts tests/pdfLinkPreview.test.ts" },
-  "dependencies": { "@vitejs/plugin-react": "latest", "vite": "latest", "react": "latest", "react-dom": "latest", "react-pdf": "latest" },
-  "devDependencies": { "typescript": "latest", "@types/react": "latest", "@types/react-dom": "latest" }
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "test:selection": "node --experimental-strip-types --test tests/pdfSelection.test.ts tests/pdfLinkPreview.test.ts tests/pdfOutline.test.ts"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "pdfjs-dist": "^5.4.296",
+    "react": "latest",
+    "react-dom": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "latest"
+  }
 }

@@ -1,32 +1,114 @@
-.selected-block-image {
-  display: block;
-  max-width: min(100%, 720px);
-  max-height: 480px;
-  object-fit: contain;
-  border: 1px solid #bfdbfe;
-  border-radius: 5px;
-  background: #fff;
-}
+/* Reader chrome. The pages themselves are rendered by pdf.js's PDFViewer,
+   which owns the page DOM; everything the app adds is portaled into a
+   `.pdf-page-overlay-slot` per page. */
+
+.pdf-viewer-panel { position:relative; display:flex; flex-direction:column; gap:10px; min-width:0; min-height:0; }
+
+.pdf-reader-frame { display:grid; flex:1 1 auto; grid-template-columns:clamp(160px, 17vw, 230px) minmax(0, 1fr); min-height:0; border:1px solid #dce3ed; border-radius:9px; overflow:hidden; background:#e9eef5; }
+.pdf-reader-frame.outline-external,
+.pdf-reader-frame.outline-collapsed { grid-template-columns:minmax(0, 1fr); }
+.pdf-reader-frame.outline-collapsed .outline { display:none; }
+
+.outline { padding:16px; background:#fff; border-right:1px solid #dce3ed; overflow:auto; }
+.outline h3 { margin:0 0 10px; font-size:15px; }
+
+.pdf-outline-tree, .pdf-outline-children { margin:0; padding:0; list-style:none; font-size:13px; }
+/* The nesting itself carries the indentation: each level sits directly under
+   its parent's chevron, and the 2px rule marks the branch a block belongs to. */
+.pdf-outline-children { margin-left:8px; padding-left:10px; border-left:2px solid #cdd7e4; }
+.pdf-outline-row { display:flex; align-items:flex-start; gap:6px; min-height:22px; padding-right:2px; border-radius:6px; }
+.pdf-outline-row:hover { background:rgb(15 23 42 / 5%); }
+.pdf-outline-toggle { flex:0 0 auto; display:grid; place-items:center; width:18px; height:18px; margin-top:2px; padding:0; border:0; border-radius:5px; background:transparent; color:#8a93a0; cursor:pointer; }
+.pdf-outline-toggle svg { width:12px; height:12px; fill:none; stroke:currentColor; stroke-width:2.1; stroke-linecap:round; stroke-linejoin:round; transition:transform .15s ease; }
+.pdf-outline-toggle[aria-expanded="true"] svg { transform:rotate(90deg); }
+span.pdf-outline-toggle { cursor:default; }
+.pdf-outline-toggle:hover { background:#eef2f7; color:#1d4ed8; }
+.pdf-outline-link, .pdf-outline-text { flex:1 1 auto; padding:1px 0; border:0; background:transparent; color:inherit; font:inherit; line-height:1.45; text-align:left; cursor:pointer; }
+.pdf-outline-link:hover { color:#1d4ed8; text-decoration:underline; }
+.pdf-outline-text { cursor:default; }
+
+.pdf-reader-body { position:relative; display:flex; flex-direction:column; min-width:0; min-height:0; }
+.pdf-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:8px 12px; border-bottom:1px solid #dce3ed; background:#e9eef5; color:#475569; font-size:13px; }
+.pdf-toolbar button { padding:5px 9px; font-size:12px; }
+
+/* pdf.js needs its scroll container to be absolutely positioned. */
+.pdf-viewer-host { position:relative; flex:1 1 auto; min-height:0; }
+.pdf-viewer-scroll { position:absolute; inset:0; overflow:auto; background:#e9eef5; scrollbar-gutter:stable; }
+
+/* One overlay layer per page, attached by the reader. */
+.pdf-page-overlay-slot { position:absolute; inset:0; z-index:3; pointer-events:none; }
+.pdf-page-overlay { position:absolute; inset:0; }
 
 .area-selection-overlay { position:absolute; inset:0; z-index:3; pointer-events:none; touch-action:none; cursor:crosshair; }
 .area-selection-overlay.active { pointer-events:auto; }
 .area-selection-box { position:absolute; border:2px solid #2563eb; background:rgb(37 99 235 / 16%); box-shadow:0 0 0 1px rgb(255 255 255 / 75%) inset; pointer-events:none; }
-.pdf-selection-summary { display:grid; gap:8px; margin:0 0 14px; padding:12px; border:1px solid #bfdbfe; border-radius:8px; background:#eff6ff; }
+
+/* A committed area draft stays visible so it can be annotated before saving. */
+/* Outline keeps the committed box visible without affecting layout or hit area. */
+.area-annotation { position:absolute; z-index:5; outline:1px dashed rgb(37 99 235 / 75%); outline-offset:1px; pointer-events:none; }
+.area-annotation.drawing { pointer-events:auto; }
+.area-annotation-strokes { position:absolute; inset:0; width:100%; height:100%; overflow:visible; pointer-events:none; }
+.area-annotation-strokes polyline,
+.area-annotation-strokes rect { fill:none; stroke:#e5484d; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+.area-annotation-surface { position:absolute; inset:0; cursor:crosshair; touch-action:none; pointer-events:none; }
+.area-annotation.drawing .area-annotation-surface { pointer-events:auto; }
+/* The toolbar stays clickable while the layer itself (and the drawing surface)
+   only listens once a tool is chosen, so the page underneath stays usable. */
+.area-annotation-toolbar { pointer-events:auto; position:absolute; top:0; left:100%; display:flex; gap:2px; margin-left:14px; padding:3px; border:1px solid #dce3ed; border-radius:8px; background:rgb(255 255 255 / 96%); box-shadow:0 8px 22px rgb(23 32 51 / 24%); }
+.area-annotation-toolbar button { display:grid; place-items:center; width:26px; height:26px; padding:0; border:0; border-radius:6px; background:transparent; color:#475569; cursor:pointer; }
+.area-annotation-toolbar button:hover:not(:disabled) { border:0; background:#eef2f7; color:#1d4ed8; }
+.area-annotation-toolbar button.active { border:0; background:#e2e8f0; color:#0f172a; }
+.area-annotation-toolbar button.area-annotation-ok { color:#15803d; }
+.area-annotation-toolbar button.area-annotation-ok:hover:not(:disabled) { background:#dcfce7; color:#15803d; }
+.area-annotation-toolbar svg { width:15px; height:15px; }
+
+/* In-PDF search: a floating bar over the reader, results counted by pdf.js. */
+.pdf-find-bar { position:absolute; z-index:10; top:12px; left:50%; display:flex; align-items:center; gap:6px; padding:6px 8px; border:1px solid #dce3ed; border-radius:10px; background:rgb(255 255 255 / 96%); box-shadow:0 10px 28px rgb(23 32 51 / 22%); transform:translateX(-50%); font-size:12.5px; }
+.pdf-find-icon { flex:0 0 auto; width:15px; height:15px; color:#64748b; }
+.pdf-find-input { width:180px; padding:4px 7px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; color:#172033; font:inherit; }
+.pdf-find-input:focus { outline:2px solid #bfdbfe; border-color:#2563eb; }
+.pdf-find-count { min-width:54px; color:#64748b; font-variant-numeric:tabular-nums; text-align:center; }
+.pdf-find-bar button { display:grid; place-items:center; width:26px; height:26px; padding:0; border:1px solid #cbd5e1; border-radius:6px; background:#fff; color:#475569; cursor:pointer; }
+.pdf-find-bar button:hover:not(:disabled) { background:#f0f5ff; border-color:#93b4ef; color:#1d4ed8; }
+.pdf-find-bar button:disabled { opacity:.45; }
+.pdf-find-bar button svg { width:14px; height:14px; }
+
+/* The outline marks the section currently being read. */
+.pdf-outline-row.current { background:rgb(37 99 235 / 10%); }
+.pdf-outline-row.current .pdf-outline-link,
+.pdf-outline-row.current .pdf-outline-text { color:#1d4ed8; font-weight:650; }
+
+.pdf-selection-summary { display:grid; gap:8px; margin:0; padding:12px; border:1px solid #bfdbfe; border-radius:8px; background:#eff6ff; }
 .pdf-selection-summary > div:first-child { display:flex; flex-wrap:wrap; gap:8px; align-items:baseline; }
 .pdf-selection-summary span,.pdf-selection-summary code { color:#475569; font-size:13px; }
 .pdf-selection-summary p { margin:0; max-height:160px; overflow:auto; white-space:pre-wrap; }
 .pdf-selection-actions { display:flex; gap:8px; }
 .pdf-selection-actions .primary { margin:0; }
 .pdf-selection-result { color:#166534; font-weight:650; }
-.pdf-viewer-panel { min-width:0; }
-.pdf-reader { grid-template-columns:clamp(160px, 17vw, 230px) minmax(0, 1fr); min-width:0; }
-.pdf-content { min-width:0; max-height:min(880px, calc(100dvh - 110px)); padding:clamp(10px, 1.5vw, 18px); scrollbar-gutter:stable; }
-.pdf-pages { width:100%; justify-items:center; }
-.pdf-page { width:auto; max-width:100%; }
-.pdf-toolbar { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-.pdf-toolbar button { padding:5px 9px; font-size:12px; }
-.pdf-reader.outline-collapsed { grid-template-columns:minmax(0, 1fr); }
-.pdf-reader.outline-collapsed .outline { display:none; }
+
+/* Floating mode rail (modeRail): replaces the labeled controls row. It is also
+   a draggable toolbar — dragged to the top or bottom edge it turns into a
+   horizontal bar (rail-horizontal) and docks there (rail-dock-end = the lower
+   or right edge), so it never sits diagonally. */
+.pdf-mode-rail { --rail-popover-gap:17px; position:absolute; z-index:9; top:50%; right:12px; display:grid; gap:6px; padding:7px 6px; border:1px solid #dce3ed; border-radius:12px; background:rgb(255 255 255 / 96%); box-shadow:0 10px 28px rgb(23 32 51 / 22%); transform:translateY(-50%); cursor:grab; touch-action:none; user-select:none; }
+.pdf-mode-rail.rail-horizontal { grid-auto-flow:column; }
+.pdf-mode-rail.rail-dragging { cursor:grabbing; box-shadow:0 14px 34px rgb(23 32 51 / 34%); }
+/* The collapse toggle points at the docked edge (rotating with the rail's
+   orientation) and flips around once the rail is folded away. */
+.pdf-mode-rail .rail-collapse-toggle svg { transform:rotate(var(--rail-toggle-angle, 0deg)); transition:transform .15s ease; }
+.pdf-mode-rail.rail-horizontal.rail-dock-end { --rail-toggle-angle:90deg; }
+.pdf-mode-rail.rail-horizontal:not(.rail-dock-end) { --rail-toggle-angle:-90deg; }
+.pdf-mode-rail:not(.rail-horizontal):not(.rail-dock-end) { --rail-toggle-angle:180deg; }
+.pdf-mode-rail.rail-collapsed .rail-collapse-toggle svg { transform:rotate(calc(var(--rail-toggle-angle, 0deg) + 180deg)); }
+.pdf-mode-rail.rail-collapsed > :not(.rail-collapse-toggle) { display:none; }
+.pdf-mode-rail button { display:grid; place-items:center; width:34px; height:34px; padding:0; border:0; border-radius:8px; background:transparent; color:#475569; cursor:pointer; }
+.pdf-mode-rail button:hover:not(:disabled) { border-color:transparent; background:#eef2f7; }
+.pdf-mode-rail button.active { border-color:transparent; background:#e2e8f0; color:#0f172a; }
+.pdf-mode-rail svg { width:19px; height:19px; }
+
+/* Floating selection action bar (modeRail): stays out of the page layout. */
+.pdf-selection-bar { position:absolute; z-index:9; bottom:14px; left:50%; display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid #dce3ed; border-radius:10px; background:rgb(255 255 255 / 96%); box-shadow:0 10px 28px rgb(23 32 51 / 22%); transform:translateX(-50%); font-size:13px; }
+.pdf-selection-bar > span { max-width:min(46ch, 42vw); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#475569; }
 
 /* Native PDF links are used only as geometric anchors. Their destinations are
    previewed as original-PDF pixels; no citation text or metadata matching is
@@ -79,19 +161,39 @@
 .citation-link-preview-status { color:#64748b; font-size:11px; }
 .citation-link-preview-error { color:#a51d2d; font-size:12px; }
 
+/* Parser block geometry is an invisible hit map. Show the box only while the
+   user is actively hovering or keyboard-focusing a Block in Block mode. */
+.block-overlay { position:absolute; inset:0; pointer-events:none; }
+.block-overlay.active { pointer-events:auto; z-index:4; }
+.block-overlay .pdf-block,
+.block-overlay .pdf-block:hover,
+.block-overlay .pdf-block:focus { border-color:transparent; outline:none; background:transparent; }
+.block-overlay.active .pdf-block:hover,
+.block-overlay.active .pdf-block:focus-visible { border-color:#2563eb; outline:2px solid rgb(37 99 235 / 53%); background:rgb(37 99 235 / 21%); }
+.block-overlay .pdf-block span { display:none; }
+.block-overlay.active .pdf-block:hover span,
+.block-overlay.active .pdf-block:focus-visible span { display:block; }
+.pdf-block { position:absolute; display:block; padding:0; border:1px solid transparent; border-radius:2px; background:transparent; cursor:pointer; overflow:hidden; }
+.pdf-block span { position:absolute; left:0; top:0; padding:2px 4px; border-radius:0 0 3px 0; background:#1d4ed8; color:#fff; font-size:10px; }
+.pdf-block-error { position:absolute; left:8px; bottom:8px; max-width:95%; margin:0; padding:5px 7px; border-radius:4px; background:#fff1f2; color:#9f1239; font-size:11px; }
+
 @media (max-width: 980px) {
-  .pdf-reader { grid-template-columns:minmax(0, 1fr); min-height:520px; }
-  .pdf-reader:not(.outline-collapsed) .outline { display:block; max-height:220px; border-right:0; border-bottom:1px solid #dce3ed; }
+  .pdf-reader-frame { grid-template-columns:minmax(0, 1fr); }
+  .pdf-reader-frame:not(.outline-collapsed) .outline { display:block; max-height:220px; border-right:0; border-bottom:1px solid #dce3ed; }
   .pdf-reader-controls { align-items:flex-start; flex-direction:column; }
+  .pdf-mode-rail { right:8px; gap:4px; padding:6px 5px; }
+  .pdf-mode-rail button { width:30px; height:30px; }
+  .pdf-mode-rail svg { width:17px; height:17px; }
+  .pdf-mode-rail { --rail-popover-gap:13px; }
+  .pdf-viewer-panel .pdf-page-jump-input { width:48px; }
+  .pdf-selection-bar { bottom:10px; gap:6px; padding:7px 8px; }
+  .pdf-selection-bar > span { max-width:34vw; }
   .pdf-mode-switch { width:100%; overflow-x:auto; }
   .pdf-mode-switch button { flex:1 0 auto; }
-  .pdf-content { max-height:75dvh; padding:10px; }
-  .pdf-toolbar { top:-10px; }
   .citation-link-preview { width:min(520px, 88vw); }
 }
 
 @media (max-width: 520px) {
-  .pdf-reader { min-height:440px; border-radius:7px; }
   .pdf-toolbar { align-items:flex-start; flex-direction:column; }
   .pdf-toolbar button { align-self:flex-end; }
   .pdf-selection-summary { padding:10px; }
@@ -99,36 +201,25 @@
   .citation-link-preview { position:fixed; right:8px!important; bottom:8px; left:8px!important; top:auto; width:auto; max-height:45dvh; overflow:auto; }
   .citation-link-preview img { max-height:30dvh; }
 }
-/* react-pdf's text layer uses z-index: 2. Raise the Block hit target only in
-   Block mode so its buttons receive pointer events without breaking normal
-   text selection or area dragging. */
-.block-overlay.active {
-  z-index: 4;
-}
 
-/* Parser block geometry is an invisible hit map. Show the box only while the
-   user is actively hovering or keyboard-focusing a Block in Block mode. The
-   extra specificity also overrides type colors from the legacy global CSS. */
-.block-overlay .pdf-block,
-.block-overlay .pdf-block:hover,
-.block-overlay .pdf-block:focus {
-  border-color: transparent;
-  outline: none;
-  background: transparent;
-}
-
-.block-overlay.active .pdf-block:hover,
-.block-overlay.active .pdf-block:focus-visible {
-  border-color: #2563eb;
-  outline: 2px solid rgb(37 99 235 / 53%);
-  background: rgb(37 99 235 / 21%);
-}
-
-.block-overlay .pdf-block span {
-  display: none;
-}
-
-.block-overlay.active .pdf-block:hover span,
-.block-overlay.active .pdf-block:focus-visible span {
-  display: block;
-}
+/* Local zoom readout: reporting through the host page would re-render it (and
+   its panels) once per gesture, which is visible as zoom jank. */
+.pdf-zoom-chip { position:absolute; z-index:9; left:12px; bottom:14px; padding:3px 8px; border:1px solid #dce3ed; border-radius:999px; background:rgb(255 255 255 / 92%); color:#475569; font-size:11.5px; font-variant-numeric:tabular-nums; pointer-events:none; }
+/* Two floating helpers: the page-number popover beside the icon rail, and the
+   single-step back button above the zoom chip (only while a jump is undoable). */
+.pdf-mode-rail .pdf-page-jump-anchor { position:relative; }
+/* The anchor is only as wide as the icon, so the popover keeps its own width.
+   It opens away from the edge the rail is docked to: left/right of a vertical
+   rail, below/above a horizontal one. */
+.pdf-viewer-panel .pdf-page-jump { position:absolute; top:50%; right:calc(100% + var(--rail-popover-gap)); display:flex; align-items:center; gap:6px; width:max-content; padding:6px 8px; border:1px solid #dce3ed; border-radius:10px; background:rgb(255 255 255 / 96%); box-shadow:0 10px 28px rgb(23 32 51 / 22%); transform:translateY(-50%); font-size:12.5px; }
+.pdf-mode-rail:not(.rail-horizontal):not(.rail-dock-end) .pdf-page-jump { right:auto; left:calc(100% + var(--rail-popover-gap)); }
+.pdf-mode-rail.rail-horizontal .pdf-page-jump { top:calc(100% + 8px); right:auto; left:50%; transform:translateX(-50%); }
+.pdf-mode-rail.rail-horizontal.rail-dock-end .pdf-page-jump { top:auto; bottom:calc(100% + 8px); }
+.pdf-viewer-panel .pdf-page-jump-input { width:58px; padding:4px 6px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; color:#172033; font:inherit; font-variant-numeric:tabular-nums; text-align:center; }
+.pdf-viewer-panel .pdf-page-jump-input:focus { outline:2px solid #bfdbfe; border-color:#2563eb; }
+.pdf-viewer-panel .pdf-page-jump-total { color:#64748b; font-variant-numeric:tabular-nums; }
+.pdf-viewer-panel .pdf-page-jump button { padding:4px 9px; border:1px solid #cbd5e1; border-radius:6px; background:#fff; color:#172033; font-size:12.5px; font-weight:600; cursor:pointer; }
+.pdf-viewer-panel .pdf-page-jump button:hover:not(:disabled) { background:#f0f5ff; border-color:#93b4ef; }
+.pdf-viewer-panel .pdf-back-button { position:absolute; z-index:9; left:12px; bottom:44px; display:inline-flex; align-items:center; gap:5px; padding:4px 10px 4px 7px; border:1px solid #dce3ed; border-radius:999px; background:rgb(255 255 255 / 92%); color:#475569; font-size:12px; font-weight:600; cursor:pointer; }
+.pdf-viewer-panel .pdf-back-button svg { width:13px; height:13px; }
+.pdf-viewer-panel .pdf-back-button:hover:not(:disabled) { background:#fff; border-color:#cbd5e1; color:#1d4ed8; }

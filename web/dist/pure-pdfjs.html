@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>纯 pdf.js 缩放对照页</title>
+<link rel="stylesheet" href="/node_modules/pdfjs-dist/web/pdf_viewer.css" />
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0e11; color: #e9ebef; font: 13px/1.5 system-ui, sans-serif; }
+  #bar { display: flex; gap: 14px; align-items: center; padding: 8px 12px; border-bottom: 1px solid #2a2d34; }
+  #bar strong { font-size: 13px; }
+  #bar span { color: #a4aab5; font-variant-numeric: tabular-nums; }
+  #viewerWrap { position: relative; height: calc(100% - 43px); }
+  #viewerContainer { position: absolute; inset: 0; overflow: auto; background: #151619; }
+  .pdfViewer { background: transparent; }
+</style>
+</head>
+<body>
+  <div id="bar">
+    <strong>纯 pdf.js（PDFViewer + 官方 CSS，无任何应用代码）</strong>
+    <span id="status">加载中…</span>
+    <span id="metric"></span>
+  </div>
+  <div id="viewerWrap">
+    <div id="viewerContainer"><div id="viewer" class="pdfViewer"></div></div>
+  </div>
+
+  <script type="module">
+    import * as pdfjs from '/node_modules/pdfjs-dist/build/pdf.min.mjs';
+    import { EventBus, PDFLinkService, PDFViewer } from '/node_modules/pdfjs-dist/web/pdf_viewer.mjs';
+
+    pdfjs.GlobalWorkerOptions.workerSrc = '/node_modules/pdfjs-dist/build/pdf.worker.min.mjs';
+
+    const container = document.getElementById('viewerContainer');
+    const scaleLabel = document.getElementById('metric');
+    const statusLabel = document.getElementById('status');
+
+    const eventBus = new EventBus();
+    const linkService = new PDFLinkService({ eventBus });
+    const viewer = new PDFViewer({ container, eventBus, linkService });
+    linkService.setViewer(viewer);
+
+    eventBus.on('pagesinit', () => {
+      viewer.currentScaleValue = 'page-width';
+      updateMetric();
+    });
+    eventBus.on('scalechanging', updateMetric);
+
+    function updateMetric() {
+      scaleLabel.textContent = `缩放 ${Math.round(viewer.currentScale * 100)}% · 画布 ${document.querySelectorAll('.canvasWrapper canvas').length}/${viewer.pagesCount} 页`;
+    }
+
+    // Live frame-time readout so this page and the app can be compared directly.
+    let frames = [];
+    let last = performance.now();
+    const fps = document.createElement('span');
+    fps.id = 'fps';
+    document.getElementById('bar').appendChild(fps);
+    (function tick() {
+      const now = performance.now();
+      frames.push(now - last);
+      last = now;
+      if (frames.length > 90) frames.shift();
+      const sorted = [...frames].sort((a, b) => a - b);
+      fps.textContent = `帧中位 ${Math.round(sorted[Math.floor(sorted.length / 2)] ?? 0)}ms · 慢帧 ${frames.filter(v => v > 34).length}/${frames.length}`;
+      requestAnimationFrame(tick);
+    })();
+
+    // Ctrl + wheel, anchored at the pointer — the same call the app uses.
+    let frame = 0;
+    let pending = 1;
+    const pointer = { x: 0, y: 0 };
+    container.addEventListener('wheel', event => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      pointer.x = event.clientX;
+      pointer.y = event.clientY;
+      pending *= event.deltaY < 0 ? 1.1 : 1 / 1.1;
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const factor = pending;
+        pending = 1;
+        if (Math.abs(factor - 1) < 0.001) return;
+        viewer.updateScale({ scaleFactor: factor, origin: [pointer.x, pointer.y] });
+        updateMetric();
+      });
+    }, { passive: false });
+
+    // Pick the first available PDF through the dev-server proxy and show it.
+    const page = await (await fetch('/api/document/search?page=1&excludeUnknown=true')).json();
+    const first = page.items?.find(item => item.contentType === 'application/pdf');
+    if (!first) {
+      statusLabel.textContent = '没有可用的 PDF（先在应用里上传一篇）。';
+    } else {
+      statusLabel.textContent = first.originalFilename;
+      const pdfDocument = await pdfjs.getDocument({ url: `/api/document/${first.id}/content` }).promise;
+      viewer.setDocument(pdfDocument);
+      linkService.setDocument(pdfDocument);
+    }
+  </script>
+</body>
+</html>
