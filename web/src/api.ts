@@ -254,6 +254,11 @@ export const api = {
       body: JSON.stringify({ resolvedDocumentId: resolvedDocumentID }),
     },
   ),
+  rematchPaperReference: (referenceID: string): Promise<{ reference: PaperReference; linked: boolean }> => requestFrom<{ reference: PaperReference; linked: boolean }>(
+    referenceBaseUrl,
+    `/${encodeURIComponent(referenceID)}/rematch`,
+    { method: 'POST' },
+  ),
   updateDocument: (id: string, payload: { originalFilename?: string; doi?: string }): Promise<{ document: Document }> => request<{ document: Document }>(
     `/${encodeURIComponent(id)}`,
     { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },

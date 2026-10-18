@@ -358,107 +358,164 @@ func (r *documentRepository) SetDOIIfEmpty(ctx context.Context, id uuid.UUID, do
 	return false, nil
 }
 
-func (r *documentRepository) MergeIntoCanonical(ctx context.Context, loserID, canonicalID uuid.UUID) error {
-	if loserID == uuid.Nil || canonicalID == uuid.Nil || loserID == canonicalID {
-		return errors.New("distinct loser and canonical document ids are required")
+// ReplaceOlderDocument implements newest-wins duplicate handling. The older
+// document and every merged tombstone under it are removed; its incoming
+// citations and collection membership move to the newest document, and the
+// newest takes over the DOI. The older document's outgoing bibliography is not
+// carried over: the newest upload's own extraction is authoritative.
+func (r *documentRepository) ReplaceOlderDocument(
+	ctx context.Context, olderID, newestID uuid.UUID,
+) (types.DocumentFileKeys, error) {
+	cleanup := types.DocumentFileKeys{}
+	if olderID == uuid.Nil || newestID == uuid.Nil || olderID == newestID {
+		return cleanup, errors.New("distinct older and newest document ids are required")
 	}
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		ids := []uuid.UUID{loserID, canonicalID}
+		ids := []uuid.UUID{olderID, newestID}
 		if ids[0].String() > ids[1].String() {
 			ids[0], ids[1] = ids[1], ids[0]
 		}
 		var locked []types.Document
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id IN ?", ids).Order("id").Find(&locked).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("id IN ?", ids).Order("id").Find(&locked).Error; err != nil {
 			return err
 		}
 		if len(locked) != 2 {
 			return sql.ErrNoRows
 		}
-		var loser, canonical types.Document
+		var older, newest types.Document
 		for _, document := range locked {
-			if document.ID == loserID {
-				loser = document
+			if document.ID == olderID {
+				older = document
 			} else {
-				canonical = document
+				newest = document
 			}
 		}
-		if loser.SourceState == types.DocumentSourceMerged {
-			if loser.CanonicalDocumentID != nil && *loser.CanonicalDocumentID == canonicalID {
-				return nil
-			}
-			return fmt.Errorf("document already merged into another canonical document")
+		if older.SourceState != types.DocumentSourceAvailable {
+			return fmt.Errorf("older document source is not available")
 		}
-		if canonical.SourceState != types.DocumentSourceAvailable {
-			return fmt.Errorf("canonical document source is not available")
+		if newest.SourceState != types.DocumentSourceAvailable {
+			return fmt.Errorf("newest document source is not available")
 		}
-		if err := tx.Exec(`UPDATE documents SET canonical_document_id = ? WHERE canonical_document_id = ?`,
-			canonicalID, loserID).Error; err != nil {
+		// Never replace the only document that owns a stored file with one that
+		// has no source. Normally both rows are available and non-empty is
+		// enforced by the schema; this is a defensive guard for legacy data or
+		// a future index-only document state.
+		if strings.TrimSpace(older.StorageKey) != "" && strings.TrimSpace(newest.StorageKey) == "" {
+			return fmt.Errorf("cannot replace a sourced document with a source-less document")
+		}
+		olderDOI := strings.ToLower(strings.TrimSpace(older.DOI))
+		newestDOI := strings.ToLower(strings.TrimSpace(newest.DOI))
+		if olderDOI != "" && newestDOI != "" && olderDOI != newestDOI {
+			return fmt.Errorf("cannot replace documents with different DOIs")
+		}
+
+		var familyIDs []uuid.UUID
+		if err := tx.Model(&types.Document{}).
+			Where("id = ? OR canonical_document_id = ?", olderID, olderID).
+			Pluck("id", &familyIDs).Error; err != nil {
 			return err
 		}
-		// Incoming bibliography rows now resolve to the canonical document.
+		var sourceKeys, markdownKeys, assetKeys []string
+		if err := tx.Model(&types.Document{}).
+			Where("id IN ?", familyIDs).Pluck("storage_key", &sourceKeys).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&types.DocumentMarkdown{}).
+			Where("document_id IN ?", familyIDs).Pluck("storage_key", &markdownKeys).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&types.Block{}).
+			Where("document_id IN ? AND asset_key <> ''", familyIDs).
+			Pluck("asset_key", &assetKeys).Error; err != nil {
+			return err
+		}
+		cleanup.StorageKeys = uniqueDocumentStorageKeys(sourceKeys, markdownKeys, assetKeys)
+
+		// A citation owned by the newest document that points at any removed
+		// family member would become a self-citation when it is repointed. It
+		// describes the same paper citing itself, so it is dropped.
+		if err := tx.Exec(`DELETE FROM paper_citations
+			WHERE citing_document_id = ? AND cited_document_id IN ?`,
+			newestID, familyIDs).Error; err != nil {
+			return err
+		}
 		now := time.Now().UTC()
 		if err := tx.Exec(`UPDATE paper_citations
 			SET cited_document_id = ?, resolution_status = 'succeeded',
-			    resolution_updated_at = ?, updated_at = ?
-			WHERE cited_document_id = ?`,
-			canonicalID, now, now, loserID).Error; err != nil {
+			    resolution_generation = CASE
+			        WHEN resolution_status IN ('queued', 'running')
+			            THEN resolution_generation + 1
+			        ELSE resolution_generation
+			    END,
+			    resolution_provider = '', resolution_error_code = NULL,
+			    resolution_error_message = NULL, resolution_updated_at = ?, updated_at = ?
+			WHERE cited_document_id IN ?`,
+			newestID, now, now, familyIDs).Error; err != nil {
 			return err
 		}
-		// Preserve the loser's outgoing bibliography under the canonical owner.
-		// Drop duplicate bibliography entries first so the owner/key unique
-		// constraint cannot block the move.
-		if err := tx.Exec(`DELETE FROM paper_citations
-			WHERE citing_document_id = ? AND cited_document_id = ?`,
-			loserID, canonicalID).Error; err != nil {
+		if err := tx.Exec(`INSERT INTO document_base_files
+				(document_base_id, document_id, added_at, sort_order, metadata)
+			SELECT document_base_id, ?, added_at, sort_order, metadata
+			FROM document_base_files
+			WHERE document_id IN ?
+			ON CONFLICT (document_base_id, document_id) DO NOTHING`,
+			newestID, familyIDs).Error; err != nil {
 			return err
 		}
-		if err := tx.Exec(`DELETE FROM paper_citations loser
-			WHERE loser.citing_document_id = ?
-			  AND EXISTS (
-				SELECT 1 FROM paper_citations existing
-				WHERE existing.citing_document_id = ?
-				  AND existing.reference_key = loser.reference_key
-			  )`, loserID, canonicalID).Error; err != nil {
+		familyIDTexts := make([]string, 0, len(familyIDs))
+		for _, id := range familyIDs {
+			familyIDTexts = append(familyIDTexts, id.String())
+		}
+		if err := tx.Where(
+			"(scope = ? AND scope_id IN ?) OR related_id IN ?",
+			types.TaskScopeDocument, familyIDTexts, familyIDTexts,
+		).Delete(&types.TaskDeadLetter{}).Error; err != nil {
 			return err
 		}
-		if err := tx.Exec(`UPDATE paper_citations
-			SET citing_document_id = ?, updated_at = ?
-			WHERE citing_document_id = ?`, canonicalID, now, loserID).Error; err != nil {
+		if err := tx.Delete(&types.Document{}, "id = ?", olderID).Error; err != nil {
 			return err
 		}
-		// A merge can create self-citations in both directions.
-		if err := tx.Exec(`DELETE FROM paper_citations
-			WHERE citing_document_id = ? AND cited_document_id = ?`,
-			canonicalID, canonicalID).Error; err != nil {
-			return err
-		}
-		updates := map[string]interface{}{
-			"source_state":               types.DocumentSourceMerged,
-			"canonical_document_id":      canonicalID,
-			"markdown_status":            types.DocumentStageCancelled,
-			"metadata_extraction_status": types.DocumentStageCancelled,
-			"source_lookup_status":       types.DocumentStageCancelled,
-			"reference_lookup_status":    types.DocumentStageCancelled,
-			"markdown_error_code":        nil, "markdown_error_message": nil,
-			"metadata_extraction_error_code": nil, "metadata_extraction_error_message": nil,
-			"source_lookup_error_code": nil, "source_lookup_error_message": nil,
-			"reference_lookup_error_code": nil, "reference_lookup_error_message": nil,
-		}
-		result := tx.Model(&types.Document{}).Where("id = ? AND source_state <> ?", loserID, types.DocumentSourceMerged).Updates(updates)
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return types.ErrDocumentNotProcessing
+		if olderDOI != "" && newestDOI == "" {
+			result := tx.Model(&types.Document{}).
+				Where("id = ? AND doi = ''", newestID).
+				Update("doi", olderDOI)
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return fmt.Errorf("newest document DOI changed during replacement")
+			}
 		}
 		return nil
 	})
 	if err != nil {
-		logger.Error(ctx, "merge document into canonical failed", "document_id", loserID, "canonical_document_id", canonicalID, "error", err)
-		return err
+		logger.Error(ctx, "replace older document failed",
+			"older_document_id", olderID, "newest_document_id", newestID, "error", err)
+		return types.DocumentFileKeys{}, err
 	}
-	logger.Info(ctx, "document merged into canonical", "document_id", loserID, "canonical_document_id", canonicalID)
-	return nil
+	logger.Info(ctx, "older document replaced by newest",
+		"older_document_id", olderID, "newest_document_id", newestID)
+	return cleanup, nil
+}
+
+func uniqueDocumentStorageKeys(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	keys := make([]string, 0)
+	for _, group := range groups {
+		for _, key := range group {
+			key = strings.TrimSpace(key)
+			if key == "" {
+				continue
+			}
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	return keys
 }
 
 func valueOrEmpty(value *string) string {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -57,6 +58,10 @@ var (
 	// scheduler can claim another provider. It deliberately carries neither the
 	// failed provider's terminal classification nor its long Retry-After value.
 	errReferenceProviderFallback = errors.New("reference provider fallback required")
+	// errDuplicateReplacementRaced means concurrent uploads kept replacing the
+	// DOI owner while newest-wins reconciliation ran. It is retryable so the
+	// task re-reads the surviving document instead of revoking with a blank DOI.
+	errDuplicateReplacementRaced = errors.New("duplicate document replacement raced")
 )
 
 var (
@@ -713,21 +718,12 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 ) (bool, error) {
 	doi := normalizePaperDOI(selected.DOI)
 	if strings.TrimSpace(document.DOI) == "" && doi != "" {
-		page, err := s.documents.Search(ctx, types.DocumentSearch{
-			DOI: doi, SourceState: types.DocumentSourceAvailable, Page: 1, PageSize: 2,
-		})
+		kept, _, err := s.promoteNewestDuplicate(ctx, &document, doi)
 		if err != nil {
 			return false, err
 		}
-		for _, canonical := range page.Items {
-			if canonical.ID == document.ID {
-				continue
-			}
-			if err := s.documents.MergeIntoCanonical(ctx, document.ID, canonical.ID); err != nil {
-				return false, err
-			}
-			s.deleteMergedSourceObject(ctx, document)
-			return true, nil
+		if !kept {
+			return false, nil
 		}
 	}
 	updated, err := s.papers.UpdateMetadata(
@@ -753,26 +749,19 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 		applied, doiErr := s.documents.SetDOIIfEmpty(ctx, document.ID, doi)
 		if doiErr != nil {
 			if errors.Is(doiErr, types.ErrDuplicateDOI) {
-				page, lookupErr := s.documents.Search(ctx, types.DocumentSearch{
-					DOI: doi, SourceState: types.DocumentSourceAvailable, Page: 1, PageSize: 2,
-				})
-				if lookupErr != nil {
-					return false, lookupErr
+				kept, replaced, dedupeErr := s.promoteNewestDuplicate(ctx, &document, doi)
+				if dedupeErr != nil {
+					return false, dedupeErr
 				}
-				for _, canonical := range page.Items {
-					if canonical.ID == document.ID {
-						continue
-					}
-					if mergeErr := s.documents.MergeIntoCanonical(ctx, document.ID, canonical.ID); mergeErr != nil {
-						return false, mergeErr
-					}
-					s.deleteMergedSourceObject(ctx, document)
-					return true, nil
+				if !kept {
+					return false, nil
 				}
-				return false, fmt.Errorf("backfill catalog DOI: %w", doiErr)
-			} else {
-				return false, fmt.Errorf("backfill catalog DOI: %w", doiErr)
+				if !replaced {
+					return false, fmt.Errorf("backfill catalog DOI: %w", doiErr)
+				}
+				return true, nil
 			}
+			return false, fmt.Errorf("backfill catalog DOI: %w", doiErr)
 		} else if applied {
 			logger.Info(ctx, "catalog DOI applied to document", "document_id", document.ID, "doi", normalizePaperDOI(selected.DOI))
 		}
@@ -780,12 +769,109 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 	return true, nil
 }
 
-func (s *paperInfoService) deleteMergedSourceObject(ctx context.Context, document types.Document) {
-	if s.storage == nil || strings.TrimSpace(document.StorageKey) == "" {
+const duplicateReplacementAttempts = 3
+
+// promoteNewestDuplicate applies newest-wins duplicate handling when DOI
+// already belongs to another available document. It keeps the document with
+// the later creation time, deletes the older row and its merged tombstones,
+// and returns whether the document under resolution survived.
+func (s *paperInfoService) promoteNewestDuplicate(
+	ctx context.Context,
+	document *types.Document,
+	doi string,
+) (kept bool, replaced bool, err error) {
+	if doi == "" || strings.TrimSpace(document.DOI) != "" {
+		return true, false, nil
+	}
+	for attempt := 0; attempt < duplicateReplacementAttempts; attempt++ {
+		if attempt > 0 {
+			// A concurrent upload may have already deleted the document whose
+			// source lookup is running. Then there is nothing left to keep.
+			current, getErr := s.documents.Get(ctx, document.ID)
+			if errors.Is(getErr, sql.ErrNoRows) {
+				return false, true, nil
+			} else if getErr != nil {
+				return false, false, getErr
+			}
+			if current.SourceState != types.DocumentSourceAvailable {
+				return false, true, nil
+			}
+		}
+		page, searchErr := s.documents.Search(ctx, types.DocumentSearch{
+			DOI: doi, SourceState: types.DocumentSourceAvailable, Page: 1, PageSize: 2,
+		})
+		if searchErr != nil {
+			return false, false, searchErr
+		}
+		retry := false
+		for _, existing := range page.Items {
+			if existing.ID == document.ID {
+				continue
+			}
+			newest, older := newestPaperDocument(*document, existing)
+			cleanup, replaceErr := s.documents.ReplaceOlderDocument(ctx, older.ID, newest.ID)
+			if replaceErr != nil {
+				if errors.Is(replaceErr, sql.ErrNoRows) {
+					// Another source-lookup task won the same race. Re-read the
+					// DOI owner and compare again instead of revoking this task
+					// with an unresolved DOI.
+					retry = true
+					break
+				}
+				return false, false, replaceErr
+			}
+			s.deleteReplacedDocumentFiles(ctx, cleanup)
+			replaced = true
+			if newest.ID != document.ID {
+				logger.Info(ctx, "source document replaced by newer duplicate",
+					"document_id", document.ID, "newest_document_id", newest.ID)
+				return false, true, nil
+			}
+			document.DOI = doi
+			logger.Info(ctx, "older duplicate replaced by source document",
+				"document_id", document.ID, "older_document_id", older.ID)
+		}
+		if !retry {
+			return true, replaced, nil
+		}
+	}
+	return false, replaced, errDuplicateReplacementRaced
+}
+
+// newestPaperDocument picks the document to keep. A document with a real
+// stored source always wins over one without; creation time decides only when
+// both have a source. Ties favor the document currently being processed, which
+// keeps retries deterministic.
+func newestPaperDocument(current, existing types.Document) (newest, older types.Document) {
+	currentHasSource := documentHasSource(current)
+	existingHasSource := documentHasSource(existing)
+	if currentHasSource != existingHasSource {
+		if existingHasSource {
+			return existing, current
+		}
+		return current, existing
+	}
+	if existing.CreatedAt.After(current.CreatedAt) {
+		return existing, current
+	}
+	return current, existing
+}
+
+func documentHasSource(document types.Document) bool {
+	return document.SourceState == types.DocumentSourceAvailable &&
+		strings.TrimSpace(document.StorageKey) != ""
+}
+
+func (s *paperInfoService) deleteReplacedDocumentFiles(
+	ctx context.Context, cleanup types.DocumentFileKeys,
+) {
+	if s.storage == nil {
 		return
 	}
-	if err := s.storage.Delete(context.WithoutCancel(ctx), document.StorageKey); err != nil {
-		logger.Warn(ctx, "delete merged document source failed", "document_id", document.ID, "storage_key", document.StorageKey, "error", err)
+	for _, key := range cleanup.StorageKeys {
+		if err := s.storage.Delete(context.WithoutCancel(ctx), key); err != nil {
+			logger.Warn(ctx, "delete replaced document file failed", "storage_key", key, "error", err)
+		}
 	}
 }
 

@@ -14,10 +14,11 @@ import (
 )
 
 type paperDocumentRepoStub struct {
-	documents map[uuid.UUID]types.Document
-	markdowns map[uuid.UUID]types.DocumentMarkdown
-	blocks    map[uuid.UUID][]types.Block
-	search    func(types.DocumentSearch) (types.DocumentPage, error)
+	documents       map[uuid.UUID]types.Document
+	markdowns       map[uuid.UUID]types.DocumentMarkdown
+	blocks          map[uuid.UUID][]types.Block
+	search          func(types.DocumentSearch) (types.DocumentPage, error)
+	replaceFailures int
 }
 
 func (*paperDocumentRepoStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
@@ -37,7 +38,10 @@ func (r *paperDocumentRepoStub) GetStage(_ context.Context, id uuid.UUID, stage 
 }
 
 func (r *paperDocumentRepoStub) QueueStageNewGeneration(_ context.Context, id uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, bool, error) {
-	document := r.documents[id]
+	document, ok := r.documents[id]
+	if !ok {
+		return types.DocumentStageState{}, false, sql.ErrNoRows
+	}
 	state, applied, err := queueStubDocumentStage(&document, stage)
 	r.documents[id] = document
 	return state, applied, err
@@ -65,7 +69,10 @@ func (r *paperDocumentRepoStub) AllowsStageWork(_ context.Context, id uuid.UUID,
 }
 
 func (r *paperDocumentRepoStub) transitionStage(id uuid.UUID, stage types.DocumentStage, generation int64, from []types.DocumentStageStatus, to types.DocumentStageStatus) (types.DocumentStageState, bool, error) {
-	document := r.documents[id]
+	document, ok := r.documents[id]
+	if !ok {
+		return types.DocumentStageState{}, false, sql.ErrNoRows
+	}
 	state, applied, err := transitionStubDocumentStage(&document, stage, generation, from, to)
 	r.documents[id] = document
 	return state, applied, err
@@ -114,12 +121,27 @@ func normalizeTestDocumentSource(document types.Document) types.Document {
 	return document
 }
 
-func (r *paperDocumentRepoStub) MergeIntoCanonical(_ context.Context, loserID, canonicalID uuid.UUID) error {
-	document := r.documents[loserID]
-	document.SourceState = types.DocumentSourceMerged
-	document.CanonicalDocumentID = &canonicalID
-	r.documents[loserID] = document
-	return nil
+func (r *paperDocumentRepoStub) ReplaceOlderDocument(
+	_ context.Context, olderID, newestID uuid.UUID,
+) (types.DocumentFileKeys, error) {
+	if r.replaceFailures > 0 {
+		r.replaceFailures--
+		return types.DocumentFileKeys{}, sql.ErrNoRows
+	}
+	older, ok := r.documents[olderID]
+	if !ok {
+		return types.DocumentFileKeys{}, sql.ErrNoRows
+	}
+	newest, ok := r.documents[newestID]
+	if !ok {
+		return types.DocumentFileKeys{}, sql.ErrNoRows
+	}
+	if newest.DOI == "" {
+		newest.DOI = older.DOI
+	}
+	r.documents[newestID] = newest
+	delete(r.documents, olderID)
+	return types.DocumentFileKeys{StorageKeys: []string{older.StorageKey}}, nil
 }
 
 func (r *paperDocumentRepoStub) Search(
@@ -837,6 +859,152 @@ func TestPaperServiceMergeExtractedCitationsLinksLocalDOI(t *testing.T) {
 	if len(items) != 1 || items[0].CitedDocumentID == nil || *items[0].CitedDocumentID != target.ID ||
 		items[0].ResolutionStatus != types.DocumentStageSucceeded {
 		t.Fatalf("local match = %#v, want target %s", items, target.ID)
+	}
+}
+
+func TestPaperServiceRematchReferenceLinksNewLocalDocument(t *testing.T) {
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	service, documents, _, _ := newPaperServiceForTest(citing)
+	raw := "Ada Lovelace. 2024. A late local paper."
+	items, err := service.MergeExtractedCitations(context.Background(), citing.ID.String(), []types.PaperCitationInput{{
+		RawReference: raw,
+		Candidate: &types.PaperReferenceCandidate{
+			RawReference: raw, DOI: "10.1000/late", Title: "A late local paper", Confidence: 0.9,
+		},
+	}})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("MergeExtractedCitations() = %#v, err=%v", items, err)
+	}
+	if items[0].CitedDocumentID != nil {
+		t.Fatal("reference unexpectedly resolved before the target was imported")
+	}
+	target := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable, DOI: "10.1000/late"}
+	if _, err := documents.Create(context.Background(), target); err != nil {
+		t.Fatalf("create late target: %v", err)
+	}
+
+	updated, linked, err := service.RematchReference(context.Background(), items[0].ReferenceID.String())
+	if err != nil {
+		t.Fatalf("RematchReference() error = %v", err)
+	}
+	if !linked || updated.CitedDocumentID == nil || *updated.CitedDocumentID != target.ID {
+		t.Fatalf("rematch = %#v linked=%t, want target %s", updated, linked, target.ID)
+	}
+	if updated.ResolutionStatus != types.DocumentStageSucceeded {
+		t.Fatalf("resolution status = %q", updated.ResolutionStatus)
+	}
+
+	again, linkedAgain, err := service.RematchReference(context.Background(), items[0].ReferenceID.String())
+	if err != nil || linkedAgain || again.CitedDocumentID == nil || *again.CitedDocumentID != target.ID {
+		t.Fatalf("second rematch = %#v linked=%t err=%v", again, linkedAgain, err)
+	}
+}
+
+func TestPaperServiceRematchReferenceUsesRawDOIFallback(t *testing.T) {
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	service, documents, _, _ := newPaperServiceForTest(citing)
+	citation, err := service.AddCitation(context.Background(), citing.ID.String(), types.PaperCitationInput{
+		RawReference: "Ada Lovelace. 2024. A raw-only paper. https://doi.org/10.1000/raw-only",
+	})
+	if err != nil {
+		t.Fatalf("AddCitation() error = %v", err)
+	}
+	target := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable, DOI: "10.1000/raw-only"}
+	if _, err := documents.Create(context.Background(), target); err != nil {
+		t.Fatalf("create raw-only target: %v", err)
+	}
+
+	updated, linked, err := service.RematchReference(context.Background(), citation.ReferenceID.String())
+	if err != nil {
+		t.Fatalf("RematchReference() error = %v", err)
+	}
+	if !linked || updated.CitedDocumentID == nil || *updated.CitedDocumentID != target.ID {
+		t.Fatalf("raw-only rematch = %#v linked=%t, want target %s", updated, linked, target.ID)
+	}
+}
+
+func TestPaperServiceRematchReferenceExcludesCitingDocument(t *testing.T) {
+	citing := types.Document{
+		ID: uuid.New(), SourceState: types.DocumentSourceAvailable, DOI: "10.1000/self",
+	}
+	service, _, _, _ := newPaperServiceForTest(citing)
+	raw := "Self Author. 2024. Self paper."
+	items, err := service.MergeExtractedCitations(context.Background(), citing.ID.String(), []types.PaperCitationInput{{
+		RawReference: raw,
+		Candidate: &types.PaperReferenceCandidate{
+			RawReference: raw, DOI: "10.1000/self", Title: "Self paper", Confidence: 0.9,
+		},
+	}})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("MergeExtractedCitations() = %#v, err=%v", items, err)
+	}
+
+	updated, linked, err := service.RematchReference(context.Background(), items[0].ReferenceID.String())
+	if err != nil {
+		t.Fatalf("RematchReference() error = %v", err)
+	}
+	if linked || updated.CitedDocumentID != nil {
+		t.Fatalf("self rematch = %#v linked=%t, want unresolved", updated, linked)
+	}
+}
+
+// P0-3 regression: resolving a work for paper A must not create a shared
+// tombstone that prevents paper B from adding the same raw reference.
+func TestPaperServiceResolvedReferenceDoesNotBlockSameRawReferenceInAnotherPaper(t *testing.T) {
+	citingA := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	citingB := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	target := types.Document{
+		ID: uuid.New(), SourceState: types.DocumentSourceAvailable, DOI: "10.1000/shared-target",
+	}
+	service, _, _, _ := newPaperServiceForTest(citingA, citingB, target)
+	raw := "Ada Lovelace. 2024. Shared bibliography entry."
+	first, err := service.MergeExtractedCitations(context.Background(), citingA.ID.String(), []types.PaperCitationInput{{
+		RawReference: raw,
+		Candidate: &types.PaperReferenceCandidate{
+			RawReference: raw, DOI: "10.1000/shared-target", Title: "Shared bibliography entry", Confidence: 0.9,
+		},
+	}})
+	if err != nil || len(first) != 1 {
+		t.Fatalf("paper A merge = %#v, err=%v", first, err)
+	}
+	if first[0].CitedDocumentID == nil || *first[0].CitedDocumentID != target.ID {
+		t.Fatalf("paper A citation = %#v, want target %s", first[0], target.ID)
+	}
+
+	second, err := service.AddCitation(context.Background(), citingB.ID.String(), types.PaperCitationInput{
+		RawReference: raw,
+	})
+	if err != nil {
+		t.Fatalf("paper B add after A resolved: %v", err)
+	}
+	if second.ReferenceID == first[0].ReferenceID {
+		t.Fatal("same raw reference in another paper reused A's row")
+	}
+	resolved, err := service.ResolveReference(
+		context.Background(), second.ReferenceID.String(), target.ID.String(),
+	)
+	if err != nil {
+		t.Fatalf("resolve paper B reference: %v", err)
+	}
+	if resolved.CitedDocumentID == nil || *resolved.CitedDocumentID != target.ID {
+		t.Fatalf("paper B resolution = %#v", resolved)
+	}
+	stillA, err := service.GetReference(context.Background(), first[0].ReferenceID.String())
+	if err != nil || stillA.CitedDocumentID == nil || *stillA.CitedDocumentID != target.ID {
+		t.Fatalf("paper A row changed = %#v, err=%v", stillA, err)
+	}
+
+	if err := service.RemoveCitation(context.Background(), citingB.ID.String(), second.ReferenceID.String()); err != nil {
+		t.Fatalf("remove paper B reference: %v", err)
+	}
+	readded, err := service.AddCitation(context.Background(), citingB.ID.String(), types.PaperCitationInput{
+		RawReference: raw,
+	})
+	if err != nil {
+		t.Fatalf("re-add paper B reference: %v", err)
+	}
+	if readded.ReferenceID != second.ReferenceID {
+		t.Fatalf("re-added reference id = %s, want %s", readded.ReferenceID, second.ReferenceID)
 	}
 }
 

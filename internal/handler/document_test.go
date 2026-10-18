@@ -174,8 +174,8 @@ func (s *documentCreatorStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, doi
 	return true, nil
 }
 
-func (s *documentCreatorStub) MergeIntoCanonical(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *documentCreatorStub) ReplaceOlderDocument(context.Context, uuid.UUID, uuid.UUID) (types.DocumentFileKeys, error) {
+	return types.DocumentFileKeys{}, nil
 }
 
 func newDocumentHandler(storage *fileservice.LocalStorage, repo *documentCreatorStub) *handler.DocumentHandler {

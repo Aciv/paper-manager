@@ -131,6 +131,28 @@ func (h *PaperCitationHandler) ResolveReference(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"reference": reference})
 }
 
+// RematchReference retries local DOI/title matching for one reference against
+// the current library. It never calls an external provider.
+func (h *PaperCitationHandler) RematchReference(c *gin.Context) {
+	referenceID := strings.TrimSpace(c.Param("referenceID"))
+	if _, err := uuid.Parse(referenceID); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid reference id"), err)
+		return
+	}
+	reference, linked, err := h.papers.RematchReference(c.Request.Context(), referenceID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			h.writeError(c, apperrors.NewNotFoundError("reference not found"), err)
+			return
+		}
+		h.handleServiceError(c, err)
+		return
+	}
+	logger.Info(c.Request.Context(), "paper reference rematched",
+		"reference_id", referenceID, "linked", linked, "cited_document_id", reference.CitedDocumentID)
+	c.JSON(http.StatusOK, gin.H{"reference": reference, "linked": linked})
+}
+
 func (h *PaperCitationHandler) Resolve(c *gin.Context) {
 	if !validPaperDocumentParam(c, h.writeError) {
 		return

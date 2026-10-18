@@ -1075,7 +1075,7 @@ func TestPaperInfoReferenceTaskCarriesOnlyTarget(t *testing.T) {
 	}
 }
 
-func TestPaperInfoResolveSourceMergesDOIConflictIntoCanonical(t *testing.T) {
+func TestPaperInfoResolveSourceKeepsNewestDocumentOnDOIConflict(t *testing.T) {
 	documentID := uuid.New()
 	otherID := uuid.New()
 	documents := newPaperDocumentRepoStub(
@@ -1091,12 +1091,101 @@ func TestPaperInfoResolveSourceMergesDOIConflictIntoCanonical(t *testing.T) {
 	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
 		t.Fatal(err)
 	}
-	merged := documents.documents[documentID]
-	if merged.SourceState != types.DocumentSourceMerged || merged.CanonicalDocumentID == nil || *merged.CanonicalDocumentID != otherID {
-		t.Fatalf("DOI conflict loser = %#v", merged)
+	if _, exists := documents.documents[otherID]; exists {
+		t.Fatal("older DOI-owning document still exists")
+	}
+	kept := documents.documents[documentID]
+	if kept.DOI != "10.1000/owned" {
+		t.Fatalf("newest document DOI = %q", kept.DOI)
+	}
+	if len(papers.updates) != 1 {
+		t.Fatalf("newest document metadata updates = %d, want 1", len(papers.updates))
+	}
+}
+
+func TestPaperInfoResolveSourceDeletesOlderCurrentDocument(t *testing.T) {
+	documentID := uuid.New()
+	otherID := uuid.New()
+	documents := newPaperDocumentRepoStub(
+		types.Document{
+			ID: documentID, SourceState: types.DocumentSourceAvailable,
+			CreatedAt: time.Now().UTC().Add(-time.Hour),
+		},
+		types.Document{
+			ID: otherID, SourceState: types.DocumentSourceAvailable,
+			DOI: "10.1000/owned", CreatedAt: time.Now().UTC(),
+		},
+	)
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
+	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1)}, nil
+	}}
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
+	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := documents.documents[documentID]; exists {
+		t.Fatal("older current document still exists")
+	}
+	if kept := documents.documents[otherID]; kept.DOI != "10.1000/owned" {
+		t.Fatalf("newest document = %#v", kept)
 	}
 	if len(papers.updates) != 0 {
-		t.Fatalf("canonicalized loser received metadata updates=%d", len(papers.updates))
+		t.Fatalf("deleted older document received metadata updates=%d", len(papers.updates))
+	}
+}
+
+func TestNewestPaperDocumentPrefersStoredSourceOverCreationTime(t *testing.T) {
+	now := time.Now().UTC()
+	sourcedID, unsourcedID := uuid.New(), uuid.New()
+	sourced := types.Document{
+		ID: sourcedID, SourceState: types.DocumentSourceAvailable,
+		StorageKey: "paper/sourced.pdf", CreatedAt: now.Add(-time.Hour),
+	}
+	unsourced := types.Document{
+		ID: unsourcedID, SourceState: types.DocumentSourceAvailable,
+		CreatedAt: now,
+	}
+	newest, older := newestPaperDocument(sourced, unsourced)
+	if newest.ID != sourcedID || older.ID != unsourcedID {
+		t.Fatalf("source preference = newest:%s older:%s", newest.ID, older.ID)
+	}
+
+	olderSourced := sourced
+	olderSourced.ID = uuid.New()
+	newerSourced := types.Document{
+		ID: uuid.New(), SourceState: types.DocumentSourceAvailable,
+		StorageKey: "paper/newer.pdf", CreatedAt: now,
+	}
+	newest, older = newestPaperDocument(olderSourced, newerSourced)
+	if newest.ID != newerSourced.ID || older.ID != olderSourced.ID {
+		t.Fatalf("time preference = newest:%s older:%s", newest.ID, older.ID)
+	}
+}
+
+func TestPaperInfoResolveSourceRetriesDuplicateReplacementRace(t *testing.T) {
+	documentID := uuid.New()
+	otherID := uuid.New()
+	documents := newPaperDocumentRepoStub(
+		types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable},
+		types.Document{ID: otherID, SourceState: types.DocumentSourceAvailable, DOI: "10.1000/owned"},
+	)
+	documents.replaceFailures = 1
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
+	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
+		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1)}, nil
+	}}
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
+	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := documents.documents[otherID]; exists {
+		t.Fatal("older DOI-owning document still exists after retry")
+	}
+	if kept := documents.documents[documentID]; kept.DOI != "10.1000/owned" {
+		t.Fatalf("newest document DOI = %q after retry", kept.DOI)
 	}
 }
 

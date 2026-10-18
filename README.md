@@ -157,7 +157,7 @@ Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，
 - `GET|POST|PUT /api/paper/{documentID}/citations`、`DELETE /api/paper/{documentID}/citations/{referenceID}`：读取、新增、整体替换或删除本论文的引用关系；`GET /api/paper/{documentID}/cited-by` 查询反向引用，`POST /api/paper/{documentID}/citations/resolve` 可将一个原始引用显式指向库内论文，`POST /api/references/{referenceID}/resolve` 可关联单条引用。
 - `GET /api/document/{id}/processing`：返回文档、论文信息、引用查询与引用 PDF 获取的持久化 span，以及紧凑引用进度；它是唯一处理状态读取接口。
 - `POST /api/paper/{documentID}/info/{extraction|catalog|reference}/retry`：分别重试元数据提取、源论文库查询或引用论文查询，不会隐式重跑其他阶段。
-- `POST /api/references/{referenceID}/resolve`：把单条引用关联到已有文档；`POST /api/references/{referenceID}/download-pdf`：为该引用显式发起 PDF 获取。
+- `POST /api/references/{referenceID}/resolve`：把单条引用关联到已有文档；`POST /api/references/{referenceID}/rematch`：只按 DOI/title 重新匹配当前库内 available 文档，不调用外部 provider，也不创建文档；`POST /api/references/{referenceID}/download-pdf`：为该引用显式发起 PDF 获取。
 - `DELETE /api/document/{id}`：删除文档元数据及其已存储的原始文件。
 - `POST /api/document/bases`、`GET /api/document/bases`、`GET|PATCH|DELETE /api/document/bases/{baseID}`：管理文档 Base。
 - `PUT|DELETE /api/document/bases/{baseID}/documents/{documentID}`：加入或移除 Base 成员；`GET /api/document/bases/{baseID}/documents?page=1` 分页列出成员。

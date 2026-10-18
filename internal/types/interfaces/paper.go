@@ -65,6 +65,10 @@ type PaperService interface {
 	GetReference(ctx context.Context, referenceID string) (*types.PaperReference, error)
 	// ResolveReference manually links one citation row to a stored document.
 	ResolveReference(ctx context.Context, referenceID, resolvedDocumentID string) (*types.PaperReference, error)
+	// RematchReference retries local DOI/title matching for one citation row
+	// against the current library. An existing link is returned unchanged and
+	// no external provider is called.
+	RematchReference(ctx context.Context, referenceID string) (*types.PaperReference, bool, error)
 	// LinkReferenceDocument links one citation row; it is used by local
 	// matching, workers, and reference PDF import.
 	LinkReferenceDocument(

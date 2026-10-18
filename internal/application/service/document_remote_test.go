@@ -32,8 +32,8 @@ func (*documentBatchRepoStub) CitationTargetProgress(context.Context, uuid.UUID)
 	return types.PaperReferenceProgress{}, nil
 }
 
-func (s *documentBatchRepoStub) MergeIntoCanonical(context.Context, uuid.UUID, uuid.UUID) error {
-	return nil
+func (s *documentBatchRepoStub) ReplaceOlderDocument(context.Context, uuid.UUID, uuid.UUID) (types.DocumentFileKeys, error) {
+	return types.DocumentFileKeys{}, nil
 }
 
 func (s *documentBatchRepoStub) Create(_ context.Context, document types.Document) (types.Document, error) {

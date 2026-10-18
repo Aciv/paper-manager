@@ -262,13 +262,13 @@ func (s *documentStatusRepoStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, 
 	return true, nil
 }
 
-func (s *documentStatusRepoStub) MergeIntoCanonical(_ context.Context, loserID, canonicalID uuid.UUID) error {
-	if s.document.ID != loserID {
-		return sql.ErrNoRows
+func (s *documentStatusRepoStub) ReplaceOlderDocument(
+	_ context.Context, olderID, _ uuid.UUID,
+) (types.DocumentFileKeys, error) {
+	if s.document.ID == olderID {
+		s.document = types.Document{}
 	}
-	s.document.SourceState = types.DocumentSourceMerged
-	s.document.CanonicalDocumentID = &canonicalID
-	return nil
+	return types.DocumentFileKeys{}, nil
 }
 
 func TestCancelDocumentParseFencesMarkdownGenerationAndDequeuesExactTask(t *testing.T) {

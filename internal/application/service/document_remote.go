@@ -389,14 +389,6 @@ func (s *documentService) findDuplicateDocument(ctx context.Context, exclude uui
 	return uuid.Nil, nil
 }
 
-func (s *documentService) redirectIncomingCitations(ctx context.Context, incomingDocumentID, canonicalID uuid.UUID) error {
-	if err := s.repo.MergeIntoCanonical(ctx, incomingDocumentID, canonicalID); err != nil {
-		return err
-	}
-	logger.Info(ctx, "reference document merged into canonical", "incoming_document_id", incomingDocumentID, "canonical_document_id", canonicalID)
-	return nil
-}
-
 func terminalRemoteImportError(err error) error {
 	if errors.Is(err, types.ErrRemotePDFUnavailable) || errors.Is(err, fileservice.ErrInvalidPDF) || errors.Is(err, fileservice.ErrUnsupportedFileType) {
 		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"math"
@@ -68,7 +69,9 @@ func finishDocumentStageTask(
 	finishCtx := context.WithoutCancel(ctx)
 	if taskErr == nil {
 		if _, applied, err := documents.FinishStage(finishCtx, documentID, stage, generation, types.DocumentStageSucceeded, "", ""); err != nil {
-			logger.Warn(ctx, "finish document stage failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+			if !ignoreDeletedDocumentStage(ctx, documentID, stage, err) {
+				logger.Warn(ctx, "finish document stage failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+			}
 		} else if !applied {
 			logger.Info(ctx, "document stage finish ignored after state change", "document_id", documentID, "stage", stage, "generation", generation)
 		}
@@ -80,13 +83,31 @@ func finishDocumentStageTask(
 	if errors.Is(taskErr, asynq.SkipRetry) || documentStageErrorTerminal(taskErr) || finalAsynqAttempt(ctx) {
 		code, message := spanFailure(taskErr)
 		if _, _, err := documents.FinishStage(finishCtx, documentID, stage, generation, types.DocumentStageFailed, code, message); err != nil {
-			logger.Warn(ctx, "fail document stage failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+			if !ignoreDeletedDocumentStage(ctx, documentID, stage, err) {
+				logger.Warn(ctx, "fail document stage failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+			}
 		}
 		return
 	}
 	if _, _, err := documents.MarkStageRetryQueued(finishCtx, documentID, stage, generation); err != nil {
-		logger.Warn(ctx, "queue document stage retry failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+		if !ignoreDeletedDocumentStage(ctx, documentID, stage, err) {
+			logger.Warn(ctx, "queue document stage retry failed", "document_id", documentID, "stage", stage, "generation", generation, "error", err)
+		}
 	}
+}
+
+// ignoreDeletedDocumentStage treats a missing document row as a normal
+// no-op. A newest-wins duplicate replacement can delete the document whose
+// source-lookup task is finishing.
+func ignoreDeletedDocumentStage(
+	ctx context.Context, documentID uuid.UUID, stage types.DocumentStage, err error,
+) bool {
+	if !errors.Is(err, sql.ErrNoRows) {
+		return false
+	}
+	logger.Info(ctx, "document stage finish skipped after document removal",
+		"document_id", documentID, "stage", stage)
+	return true
 }
 
 func documentStageErrorTerminal(err error) bool {

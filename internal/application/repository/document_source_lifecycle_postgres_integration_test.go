@@ -2,83 +2,145 @@ package repository
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"paperMaster/internal/types"
 
 	"github.com/google/uuid"
 )
 
-func TestDocumentCanonicalizationMovesCitationsPostgres(t *testing.T) {
+func TestDocumentNewestReplacementMovesRelationsPostgres(t *testing.T) {
 	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
 	documents := NewDocumentRepository(db)
 	citations := NewPaperCitationRepository(db)
 
-	canonicalID, sourceOne, sourceTwo := uuid.New(), uuid.New(), uuid.New()
-	loserOne, loserTwo := uuid.New(), uuid.New()
-	for _, id := range []uuid.UUID{canonicalID, sourceOne, sourceTwo, loserOne, loserTwo} {
-		if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(id, "source.pdf", "canonical/"+id.String(), "")); err != nil {
-			t.Fatalf("create document %s: %v", id, err)
-		}
+	olderID, newerID, sourceID, mergedChildID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
+	older := sourceDocumentForCanonicalTest(olderID, "older.pdf", "replacement/older", "")
+	older.DOI = "10.1000/replacement"
+	older.CreatedAt = time.Now().UTC().Add(-time.Hour)
+	if _, err := documents.Create(ctx, older); err != nil {
+		t.Fatalf("create older document: %v", err)
 	}
-	first := testResolvedCitation(sourceOne, "Shared reference one", loserOne)
-	second := testResolvedCitation(sourceTwo, "Shared reference two", loserTwo)
-	if _, err := citations.AddCitation(ctx, first); err != nil {
-		t.Fatalf("add first citation: %v", err)
+	newer := sourceDocumentForCanonicalTest(newerID, "newer.pdf", "replacement/newer", "")
+	newer.CreatedAt = time.Now().UTC()
+	if _, err := documents.Create(ctx, newer); err != nil {
+		t.Fatalf("create newer document: %v", err)
 	}
-	if _, err := citations.AddCitation(ctx, second); err != nil {
-		t.Fatalf("add second citation: %v", err)
+	if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(
+		sourceID, "source.pdf", "replacement/source", "",
+	)); err != nil {
+		t.Fatalf("create citing source document: %v", err)
 	}
-	// The loser itself cites the canonical document. The merge must drop this
-	// row before rewriting citing_document_id, otherwise the self-citation
-	// CHECK would block the move.
-	loserOutgoing := testResolvedCitation(loserOne, "Loser outgoing reference", canonicalID)
-	loserOutgoing.Origin = types.PaperCitationOriginExtraction
-	if err := db.Create(&loserOutgoing).Error; err != nil {
-		t.Fatalf("add loser outgoing citation: %v", err)
+	child := sourceDocumentForCanonicalTest(mergedChildID, "child.pdf", "replacement/child", "")
+	child.SourceState = types.DocumentSourceMerged
+	child.CanonicalDocumentID = &olderID
+	if _, err := documents.Create(ctx, child); err != nil {
+		t.Fatalf("create merged child: %v", err)
+	}
+	if err := db.Create(&types.DocumentMarkdown{
+		DocumentID: olderID, StorageKey: "replacement/older.md", Filename: "older.md",
+		ContentType: "text/markdown", SizeBytes: 1, Metadata: types.JSON(`{}`),
+	}).Error; err != nil {
+		t.Fatalf("create older markdown: %v", err)
+	}
+	pageNumber, pageWidth, pageHeight := 1, 612.0, 792.0
+	bboxX0, bboxY0, bboxX1, bboxY1 := 0.0, 0.0, 100.0, 20.0
+	markdownStart, markdownEnd := 0, 5
+	if err := db.Create(&types.Block{
+		ID: uuid.New(), DocumentID: olderID, Ordinal: 0, Type: "text", Text: "older",
+		AssetKey: "replacement/older.png",
+		Location: &types.PDFBlockLocation{
+			PageNumber: &pageNumber, PageWidth: &pageWidth, PageHeight: &pageHeight,
+			BBoxX0: &bboxX0, BBoxY0: &bboxY0, BBoxX1: &bboxX1, BBoxY1: &bboxY1,
+			MarkdownCodepointStart: &markdownStart, MarkdownCodepointEnd: &markdownEnd,
+		},
+	}).Error; err != nil {
+		t.Fatalf("create older block: %v", err)
+	}
+	base := types.DocumentBase{ID: uuid.New(), Name: "Newest wins", Settings: types.JSON(`{}`)}
+	if err := db.Create(&base).Error; err != nil {
+		t.Fatalf("create base: %v", err)
+	}
+	if err := db.Create(&types.DocumentBaseFile{
+		DocumentBaseID: base.ID, DocumentID: olderID, Metadata: types.JSON(`{}`),
+	}).Error; err != nil {
+		t.Fatalf("create base membership: %v", err)
+	}
+	incoming := testResolvedCitation(sourceID, "Incoming reference", olderID)
+	if err := db.Create(&incoming).Error; err != nil {
+		t.Fatalf("create incoming citation: %v", err)
+	}
+	newerSelf := testResolvedCitation(newerID, "Newest self reference", olderID)
+	if err := db.Create(&newerSelf).Error; err != nil {
+		t.Fatalf("create newest self citation: %v", err)
+	}
+	olderOutgoing := testResolvedCitation(olderID, "Older outgoing reference", sourceID)
+	olderOutgoing.Origin = types.PaperCitationOriginExtraction
+	if err := db.Create(&olderOutgoing).Error; err != nil {
+		t.Fatalf("create older outgoing citation: %v", err)
 	}
 
-	gate := make(chan struct{})
-	errs := make(chan error, 2)
-	var wait sync.WaitGroup
-	for _, loserID := range []uuid.UUID{loserOne, loserTwo} {
-		wait.Add(1)
-		go func(id uuid.UUID) {
-			defer wait.Done()
-			<-gate
-			errs <- documents.MergeIntoCanonical(ctx, id, canonicalID)
-		}(loserID)
-	}
-	close(gate)
-	wait.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("concurrent MergeIntoCanonical: %v", err)
-		}
+	cleanupKeys, err := documents.ReplaceOlderDocument(ctx, olderID, newerID)
+	if err != nil {
+		t.Fatalf("ReplaceOlderDocument: %v", err)
 	}
 
-	for _, source := range []uuid.UUID{sourceOne, sourceTwo} {
-		items, err := citations.ListByCitingDocumentID(ctx, source)
-		if err != nil {
-			t.Fatalf("list citations: %v", err)
+	if _, err := documents.Get(ctx, olderID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("older document still exists, err=%v", err)
+	}
+	if _, err := documents.Get(ctx, mergedChildID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("merged child still exists, err=%v", err)
+	}
+	updatedNewer, err := documents.Get(ctx, newerID)
+	if err != nil {
+		t.Fatalf("load newer document: %v", err)
+	}
+	if updatedNewer.DOI != older.DOI {
+		t.Fatalf("newest DOI = %q, want %q", updatedNewer.DOI, older.DOI)
+	}
+	items, err := citations.ListByCitingDocumentID(ctx, sourceID)
+	if err != nil {
+		t.Fatalf("list incoming citations: %v", err)
+	}
+	if len(items) != 1 || items[0].CitedDocumentID == nil || *items[0].CitedDocumentID != newerID {
+		t.Fatalf("incoming citations = %#v, want target %s", items, newerID)
+	}
+	for _, owner := range []uuid.UUID{newerID, olderID} {
+		remaining, listErr := citations.ListByCitingDocumentID(ctx, owner)
+		if listErr != nil {
+			t.Fatalf("list owner %s citations: %v", owner, listErr)
 		}
-		if len(items) != 1 || items[0].CitedDocumentID == nil || *items[0].CitedDocumentID != canonicalID {
-			t.Fatalf("citation target = %#v, want canonical %s", items, canonicalID)
+		if len(remaining) != 0 {
+			t.Fatalf("owner %s kept citations: %#v", owner, remaining)
 		}
 	}
-	for _, loserID := range []uuid.UUID{loserOne, loserTwo} {
-		loser, err := documents.Get(ctx, loserID)
-		if err != nil {
-			t.Fatalf("load loser: %v", err)
+	var membership int64
+	if err := db.Model(&types.DocumentBaseFile{}).
+		Where("document_base_id = ? AND document_id = ?", base.ID, newerID).
+		Count(&membership).Error; err != nil {
+		t.Fatalf("count newest base membership: %v", err)
+	}
+	if membership != 1 {
+		t.Fatalf("newest base membership = %d, want 1", membership)
+	}
+	expectedKeys := map[string]bool{
+		"replacement/older": true, "replacement/child": true,
+		"replacement/older.md": true, "replacement/older.png": true,
+	}
+	for _, key := range cleanupKeys.StorageKeys {
+		if !expectedKeys[key] {
+			t.Fatalf("unexpected cleanup key %q in %#v", key, cleanupKeys.StorageKeys)
 		}
-		if loser.SourceState != types.DocumentSourceMerged ||
-			loser.CanonicalDocumentID == nil || *loser.CanonicalDocumentID != canonicalID {
-			t.Fatalf("loser lifecycle = %#v", loser)
-		}
+		delete(expectedKeys, key)
+	}
+	if len(expectedKeys) != 0 {
+		t.Fatalf("missing cleanup keys %#v from %#v", expectedKeys, cleanupKeys.StorageKeys)
 	}
 	var selfCitations int64
 	if err := db.Table("paper_citations").
@@ -86,17 +148,105 @@ func TestDocumentCanonicalizationMovesCitationsPostgres(t *testing.T) {
 		t.Fatalf("count self citations: %v", err)
 	}
 	if selfCitations != 0 {
-		t.Fatalf("self citations after merge = %d, want 0", selfCitations)
+		t.Fatalf("self citations after replacement = %d, want 0", selfCitations)
 	}
-	// P0-2: deleting a canonical paper must cascade merged tombstones instead of
-	// being blocked by the self-referencing foreign key.
+}
+
+// P0-2 regression: deleting a legacy canonical document must cascade its
+// merged tombstones instead of being blocked by the self-referencing FK.
+func TestDeleteLegacyCanonicalCascadesMergedChildrenPostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	documents := NewDocumentRepository(db)
+
+	canonicalID, childID := uuid.New(), uuid.New()
+	if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(
+		canonicalID, "canonical.pdf", "legacy/canonical", "",
+	)); err != nil {
+		t.Fatalf("create canonical document: %v", err)
+	}
+	child := sourceDocumentForCanonicalTest(childID, "child.pdf", "legacy/child", "")
+	child.SourceState = types.DocumentSourceMerged
+	child.CanonicalDocumentID = &canonicalID
+	if _, err := documents.Create(ctx, child); err != nil {
+		t.Fatalf("create merged child: %v", err)
+	}
+
 	if err := documents.Delete(ctx, canonicalID); err != nil {
 		t.Fatalf("delete canonical: %v", err)
 	}
-	for _, loserID := range []uuid.UUID{loserOne, loserTwo} {
-		if _, err := documents.Get(ctx, loserID); err == nil {
-			t.Fatalf("merged child %s still exists after canonical deletion", loserID)
+	for _, id := range []uuid.UUID{canonicalID, childID} {
+		if _, err := documents.Get(ctx, id); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("document %s still exists, err=%v", id, err)
 		}
+	}
+}
+
+func TestDocumentNewestReplacementHasSingleWinnerPostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	documents := NewDocumentRepository(db)
+
+	olderID, firstID, secondID := uuid.New(), uuid.New(), uuid.New()
+	older := sourceDocumentForCanonicalTest(olderID, "older.pdf", "winner/older", "")
+	older.DOI = "10.1000/winner"
+	if _, err := documents.Create(ctx, older); err != nil {
+		t.Fatalf("create older document: %v", err)
+	}
+	for index, id := range []uuid.UUID{firstID, secondID} {
+		document := sourceDocumentForCanonicalTest(id, "candidate.pdf", "winner/"+id.String(), "")
+		document.CreatedAt = time.Now().UTC().Add(time.Duration(index) * time.Second)
+		if _, err := documents.Create(ctx, document); err != nil {
+			t.Fatalf("create candidate %s: %v", id, err)
+		}
+	}
+
+	gate := make(chan struct{})
+	errs := make(chan error, 2)
+	var wait sync.WaitGroup
+	for _, newestID := range []uuid.UUID{firstID, secondID} {
+		wait.Add(1)
+		go func(id uuid.UUID) {
+			defer wait.Done()
+			<-gate
+			_, err := documents.ReplaceOlderDocument(ctx, olderID, id)
+			errs <- err
+		}(newestID)
+	}
+	close(gate)
+	wait.Wait()
+	close(errs)
+	successes := 0
+	for err := range errs {
+		if err == nil {
+			successes++
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("concurrent replacement error = %v, want sql.ErrNoRows", err)
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("replacement successes = %d, want exactly 1", successes)
+	}
+	first, err := documents.Get(ctx, firstID)
+	if err != nil {
+		t.Fatalf("load first candidate: %v", err)
+	}
+	second, err := documents.Get(ctx, secondID)
+	if err != nil {
+		t.Fatalf("load second candidate: %v", err)
+	}
+	withDOI := 0
+	for _, document := range []types.Document{first, second} {
+		if document.DOI == older.DOI {
+			withDOI++
+		}
+	}
+	if withDOI != 1 {
+		t.Fatalf("candidates with transferred DOI = %d, want 1", withDOI)
 	}
 }
 

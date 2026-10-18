@@ -51,9 +51,13 @@ type DocumentRepository interface {
 	// supplied a DOI first, and returns ErrDuplicateDOI if another document owns
 	// the provider DOI.
 	SetDOIIfEmpty(ctx context.Context, id uuid.UUID, doi string) (bool, error)
-	// MergeIntoCanonical atomically redirects all citation edges from loser to
-	// canonical and retains loser as a canonical tombstone.
-	MergeIntoCanonical(ctx context.Context, loserID, canonicalID uuid.UUID) error
+	// ReplaceOlderDocument makes newestID the surviving document for a paper
+	// previously represented by olderID. It repoints incoming citations and
+	// collection membership to newest, transfers the DOI, drops the older
+	// document's outgoing bibliography, and deletes older plus its merged
+	// tombstones in one transaction. Stored objects from the removed family are
+	// returned for post-commit cleanup.
+	ReplaceOlderDocument(ctx context.Context, olderID, newestID uuid.UUID) (types.DocumentFileKeys, error)
 	// GetStage returns one stage's durable control-plane snapshot.
 	GetStage(ctx context.Context, documentID uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, error)
 	// QueueStageNewGeneration increments a non-active stage generation and queues it atomically.

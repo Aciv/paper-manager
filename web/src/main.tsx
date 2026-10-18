@@ -658,6 +658,22 @@ function App() {
     }
   }
 
+  async function rematchReference(referenceID: string) {
+    setBusy(true);
+    try {
+      const { linked } = await api.rematchPaperReference(referenceID);
+      setMessage(linked ? '已重新匹配到库内文档。' : '库内仍没有匹配的文档。');
+      if (selected) {
+        const { items } = await api.listPaperCitations(selected.id);
+        setCitations(items);
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? `重新匹配引用失败：${error.message}` : '重新匹配引用失败。');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function cancelPaperInfo() {
     if (!selected || !window.confirm('取消当前引用论文查询任务？已解析文档、元数据提取和源论文查询不会被删除。')) return;
     setBusy(true);
@@ -1013,7 +1029,7 @@ function App() {
 			{detailMenu === 'citations' && <section className="citation-panel">
 			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>
 			  <div className="citation-columns">
-				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>查看第 {index + 1} 条的引用信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId) || !citation.sourceUrl}>下载 PDF</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
+				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>查看第 {index + 1} 条的引用信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId) || !citation.sourceUrl}>下载 PDF</button><button type="button" onClick={() => void rematchReference(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId)}>重新匹配</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference || '')}>查看第 {index + 1} 条的已落库信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 			  </div>
 			</section>}

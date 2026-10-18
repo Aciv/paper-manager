@@ -97,3 +97,10 @@ type DocumentPage struct {
 	PageSize int        `json:"pageSize"`
 	Total    int64      `json:"total"`
 }
+
+// DocumentFileKeys lists stored objects that belonged to a document family
+// removed by a newest-wins replacement. The caller deletes them after the
+// database transaction commits; failures leave only orphan files.
+type DocumentFileKeys struct {
+	StorageKeys []string
+}

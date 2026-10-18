@@ -724,6 +724,49 @@ func (s *paperService) ResolveReference(
 	return &reference, nil
 }
 
+// RematchReference retries the same local DOI/title matching used after
+// extraction and before provider lookup. It never creates a document and never
+// calls an external provider.
+func (s *paperService) RematchReference(
+	ctx context.Context, referenceID string,
+) (*types.PaperReference, bool, error) {
+	id, err := parsePaperReferenceID(referenceID)
+	if err != nil {
+		return nil, false, err
+	}
+	reference, err := s.citations.GetReference(ctx, id)
+	if err != nil {
+		return nil, false, err
+	}
+	if reference.CitedDocumentID != nil {
+		return &reference, false, nil
+	}
+	// Raw-only rows still get a local match attempt: the same heuristic used by
+	// extraction derives a DOI/title without persisting or querying a provider.
+	matchReference := reference
+	if strings.TrimSpace(matchReference.DOI) == "" && strings.TrimSpace(matchReference.Title) == "" {
+		fallback := referenceLookupQuery(matchReference.RawReference)
+		matchReference.DOI = fallback.DOI
+		matchReference.Title = fallback.Title
+	}
+	documentID, found, err := s.FindLocalReferenceMatch(ctx, matchReference, matchReference.CitingDocumentID)
+	if err != nil {
+		return nil, false, err
+	}
+	if !found {
+		return &reference, false, nil
+	}
+	updated, applied, err := s.citations.LinkResolvedDocument(ctx, id, documentID, false)
+	if err != nil {
+		return nil, false, err
+	}
+	if applied {
+		logger.Info(ctx, "paper reference rematched to local document",
+			"reference_id", id, "document_id", documentID)
+	}
+	return &updated, applied, nil
+}
+
 func (s *paperService) LinkReferenceDocument(
 	ctx context.Context, referenceID, documentID uuid.UUID, overwrite bool,
 ) (*types.PaperReference, error) {
