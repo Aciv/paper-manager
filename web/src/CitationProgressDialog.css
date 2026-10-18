@@ -1,0 +1,99 @@
+/* Aggregate reference-resolution progress. Rendered inside the console, so the
+   --ui-* sky/white tokens are inherited. */
+.citation-progress-backdrop {
+  position: fixed;
+  z-index: 80;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(4 20 33 / 58%);
+}
+
+.citation-progress-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(900px, 100%);
+  max-height: min(780px, calc(100dvh - 48px));
+  min-height: 0;
+  padding: 20px;
+  border: 1px solid var(--ui-border-2);
+  border-radius: 12px;
+  background: var(--ui-surface);
+  color: var(--ui-text);
+  box-shadow: 0 30px 80px rgb(6 28 46 / 45%);
+}
+
+.citation-progress-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.citation-progress-header h2 { margin: 0; font-size: 19px; }
+.citation-progress-header .hint { margin: 4px 0 0; }
+.citation-progress-header code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11.5px; }
+
+.citation-progress-summary { display: flex; flex-wrap: wrap; gap: 7px; padding: 12px 0 6px; }
+.citation-progress-summary span { padding: 4px 10px; border-radius: 999px; background: var(--ui-surface-2); color: var(--ui-dim); font-size: 12px; }
+.citation-progress-summary strong { color: var(--ui-text); font-variant-numeric: tabular-nums; }
+.citation-progress-summary .summary-running strong { color: #0369a1; }
+.citation-progress-summary .summary-queued strong { color: #b45309; }
+.citation-progress-summary .summary-completed strong { color: var(--ui-ok); }
+.citation-progress-summary .summary-failed strong { color: var(--ui-danger); }
+.citation-progress-summary .summary-cancelled strong { color: var(--ui-faint); }
+
+.citation-progress-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 6px 0 10px; }
+.citation-progress-toolbar label { display: flex; align-items: center; gap: 6px; color: var(--ui-dim); font-size: 12.5px; }
+.citation-progress-toolbar .citation-progress-selected { margin-left: auto; color: var(--ui-faint); font-size: 12px; font-variant-numeric: tabular-nums; }
+.citation-progress-toolbar .primary { margin-top: 0; }
+.citation-progress-dialog input[type="checkbox"] { width: 15px; height: 15px; padding: 0; accent-color: var(--ui-accent); }
+
+.citation-progress-notice { margin: 0 0 8px; padding: 8px 10px; border-radius: 7px; background: var(--ui-ok-bg); color: var(--ui-ok); font-size: 12.5px; }
+.citation-progress-loading { padding: 28px 0; text-align: center; }
+
+.citation-progress-list { display: flex; flex-direction: column; gap: 6px; min-height: 0; margin: 0; padding: 0 2px 2px 0; overflow: auto; list-style: none; }
+.citation-progress-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 11px;
+  border: 1px solid var(--ui-border);
+  border-radius: 9px;
+  background: var(--ui-surface-2);
+}
+.citation-progress-check { display: flex; }
+.citation-progress-main { display: grid; gap: 5px; min-width: 0; }
+.citation-progress-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.citation-progress-title strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+.citation-progress-stage { flex: 0 0 auto; padding: 1px 7px; border-radius: 999px; background: var(--ui-surface-3); color: var(--ui-dim); font-size: 10.5px; font-weight: 650; }
+.citation-progress-stage.stage-failed,
+.citation-progress-stage.stage-cancelled { background: var(--ui-danger-bg); color: var(--ui-danger); }
+.citation-progress-stage.stage-running { background: var(--ui-accent-soft); color: var(--ui-accent-text); }
+.citation-progress-stage.stage-queued { background: var(--ui-warn-bg); color: var(--ui-warn); }
+.citation-progress-stage.stage-succeeded { background: var(--ui-ok-bg); color: var(--ui-ok); }
+
+.citation-progress-bar { display: flex; width: 100%; height: 6px; overflow: hidden; border-radius: 999px; background: var(--ui-surface-3); }
+.citation-progress-bar i { height: 100%; }
+.citation-progress-bar .seg-empty { width: 100%; background: var(--ui-surface-3); }
+.citation-progress-bar .seg-completed { background: #12b76a; }
+.citation-progress-bar .seg-running { background: #03a9f4; }
+.citation-progress-bar .seg-queued { background: #f59e0b; }
+.citation-progress-bar .seg-failed { background: #ef4444; }
+.citation-progress-bar .seg-cancelled { background: #9aa4af; }
+.citation-progress-counts { color: var(--ui-faint); font-size: 11.5px; line-height: 1.45; font-variant-numeric: tabular-nums; }
+.citation-progress-counts em { color: var(--ui-danger); font-style: normal; }
+.citation-progress-retry { height: 30px; padding: 0 10px; font-size: 12px; }
+.citation-progress-no-retry { padding: 0 8px; color: var(--ui-faint); font-size: 12px; text-align: center; }
+
+@media (max-width: 640px) {
+  .citation-progress-backdrop { padding: 10px; }
+  .citation-progress-dialog { padding: 14px; }
+  .citation-progress-header { flex-direction: column; }
+  .citation-progress-toolbar .citation-progress-selected { margin-left: 0; }
+  .citation-progress-row { grid-template-columns: auto minmax(0, 1fr); }
+  .citation-progress-retry { grid-column: 2; justify-self: start; }
+}

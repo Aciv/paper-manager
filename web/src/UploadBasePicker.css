@@ -1,32 +1,41 @@
+/* Base picker of the upload form — chip multi-select (dark tokens come from the
+   console shell, see styles.css). */
 .base-picker {
   display: grid;
-  gap: 6px;
+  gap: 7px;
   margin: 2px 0 0;
   padding: 10px;
-  border: 1px solid #dce3ed;
-  border-radius: 7px;
+  border: 1px solid var(--ui-border-2);
+  border-radius: 8px;
 }
 
-.base-picker legend {
-  padding: 0 4px;
-  font-size: 13px;
+.base-picker-label {
+  color: var(--ui-dim);
+  font-size: 12.5px;
   font-weight: 650;
-  color: #41506a;
 }
 
-.upload-form .base-option {
+.base-picker .base-chips {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  font-weight: 500;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
-.upload-form .base-option input {
-  width: auto;
-  padding: 0;
-  accent-color: #2563eb;
+.document-console .base-chip {
+  padding: 5px 11px;
+  border-radius: 999px;
+  border-color: var(--ui-border-2);
+  background: var(--ui-surface);
+  color: var(--ui-dim);
+  font-size: 12px;
 }
 
-.base-picker:disabled {
-  opacity: 0.55;
+.document-console .base-chip:hover:not(:disabled) { border-color: var(--ui-border-3); background: var(--ui-surface-3); color: var(--ui-text); }
+
+.document-console .base-chip.active {
+  border-color: var(--ui-accent);
+  background: var(--ui-accent);
+  color: #fff;
 }
+
+.document-console .base-chip:disabled { opacity: .55; }

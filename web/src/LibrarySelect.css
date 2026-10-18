@@ -1,0 +1,98 @@
+/* Trigger lives in the dark library column and inherits its --pl-* tokens. */
+.paper-library .library-select-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  width: 100%;
+  min-width: 0;
+  padding: 5px 7px;
+  border: 1px solid var(--pl-border-2);
+  border-radius: 6px;
+  background: var(--pl-surface);
+  color: var(--pl-text);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+.paper-library .library-select-trigger > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.paper-library .library-select-trigger > svg {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  color: var(--pl-faint);
+  transition: transform .13s ease;
+}
+.paper-library .library-select-trigger.open > svg { transform: rotate(180deg); }
+.paper-library .library-select-trigger:hover:not(:disabled),
+.paper-library .library-select-trigger.open { border-color: var(--pl-border-3); background: var(--pl-surface-2); }
+.paper-library .library-select-trigger:focus-visible { outline: 2px solid rgb(255 255 255 / 14%); border-color: var(--pl-border-3); }
+.paper-library .library-sort-row .library-select-trigger { flex: 1 1 auto; }
+
+/* The menu is portalled to <body> (outside .paper-library), so it carries the
+   library's dark palette directly. Width is set inline to the trigger width. */
+.library-select-menu {
+  position: fixed;
+  z-index: 120;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid #454950;
+  border-radius: 8px;
+  background: #222327;
+  color: #e9ebef;
+  box-shadow: 0 14px 36px rgb(0 0 0 / 55%);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: #383c45 transparent;
+  font-size: 11.5px;
+}
+.library-select-menu::-webkit-scrollbar { width: 9px; height: 9px; }
+.library-select-menu::-webkit-scrollbar-track { background: transparent; }
+.library-select-menu::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: #383c45; background-clip: padding-box; }
+.library-select-menu::-webkit-scrollbar-thumb:hover { background: #4a5058; background-clip: padding-box; }
+
+/* One line per option, fixed height. A long label is a horizontal sliding
+   window: the wheel handler in LibrarySelect shifts scrollLeft. */
+.library-select-option {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  height: 29px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #a8aeb8;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 29px;
+  text-align: left;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  cursor: pointer;
+}
+.library-select-option::-webkit-scrollbar { display: none; }
+.library-select-option:hover,
+.library-select-option:focus-visible { outline: none; background: rgb(255 255 255 / 8%); color: #fff; }
+.library-select-option.active { background: rgb(255 255 255 / 12%); color: #fff; }

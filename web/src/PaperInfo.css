@@ -1,14 +1,16 @@
+/* Paper pipeline + citation panels of the import console. Same dark tokens as
+   the console shell (styles.css defines --ui-* on .document-console). */
 .paper-info-panel,
 .citation-panel {
   margin-top: 22px;
   padding-top: 18px;
-  border-top: 1px solid #e6ebf1;
+  border-top: 1px solid var(--ui-border);
 }
 
 .paper-info-panel h4,
 .citation-panel h4 {
   margin: 0;
-  font-size: 16px;
+  font-size: 15px;
 }
 
 .paper-info-stages {
@@ -27,45 +29,51 @@
 .paper-info-stages > div.processing-child {
   margin-left: 1rem;
   padding-left: .75rem;
-  border-left: 2px solid #c7d2fe;
+  border-left: 2px solid var(--ui-border-3);
 }
 
-.paper-stage {
-  border-radius: 999px;
-  padding: 3px 8px;
-  font-size: 12px;
-  font-weight: 700;
-  background: #edf2f7;
-  color: #475569;
-}
-
-.paper-stage-queued { background: #fff3cd; color: #875d00; }
-.paper-stage-running { background: #dbeafe; color: #1d4ed8; }
-.paper-stage-succeeded { background: #dcfce7; color: #166534; }
-.paper-stage-failed,.paper-stage-cancelled { background: #fee2e2; color: #a51d2d; }
+.paper-stage { display: inline-flex; align-items: center; gap: 6px; padding: 0; border-radius: 0; background: transparent; color: var(--ui-dim); font-size: 11.5px; font-weight: 600; }
+.paper-stage::before { content: ""; width: 6px; height: 6px; border-radius: 999px; background: #a1a1aa; }
+.paper-stage-queued::before { background: #f59e0b; }
+.paper-stage-running::before { background: #03a9f4; }
+.paper-stage-succeeded::before { background: #12b76a; }
+.paper-stage-failed::before, .paper-stage-cancelled::before { background: #ef4444; }
 
 .citation-columns {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
+  gap: 12px;
   margin-top: 12px;
+  min-height: 0;
 }
 
-.citation-columns h5 { margin: 0; font-size: 14px; }
-.citation-columns ol { margin: 8px 0; padding-left: 20px; display: grid; gap: 9px; }
-.citation-columns li { font-size: 13px; overflow-wrap: anywhere; }
-.citation-columns code { font-size: 11px; color: #475569; }
-.citation-columns p { margin: 3px 0 0; line-height: 1.45; color: #475569; }
+/* Each list is its own bordered card with an independent scrollbar. */
+.citation-columns > div {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 10px;
+  background: var(--ui-surface);
+}
+
+.citation-columns h5 { margin: 0; padding-bottom: 8px; border-bottom: 1px solid var(--ui-border); font-size: 13.5px; color: var(--ui-text); }
+.citation-columns ol { display: grid; flex: 1 1 auto; align-content: start; gap: 9px; min-height: 0; margin: 8px 0 0; padding: 0 4px 0 20px; overflow: auto; scrollbar-width: thin; }
+.citation-columns li { font-size: 12.5px; overflow-wrap: anywhere; }
+.citation-columns code { color: var(--ui-faint); font-size: 11px; }
+.citation-columns p { margin: 3px 0 0; color: var(--ui-dim); line-height: 1.45; }
 .citation-source-button { margin-top: 4px; font-size: 12px; text-align: left; }
-.citation-source-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 24px; background: #17203399; }
-.citation-source-dialog { width: min(680px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto; padding: 20px; border-radius: 12px; background: #fff; box-shadow: 0 20px 60px #17203366; }
-.citation-source-dialog > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid #e6ebf1; }
+
+.citation-source-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(23 32 51 / 28%); }
+.citation-source-dialog { width: min(680px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto; padding: 20px; border: 1px solid var(--ui-border-2); border-radius: 12px; background: var(--ui-surface); box-shadow: 0 24px 64px rgb(16 24 40 / 22%); }
+.citation-source-dialog > header { display: flex; align-items: start; justify-content: space-between; gap: 16px; padding-bottom: 14px; border-bottom: 1px solid var(--ui-border); }
 .citation-source-dialog h4, .citation-source-dialog h5 { margin: 0; }
-.citation-source-dialog h5 { font-size: 14px; }
+.citation-source-dialog h5 { font-size: 13.5px; }
 .citation-source-dialog dl { display: grid; grid-template-columns: 106px minmax(0, 1fr); gap: 10px 14px; margin: 18px 0 0; }
-.citation-source-dialog dt { color: #64748b; font-size: 13px; font-weight: 700; }
+.citation-source-dialog dt { color: var(--ui-faint); font-size: 12.5px; font-weight: 700; }
 .citation-source-dialog dd { margin: 0; overflow-wrap: anywhere; line-height: 1.5; }
-.citation-source-raw { margin-top: 16px; padding: 12px; border-radius: 7px; background: #f8fafc; }
+.citation-source-raw { margin-top: 16px; padding: 12px; border-radius: 7px; background: var(--ui-surface-2); }
 .citation-source-raw p { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; line-height: 1.55; }
 
 @media (max-width: 720px) {

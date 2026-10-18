@@ -1,14 +1,35 @@
-import { ChangeEvent, FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
-import { PdfReader } from './PdfReader';
-import { PaperLibraryPage } from './PaperLibraryPage';
 import './PaperInfo.css';
+import '@fontsource-variable/manrope';
+import '@fontsource-variable/noto-sans-sc';
 import './styles.css';
 import './UploadBasePicker.css';
 
+// Route-level chunks: the console never needs PDF.js, and the citation scanner
+// only loads when its dialog is opened.
+const PaperLibraryPage = lazy(() => import('./PaperLibraryPage').then((module) => ({ default: module.PaperLibraryPage })));
+const CitationProgressDialog = lazy(() => import('./CitationProgressDialog').then((module) => ({ default: module.CitationProgressDialog })));
+
 const acceptedFiles = '.txt,.json,.md,.markdown,.csv,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx';
 const maxBatchItems = 20;
+
+// Left-column function menus of the import console.
+const CONSOLE_FORM_MENUS = [
+  ['upload', '上传'],
+  ['url', 'URL 导入'],
+  ['base', 'Base'],
+] as const;
+type ConsoleFormMenu = typeof CONSOLE_FORM_MENUS[number][0];
+
+// Document detail menus; the 阅读 tab is added only for PDFs.
+const DETAIL_MENUS = [
+  ['overview', '概览'],
+  ['edit', '编辑'],
+  ['pipeline', '流程'],
+  ['citations', '引用'],
+] as const;
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`;
@@ -20,8 +41,21 @@ function formatDate(value: string) {
   return new Date(value).toLocaleString();
 }
 
+const DOCUMENT_STATUS_LABELS: Record<string, string> = {
+  missing: '未解析引用', available: '可用', uploaded: '已上传', queued: '排队中',
+  processing: '处理中', ready: '就绪', failed: '失败', cancelled: '已取消',
+  deleting: '删除中', merged: '已合并',
+};
+
+function statusLabel(value: string): string {
+  return DOCUMENT_STATUS_LABELS[value] ?? value;
+}
+
 function documentLabel(document: Document, paper?: PaperMetadata) {
-  return paper?.title || document.originalFilename;
+  if (paper?.title) return paper.title;
+  if (document.originalFilename) return document.originalFilename;
+  // Unresolved citation placeholders carry neither a title nor a filename.
+  return `${document.sourceState === 'missing' ? '未解析引用' : '未命名文档'} · ${document.id.slice(0, 8)}`;
 }
 
 function parseTags(value: string) {
@@ -73,9 +107,15 @@ function isActiveSpan(stage: ProcessingSpan) {
 
 function App() {
   const [filters, setFilters] = useState<DocumentSearch>({ page: 1 });
+  // Right-hand top bar: one search box (title/author/id/doi), a state filter and
+  // a Base filter, replacing the old left-column query forms.
+  const [toolbarQuery, setToolbarQuery] = useState('');
+  const [baseFilterID, setBaseFilterID] = useState('');
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [page, setPage] = useState<DocumentPage>({ items: [], page: 1, pageSize: 10, total: 0 });
   const [selected, setSelected] = useState<Document>();
   const [files, setFiles] = useState<File[]>([]);
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const [doi, setDoi] = useState('');
   const [title, setTitle] = useState('');
   const [tags, setTags] = useState('');
@@ -109,6 +149,16 @@ function App() {
   const [message, setMessage] = useState('');
   const [batchResults, setBatchResults] = useState<DocumentBatchItemResult[]>([]);
   const [busy, setBusy] = useState(false);
+  // Library-wide reference aggregation, opened from the workspace header.
+  const [citationProgressOpen, setCitationProgressOpen] = useState(false);
+  // Same collapse behaviour as the reading library: the sidebar folds away to a
+  // slim edge handle, and its long import forms stay out of the way.
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // The sidebar's long form stack is grouped into function menus, like the
+  // reading library's left column tabs.
+  const [formMenu, setFormMenu] = useState<ConsoleFormMenu>('upload');
+  // The detail panel is grouped into function menus, same as the left column.
+  const [detailMenu, setDetailMenu] = useState<'overview' | 'edit' | 'pipeline' | 'citations'>('overview');
   const processingPollDelay = useRef(2500);
   const processingWatchUntil = useRef(0);
   const processingWatchDocumentID = useRef('');
@@ -169,10 +219,14 @@ function App() {
     setProcessingPollRevision((value) => value + 1);
   }
 
-  async function load(nextFilters = filters) {
+  async function load(nextFilters = filters, baseID = baseFilterID) {
     setBusy(true);
     try {
-      const result = await api.searchDocuments(nextFilters);
+      // A selected Base scopes the list to its members (same API the reading
+      // library uses); otherwise it is a plain document search.
+      const result = baseID
+        ? await api.listDocumentBaseDocuments(baseID, nextFilters.page ?? 1, nextFilters.sourceState === 'available')
+        : await api.searchDocuments(nextFilters);
       setFilters({ ...nextFilters, page: result.page });
       setPage(result);
       setSelected((current) => result.items.find((item) => item.id === current?.id) ?? current);
@@ -195,6 +249,7 @@ function App() {
   }
 
   useEffect(() => { void load({ page: 1 }); void loadBases(); }, []);
+
   useEffect(() => {
     setEditOriginalFilename(selected?.originalFilename ?? '');
     setEditDoi(selected?.doi ?? '');
@@ -261,16 +316,10 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [page.items, filters]);
 
-  async function submitSearch(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    await load({ ...filters, page: 1 });
-  }
-
-  async function submitPaperSearch(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  async function searchPaperMetadata(title: string) {
     setBusy(true);
     try {
-      const result = await api.searchPaperMetadata({ title: paperSearchTitle.trim(), author: paperSearchAuthor.trim(), tags: parseTags(paperSearchTags), tagMode: paperTagMode, page: 1 });
+      const result = await api.searchPaperMetadata({ title: title.trim(), author: paperSearchAuthor.trim(), tags: parseTags(paperSearchTags), tagMode: paperTagMode, page: 1 });
       const documents = (await Promise.all(result.items.map(async (item) => {
         const page = await api.searchDocuments({ id: item.documentId, page: 1 });
         return page.items[0];
@@ -285,6 +334,33 @@ function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  // The toolbar search box routes to the exact lookup when the input is an ID or
+  // a DOI, and to paper-metadata search otherwise.
+  async function runToolbarSearch() {
+    const query = toolbarQuery.trim();
+    const sourceState = filters.sourceState;
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(query)) {
+      await load({ page: 1, id: query.toLowerCase(), sourceState }, baseFilterID);
+      return;
+    }
+    if (/^10\.\d{4,9}\/\S+$/i.test(query)) {
+      await load({ page: 1, doi: query, sourceState }, baseFilterID);
+      return;
+    }
+    if (query || paperSearchAuthor.trim() || parseTags(paperSearchTags).length > 0) {
+      await searchPaperMetadata(query);
+      return;
+    }
+    await load({ page: 1, sourceState }, baseFilterID);
+  }
+
+  function resetToolbar() {
+    setToolbarQuery('');
+    setBaseFilterID('');
+    setFilters({ page: 1 });
+    void load({ page: 1 }, '');
   }
 
   async function submitUpload(event: FormEvent<HTMLFormElement>) {
@@ -617,8 +693,9 @@ function App() {
     }
   }
 
-  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
-    const selectedFiles = Array.from(event.target.files ?? []);
+  // Shared by the file picker and drag-and-drop; a multi-file batch can't carry
+  // per-file metadata, so those fields reset.
+  function applySelectedFiles(selectedFiles: File[]) {
     setFiles(selectedFiles);
     if (selectedFiles.length > 1) {
       setDoi('');
@@ -626,6 +703,17 @@ function App() {
       setTags('');
       setUploadBaseIDs([]);
     }
+  }
+
+  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
+    applySelectedFiles(Array.from(event.target.files ?? []));
+  }
+
+  function onFilesDropped(event: ReactDragEvent<HTMLLabelElement>) {
+    event.preventDefault();
+    setDraggingFiles(false);
+    if (busy) return;
+    applySelectedFiles(Array.from(event.dataTransfer.files ?? []));
   }
 
   function onRemoteURLsChange(event: ChangeEvent<HTMLTextAreaElement>) {
@@ -663,52 +751,94 @@ function App() {
       : [...current, baseID]);
   }
 
+  // Reading happens in the library page, not inline: open it in a new tab and
+  // carry the selected paper (and the active Base filter) over in the hash.
+  function openInLibrary() {
+    if (!selected) return;
+    const params = new URLSearchParams({ doc: selected.id });
+    if (baseFilterID) params.set('base', baseFilterID);
+    window.open(`${window.location.origin}${window.location.pathname}#/library?${params.toString()}`, '_blank', 'noopener');
+  }
+
 	const selectedDescription = useMemo(() => {
 	if (!selected) return '选择左侧列表中的文档，可查看其 ID、DOI、状态及删除操作。';
 	if (markdownState?.errorMessage) return markdownState.errorMessage;
-	if (selected.contentType === 'application/pdf' && documentStatus === 'ready') return '可在下方切换文本选择和解析 Block 选择模式。';
-	if (selected.contentType === 'application/pdf') return 'PDF 解析完成后可在下方阅读原文并选择解析 Block。';
-	return '该文件可管理和解析；PDF 阅读器仅对 PDF 文件显示。';
+	if (selected.contentType === 'application/pdf' && documentStatus === 'ready') return '点「阅读 ↗」可在论文阅读库中打开这篇论文。';
+	if (selected.contentType === 'application/pdf') return 'PDF 解析完成后即可在论文阅读库中打开阅读。';
+	return '该文件可管理和解析；仅 PDF 支持在阅读库中预览。';
 	}, [selected, markdownState?.errorMessage, documentStatus]);
 
-  return <main className="document-console">
-    <aside className="document-sidebar">
-      <div className="brand"><p className="eyebrow">Papers Manager</p><h1>文档测试台</h1><a className="library-back-link" href="#/library">打开论文阅读库</a></div>
+  return <main className={`document-console${sidebarCollapsed ? ' sidebar-collapsed' : ''}`}>
+    <aside className={`document-sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
+      {!sidebarCollapsed && <>
+      <div className="console-sidebar-head">
+        <div className="brand"><p className="eyebrow">Papers Manager</p><h1>论文管理端</h1><a className="library-back-link" href="#/library" target="_blank" rel="noreferrer">打开论文阅读库</a></div>
+        <button className="console-collapse" type="button" onClick={() => setSidebarCollapsed(true)} aria-expanded="true" aria-controls="console-sidebar" title="收起左栏">«</button>
+      </div>
 
-      <form className="upload-form" onSubmit={submitUpload}>
-        <h2>上传文档</h2>
-        <label htmlFor="document-file">文件（可多选）</label>
-        <input id="document-file" type="file" accept={acceptedFiles} multiple onChange={onFileChange} disabled={busy} />
+      <nav className="console-menu" role="tablist" aria-label="左栏功能菜单">
+        {CONSOLE_FORM_MENUS.map(([key, label]) => (
+          <button className={formMenu === key ? 'active' : ''} type="button" role="tab" aria-selected={formMenu === key} key={key} onClick={() => setFormMenu(key)}>{label}</button>
+        ))}
+      </nav>
+
+      {formMenu === 'upload' && <form className="upload-form" onSubmit={submitUpload}>
+        <label className={`upload-dropzone${draggingFiles ? ' dragging' : ''}`} htmlFor="document-file"
+          onDragOver={(event) => { event.preventDefault(); if (!busy) setDraggingFiles(true); }}
+          onDragLeave={() => setDraggingFiles(false)}
+          onDrop={onFilesDropped}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M12 16V5.5m0 0L8 9.5m4-4 4 4" />
+            <path d="M4.5 15.5v2A1.5 1.5 0 0 0 6 19h12a1.5 1.5 0 0 0 1.5-1.5v-2" />
+          </svg>
+          <strong>拖拽文件到这里，或点击选择</strong>
+          <span>可多选 · PDF、Word、Excel、PowerPoint、Markdown、TXT 等</span>
+          <input id="document-file" className="upload-file-input" type="file" accept={acceptedFiles} multiple onChange={onFileChange} disabled={busy} />
+        </label>
+        {files.length > 0 && <ul className="upload-file-list">
+          {files.map((file, index) => <li key={`${file.name}-${file.size}-${index}`}>
+            <span className="upload-file-name" title={file.name}>{file.name}</span>
+            <span className="upload-file-size">{formatBytes(file.size)}</span>
+            <button type="button" title="移除文件" aria-label={`移除 ${file.name}`}
+              onClick={() => applySelectedFiles(files.filter((_, position) => position !== index))}>×</button>
+          </li>)}
+        </ul>}
         <label htmlFor="document-doi">DOI（可选）</label>
         <input id="document-doi" value={doi} maxLength={255} onChange={(event) => setDoi(event.target.value)} placeholder="10.1000/example" disabled={busy || files.length > 1} />
         <label htmlFor="document-title">论文正式标题（可选）</label>
         <input id="document-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="未填写时使用原始文件名" disabled={busy || files.length > 1} />
         <label htmlFor="document-tags">学科标签（可选）</label>
         <input id="document-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="computer science, graphics" disabled={busy || files.length > 1} />
-        <fieldset className="base-picker" disabled={busy || files.length > 1 || bases.length === 0}>
-          <legend>加入 Document Base（可多选）</legend>
-          {bases.length === 0 ? <p className="hint">暂无可选 Base；可先在下方创建。</p> : bases.map((base) => (
-            <label className="base-option" htmlFor={`upload-base-${base.id}`} key={base.id}>
-              <input id={`upload-base-${base.id}`} type="checkbox" checked={uploadBaseIDs.includes(base.id)} onChange={() => toggleUploadBase(base.id)} />
-              <span>{base.name}</span>
-            </label>
-          ))}
-        </fieldset>
+        <div className="base-picker">
+          <span className="base-picker-label">加入 Document Base（可多选）</span>
+          {bases.length === 0
+            ? <p className="hint">暂无可选 Base；可先在 Base 菜单里创建。</p>
+            : <div className="base-chips">
+              {bases.map((base) => {
+                const selected = uploadBaseIDs.includes(base.id);
+                return <button className={`base-chip${selected ? ' active' : ''}`} type="button" key={base.id}
+                  aria-pressed={selected} disabled={busy || files.length > 1} onClick={() => toggleUploadBase(base.id)}>{base.name}</button>;
+              })}
+            </div>}
+        </div>
         <button className="primary" type="submit" disabled={busy || files.length === 0}>{files.length > 1 ? `批量上传 ${files.length} 个文件` : '上传并创建记录'}</button>
-        <p className="hint">支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；单文件可设置 DOI、标题、标签和 Base。批量上传仅提交文件，完成后可逐项编辑元数据。</p>
-      </form>
+        <p className="hint" title="支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；单文件可设置 DOI、标题、标签和 Base。批量上传仅提交文件，完成后可逐项编辑元数据。">支持 PDF / Office / Markdown / TXT 等；单文件可补充 DOI、标题、标签。</p>
+      </form>}
 
-      <form className="upload-form" onSubmit={submitRemoteImport}>
+      {formMenu === 'url' && <form className="upload-form" onSubmit={submitRemoteImport}>
         <h2>从 URL 导入 PDF</h2>
-        <label htmlFor="remote-url">PDF、arXiv 或 DOI URL（每行一个）</label>
-        <textarea id="remote-url" value={remoteURL} onChange={onRemoteURLsChange} placeholder={'https://arxiv.org/abs/1706.03762\nhttps://example.org/paper.pdf'} disabled={busy} required />
+        <div className="field-row">
+          <label htmlFor="remote-url">PDF、arXiv 或 DOI URL（每行一个）</label>
+          <span className="field-meta">{remoteURLs.length} 个</span>
+        </div>
+        <textarea id="remote-url" className="code-input" value={remoteURL} onChange={onRemoteURLsChange} placeholder={'https://arxiv.org/abs/1706.03762\nhttps://example.org/paper.pdf'} disabled={busy} required />
         <label htmlFor="remote-doi">显式 DOI（可选）</label>
         <input id="remote-doi" value={remoteDOI} maxLength={255} onChange={(event) => setRemoteDOI(event.target.value)} placeholder="10.1000/example" disabled={busy || remoteURLs.length > 1} />
         <label htmlFor="remote-filename">保存文件名（可选）</label>
         <input id="remote-filename" value={remoteFilename} onChange={(event) => setRemoteFilename(event.target.value)} placeholder="paper.pdf" disabled={busy || remoteURLs.length > 1} />
         <button className="primary" type="submit" disabled={busy || remoteURLs.length === 0}>{remoteURLs.length > 1 ? `批量导入 ${remoteURLs.length} 个 URL` : '验证、下载并处理'}</button>
-        <p className="hint">普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。多行 URL 会逐项受理，单项 DOI 和文件名仅适用于单行导入。</p>
-      </form>
+        <p className="hint" title="普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。多行 URL 会逐项受理，单项 DOI 和文件名仅适用于单行导入。">支持显式 PDF URL、arXiv 页面与 DOI URL（每行一个）。</p>
+      </form>}
 
       {batchResults.length > 0 && <section className="batch-results" aria-live="polite">
         <h2>批量导入结果</h2>
@@ -719,78 +849,103 @@ function App() {
         </li>)}</ul>
       </section>}
 
-      <form className="search-form" onSubmit={submitSearch}>
-        <h2>查询文档</h2>
-        <label htmlFor="search-id">文档 ID</label>
-        <input id="search-id" value={filters.id ?? ''} onChange={(event) => setFilters({ ...filters, id: event.target.value })} placeholder="UUID" disabled={busy} />
-        <label htmlFor="search-doi">DOI</label>
-        <input id="search-doi" value={filters.doi ?? ''} onChange={(event) => setFilters({ ...filters, doi: event.target.value })} placeholder="精确匹配，不区分大小写" disabled={busy} />
-		<label htmlFor="search-source-state">源状态</label>
-		<select id="search-source-state" value={filters.sourceState ?? ''} onChange={(event) => setFilters({ ...filters, sourceState: event.target.value as DocumentSearch['sourceState'] })} disabled={busy}>
-		  <option value="">全部源状态</option>
-		  <option value="missing">missing</option>
-		  <option value="available">available</option>
-		  <option value="deleting">deleting</option>
-		  <option value="merged">merged</option>
-        </select>
-        <div className="form-actions"><button type="submit" disabled={busy}>查询</button><button type="button" onClick={() => { const next = { page: 1 }; setFilters(next); void load(next); }} disabled={busy}>重置</button></div>
-      </form>
-
-      <form className="search-form" onSubmit={submitPaperSearch}>
-        <h2>论文检索</h2>
-        <label htmlFor="paper-search-title">正式标题</label>
-        <input id="paper-search-title" value={paperSearchTitle} onChange={(event) => setPaperSearchTitle(event.target.value)} placeholder="模糊匹配" disabled={busy} />
-        <label htmlFor="paper-search-author">作者</label>
-        <input id="paper-search-author" value={paperSearchAuthor} onChange={(event) => setPaperSearchAuthor(event.target.value)} placeholder="作者姓名模糊匹配" disabled={busy} />
-        <label htmlFor="paper-search-tags">学科标签</label>
-        <input id="paper-search-tags" value={paperSearchTags} onChange={(event) => setPaperSearchTags(event.target.value)} placeholder="computer-science, graphics" disabled={busy} />
-        <label htmlFor="paper-tag-mode">标签匹配方式</label>
-        <select id="paper-tag-mode" value={paperTagMode} onChange={(event) => setPaperTagMode(event.target.value as 'all' | 'any')} disabled={busy}>
-          <option value="all">全部标签匹配</option>
-          <option value="any">任一标签匹配</option>
-        </select>
-        <button type="submit" disabled={busy}>检索论文</button>
-      </form>
-
-      <form className="search-form" onSubmit={submitBaseCreate}>
+      {formMenu === 'base' && <form className="search-form" onSubmit={submitBaseCreate}>
         <h2>文档 Base</h2>
         <label htmlFor="base-name">新 Base 名称</label>
         <input id="base-name" value={baseName} maxLength={120} onChange={(event) => setBaseName(event.target.value)} placeholder="例如：计算机图形学" disabled={busy} />
         <label htmlFor="base-description">说明（可选）</label>
         <input id="base-description" value={baseDescription} onChange={(event) => setBaseDescription(event.target.value)} disabled={busy} />
-        <button type="submit" disabled={busy || !baseName.trim()}>创建 Base</button>
+        <button className="primary" type="submit" disabled={busy || !baseName.trim()}>创建 Base</button>
         <label htmlFor="base-selector">目标 Base</label>
         <select id="base-selector" value={selectedBaseID} onChange={(event) => setSelectedBaseID(event.target.value)} disabled={busy || bases.length === 0}>
           {bases.length === 0 ? <option value="">尚未创建 Base</option> : bases.map((base) => <option value={base.id} key={base.id}>{base.name}</option>)}
         </select>
         <button type="button" onClick={() => void addSelectedToBase()} disabled={busy || !selected || !selectedBaseID}>将当前文档加入 Base</button>
-      </form>
+      </form>}
+      </>}
     </aside>
+    {sidebarCollapsed && <button className="console-peek" type="button" onClick={() => setSidebarCollapsed(false)}
+      title="展开左栏（导入与查询）" aria-label="展开左栏" aria-expanded="false">»</button>}
 
     <section className="document-workspace">
       <header className="workspace-header">
         <div><p className="eyebrow">Document API</p><h2>上传、查询、取消与删除</h2></div>
         <div className="detail-actions">
+          <button type="button" onClick={() => setCitationProgressOpen(true)}>引用解析进度</button>
           <button type="button" onClick={() => void load()} disabled={busy}>刷新</button>
-          <button className="danger" type="button" onClick={() => void deleteAllDocuments()} disabled={busy}>删除所有论文</button>
+          <button className="danger-quiet" type="button" onClick={() => void deleteAllDocuments()} disabled={busy}>删除所有论文</button>
         </div>
       </header>
+      <div className="workspace-toolbar" role="search">
+        <div className="toolbar-search">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6" /><path d="m15.2 15.2 4 4" /></svg>
+          <input value={toolbarQuery} onChange={(event) => setToolbarQuery(event.target.value)} placeholder="搜索标题 / 作者 / 文档 ID / DOI" aria-label="搜索标题、作者、文档 ID 或 DOI" disabled={busy}
+            onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void runToolbarSearch(); } }} />
+        </div>
+        <button className="primary" type="button" onClick={() => void runToolbarSearch()} disabled={busy}>查询</button>
+        <button type="button" onClick={resetToolbar} disabled={busy}>重置</button>
+        <button className={`toolbar-more${advancedOpen ? ' active' : ''}`} type="button" aria-expanded={advancedOpen} title="作者 / 标签筛选" onClick={() => setAdvancedOpen((open) => !open)}>高级</button>
+      </div>
+      {advancedOpen && <div className="workspace-toolbar workspace-toolbar-advanced">
+        <input value={paperSearchAuthor} onChange={(event) => setPaperSearchAuthor(event.target.value)} placeholder="作者（模糊匹配）" aria-label="作者" disabled={busy} />
+        <input value={paperSearchTags} onChange={(event) => setPaperSearchTags(event.target.value)} placeholder="学科标签：computer-science, graphics" aria-label="学科标签" disabled={busy} />
+        <select value={paperTagMode} onChange={(event) => setPaperTagMode(event.target.value as 'all' | 'any')} aria-label="标签匹配方式" disabled={busy}>
+          <option value="all">全部标签匹配</option>
+          <option value="any">任一标签匹配</option>
+        </select>
+      </div>}
       <p className={`status-message ${message.includes('失败') ? 'error' : ''}`}>{message || '正在准备文档列表…'}</p>
 
       <div className="workspace-grid">
         <section className="document-list-panel">
-          <div className="panel-heading"><h3>结果</h3><span>{page.total} 个文档</span></div>
+          <div className="panel-heading panel-heading-filters">
+          <h3>结果</h3>
+          <div className="panel-filters">
+            <select value={filters.sourceState ?? ''} aria-label="源状态筛选" disabled={busy}
+              onChange={(event) => {
+                // Filters apply on selection, not through the search button.
+                const sourceState = event.target.value as DocumentSearch['sourceState'];
+                setFilters({ ...filters, sourceState });
+                void load({ page: 1, sourceState }, baseFilterID);
+              }}>
+              <option value="">全部源状态</option>
+              <option value="missing">missing</option>
+              <option value="available">available</option>
+              <option value="deleting">deleting</option>
+              <option value="merged">merged</option>
+            </select>
+            <select value={baseFilterID} aria-label="按 Base 筛选" disabled={busy}
+              onChange={(event) => {
+                setBaseFilterID(event.target.value);
+                void load({ page: 1, sourceState: filters.sourceState }, event.target.value);
+              }}>
+              <option value="">全部 Base</option>
+              {bases.map((base) => <option value={base.id} key={base.id}>{base.name}</option>)}
+            </select>
+            <span className="panel-count">{page.total} 个文档</span>
+          </div>
+        </div>
           <div className="document-list">
             {page.items.length === 0 ? <p className="empty-list">没有匹配的文档。</p> : page.items.map((item) => <button type="button" key={item.id} className={selected?.id === item.id ? 'document-row active' : 'document-row'} onClick={() => setSelected(item)}>
-			  <span className="filename">{documentLabel(item)}</span><span className={`status status-${item.sourceState}`}>{item.sourceState}</span><small>{formatBytes(item.sizeBytes)} · {item.doi || '无 DOI'}</small>
+			  <span className="filename">{documentLabel(item)}</span><span className={`status status-${item.sourceState}`}>{statusLabel(item.sourceState)}</span><small>{formatBytes(item.sizeBytes)} · {item.doi || '无 DOI'}</small>
             </button>)}
           </div>
           <div className="pagination"><button type="button" disabled={busy || !hasPreviousPage} onClick={() => void load({ ...filters, page: page.page - 1 })}>上一页</button><span>{page.page} / {pageCount}</span><button type="button" disabled={busy || !hasNextPage} onClick={() => void load({ ...filters, page: page.page + 1 })}>下一页</button></div>
         </section>
 
-        <section className="document-detail-panel">
+        <section className={`document-detail-panel${detailMenu === 'citations' ? ' detail-panel-fixed' : ''}`}>
           {!selected ? <div className="empty-detail"><h3>未选择文档</h3><p>{selectedDescription}</p></div> : <>
           <div className="panel-heading"><h3>文档详情</h3><div className="detail-actions">{['uploaded', 'queued', 'processing'].includes(documentStatus) && <button className="warning" type="button" onClick={() => void cancelSelected()} disabled={busy}>取消解析</button>}{['failed', 'cancelled'].includes(documentStatus) && <button type="button" onClick={() => void retrySelected()} disabled={busy || pipelineActive}>重新解析</button>}<button className="danger" type="button" onClick={() => void deleteSelected()} disabled={busy}>删除文档</button></div></div>
+          <nav className="console-menu detail-menu" role="tablist" aria-label="文档详情菜单">
+            {DETAIL_MENUS.map(([key, label]) => (
+              <button className={detailMenu === key ? 'active' : ''} type="button" role="tab" aria-selected={detailMenu === key} key={key} onClick={() => setDetailMenu(key)}>{label}</button>
+            ))}
+            {selected.contentType === 'application/pdf' && (
+              <button className="detail-jump" type="button" title="在论文阅读库中打开这篇论文" onClick={openInLibrary}>阅读 ↗</button>
+            )}
+          </nav>
+          <div className={`detail-body${detailMenu === 'citations' ? ' detail-body-fixed' : ''}`}>
+            {detailMenu === 'overview' && <>
             <dl className="document-details">
               <dt>正式标题</dt><dd>{paperMetadata?.title || '未设置（使用原始文件名展示）'}</dd>
               <dt>原始文件名</dt><dd>{selected.originalFilename}</dd>
@@ -800,11 +955,13 @@ function App() {
 			  <dt>论文信息来源</dt><dd>{paperMetadata?.metadataSource ?? '加载中'}</dd>
               <dt>类型</dt><dd>{selected.contentType}</dd>
               <dt>大小</dt><dd>{formatBytes(selected.sizeBytes)}</dd>
-              <dt>状态</dt><dd><span className={`status status-${documentStatus}`}>{documentStatus}</span></dd>
+              <dt>状态</dt><dd><span className={`status status-${documentStatus}`}>{statusLabel(documentStatus)}</span></dd>
               <dt>创建时间</dt><dd>{formatDate(selected.createdAt)}</dd>
               <dt>更新时间</dt><dd>{formatDate(selected.updatedAt)}</dd>
             </dl>
-            <form className="metadata-form" onSubmit={submitMetadataUpdate}>
+            <p className={documentStatus === 'failed' ? 'detail-error' : 'hint'}>{selectedDescription}</p>
+            </>}
+            {detailMenu === 'edit' && <form className="metadata-form" onSubmit={submitMetadataUpdate}>
               <h4>修改文档信息</h4>
               <label htmlFor="edit-filename">原始文件名</label>
               <input id="edit-filename" value={editOriginalFilename} onChange={(event) => setEditOriginalFilename(event.target.value)} disabled={busy} required />
@@ -815,7 +972,8 @@ function App() {
               <label htmlFor="edit-tags">学科标签</label>
               <input id="edit-tags" value={editTags} onChange={(event) => setEditTags(event.target.value)} placeholder="computer science, graphics" disabled={busy} />
               <button type="submit" disabled={busy || (editOriginalFilename === selected.originalFilename && editDoi === (selected.doi ?? '') && editTitle === (paperMetadata?.title ?? '') && editTags === (paperMetadata?.tags.join(', ') ?? ''))}>保存修改</button>
-            </form>
+            </form>}
+            {detailMenu === 'pipeline' && <>
 			<section className="paper-info-panel">
 			  <div className="panel-heading"><h4>文档处理流程</h4><span>{processing?.sourceState ?? '尚未加载'}</span></div>
 			  <div className="paper-info-stages">
@@ -834,13 +992,15 @@ function App() {
 			  {referenceCatalogActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消引用论文查询</button>}
 			  <p className="hint">状态来自持久化处理 span；元数据来源来自已落库的论文信息。历史失败请查看 Asynq 死信记录。</p>
 			</section>
-			<section className="citation-panel">
+            </>}
+			{detailMenu === 'citations' && <section className="citation-panel">
 			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>
 			  <div className="citation-columns">
 				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference)}>查看第 {index + 1} 条的 Python 提取信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.citedDocumentId)} disabled={busy}>下载 PDF</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference)}>查看第 {index + 1} 条的已落库信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 			  </div>
-			</section>
+			</section>}
+          </div>
 			{citationSourceInfoOpen && <div className="citation-source-backdrop" role="presentation" onMouseDown={() => setCitationSourceInfoOpen(false)}>
 			  <section className="citation-source-dialog" role="dialog" aria-modal="true" aria-labelledby="citation-source-title" onMouseDown={(event) => event.stopPropagation()}>
 				<header><div><p className="eyebrow">Citation extraction</p><h4 id="citation-source-title">Python 提取的引用源信息</h4></div><div className="detail-actions"><button type="button" onClick={() => setCitationSourceRawVisible((visible) => !visible)}>{citationSourceRawVisible ? '收起引用原文' : '查看引用原文'}</button><button type="button" onClick={() => setCitationSourceInfoOpen(false)}>关闭</button></div></header>
@@ -857,12 +1017,15 @@ function App() {
 				</dl></>}
 			  </section>
 			</div>}
-            <p className={documentStatus === 'failed' ? 'detail-error' : 'hint'}>{selectedDescription}</p>
-			{selected.contentType === 'application/pdf' && <PdfReader document={selected} onMessage={setMessage} />}
           </>}
         </section>
       </div>
     </section>
+    {/* Local boundary: opening the dialog must not blank the console while its
+        chunk loads. Rendering only when open keeps the chunk off first paint. */}
+    <Suspense fallback={null}>
+      {citationProgressOpen && <CitationProgressDialog open onClose={() => setCitationProgressOpen(false)} />}
+    </Suspense>
   </main>;
 }
 
@@ -875,7 +1038,13 @@ function Root() {
     return () => window.removeEventListener('hashchange', syncRoute);
   }, []);
 
-  return route === '#/library' ? <PaperLibraryPage /> : <App />;
+  if (!route.startsWith('#/library')) return <App />;
+  // #/library?doc=<id>&base=<baseID> opens a specific paper (optionally inside
+  // a Base) straight in the reading library.
+  const params = new URLSearchParams(route.includes('?') ? route.slice(route.indexOf('?') + 1) : '');
+  return <Suspense fallback={<div className="app-route-loading">正在加载论文阅读库…</div>}>
+    <PaperLibraryPage initialBaseID={params.get('base') ?? undefined} initialDocumentID={params.get('doc') ?? undefined} />
+  </Suspense>;
 }
 
 createRoot(document.getElementById('root')!).render(<Root />);

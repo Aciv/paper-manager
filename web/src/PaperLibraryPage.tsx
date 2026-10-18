@@ -1,8 +1,13 @@
-import { ChangeEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, Document, DocumentBase, DocumentPage, PaperCitation, PaperMetadata } from './api';
-import { PdfReader } from './PdfReader';
+import { api, Document, DocumentBase, PaperCitation, PaperMetadata } from './api';
+import { LibrarySelect } from './LibrarySelect';
+import { isDocumentRead, localFileReadingKey, subscribeReadingState, transferReadingRecord } from './readingState';
 import './PaperLibraryPage.css';
+
+// PDF.js is the heaviest dependency in the app; load it only once a paper is
+// actually opened, not while the catalog or an empty scope is showing.
+const PdfReader = lazy(() => import('./PdfReader').then((module) => ({ default: module.PdfReader })));
 
 function documentTitle(document: Document, metadata?: PaperMetadata) {
   return metadata?.title || document.originalFilename || '未命名论文';
@@ -31,7 +36,99 @@ type RightMenu = typeof RIGHT_MENUS[number];
 const LEFT_MENU_LABELS: Record<LeftMenu, string> = { catalog: '论文目录', base: '类别', outline: 'PDF 目录' };
 const RIGHT_MENU_LABELS: Record<RightMenu, string> = { info: '论文信息', citations: '引用信息' };
 
-export function PaperLibraryPage() {
+type LibraryReadFilter = 'all' | 'read' | 'unread';
+type LibrarySort = 'added' | 'title' | 'year' | 'author';
+
+function metadataYear(metadata?: PaperMetadata): string {
+  return metadata?.publishedAt?.slice(0, 4) ?? '';
+}
+
+type LibraryView = {
+  filtersOpen: boolean;
+  authorFilter: string;
+  venueFilter: string;
+  tagFilter: string;
+  yearFilter: string;
+  readFilter: LibraryReadFilter;
+  sortBy: LibrarySort;
+  sortDesc: boolean;
+};
+
+const LIBRARY_VIEW_STORAGE = 'papersManager.library.view.v1';
+
+// Persisted per device: an active filter or sort order should survive a
+// reload, a trip to the console, and opening another paper in a new tab.
+function readLibraryView(): LibraryView {
+  const fallback: LibraryView = {
+    filtersOpen: false,
+    authorFilter: '',
+    venueFilter: '',
+    tagFilter: '',
+    yearFilter: '',
+    readFilter: 'all',
+    sortBy: 'added',
+    sortDesc: true,
+  };
+  try {
+    const raw = window.localStorage.getItem(LIBRARY_VIEW_STORAGE);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const text = (value: unknown) => (typeof value === 'string' ? value : '');
+    return {
+      filtersOpen: parsed.filtersOpen === true,
+      authorFilter: text(parsed.authorFilter),
+      venueFilter: text(parsed.venueFilter),
+      tagFilter: text(parsed.tagFilter),
+      yearFilter: text(parsed.yearFilter),
+      readFilter: parsed.readFilter === 'read' || parsed.readFilter === 'unread' ? parsed.readFilter : 'all',
+      sortBy: parsed.sortBy === 'title' || parsed.sortBy === 'year' || parsed.sortBy === 'author' ? parsed.sortBy : 'added',
+      sortDesc: typeof parsed.sortDesc === 'boolean' ? parsed.sortDesc : true,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+// The filters below run on the whole (small) library, so the catalog loads every
+// page once instead of paginating server-side. Keep a defensive bound so a bad
+// total can never loop forever.
+async function fetchAllDocuments(baseID: string): Promise<Document[]> {
+  const documents = new Map<string, Document>();
+  let pageNumber = 1;
+  for (;;) {
+    const result = baseID
+      ? await api.listDocumentBaseDocuments(baseID, pageNumber, true)
+      : await api.searchDocuments({ page: pageNumber, excludeUnknown: true });
+    result.items.forEach((item) => documents.set(item.id, item));
+    const totalPages = Math.max(1, Math.ceil(result.total / Math.max(1, result.pageSize)));
+    if (pageNumber >= totalPages || result.items.length === 0 || pageNumber >= 100) break;
+    pageNumber += 1;
+  }
+  return Array.from(documents.values());
+}
+
+// Metadata requests are the expensive part of loading a full catalog; keep a
+// small pool so a large library does not open hundreds of sockets at once.
+async function fetchMetadataMap(documents: Document[]): Promise<Record<string, PaperMetadata>> {
+  const metadataByID: Record<string, PaperMetadata> = {};
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < documents.length) {
+      const documentItem = documents[cursor];
+      cursor += 1;
+      try {
+        const { paperMetadata } = await api.getPaperMetadata(documentItem.id);
+        if (paperMetadata) metadataByID[documentItem.id] = paperMetadata;
+      } catch {
+        // Missing metadata only disables the metadata-based filters for that row.
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(6, documents.length) }, worker));
+  return metadataByID;
+}
+
+export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initialBaseID?: string; initialDocumentID?: string } = {}) {
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   // Side column widths: draggable via the handle on each column's inner edge,
@@ -61,7 +158,7 @@ export function PaperLibraryPage() {
   const [rightMenu, setRightMenu] = useState<RightMenu>('info');
   const [outlineSlot, setOutlineSlot] = useState<HTMLDivElement | null>(null);
   const [bases, setBases] = useState<DocumentBase[]>([]);
-  const [baseID, setBaseID] = useState('');
+  const [baseID, setBaseID] = useState(initialBaseID ?? '');
   // Local papers are PDFs the user opens straight from a folder: they never
   // reach the backend, so their scope is tracked apart from the stored ones.
   const [localMode, setLocalMode] = useState(false);
@@ -69,8 +166,12 @@ export function PaperLibraryPage() {
   const [localSelected, setLocalSelected] = useState<File | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
-  const [page, setPage] = useState<DocumentPage>({ items: [], page: 1, pageSize: 10, total: 0 });
+  // The full scope (all pages + metadata) feeds client-side filtering/sorting.
+  // This is deliberately the whole small library, not the current server page.
+  const [items, setItems] = useState<Document[]>([]);
+  const [metadataByID, setMetadataByID] = useState<Record<string, PaperMetadata>>({});
   const [selected, setSelected] = useState<Document>();
+  const pendingDocumentID = useRef(initialDocumentID ?? '');
   const [metadata, setMetadata] = useState<PaperMetadata>();
   const [citations, setCitations] = useState<PaperCitation[]>([]);
   const [citedBy, setCitedBy] = useState<PaperCitation[]>([]);
@@ -84,9 +185,27 @@ export function PaperLibraryPage() {
   // Only shown when there is something to report (errors, processing results);
   // routine progress stays off screen.
   const [message, setMessage] = useState('');
-  const [titles, setTitles] = useState<Record<string, string>>({});
+  // Client-side catalog filters and sort (the whole scope is already loaded).
+  // The panel and its choices come from the per-device view saved last time.
+  const [initialView] = useState(readLibraryView);
+  const [filtersOpen, setFiltersOpen] = useState(initialView.filtersOpen);
+  const [authorFilter, setAuthorFilter] = useState(initialView.authorFilter);
+  const [venueFilter, setVenueFilter] = useState(initialView.venueFilter);
+  const [tagFilter, setTagFilter] = useState(initialView.tagFilter);
+  const [yearFilter, setYearFilter] = useState(initialView.yearFilter);
+  const [readFilter, setReadFilter] = useState<LibraryReadFilter>(initialView.readFilter);
+  const [sortBy, setSortBy] = useState<LibrarySort>(initialView.sortBy);
+  const [sortDesc, setSortDesc] = useState(initialView.sortDesc);
+  // Set once the current scope's items + metadata have arrived; remembered
+  // filters are validated against the options they produce.
+  const [catalogLoaded, setCatalogLoaded] = useState(false);
+  // Read/unread writes are broadcast from the reader; the catalog recomputes.
+  const [readRevision, setReadRevision] = useState(0);
+  // Local PDFs can be imported with the same upload API the console uses.
+  const [importingLocal, setImportingLocal] = useState(false);
+  const [importedLocal, setImportedLocal] = useState<Record<string, string>>({});
   const citationInfoRequest = useRef(0);
-  const titleCache = useRef(new Map<string, string>());
+  const loadGeneration = useRef(0);
   const resizeDrag = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(null);
   // Floating edge button for a collapsed column: appears only while the pointer
   // is near that edge, pinned at the position of the first approach; clicking it
@@ -108,8 +227,6 @@ export function PaperLibraryPage() {
   const effectiveLeftWidth = Math.max(MIN_COLUMN_WIDTH, Math.min(leftWidth, widthMax('left')));
   const effectiveRightWidth = Math.max(MIN_COLUMN_WIDTH, Math.min(rightWidth, widthMax('right')));
 
-  const pageCount = Math.max(1, Math.ceil(page.total / page.pageSize));
-  const visibleItems = useMemo(() => page.items.filter((item) => item.sourceState === 'available'), [page.items]);
   const activeBase = bases.find((base) => base.id === baseID);
   const selectedIsPDF = selected?.contentType === 'application/pdf';
   const localFolder = useMemo(() => {
@@ -119,26 +236,104 @@ export function PaperLibraryPage() {
     return path.includes('/') ? path.split('/')[0] : '本地文件';
   }, [localFiles]);
   const outlineReady = localMode ? Boolean(localSelected) : selectedIsPDF;
+  const localSelectedKey = localSelected ? localPath(localSelected) : '';
+  const localSelectedImportedID = localSelectedKey ? importedLocal[localSelectedKey] : undefined;
 
-  // The catalog shows paper titles; the search endpoint only returns files, so
-  // titles come from each paper's metadata and are cached across pages.
+  useEffect(() => subscribeReadingState(() => setReadRevision((value) => value + 1)), []);
+
   useEffect(() => {
-    const missing = visibleItems.filter((item) => !titleCache.current.has(item.id));
-    if (missing.length === 0) return;
-    let active = true;
-    void Promise.allSettled(missing.map((item) => api.getPaperMetadata(item.id))).then(results => {
-      if (!active) return;
-      const next: Record<string, string> = {};
-      results.forEach((result, index) => {
-        const title = result.status === 'fulfilled' ? result.value.paperMetadata?.title?.trim() : '';
-        if (!title) return;
-        titleCache.current.set(missing[index].id, title);
-        next[missing[index].id] = title;
-      });
-      if (Object.keys(next).length > 0) setTitles(current => ({ ...current, ...next }));
+    try {
+      window.localStorage.setItem(LIBRARY_VIEW_STORAGE, JSON.stringify({
+        filtersOpen, authorFilter, venueFilter, tagFilter, yearFilter, readFilter, sortBy, sortDesc,
+      }));
+    } catch {
+      // Storage may be full or disabled; filtering still works for this visit.
+    }
+  }, [filtersOpen, authorFilter, venueFilter, tagFilter, yearFilter, readFilter, sortBy, sortDesc]);
+
+  // Filter options are derived from the loaded metadata, so they only offer
+  // values that actually occur in this scope.
+  const yearOptions = useMemo(() => Array.from(new Set(
+    items.map((item) => metadataYear(metadataByID[item.id])).filter(Boolean),
+  )).sort((a, b) => b.localeCompare(a)), [items, metadataByID]);
+  const venueOptions = useMemo(() => Array.from(new Set(
+    items.map((item) => metadataByID[item.id]?.venue?.trim()).filter((venue): venue is string => Boolean(venue)),
+  )).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')), [items, metadataByID]);
+  const tagOptions = useMemo(() => Array.from(new Set(
+    items.flatMap((item) => metadataByID[item.id]?.tags ?? []),
+  )).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')), [items, metadataByID]);
+  const activeFilterCount = [
+    authorFilter.trim(), venueFilter, tagFilter, yearFilter,
+    readFilter === 'all' ? '' : readFilter,
+  ].filter(Boolean).length;
+  const sortCustomized = sortBy !== 'added' || !sortDesc;
+  const viewCustomized = activeFilterCount > 0 || sortCustomized;
+
+  // Once this scope's catalog is here, drop remembered values it no longer
+  // contains (switched Base, removed paper). Author stays: it is free text.
+  useEffect(() => {
+    if (!catalogLoaded || localMode) return;
+    if (yearFilter && !yearOptions.includes(yearFilter)) setYearFilter('');
+    if (venueFilter && !venueOptions.includes(venueFilter)) setVenueFilter('');
+    if (tagFilter && !tagOptions.includes(tagFilter)) setTagFilter('');
+  }, [catalogLoaded, localMode, yearFilter, venueFilter, tagFilter, yearOptions, venueOptions, tagOptions]);
+
+  const availableCount = useMemo(
+    () => items.filter((item) => item.sourceState === 'available').length,
+    [items],
+  );
+
+  const visibleItems = useMemo(() => {
+    const authorQuery = authorFilter.trim().toLowerCase();
+    const filtered = items.filter((item) => {
+      if (item.sourceState !== 'available') return false;
+      const itemMetadata = metadataByID[item.id];
+      if (authorQuery && !(itemMetadata?.authors ?? []).some((author) => author.name.toLowerCase().includes(authorQuery))) return false;
+      if (yearFilter && metadataYear(itemMetadata) !== yearFilter) return false;
+      if (venueFilter && (itemMetadata?.venue ?? '').trim() !== venueFilter) return false;
+      if (tagFilter && !(itemMetadata?.tags ?? []).includes(tagFilter)) return false;
+      if (readFilter !== 'all' && isDocumentRead(item.id) !== (readFilter === 'read')) return false;
+      return true;
     });
-    return () => { active = false; };
-  }, [visibleItems]);
+    const direction = sortDesc ? -1 : 1;
+    const text = (left: string, right: string) => left.localeCompare(right, 'zh-Hans-CN');
+    filtered.sort((left, right) => {
+      const leftMetadata = metadataByID[left.id];
+      const rightMetadata = metadataByID[right.id];
+      if (sortBy === 'title') {
+        return direction * text(documentTitle(left, leftMetadata), documentTitle(right, rightMetadata));
+      }
+      if (sortBy === 'year') {
+        const leftYear = metadataYear(leftMetadata);
+        const rightYear = metadataYear(rightMetadata);
+        if (!leftYear && !rightYear) return 0;
+        if (!leftYear) return 1;
+        if (!rightYear) return -1;
+        return direction * leftYear.localeCompare(rightYear);
+      }
+      if (sortBy === 'author') {
+        const leftAuthor = leftMetadata?.authors[0]?.name ?? '';
+        const rightAuthor = rightMetadata?.authors[0]?.name ?? '';
+        if (!leftAuthor && !rightAuthor) return 0;
+        if (!leftAuthor) return 1;
+        if (!rightAuthor) return -1;
+        return direction * text(leftAuthor, rightAuthor);
+      }
+      return direction * (new Date(left.createdAt).getTime() - new Date(right.createdAt).getTime());
+    });
+    return filtered;
+    // readRevision invalidates the memo after a read flag is toggled elsewhere.
+  }, [items, metadataByID, authorFilter, venueFilter, tagFilter, yearFilter, readFilter, sortBy, sortDesc, readRevision]);
+
+  function resetFilters() {
+    setAuthorFilter('');
+    setVenueFilter('');
+    setTagFilter('');
+    setYearFilter('');
+    setReadFilter('all');
+    setSortBy('added');
+    setSortDesc(true);
+  }
 
 
   useEffect(() => {
@@ -231,22 +426,51 @@ export function PaperLibraryPage() {
     event.target.value = ''; // picking the same file or folder again must still fire
   }
 
-  function loadDocuments(nextPage = 1) {
+  function loadDocuments() {
     if (localMode) return; // the local scope lists files from disk, not the API
+    const generation = loadGeneration.current + 1;
+    loadGeneration.current = generation;
     setLoading(true);
-    const request = baseID
-      ? api.listDocumentBaseDocuments(baseID, nextPage, true)
-      : api.searchDocuments({ page: nextPage, excludeUnknown: true });
-    void request
-      .then((result) => {
-        setPage(result);
-        setSelected((current) => result.items.find((item) => item.id === current?.id) ?? result.items[0]);
+    setCatalogLoaded(false);
+    void fetchAllDocuments(baseID)
+      .then(async (documents) => {
+        if (loadGeneration.current !== generation) return;
+        const metadataMap = await fetchMetadataMap(documents);
+        if (loadGeneration.current !== generation) return;
+        setItems(documents);
+        setMetadataByID(metadataMap);
+        setCatalogLoaded(true);
+        const pending = pendingDocumentID.current;
+        if (pending) {
+          pendingDocumentID.current = '';
+          const target = documents.find((item) => item.id === pending);
+          if (target) {
+            setSelected(target);
+            return;
+          }
+          // The paper may sit outside this Base: fetch it directly so the
+          // reader still opens what the console asked for.
+          try {
+            const found = await api.searchDocuments({ id: pending, page: 1 });
+            if (loadGeneration.current !== generation) return;
+            setSelected(found.items.find((item) => item.id === pending) ?? documents[0]);
+          } catch {
+            setSelected(documents[0]);
+          }
+          return;
+        }
+        setSelected((current) => documents.find((item) => item.id === current?.id) ?? documents[0]);
       })
-      .catch((error) => setMessage(error instanceof Error ? `加载论文失败：${error.message}` : '加载论文失败。'))
-      .finally(() => setLoading(false));
+      .catch((error) => {
+        if (loadGeneration.current !== generation) return;
+        setMessage(error instanceof Error ? `加载论文失败：${error.message}` : '加载论文失败。');
+      })
+      .finally(() => {
+        if (loadGeneration.current === generation) setLoading(false);
+      });
   }
 
-  useEffect(() => { loadDocuments(1); }, [baseID, localMode]);
+  useEffect(() => { loadDocuments(); }, [baseID, localMode]);
 
   useEffect(() => {
     // The local scope shows files that have no backend record at all.
@@ -297,13 +521,46 @@ export function PaperLibraryPage() {
       });
   }
 
+  // A local PDF is uploaded through the same endpoint as the console; the
+  // backend then runs the ordinary pipeline. The local scope stays selected so
+  // the user can keep reading the file from disk.
+  async function importLocalPaper(picked: File) {
+    setImportingLocal(true);
+    try {
+      const { document: imported } = await api.upload(picked, '');
+      // The local file's page/read state follows it into the stored document.
+      const carried = transferReadingRecord(localFileReadingKey(picked), imported.id);
+      let baseNote = '';
+      if (baseID) {
+        const targetBase = bases.find((base) => base.id === baseID);
+        try {
+          await api.addDocumentToBase(baseID, imported.id);
+          baseNote = `，并加入 Base「${targetBase?.name ?? baseID}」`;
+        } catch (error) {
+          baseNote = `；加入 Base 失败：${error instanceof Error ? error.message : '未知错误'}`;
+        }
+      }
+      setImportedLocal((current) => ({ ...current, [localPath(picked)]: imported.id }));
+      setMessage(`已导入到内部论文库：${imported.originalFilename}（${imported.id}）${carried ? '，已同步本地阅读位置与已读状态' : ''}，后台解析已开始${baseNote}。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? `导入到库失败：${error.message}` : '导入到库失败。');
+    } finally {
+      setImportingLocal(false);
+    }
+  }
+
+  function viewImportedPaper(documentID: string) {
+    pendingDocumentID.current = documentID;
+    setLocalMode(false);
+  }
+
   const collapsedClass = `${leftCollapsed ? ' left-collapsed' : ''}${rightCollapsed ? ' right-collapsed' : ''}`;
 
   const leftColumnBody = <>
     <div className="library-resizer" role="separator" aria-orientation="vertical" title="拖动调整左栏宽度"
       onPointerDown={event => startResize('left', event)} />
     <div className="library-menu-bar">
-      <a className="library-back-link" href="#">返回测试台</a>
+      <a className="library-back-link" href="#">返回论文管理端</a>
       <button className="library-collapse" type="button" onClick={() => setLeftCollapsed(true)} aria-expanded="true" aria-controls="library-left-column" title="收起左栏">«</button>
     </div>
     <nav className="library-menu" role="tablist" aria-label="左侧功能菜单">
@@ -321,8 +578,37 @@ export function PaperLibraryPage() {
         </div>
         <p className="library-detail-meta">
           <span>{localMode ? `本地论文 · ${localFolder}` : activeBase ? `内部论文 · ${activeBase.name}` : '内部论文 · 全部'}</span>
-          <span>{localMode ? localFiles.length : page.total} 篇</span>
+          <span>{localMode ? `${localFiles.length} 篇` : `${visibleItems.length} / ${availableCount} 篇`}</span>
         </p>
+        {!localMode && <div className="library-catalog-tools">
+          <button className={`library-filter-toggle${filtersOpen ? ' active' : ''}`} type="button" aria-expanded={filtersOpen} onClick={() => setFiltersOpen((open) => !open)}>
+            筛选与排序{activeFilterCount > 0 ? ` · ${activeFilterCount}` : ''}
+          </button>
+          {viewCustomized && <button className="library-filter-reset" type="button" onClick={resetFilters}>清除</button>}
+        </div>}
+        {!localMode && filtersOpen && <div className="library-filters">
+          <input value={authorFilter} onChange={(event) => setAuthorFilter(event.target.value)} placeholder="按作者筛选（模糊）" aria-label="按作者筛选" />
+          <div className="library-filter-grid">
+            <LibrarySelect value={yearFilter} onChange={setYearFilter} ariaLabel="按年份筛选"
+              options={[{ value: '', label: '全部年份' }, ...yearOptions.map((year) => ({ value: year, label: year }))]} />
+            <LibrarySelect value={venueFilter} onChange={setVenueFilter} ariaLabel="按发表 venue 筛选"
+              options={[{ value: '', label: '全部 venue' }, ...venueOptions.map((venue) => ({ value: venue, label: venue }))]} />
+            <LibrarySelect value={tagFilter} onChange={setTagFilter} ariaLabel="按标签筛选"
+              options={[{ value: '', label: '全部标签' }, ...tagOptions.map((tag) => ({ value: tag, label: tag }))]} />
+            <LibrarySelect value={readFilter} onChange={(next) => setReadFilter(next as LibraryReadFilter)} ariaLabel="按阅读状态筛选"
+              options={[{ value: 'all', label: '全部阅读状态' }, { value: 'unread', label: '未读' }, { value: 'read', label: '已读' }]} />
+          </div>
+          <div className="library-sort-row">
+            <LibrarySelect value={sortBy} onChange={(next) => setSortBy(next as LibrarySort)} ariaLabel="排序方式"
+              options={[
+                { value: 'added', label: '按添加时间' },
+                { value: 'title', label: '按标题' },
+                { value: 'year', label: '按年份' },
+                { value: 'author', label: '按第一作者' },
+              ]} />
+            <button type="button" title={sortDesc ? '当前降序，点击切换升序' : '当前升序，点击切换降序'} onClick={() => setSortDesc((desc) => !desc)}>{sortDesc ? '降序 ↓' : '升序 ↑'}</button>
+          </div>
+        </div>}
         <div className="library-document-list">
           {localMode
             ? <>
@@ -330,20 +616,35 @@ export function PaperLibraryPage() {
               <button className="library-folder-open" type="button" title="加载这个文件夹里（含子文件夹）的全部 PDF，不逐个挑选" onClick={() => folderInput.current?.click()}>{localFiles.length > 0 ? '换成整个文件夹…' : '选择整个文件夹…'}</button>
               {localFiles.length === 0
                 ? <p className="hint">「选择 PDF 文件…」里可以进到任意文件夹，看到并多选其中的 PDF（Ctrl+A 全选）；全部只在浏览器里打开，不会写入后端。</p>
-                : localFiles.map((item, index) => <button className={localSelected === item ? 'active' : ''} type="button" key={`${localPath(item)}-${index}`} title={localPath(item)} onClick={() => { setLocalSelected(item); if (narrow) setLeftCollapsed(true); }}>
-                  <strong>{item.name}</strong>
-                </button>)}
+                : localFiles.map((item, index) => {
+                  const read = isDocumentRead(localFileReadingKey(item));
+                  return <button className={`${localSelected === item ? 'active' : ''}${read ? ' read' : ''}`} type="button" key={`${localPath(item)}-${index}`} title={localPath(item)} onClick={() => { setLocalSelected(item); if (narrow) setLeftCollapsed(true); }}>
+                    <strong><span className={`library-read-dot${read ? ' read' : ''}`} aria-hidden="true" />{item.name}</strong>
+                  </button>;
+                })}
             </>
-            : visibleItems.length === 0
-              ? <p className="hint">此范围内没有论文。</p>
-              : visibleItems.map((document) => <button className={selected?.id === document.id ? 'active' : ''} type="button" key={document.id} title={document.originalFilename} onClick={() => { setSelected(document); if (narrow) setLeftCollapsed(true); }}>
-                <strong>{titles[document.id] ?? document.originalFilename}</strong>
-              </button>)}
+            : loading && items.length === 0
+              ? <p className="hint">正在加载论文与元数据…</p>
+              : visibleItems.length === 0
+                ? <p className="hint">{items.length === 0 ? '此范围内没有论文。' : '没有符合筛选条件的论文。'}</p>
+                : visibleItems.map((documentItem) => {
+                  const itemMetadata = metadataByID[documentItem.id];
+                  const read = isDocumentRead(documentItem.id);
+                  const detail = [metadataYear(itemMetadata), itemMetadata?.venue?.trim()].filter(Boolean).join(' · ')
+                    || formatAuthors(itemMetadata?.authors ?? []);
+                  return <button className={`${selected?.id === documentItem.id ? 'active' : ''}${read ? ' read' : ''}`} type="button" key={documentItem.id} title={documentItem.originalFilename} onClick={() => { setSelected(documentItem); if (narrow) setLeftCollapsed(true); }}>
+                    <strong><span className={`library-read-dot${read ? ' read' : ''}`} aria-hidden="true" />{documentTitle(documentItem, itemMetadata)}</strong>
+                    <span>{detail}</span>
+                  </button>;
+                })}
         </div>
-        {!localMode && <div className="library-pagination">
-          <button type="button" onClick={() => loadDocuments(page.page - 1)} disabled={loading || page.page <= 1} title="上一页">‹</button>
-          <span>{page.page} / {pageCount}</span>
-          <button type="button" onClick={() => loadDocuments(page.page + 1)} disabled={loading || page.page >= pageCount} title="下一页">›</button>
+        {localMode && localSelected && <div className="library-local-import">
+          <button className="primary" type="button" disabled={importingLocal || Boolean(localSelectedImportedID)}
+            onClick={() => { if (localSelected) void importLocalPaper(localSelected); }}>
+            {importingLocal ? '正在导入…' : localSelectedImportedID ? '已导入到库' : '导入当前论文到库'}
+          </button>
+          {localSelectedImportedID && <button type="button" onClick={() => viewImportedPaper(localSelectedImportedID)}>在内部论文中查看</button>}
+          <p className="hint">通过上传接口写入内部论文库，解析流程与普通上传一致。</p>
         </div>}
       </section>}
       {leftMenu === 'base' && <section className="library-panel library-panel-base" aria-label="类别操作">
@@ -358,7 +659,7 @@ export function PaperLibraryPage() {
               <dt>类别</dt><dd>{activeBase.name}</dd>
               <dt>说明</dt><dd>{activeBase.description || '未填写说明'}</dd>
               <dt>创建时间</dt><dd>{activeBase.createdAt ? activeBase.createdAt.slice(0, 10) : '未知'}</dd>
-              <dt>篇数</dt><dd>{page.total}</dd>
+              <dt>篇数</dt><dd>{items.length}</dd>
             </dl>}
           </div>
         </div>
@@ -439,15 +740,17 @@ export function PaperLibraryPage() {
     </aside>
 
     <section className="paper-library-main">
-      {localMode
-        ? localSelected
-          ? <PdfReader file={localSelected} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
-          : <div className="library-empty"><p>在左侧「本地论文」里打开一个文件夹，里面的 PDF 会列在那里。</p></div>
-        : !selected
-          ? <div className="library-empty"><p>从左侧论文目录选择一篇论文开始阅读。</p></div>
-          : selectedIsPDF
-            ? <PdfReader document={selected} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
-            : <div className="library-empty"><p>该论文不是 PDF，无法在阅读库中预览。</p></div>}
+      <Suspense fallback={<div className="library-empty"><p>正在加载阅读器…</p></div>}>
+        {localMode
+          ? localSelected
+            ? <PdfReader file={localSelected} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+            : <div className="library-empty"><p>在左侧「本地论文」里打开一个文件夹，里面的 PDF 会列在那里。</p></div>
+          : !selected
+            ? <div className="library-empty"><p>从左侧论文目录选择一篇论文开始阅读。</p></div>
+            : selectedIsPDF
+              ? <PdfReader document={selected} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+              : <div className="library-empty"><p>该论文不是 PDF，无法在阅读库中预览。</p></div>}
+      </Suspense>
       {message && <p className="library-message">{message}</p>}
     </section>
 

@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { AnnotationMode, GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
-import { EventBus, FindState, PDFFindController, PDFLinkService, PDFViewer } from 'pdfjs-dist/web/pdf_viewer.mjs';
+import { EventBus, FindState, PDFFindController, PDFLinkService, PDFViewer, ScrollMode, SpreadMode } from 'pdfjs-dist/web/pdf_viewer.mjs';
 import 'pdfjs-dist/web/pdf_viewer.css';
 
 import './PdfReader.css';
@@ -9,6 +9,7 @@ import { api, Block, contentUrl, Document as PaperDocument, DocumentSelectionRes
 import { PDFLinkPreview, destinationPDFPoint, destinationPreviewRegion, mergeAdjacentPDFLinks, viewportRegion } from './pdfLinkPreview';
 import { LatestPDFSelection, NormalizedPDFRegion, SelectionGeneration, canvasCropForRegion, normalizedRegion, regionIsLargeEnough } from './pdfSelection';
 import { activeOutlineNode, annotateOutlinePages, type OutlineEntry } from './pdfOutline';
+import { isDocumentRead, localFileReadingKey, readingRecord, saveReadingPage, setDocumentRead, subscribeReadingState } from './readingState';
 
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
 
@@ -27,6 +28,20 @@ type AnnotationStroke = { tool: 'pen' | 'rect'; points: Array<{ x: number; y: nu
 
 const NO_STROKES: AnnotationStroke[] = [];
 const ANNOTATION_COLOR = '#e5484d';
+
+// Reader presentation preferences are device-local, shared by every document.
+type PDFViewMode = 'single' | 'continuous' | 'double';
+const VIEW_MODE_STORAGE = 'papersManager.pdfViewMode';
+const NIGHT_MODE_STORAGE = 'papersManager.pdfNightMode';
+
+function initialViewMode(): PDFViewMode {
+  const stored = window.localStorage.getItem(VIEW_MODE_STORAGE);
+  return stored === 'single' || stored === 'double' ? stored : 'continuous';
+}
+
+function initialNightMode(): boolean {
+  return window.localStorage.getItem(NIGHT_MODE_STORAGE) === 'true';
+}
 
 function drawAnnotationStrokes(context: CanvasRenderingContext2D, strokes: AnnotationStroke[], width: number, height: number) {
   if (strokes.length === 0) return;
@@ -479,10 +494,35 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
   const processable = Boolean(documentId);
   // A draft's identity: stored documents use their id, local files their key.
   const selectionTarget = documentId ?? sourceKey;
+  // Where this paper's saved reading position and read flag live.
+  const readingKey = localFile ? localFileReadingKey(localFile) : documentId ?? '';
+
+  // Presentation preferences: single page / continuous / two-page spread, and
+  // the inverted night canvas. Kept per device, not per document.
+  const [viewMode, setViewMode] = useState<PDFViewMode>(initialViewMode);
+  const [nightMode, setNightMode] = useState(initialNightMode);
+  // Digits typed on the keyboard open a transient "jump to page" prompt.
+  const [typedPage, setTypedPage] = useState('');
+  const [readState, setReadState] = useState(false);
+  const viewModeRef = useRef(viewMode);
+  viewModeRef.current = viewMode;
+  const readingKeyRef = useRef(readingKey);
+  readingKeyRef.current = readingKey;
+  const latestPageRef = useRef(1);
+  // An explicit "unread" on the last page wins over the automatic flag until
+  // the reader leaves that page (or opens another document).
+  const suppressAutoRead = useRef(false);
+  const positionSaveTimer = useRef(0);
+  const typedPageTimer = useRef(0);
+  // While a saved position is being restored, pagechanging events report the
+  // transient page 1 first; saving that would overwrite the stored position.
+  const restoreGuard = useRef(false);
 
   const [railPlacement, setRailPlacement] = useState<{ x: number; y: number; horizontal: boolean; dockEnd: boolean } | null>(null);
   const [railDragging, setRailDragging] = useState(false);
   const [railCollapsed, setRailCollapsed] = useState(false);
+  // View / night / read controls fold behind one icon so the rail stays short.
+  const [viewMenuOpen, setViewMenuOpen] = useState(false);
   const railRef = useRef<HTMLDivElement>(null);
   const railDrag = useRef<{
     pointerId: number; offsetX: number; offsetY: number; startX: number; startY: number;
@@ -491,31 +531,157 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
   const railSnapPending = useRef(false);
   const railClickGuard = useRef(false);
 
-  // Ctrl+F belongs to the reader only while the reader was the last surface
-  // clicked; Escape closes the bar again.
+  // Keyboard shortcuts belong to the reader only while it is the surface being
+  // used. They never fire inside form controls, so typing in the find bar, the
+  // page-jump popover or a metadata form is unaffected.
   useEffect(() => {
     const onPointerDown = (event: PointerEvent) => {
       readerActive.current = Boolean(panelRef.current?.contains(event.target as Node));
     };
+    // Scrolling with the wheel is using the reader too; without this, shortcuts
+    // only worked after a click on the page.
+    const onWheel = (event: WheelEvent) => {
+      if (panelRef.current?.contains(event.target as Node)) readerActive.current = true;
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (panelRef.current?.contains(event.target as Node)) readerActive.current = true;
+    };
+    const clearTypedPage = () => {
+      window.clearTimeout(typedPageTimer.current);
+      setTypedPage('');
+    };
+    const appendTypedDigit = (digit: string) => {
+      const next = `${typedPage}${digit}`.replace(/^0+(?=\d)/, '').slice(0, 6);
+      setTypedPage(next);
+      window.clearTimeout(typedPageTimer.current);
+      // A pause commits nothing; the prompt simply fades away.
+      typedPageTimer.current = window.setTimeout(() => setTypedPage(''), 1400);
+    };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && findOpen) {
-        closeFind();
-        return;
-      }
-      if (!(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 'f') return;
       const panel = panelRef.current;
       const inside = Boolean(panel && (readerActive.current || panel.contains(window.document.activeElement)));
       if (!inside) return;
-      event.preventDefault();
-      setFindOpen(true);
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+        event.preventDefault();
+        setFindOpen(true);
+        window.requestAnimationFrame(() => findInput.current?.select());
+        return;
+      }
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+
+      if (event.key === 'Escape') {
+        if (findOpen) { closeFind(); return; }
+        if (pageJumpOpen) { setPageJumpOpen(false); return; }
+        if (viewMenuOpen) { setViewMenuOpen(false); return; }
+        if (typedPage) { clearTypedPage(); return; }
+        if (selection) clearSelection();
+        return;
+      }
+
+      // Type a page number, then Enter. The overlay shows what will be jumped to.
+      if (/^[0-9]$/.test(event.key)) {
+        event.preventDefault();
+        appendTypedDigit(event.key);
+        return;
+      }
+      if (event.key === 'Backspace' && typedPage) {
+        event.preventDefault();
+        const next = typedPage.slice(0, -1);
+        setTypedPage(next);
+        if (!next) window.clearTimeout(typedPageTimer.current);
+        else {
+          window.clearTimeout(typedPageTimer.current);
+          typedPageTimer.current = window.setTimeout(() => setTypedPage(''), 1400);
+        }
+        return;
+      }
+      if ((event.key === 'Enter' || event.key === 'NumpadEnter') && typedPage) {
+        event.preventDefault();
+        const requested = Number.parseInt(typedPage, 10);
+        clearTypedPage();
+        jumpToPageNumber(requested);
+        return;
+      }
+
+      const viewer = viewerRef.current;
+      if (!viewer || viewer.pagesCount === 0) return;
+      if (event.key === 'ArrowRight' || event.key === 'PageDown') {
+        event.preventDefault();
+        viewer.nextPage();
+        return;
+      }
+      if (event.key === 'ArrowLeft' || event.key === 'PageUp') {
+        event.preventDefault();
+        viewer.previousPage();
+        return;
+      }
+      if (event.key === 'Home') {
+        event.preventDefault();
+        jumpToPageNumber(1);
+        return;
+      }
+      if (event.key === 'End') {
+        event.preventDefault();
+        jumpToPageNumber(viewer.pagesCount);
+        return;
+      }
+      if (event.key === '+' || event.key === '=') {
+        event.preventDefault();
+        viewer.increaseScale();
+        setZoom(viewer.currentScale);
+        return;
+      }
+      if (event.key === '-' || event.key === '_') {
+        event.preventDefault();
+        viewer.decreaseScale();
+        setZoom(viewer.currentScale);
+      }
     };
     window.document.addEventListener('pointerdown', onPointerDown, true);
+    window.document.addEventListener('wheel', onWheel, { capture: true, passive: true });
+    window.document.addEventListener('focusin', onFocusIn, true);
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.document.removeEventListener('pointerdown', onPointerDown, true);
+      window.document.removeEventListener('wheel', onWheel, { capture: true });
+      window.document.removeEventListener('focusin', onFocusIn, true);
       window.removeEventListener('keydown', onKeyDown);
     };
   });
+
+  // Read/unread is shared with the catalog through the storage module.
+  useEffect(() => {
+    const sync = () => setReadState(isDocumentRead(readingKey));
+    sync();
+    return subscribeReadingState(sync);
+  }, [readingKey]);
+
+  // Switching the presentation mode applies to the live viewer and keeps the
+  // reader on the page it was already showing. Re-applying the page after the
+  // asynchronous re-scale is required: the scale update scrolls back to
+  // whatever page the viewer considered current before the mode switch.
+  useEffect(() => {
+    window.localStorage.setItem(VIEW_MODE_STORAGE, viewMode);
+    const viewer = viewerRef.current;
+    if (!viewer || viewer.pagesCount === 0) return;
+    const page = Math.min(Math.max(1, latestPageRef.current || viewer.currentPageNumber || 1), viewer.pagesCount);
+    viewer.scrollMode = viewMode === 'continuous' ? ScrollMode.VERTICAL : ScrollMode.PAGE;
+    viewer.spreadMode = viewMode === 'double' ? SpreadMode.ODD : SpreadMode.NONE;
+    viewer.currentPageNumber = page;
+    viewer.currentScaleValue = viewMode === 'continuous' ? 'page-width' : 'page-fit';
+    setZoom(viewer.currentScale);
+    const timer = window.setTimeout(() => {
+      if (viewerRef.current === viewer) viewer.currentPageNumber = page;
+    }, 220);
+    return () => window.clearTimeout(timer);
+  }, [viewMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem(NIGHT_MODE_STORAGE, String(nightMode));
+  }, [nightMode]);
 
   // The query is selected on open so typing replaces it.
   useEffect(() => {
@@ -534,6 +700,17 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     window.document.addEventListener('pointerdown', onPointerDown);
     return () => window.document.removeEventListener('pointerdown', onPointerDown);
   }, [pageJumpOpen]);
+
+  // The view panel is a side popover: clicking anywhere else dismisses it.
+  useEffect(() => {
+    if (!viewMenuOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if ((event.target as HTMLElement | null)?.closest('.pdf-view-anchor')) return;
+      setViewMenuOpen(false);
+    };
+    window.document.addEventListener('pointerdown', onPointerDown);
+    return () => window.document.removeEventListener('pointerdown', onPointerDown);
+  }, [viewMenuOpen]);
 
   // One viewer per reader, reused for every document: `setDocument` is what
   // tears the previous document's page DOM down, so building a fresh viewer per
@@ -567,6 +744,8 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       maxCanvasPixels: 2 ** 25,
     });
     linkService.setViewer(viewer);
+    viewer.scrollMode = viewModeRef.current === 'continuous' ? ScrollMode.VERTICAL : ScrollMode.PAGE;
+    viewer.spreadMode = viewModeRef.current === 'double' ? SpreadMode.ODD : SpreadMode.NONE;
     viewerRef.current = viewer;
     linkServiceRef.current = linkService;
     eventBusRef.current = eventBus;
@@ -589,12 +768,30 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     };
 
     const onPagesInit = () => {
-      viewer.currentScaleValue = 'page-width';
+      // Continuous reading fills the width; a single page or a spread fits the
+      // whole page into the viewport.
+      viewer.currentScaleValue = viewModeRef.current === 'continuous' ? 'page-width' : 'page-fit';
       setZoom(viewer.currentScale);
       syncSlots();
     };
     const onPageChanging = (event: { pageNumber?: number }) => {
-      if (typeof event.pageNumber === 'number') setCurrentPage(event.pageNumber);
+      if (typeof event.pageNumber !== 'number') return;
+      setCurrentPage(event.pageNumber);
+      latestPageRef.current = event.pageNumber;
+      // Reaching the last page counts as having read the paper; the catalog
+      // updates through the same broadcast as a manual toggle.
+      if (event.pageNumber < viewer.pagesCount) suppressAutoRead.current = false;
+      if (event.pageNumber >= viewer.pagesCount && !suppressAutoRead.current && !isDocumentRead(readingKeyRef.current)) {
+        setDocumentRead(readingKeyRef.current, true, event.pageNumber);
+      }
+      // Debounced: scrolling a long document must not write on every page tick.
+      if (!restoreGuard.current) {
+        window.clearTimeout(positionSaveTimer.current);
+        positionSaveTimer.current = window.setTimeout(
+          () => saveReadingPage(readingKeyRef.current, latestPageRef.current),
+          900,
+        );
+      }
     };
     const onFindMatches = (event: { matchesCount?: { current: number; total: number } }) => {
       setFindMatches(event.matchesCount ?? null);
@@ -635,6 +832,31 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     let disposed = false;
     const generation = pdfLoadGeneration.current + 1;
     pdfLoadGeneration.current = generation;
+    // Until the saved position has been applied, ignore the transient first
+    // pagechanging events of the new document.
+    restoreGuard.current = true;
+    latestPageRef.current = 1;
+    suppressAutoRead.current = false;
+    window.clearTimeout(positionSaveTimer.current);
+    const savedPage = readingRecord(readingKey)?.page ?? 0;
+    const bus = eventBusRef.current;
+    const onRestorePages = () => {
+      // Pages are initialised here; defer one frame-ish so the target page view
+      // exists, then jump to the remembered page.
+      window.setTimeout(() => {
+        if (disposed || pdfLoadGeneration.current !== generation) return;
+        try {
+          if (savedPage > 1 && savedPage <= viewer.pagesCount) {
+            viewer.scrollPageIntoView({ pageNumber: savedPage });
+            latestPageRef.current = savedPage;
+            setCurrentPage(savedPage);
+          }
+        } finally {
+          restoreGuard.current = false;
+        }
+      }, 120);
+    };
+    bus?.on('pagesinit', onRestorePages);
     // A stored document streams from the content endpoint; a local file is read
     // straight off disk.
     const loading = localFile
@@ -674,11 +896,17 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
         }).catch(() => { /* annotations unavailable */ });
       });
     }).catch(error => {
+      restoreGuard.current = false;
       if (!disposed) onMessage(`PDF 加载失败：${error instanceof Error ? error.message : '未知错误'}`);
     });
 
     return () => {
       disposed = true;
+      bus?.off('pagesinit', onRestorePages);
+      window.clearTimeout(positionSaveTimer.current);
+      // Flush the latest page of the source being left.
+      if (!restoreGuard.current) saveReadingPage(readingKey, latestPageRef.current);
+      restoreGuard.current = false;
       pdfDocumentRef.current = undefined;
       linkServiceRef.current?.setDocument(null);
       setSlots([]);
@@ -694,7 +922,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       eventBusRef.current?.dispatch('findbarclose', { source: null });
       if (opened.task) void opened.task.destroy();
     };
-  }, [sourceKey, localFile, documentId, onMessage]);
+  }, [sourceKey, localFile, documentId, readingKey, onMessage]);
 
   // Source switch: drop any selection draft from the previous file.
   useEffect(() => {
@@ -999,8 +1227,19 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
   const totalPages = pageCount || viewerRef.current?.pagesCount || 0;
 
   function toggleRailCollapsed() {
-    if (!railCollapsed) setPageJumpOpen(false);
+    if (!railCollapsed) {
+      setPageJumpOpen(false);
+      setViewMenuOpen(false);
+    }
     setRailCollapsed(!railCollapsed);
+  }
+
+  function toggleReadState() {
+    if (!readingKey) return;
+    // Turning the flag off while sitting on the last page must not be undone
+    // by the next pagechanging tick.
+    suppressAutoRead.current = readState;
+    setDocumentRead(readingKey, !readState, latestPageRef.current);
   }
 
   // pdf.js reads `query` as a plain phrase and `type` as '' for a new search /
@@ -1065,16 +1304,24 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       setPageJumpOpen(false);
       return;
     }
+    setViewMenuOpen(false);
     // Prefilled with the page the reader is on, which doubles as a page counter.
     setPageJumpValue(String(viewerRef.current?.currentPageNumber ?? 1));
     setPageJumpOpen(true);
   }
 
+  function jumpToPageNumber(requested: number) {
+    if (!Number.isFinite(requested) || totalPages < 1) return;
+    rememberPosition();
+    const page = Math.min(Math.max(1, Math.round(requested)), totalPages);
+    latestPageRef.current = page;
+    viewerRef.current?.scrollPageIntoView({ pageNumber: page });
+  }
+
   function jumpToPage() {
     const requested = Number.parseInt(pageJumpValue, 10);
     if (!Number.isFinite(requested) || totalPages < 1) return;
-    rememberPosition();
-    viewerRef.current?.scrollPageIntoView({ pageNumber: Math.min(Math.max(1, requested), totalPages) });
+    jumpToPageNumber(requested);
     setPageJumpOpen(false);
     setPageJumpValue('');
   }
@@ -1095,7 +1342,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     // spent by now.
     railClickGuard.current = false;
     if (event.button !== 0 || railDrag.current) return;
-    if ((event.target as HTMLElement | null)?.closest('.pdf-page-jump')) return;
+    if ((event.target as HTMLElement | null)?.closest('.pdf-page-jump, .pdf-view-popover')) return;
     const rail = railRef.current;
     const panel = panelRef.current;
     if (!rail || !panel) return;
@@ -1205,7 +1452,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     ? <p className="hint">该 PDF 未提供目录。</p>
     : <OutlineTree nodes={outline} onNavigate={navigateOutline} active={activeOutline} />, [outline, navigateOutline, activeOutline]);
 
-  return <section className="pdf-viewer-panel" ref={panelRef}>
+  return <section className={`pdf-viewer-panel${nightMode ? ' pdf-night' : ''}`} ref={panelRef}>
     {!modeRail && <div className="pdf-reader-controls"><strong>PDF 阅读与定位</strong>
       <div className="pdf-mode-switch" role="group" aria-label="选择模式">
         <button className={mode === 'text' ? 'active' : ''} type="button" onClick={() => selectMode('text')}>选择文本</button>
@@ -1282,6 +1529,35 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
           <button type="button" onClick={jumpToPage}>跳转</button>
         </div>}
       </div>
+      {/* Presentation, night mode and read state fold behind one icon and open
+          as a side panel, like the page-number popover. */}
+      <div className="pdf-view-anchor">
+        <button className={viewMenuOpen ? 'active' : ''} type="button" aria-pressed={viewMenuOpen} aria-expanded={viewMenuOpen}
+          title={viewMenuOpen ? '收起视图与阅读状态' : '视图与阅读状态'} onClick={() => { setPageJumpOpen(false); setViewMenuOpen((open) => !open); }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
+            <rect x="4" y="4" width="6.5" height="6.5" rx="1.2" /><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.2" />
+            <rect x="4" y="13.5" width="6.5" height="6.5" rx="1.2" /><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.2" />
+          </svg>
+        </button>
+        {viewMenuOpen && <div className="pdf-view-popover" role="group" aria-label="视图与阅读状态">
+          <button className={viewMode === 'single' ? 'active' : ''} type="button" aria-pressed={viewMode === 'single'} title="单页视图" onClick={() => setViewMode('single')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><rect x="6.5" y="3.5" width="11" height="17" rx="1.4" /><path d="M9.2 7h5.6M9.2 10h5.6" strokeLinecap="round" /></svg>
+          </button>
+          <button className={viewMode === 'continuous' ? 'active' : ''} type="button" aria-pressed={viewMode === 'continuous'} title="连续视图" onClick={() => setViewMode('continuous')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><rect x="6" y="3.5" width="12" height="6.5" rx="1" /><rect x="6" y="14" width="12" height="6.5" rx="1" /></svg>
+          </button>
+          <button className={viewMode === 'double' ? 'active' : ''} type="button" aria-pressed={viewMode === 'double'} title="双页视图" onClick={() => setViewMode('double')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true"><rect x="3.5" y="4.5" width="7.6" height="15" rx="1.2" /><rect x="12.9" y="4.5" width="7.6" height="15" rx="1.2" /></svg>
+          </button>
+          <button className={nightMode ? 'active' : ''} type="button" aria-pressed={nightMode} title={nightMode ? '关闭夜间反色' : '夜间反色'} onClick={() => setNightMode(value => !value)}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M20.2 13.4A8.2 8.2 0 1 1 10.6 3.8a6.6 6.6 0 0 0 9.6 9.6z" /></svg>
+          </button>
+          {/* Manual read state; the catalog filters and marks the same record. */}
+          <button className={readState ? 'active' : ''} type="button" aria-pressed={readState} title={readState ? '标记为未读' : '标记为已读'} onClick={toggleReadState}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4.5 5.5A2.5 2.5 0 0 1 7 3h12.5v15.5H7a2.5 2.5 0 0 0-2.5 2.5z" /><path d="M4.5 5.5V21" /><path d="m8.4 10.7 2.2 2.2 4.4-4.4" /></svg>
+          </button>
+        </div>}
+      </div>
       {/* Folds the whole rail away, leaving this one icon to bring it back. */}
       <button className="rail-collapse-toggle" type="button" aria-expanded={!railCollapsed} title={railCollapsed ? '展开工具栏' : '收起工具栏'} onClick={toggleRailCollapsed}>
         <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -1314,6 +1590,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       </button>
     </div>}
     <span className="pdf-zoom-chip" aria-hidden="true">{Math.round(zoom * 100)}%</span>
+    {typedPage && <span className="pdf-typed-page" aria-live="polite">跳到第 {typedPage} 页 · Enter</span>}
     {outlineExternal && outlineTarget && !outlineCollapsed && createPortal(<div className="pdf-outline-content">{outlineTree}</div>, outlineTarget)}
     {slots.map(entry => createPortal(
       <PageOverlay documentId={documentId} selectionTarget={selectionTarget} pageNumber={entry.pageNumber} mode={mode}

@@ -208,6 +208,19 @@ span.pdf-outline-toggle { cursor:default; }
 /* Two floating helpers: the page-number popover beside the icon rail, and the
    single-step back button above the zoom chip (only while a jump is undoable). */
 .pdf-mode-rail .pdf-page-jump-anchor { position:relative; }
+.pdf-mode-rail .pdf-view-anchor { position:relative; }
+/* The view controls open to the side of the rail (above/below when the rail is
+   horizontal), mirroring the page-number popover. */
+.pdf-viewer-panel .pdf-view-popover { position:absolute; z-index:10; top:50%; right:calc(100% + var(--rail-popover-gap)); display:flex; gap:4px; width:max-content; padding:5px; border:1px solid #dce3ed; border-radius:10px; background:rgb(255 255 255 / 96%); box-shadow:0 10px 28px rgb(23 32 51 / 22%); transform:translateY(-50%); }
+.pdf-mode-rail:not(.rail-horizontal):not(.rail-dock-end) .pdf-view-popover { right:auto; left:calc(100% + var(--rail-popover-gap)); }
+/* A horizontal rail spans the top/bottom edge: opening a horizontal strip there
+   would run along that edge and get clipped, so the panel stacks vertically. */
+.pdf-mode-rail.rail-horizontal .pdf-view-popover { flex-direction:column; top:calc(100% + 8px); right:auto; left:50%; transform:translateX(-50%); }
+.pdf-mode-rail.rail-horizontal.rail-dock-end .pdf-view-popover { top:auto; bottom:calc(100% + 8px); }
+.pdf-viewer-panel .pdf-view-popover button { width:32px; height:32px; padding:0; border:0; border-radius:7px; background:transparent; color:#475569; }
+.pdf-viewer-panel .pdf-view-popover button:hover:not(:disabled) { border:0; background:#eef2f7; }
+.pdf-viewer-panel .pdf-view-popover button.active { border:0; background:#e2e8f0; color:#0f172a; }
+.pdf-viewer-panel .pdf-view-popover button svg { width:18px; height:18px; }
 /* The anchor is only as wide as the icon, so the popover keeps its own width.
    It opens away from the edge the rail is docked to: left/right of a vertical
    rail, below/above a horizontal one. */
@@ -223,3 +236,17 @@ span.pdf-outline-toggle { cursor:default; }
 .pdf-viewer-panel .pdf-back-button { position:absolute; z-index:9; left:12px; bottom:44px; display:inline-flex; align-items:center; gap:5px; padding:4px 10px 4px 7px; border:1px solid #dce3ed; border-radius:999px; background:rgb(255 255 255 / 92%); color:#475569; font-size:12px; font-weight:600; cursor:pointer; }
 .pdf-viewer-panel .pdf-back-button svg { width:13px; height:13px; }
 .pdf-viewer-panel .pdf-back-button:hover:not(:disabled) { background:#fff; border-color:#cbd5e1; color:#1d4ed8; }
+
+/* Keyboard "type a page number" prompt. */
+.pdf-typed-page { position:absolute; z-index:10; right:12px; bottom:14px; padding:4px 11px; border:1px solid #dce3ed; border-radius:999px; background:rgb(255 255 255 / 96%); box-shadow:0 8px 22px rgb(23 32 51 / 18%); color:#1d4ed8; font-size:12px; font-weight:650; font-variant-numeric:tabular-nums; pointer-events:none; }
+.paper-library .pdf-typed-page { border-color:var(--pl-border-2); background:rgb(34 35 39 / 96%); color:#9ecbff; }
+
+/* Night reading inverts the page bitmap only: the PDF's white paper becomes
+   near-black while app chrome, thumbnails and annotation overlays keep their
+   own colours. hue-rotate keeps coloured figures recognizable. */
+.pdf-viewer-panel.pdf-night .pdf-viewer-host,
+.pdf-viewer-panel.pdf-night .pdf-viewer-scroll { background:#11151b; }
+.pdf-viewer-panel.pdf-night .pdfViewer .page { background-color:#101215; }
+.pdf-viewer-panel.pdf-night .pdfViewer .canvasWrapper canvas { filter:invert(1) hue-rotate(180deg) brightness(.9) contrast(1.05); }
+.pdf-viewer-panel.pdf-night .pdfViewer .textLayer ::selection { background:rgb(86 150 255 / 55%); }
+.pdf-viewer-panel.pdf-night .pdfViewer .textLayer .highlight { --highlight-bg-color:rgb(255 214 102 / 42%); --highlight-selected-bg-color:rgb(255 196 64 / 72%); }

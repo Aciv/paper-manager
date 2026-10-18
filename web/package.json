@@ -9,6 +9,8 @@
     "test:selection": "node --experimental-strip-types --test tests/pdfSelection.test.ts tests/pdfLinkPreview.test.ts tests/pdfOutline.test.ts"
   },
   "dependencies": {
+    "@fontsource-variable/manrope": "^5.3.0",
+    "@fontsource-variable/noto-sans-sc": "^5.3.1",
     "@vitejs/plugin-react": "latest",
     "pdfjs-dist": "^5.4.296",
     "react": "latest",
