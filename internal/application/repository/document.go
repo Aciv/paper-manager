@@ -179,7 +179,7 @@ func (r *documentRepository) ReplaceParsedOutput(
 		if len(blocks) == 0 {
 			return nil
 		}
-		return tx.Create(&blocks).Error
+		return tx.CreateInBatches(blocks, insertBatchSize).Error
 	})
 	if err != nil {
 		logger.Error(ctx, "replace document parsed output failed", "document_id", markdown.DocumentID, "block_count", len(blocks), "error", err)
