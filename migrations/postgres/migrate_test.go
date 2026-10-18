@@ -299,8 +299,32 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 24 {
-		t.Fatalf("latest migration version = %d, want 24", got)
+	if got := migrations[len(migrations)-1].version; got != 26 {
+		t.Fatalf("latest migration version = %d, want 26", got)
+	}
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS paper_references",
+		"resolution_generation BIGINT NOT NULL DEFAULT 0",
+		"resolved_document_id UUID REFERENCES documents(id) ON DELETE SET NULL",
+		"CREATE TABLE IF NOT EXISTS paper_citations",
+		"reference_id UUID NOT NULL REFERENCES paper_references(id) ON DELETE CASCADE",
+		"FOREIGN KEY (canonical_document_id) REFERENCES documents(id) ON DELETE CASCADE",
+	} {
+		if !strings.Contains(paperReferencesUp, fragment) {
+			t.Fatalf("paper references migration does not include %q", fragment)
+		}
+	}
+	for _, fragment := range []string{
+		"CREATE TABLE paper_citations_next",
+		"citing_document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE",
+		"reference_key TEXT NOT NULL",
+		"cited_document_id UUID REFERENCES documents(id) ON DELETE SET NULL",
+		"UNIQUE (citing_document_id, reference_key)",
+		"DROP TABLE paper_references",
+	} {
+		if !strings.Contains(citationReferenceRowsUp, fragment) {
+			t.Fatalf("citation reference rows migration does not include %q", fragment)
+		}
 	}
 }
 

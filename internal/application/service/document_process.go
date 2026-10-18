@@ -693,14 +693,23 @@ func NewPaperCatalogResolveTask(
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode paper catalog resolution task: %w", err)
 	}
+	queue := types.QueueDefault
+	ownerID := payload.DocumentID
+	parts := stageTaskIDParts(payload.Stage, payload.Generation)
+	if payload.ReferenceID != "" {
+		// Reference lookups are user-triggered background work; keep them off the
+		// default lane so a large bibliography cannot starve upload processing.
+		queue = types.QueueLow
+		ownerID = payload.ReferenceID
+		parts = []string{"reference", strconv.FormatInt(payload.Generation, 10)}
+	}
 	options := []asynq.Option{
-		asynq.Queue(types.QueueDefault),
+		asynq.Queue(queue),
 		asynq.MaxRetry(maxRetry),
 		asynq.Timeout(timeout),
 	}
-	parts := stageTaskIDParts(payload.Stage, payload.Generation)
 	options = append(options, asynq.TaskID(paperInfoTaskID(
-		types.TypePaperCatalogResolve, payload.DocumentID, 0, parts...,
+		types.TypePaperCatalogResolve, ownerID, 0, parts...,
 	)))
 	return task, options, nil
 }
@@ -715,10 +724,18 @@ func NewDocumentRemoteImportTask(payload types.DocumentRemoteImportPayload) (*as
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode remote document import task: %w", err)
 	}
-	return task, []asynq.Option{
+	options := []asynq.Option{
 		asynq.Queue(types.QueueDownload), asynq.Timeout(defaultRemotePDFTaskTimeout), asynq.MaxRetry(defaultRemotePDFTaskMaxRetry),
-		asynq.TaskID(paperInfoTaskID(types.TypeDocumentRemoteImport, payload.DocumentID, 0, strconv.FormatInt(payload.Generation, 10))),
-	}, nil
+	}
+	if payload.ReferenceID != "" {
+		// Do not reuse a deterministic task ID: archived failed imports would
+		// otherwise block a later explicit retry. The worker is idempotent.
+		return task, options, nil
+	}
+	options = append(options, asynq.TaskID(paperInfoTaskID(
+		types.TypeDocumentRemoteImport, payload.DocumentID, 0, strconv.FormatInt(payload.Generation, 10),
+	)))
+	return task, options, nil
 }
 
 func newPaperInfoJSONTask(taskType string, payload any) (*asynq.Task, error) {

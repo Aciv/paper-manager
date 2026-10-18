@@ -102,6 +102,18 @@ var removeLegacyProcessingControlUp string
 //go:embed 000024_remove_legacy_processing_control.down.sql
 var removeLegacyProcessingControlDown string
 
+//go:embed 000025_paper_references.up.sql
+var paperReferencesUp string
+
+//go:embed 000025_paper_references.down.sql
+var paperReferencesDown string
+
+//go:embed 000026_citation_reference_rows.up.sql
+var citationReferenceRowsUp string
+
+//go:embed 000026_citation_reference_rows.down.sql
+var citationReferenceRowsDown string
+
 type migration struct {
 	version int64
 	up      string
@@ -133,6 +145,8 @@ var migrations = []migration{
 	{version: 22, up: documentSourceLifecycleUp},
 	{version: 23, up: processingSpanRetentionUp},
 	{version: 24, up: removeLegacyProcessingControlUp},
+	{version: 25, up: paperReferencesUp},
+	{version: 26, up: citationReferenceRowsUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

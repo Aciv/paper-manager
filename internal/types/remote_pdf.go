@@ -117,17 +117,30 @@ func SuggestedPDFFilename(rawURL string) string {
 }
 
 // DocumentRemoteImportPayload is emitted only by an explicit user request to
-// download one bibliographic placeholder. Reference parsing never creates it.
+// download the source PDF for a citation row. ReferenceID selects the
+// reference path; the legacy DocumentID path is retained for old queue tasks.
 type DocumentRemoteImportPayload struct {
-	RequestID  string `json:"request_id,omitempty"`
-	DocumentID string `json:"document_id"`
-	Generation int64  `json:"generation"`
+	RequestID   string `json:"request_id,omitempty"`
+	DocumentID  string `json:"document_id,omitempty"`
+	ReferenceID string `json:"reference_id,omitempty"`
+	Generation  int64  `json:"generation"`
 }
 
 func (payload DocumentRemoteImportPayload) Validate() error {
-	id, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
-	if err != nil || id == uuid.Nil {
-		return fmt.Errorf("document id is required")
+	documentID := strings.TrimSpace(payload.DocumentID)
+	referenceID := strings.TrimSpace(payload.ReferenceID)
+	if documentID == "" && referenceID == "" {
+		return fmt.Errorf("document_id or reference_id is required")
+	}
+	if documentID != "" {
+		if id, err := uuid.Parse(documentID); err != nil || id == uuid.Nil {
+			return fmt.Errorf("document id must be a non-zero UUID")
+		}
+	}
+	if referenceID != "" {
+		if id, err := uuid.Parse(referenceID); err != nil || id == uuid.Nil {
+			return fmt.Errorf("reference id must be a non-zero UUID")
+		}
 	}
 	if payload.Generation <= 0 {
 		return fmt.Errorf("generation must be positive")

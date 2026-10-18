@@ -2,113 +2,115 @@ package repository
 
 import (
 	"context"
-	"os"
-	"strings"
 	"testing"
 
 	"paperMaster/internal/types"
 
 	"github.com/google/uuid"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
-// TestPaperCitationRepositoryMergeAutomaticCitationsPostgres verifies the
-// transaction/row-lock implementation against a real PostgreSQL database.
-// It is deliberately opt-in: callers must point PAPERS_MANAGER_TEST_POSTGRES_DSN
-// at a disposable test database. The test creates and drops its own schema,
-// so it never reads or writes the application's public schema.
-func TestPaperCitationRepositoryMergeAutomaticCitationsPostgres(t *testing.T) {
-	dsn := strings.TrimSpace(os.Getenv("PAPERS_MANAGER_TEST_POSTGRES_DSN"))
-	if dsn == "" {
-		t.Skip("PAPERS_MANAGER_TEST_POSTGRES_DSN is not configured")
-	}
-	db, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
-	if err != nil {
-		t.Fatalf("open PostgreSQL test database: %v", err)
-	}
-	sqlDB, err := db.DB()
-	if err != nil {
-		t.Fatalf("get PostgreSQL test sql.DB: %v", err)
-	}
-	// SET search_path is connection-local. A one-connection pool guarantees
-	// the repository transaction below remains inside the disposable schema.
-	sqlDB.SetMaxOpenConns(1)
-	sqlDB.SetMaxIdleConns(1)
-	defer sqlDB.Close()
-
-	schema := "paper_citation_phase2_" + strings.ReplaceAll(uuid.NewString(), "-", "")
-	if err := db.Exec("CREATE SCHEMA " + schema).Error; err != nil {
-		t.Fatalf("create test schema: %v", err)
-	}
-	defer func() {
-		if err := db.Exec("DROP SCHEMA " + schema + " CASCADE").Error; err != nil {
-			t.Errorf("drop test schema: %v", err)
-		}
-	}()
-	if err := db.Exec("SET search_path TO " + schema).Error; err != nil {
-		t.Fatalf("set test schema: %v", err)
-	}
-	if err := db.Exec(`CREATE TABLE documents (id UUID PRIMARY KEY)`).Error; err != nil {
-		t.Fatalf("create documents table: %v", err)
-	}
-	if err := db.Exec(`CREATE TABLE paper_citations (
-        citing_document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-        cited_document_id UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-        raw_reference TEXT NOT NULL,
-        origin TEXT NOT NULL DEFAULT 'manual' CHECK (origin IN ('manual', 'extraction')),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        PRIMARY KEY (citing_document_id, cited_document_id)
-    )`).Error; err != nil {
-		t.Fatalf("create paper_citations table: %v", err)
-	}
-
+func TestPaperCitationResolutionStateMachinePostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
 	ctx := context.Background()
-	citingID, resolvedID, unknownID, manualID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
-	for _, id := range []uuid.UUID{citingID, resolvedID, unknownID, manualID} {
-		if err := db.Exec("INSERT INTO documents (id) VALUES (?)", id).Error; err != nil {
-			t.Fatalf("insert fixture document %s: %v", id, err)
+	documents := NewDocumentRepository(db)
+	repo := NewPaperCitationRepository(db)
+
+	citingID, targetID := uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{citingID, targetID} {
+		if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(id, "source.pdf", "resolution/"+id.String(), "")); err != nil {
+			t.Fatalf("create document: %v", err)
 		}
 	}
-	repo := &paperCitationRepository{db: db}
-	raw := "[1] Ada Lovelace. Notes on the analytical engine."
-	if err := repo.AddCitation(ctx, types.PaperCitation{
-		CitingDocumentID: citingID, CitedDocumentID: unknownID,
-		RawReference: raw, Origin: types.PaperCitationOriginExtraction,
-	}); err != nil {
+	citation := testResolvedCitation(citingID, "Resolution target", uuid.Nil)
+	saved, err := repo.AddCitation(ctx, citation)
+	if err != nil {
+		t.Fatalf("seed citation: %v", err)
+	}
+	queued, applied, err := repo.QueueResolution(ctx, saved.ReferenceID)
+	if err != nil || !applied || queued.ResolutionStatus != types.DocumentStageQueued || queued.ResolutionGeneration != 1 {
+		t.Fatalf("queue = %#v, applied=%v, err=%v", queued, applied, err)
+	}
+	running, applied, err := repo.StartResolution(ctx, saved.ReferenceID, queued.ResolutionGeneration)
+	if err != nil || !applied || running.ResolutionStatus != types.DocumentStageRunning {
+		t.Fatalf("start = %#v, applied=%v, err=%v", running, applied, err)
+	}
+	title := "Catalog title"
+	source := types.PaperMetadataSourceCatalog
+	finished, applied, err := repo.FinishResolution(
+		ctx, saved.ReferenceID, running.ResolutionGeneration, types.DocumentStageSucceeded,
+		"arxiv", "", "", &types.PaperReferenceMetadataPatch{Title: &title, MetadataSource: &source}, &targetID,
+	)
+	if err != nil || !applied || finished.CitedDocumentID == nil || *finished.CitedDocumentID != targetID ||
+		finished.Title != title || finished.ResolutionStatus != types.DocumentStageSucceeded {
+		t.Fatalf("finish = %#v, applied=%v, err=%v", finished, applied, err)
+	}
+	if err := documents.Delete(ctx, targetID); err != nil {
+		t.Fatalf("delete target: %v", err)
+	}
+	reset, err := repo.GetReference(ctx, saved.ReferenceID)
+	if err != nil {
+		t.Fatalf("reload reference: %v", err)
+	}
+	if reset.CitedDocumentID != nil || reset.ResolutionStatus != types.DocumentStageNotStarted ||
+		reset.ResolutionGeneration != finished.ResolutionGeneration+1 {
+		t.Fatalf("reset reference = %#v", reset)
+	}
+}
+
+// TestPaperCitationRepositoryMergeAutomaticCitationsPostgres verifies the
+// row-locked reconciliation implementation against a real PostgreSQL database.
+// It is opt-in via PAPERS_MANAGER_TEST_POSTGRES_DSN.
+func TestPaperCitationRepositoryMergeAutomaticCitationsPostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	documents := NewDocumentRepository(db)
+	repo := NewPaperCitationRepository(db)
+
+	citingID, resolvedID := uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{citingID, resolvedID} {
+		if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(id, "source.pdf", "citation/"+id.String(), "")); err != nil {
+			t.Fatalf("create document: %v", err)
+		}
+	}
+	automatic := testResolvedCitation(citingID, "Ada Lovelace. Notes on the analytical engine.", resolvedID)
+	automatic.Origin = types.PaperCitationOriginExtraction
+	if err := db.Create(&automatic).Error; err != nil {
 		t.Fatalf("seed automatic citation: %v", err)
 	}
-	if err := repo.RepointCitation(ctx, citingID, unknownID, resolvedID, raw); err != nil {
-		t.Fatalf("resolve automatic citation: %v", err)
-	}
 
-	items, removed, err := repo.MergeAutomaticCitations(ctx, citingID, []types.PaperCitation{{
-		CitingDocumentID: citingID, CitedDocumentID: unknownID,
-		RawReference: " [1] ADA Lovelace. Notes on the analytical engine. ",
-		Origin:       types.PaperCitationOriginExtraction,
+	items, err := repo.MergeAutomaticCitations(ctx, citingID, []types.PaperCitation{{
+		PaperReference: types.PaperReference{
+			ReferenceID:      automatic.ReferenceID,
+			CitingDocumentID: citingID,
+			RawReference:     " [1]  ADA Lovelace. Notes on the analytical engine. ",
+			Authors:          []types.PaperAuthor{},
+			ResolutionStatus: types.DocumentStageSucceeded,
+			MetadataSource:   types.PaperMetadataSourceExtraction,
+			CitedDocumentID:  &resolvedID,
+		},
+		Origin: types.PaperCitationOriginExtraction,
 	}})
 	if err != nil {
 		t.Fatalf("merge repeated automatic citation: %v", err)
 	}
-	if len(removed) != 0 || len(items) != 1 || items[0].CitedDocumentID != resolvedID {
-		t.Fatalf("merge result items=%#v removed=%#v, want prior resolved target", items, removed)
+	if len(items) != 1 || items[0].ReferenceID != automatic.ReferenceID {
+		t.Fatalf("merge result items=%#v, want prior reference", items)
 	}
 
-	if err := repo.AddCitation(ctx, types.PaperCitation{
-		CitingDocumentID: citingID, CitedDocumentID: manualID,
-		RawReference: "Manual reference", Origin: types.PaperCitationOriginManual,
-	}); err != nil {
+	manual := testResolvedCitation(citingID, "Manual reference", uuid.Nil)
+	manual.Origin = types.PaperCitationOriginManual
+	if _, err := repo.AddCitation(ctx, manual); err != nil {
 		t.Fatalf("seed manual citation: %v", err)
 	}
-	items, removed, err = repo.MergeAutomaticCitations(ctx, citingID, nil)
+	items, err = repo.MergeAutomaticCitations(ctx, citingID, nil)
 	if err != nil {
 		t.Fatalf("merge detected empty bibliography: %v", err)
 	}
-	if len(items) != 1 || items[0].CitedDocumentID != manualID || items[0].EffectiveOrigin() != types.PaperCitationOriginManual {
+	if len(items) != 1 || items[0].ReferenceID != manual.ReferenceID ||
+		items[0].EffectiveOrigin() != types.PaperCitationOriginManual {
 		t.Fatalf("detected empty merge retained wrong rows: %#v", items)
-	}
-	if len(removed) != 1 || removed[0].CitedDocumentID != resolvedID {
-		t.Fatalf("removed automatic rows = %#v, want resolved automatic row", removed)
 	}
 
 	var count int64

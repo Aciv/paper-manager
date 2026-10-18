@@ -48,13 +48,17 @@ function retryable(row: ProgressRow): boolean {
   if (row.document.sourceState !== 'available') return false;
   const stage = referenceStage(row);
   if (stage?.status === 'queued' || stage?.status === 'running') return false;
+  if (stage?.status === 'not_started') {
+    // Manual-start mode: references await an explicit resolution run.
+    return progressOf(row).queued > 0;
+  }
   return stage?.status === 'failed'
     || (progressOf(row).failed > 0);
 }
 
 function documentName(documentItem: Document): string {
   if (documentItem.originalFilename) return documentItem.originalFilename;
-  return documentItem.sourceState === 'missing' ? `未解析引用 · ${documentItem.id.slice(0, 8)}` : documentItem.id.slice(0, 8);
+  return documentItem.id.slice(0, 8);
 }
 
 async function fetchAllDocuments(): Promise<Document[]> {
@@ -232,7 +236,7 @@ export function CitationProgressDialog({ open, onClose }: { open: boolean; onClo
         <label><input type="checkbox" checked={showAll} onChange={(event) => setShowAll(event.target.checked)} /> 显示无引用进度的文档</label>
         <span className="citation-progress-selected">{summary.failedDocuments > 0 ? `${summary.failedDocuments} 篇可重试 · ` : ''}已选 {selected.size} 个</span>
         <button className="primary" type="button" disabled={busy || selected.size === 0} onClick={() => void retryRows(Array.from(selected))}>
-          {busy ? '提交中…' : `批量重试 ${selected.size} 个`}
+          {busy ? '提交中…' : `批量解析 / 重试 ${selected.size} 个`}
         </button>
       </div>
 

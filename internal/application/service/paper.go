@@ -22,11 +22,11 @@ var (
 	// ErrInvalidPaperMetadata indicates a malformed bibliographic patch or
 	// search request.
 	ErrInvalidPaperMetadata = errors.New("invalid paper metadata")
-	// ErrUnknownPaperCannotCite prevents bibliographic placeholders from acting
-	// as source papers in the citation graph.
-	ErrUnknownPaperCannotCite = errors.New("unknown paper placeholder cannot cite documents")
-	// ErrCitationTargetNotResolved means ResolveCitation was given another
-	// unknown placeholder instead of a stored source document.
+	// ErrPaperCannotCite prevents documents without an available source file
+	// from acting as source papers in the citation graph.
+	ErrPaperCannotCite = errors.New("paper without an available source cannot cite documents")
+	// ErrCitationTargetNotResolved means a citation was given a document whose
+	// source file is not available.
 	ErrCitationTargetNotResolved = errors.New("citation target is not a resolved document")
 )
 
@@ -36,7 +36,7 @@ type paperService struct {
 	citations interfaces.PaperCitationRepository
 }
 
-// NewPaperService creates the paper-domain boundary from its three persistence
+// NewPaperService creates the paper-domain boundary from its persistence
 // abstractions. It deliberately does not depend on DocumentService.
 func NewPaperService(
 	documents interfaces.DocumentRepository,
@@ -141,33 +141,26 @@ func (s *paperService) AddCitation(
 	if err != nil {
 		return nil, err
 	}
-	targetID, created, err := s.resolveCitationTarget(ctx, input.CitedDocumentID, rawReference)
+	citation := newPaperCitation(citingID, rawReference)
+	citation.Origin = types.PaperCitationOriginManual
+	if input.CitedDocumentID != nil {
+		if err := s.applyCitationTarget(ctx, &citation, *input.CitedDocumentID); err != nil {
+			return nil, err
+		}
+	}
+	citation, err = s.applyReferenceCandidate(citation, input.Candidate, rawReference)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.applyReferenceCandidate(ctx, targetID, input.Candidate, rawReference); err != nil {
-		if created {
-			s.cleanupUnknown(ctx, targetID)
-		}
-		return nil, err
-	}
-	citation := types.PaperCitation{
-		CitingDocumentID: citingID,
-		CitedDocumentID:  targetID,
-		RawReference:     rawReference,
-		Origin:           types.PaperCitationOriginManual,
-	}
-	if err := s.citations.AddCitation(ctx, citation); err != nil {
-		if created {
-			s.cleanupUnknown(ctx, targetID)
-		}
+	saved, err := s.citations.AddCitation(ctx, citation)
+	if err != nil {
 		return nil, err
 	}
 	logger.Info(ctx, "paper citation add completed",
 		"citing_document_id", citingID,
-		"cited_document_id", targetID,
-		"unresolved", input.CitedDocumentID == nil)
-	return &citation, nil
+		"reference_id", saved.ReferenceID,
+		"unresolved", saved.CitedDocumentID == nil)
+	return &saved, nil
 }
 
 func (s *paperService) ReplaceCitations(
@@ -183,46 +176,40 @@ func (s *paperService) ReplaceCitations(
 	if err != nil {
 		return nil, err
 	}
+	previousByKey := citationsByReferenceKey(previous)
 
 	replacements := make([]types.PaperCitation, 0, len(inputs))
-	createdUnknowns := make(map[uuid.UUID]struct{})
-	seenTargets := make(map[uuid.UUID]struct{}, len(inputs))
+	seen := make(map[string]struct{}, len(inputs))
 	for _, input := range inputs {
 		rawReference, validateErr := validateRawReference(input.RawReference)
 		if validateErr != nil {
-			s.cleanupUnknownSet(ctx, createdUnknowns)
 			return nil, validateErr
 		}
-		targetID, created, resolveErr := s.resolveCitationTarget(ctx, input.CitedDocumentID, rawReference)
-		if resolveErr != nil {
-			s.cleanupUnknownSet(ctx, createdUnknowns)
-			return nil, resolveErr
-		}
-		if created {
-			createdUnknowns[targetID] = struct{}{}
-		}
-		if _, exists := seenTargets[targetID]; exists {
+		key := types.PaperCitationReferenceKey(rawReference)
+		if _, exists := seen[key]; exists {
 			continue
 		}
-		seenTargets[targetID] = struct{}{}
-		if applyErr := s.applyReferenceCandidate(ctx, targetID, input.Candidate, rawReference); applyErr != nil {
-			s.cleanupUnknownSet(ctx, createdUnknowns)
-			return nil, applyErr
+		seen[key] = struct{}{}
+		citation := previousByKey[key]
+		if citation.ReferenceID == uuid.Nil {
+			citation = newPaperCitation(citingID, rawReference)
 		}
-		replacements = append(replacements, types.PaperCitation{
-			CitingDocumentID: citingID,
-			CitedDocumentID:  targetID,
-			RawReference:     rawReference,
-			Origin:           types.PaperCitationOriginManual,
-		})
+		citation.Origin = types.PaperCitationOriginManual
+		citation.RawReference = rawReference
+		if input.CitedDocumentID != nil {
+			if applyErr := s.applyCitationTarget(ctx, &citation, *input.CitedDocumentID); applyErr != nil {
+				return nil, applyErr
+			}
+		}
+		citation, validateErr = s.applyReferenceCandidate(citation, input.Candidate, rawReference)
+		if validateErr != nil {
+			return nil, validateErr
+		}
+		replacements = append(replacements, citation)
 	}
 
 	if err := s.citations.ReplaceCitations(ctx, citingID, replacements); err != nil {
-		s.cleanupUnknownSet(ctx, createdUnknowns)
 		return nil, err
-	}
-	for _, citation := range previous {
-		s.cleanupUnknown(ctx, citation.CitedDocumentID)
 	}
 	logger.Info(ctx, "paper citation replacement completed",
 		"citing_document_id", citingID,
@@ -231,8 +218,8 @@ func (s *paperService) ReplaceCitations(
 }
 
 // MergeExtractedCitations reconciles one positively detected bibliography.
-// It differs from ReplaceCitations: normalized raw text retains existing
-// resolved targets, and manual/legacy edges are never removed by automation.
+// Each row belongs to the citing paper; manual rows are never removed by
+// automation, and existing resolved targets are retained.
 func (s *paperService) MergeExtractedCitations(
 	ctx context.Context,
 	citingDocumentID string,
@@ -246,142 +233,249 @@ func (s *paperService) MergeExtractedCitations(
 	if err != nil {
 		return nil, err
 	}
-	previousByReference := make(map[string][]types.PaperCitation, len(previous))
-	for _, citation := range previous {
-		key := types.PaperCitationReferenceKey(citation.RawReference)
-		if key != "" {
-			previousByReference[key] = append(previousByReference[key], citation)
-		}
-	}
+	previousByKey := citationsByReferenceKey(previous)
 
 	automatic := make([]types.PaperCitation, 0, len(inputs))
-	createdUnknowns := make(map[uuid.UUID]struct{})
-	seenReferences := make(map[string]struct{}, len(inputs))
+	seen := make(map[string]struct{}, len(inputs))
 	for _, input := range inputs {
 		rawReference, validateErr := validateRawReference(input.RawReference)
 		if validateErr != nil {
-			s.cleanupUnknownSet(ctx, createdUnknowns)
 			return nil, validateErr
 		}
 		key := types.PaperCitationReferenceKey(rawReference)
-		if _, seen := seenReferences[key]; seen {
+		if _, seen := seen[key]; seen {
 			continue
 		}
-		seenReferences[key] = struct{}{}
+		seen[key] = struct{}{}
 
-		targetID, exists := preferredExistingCitationTarget(previousByReference[key])
-		created := false
+		existing, exists := previousByKey[key]
+		if exists && existing.EffectiveOrigin() == types.PaperCitationOriginManual {
+			continue
+		}
+		citation := existing
 		if !exists {
-			targetID, created, err = s.resolveCitationTarget(ctx, input.CitedDocumentID, rawReference)
-			if err != nil {
-				s.cleanupUnknownSet(ctx, createdUnknowns)
-				return nil, err
+			citation = newPaperCitation(citingID, rawReference)
+		}
+		citation.Origin = types.PaperCitationOriginExtraction
+		citation.RawReference = rawReference
+		if input.CitedDocumentID != nil {
+			if applyErr := s.applyCitationTarget(ctx, &citation, *input.CitedDocumentID); applyErr != nil {
+				return nil, applyErr
 			}
 		}
-		if created {
-			createdUnknowns[targetID] = struct{}{}
-		}
-		if err := s.applyReferenceCandidate(ctx, targetID, input.Candidate, rawReference); err != nil {
-			s.cleanupUnknownSet(ctx, createdUnknowns)
+		citation, err = s.applyReferenceCandidate(citation, input.Candidate, rawReference)
+		if err != nil {
 			return nil, err
 		}
-		automatic = append(automatic, types.PaperCitation{
-			CitingDocumentID: citingID,
-			CitedDocumentID:  targetID,
-			RawReference:     rawReference,
-			Origin:           types.PaperCitationOriginExtraction,
-		})
+		// Python extraction has already supplied DOI/title. Match the local
+		// library immediately, before any provider or queued resolution.
+		if citation.CitedDocumentID == nil {
+			if documentID, found, matchErr := s.FindLocalReferenceMatch(ctx, citation.PaperReference, citingID); matchErr != nil {
+				return nil, matchErr
+			} else if found {
+				citation.CitedDocumentID = &documentID
+				citation.ResolutionStatus = types.DocumentStageSucceeded
+				citation.ResolutionErrorCode = nil
+				citation.ResolutionErrorMsg = nil
+				citation.ResolutionUpdatedAt = time.Now().UTC()
+			}
+		}
+		automatic = append(automatic, citation)
 	}
 
-	merged, removed, err := s.citations.MergeAutomaticCitations(ctx, citingID, automatic)
+	merged, err := s.citations.MergeAutomaticCitations(ctx, citingID, automatic)
 	if err != nil {
-		s.cleanupUnknownSet(ctx, createdUnknowns)
 		return nil, err
-	}
-	for _, citation := range removed {
-		s.cleanupUnknown(ctx, citation.CitedDocumentID)
 	}
 	logger.Info(ctx, "extracted paper citations reconciled",
 		"citing_document_id", citingID,
 		"extracted_count", len(automatic),
-		"final_count", len(merged),
-		"removed_automatic_count", len(removed))
+		"final_count", len(merged))
 	return merged, nil
 }
 
-// preferredExistingCitationTarget prioritizes manual/legacy edges, then an
-// automatic edge. The repository repeats the same rule under row lock.
-func preferredExistingCitationTarget(citations []types.PaperCitation) (uuid.UUID, bool) {
+func citationsByReferenceKey(citations []types.PaperCitation) map[string]types.PaperCitation {
+	result := make(map[string]types.PaperCitation, len(citations))
 	for _, citation := range citations {
-		if citation.EffectiveOrigin() == types.PaperCitationOriginManual {
-			return citation.CitedDocumentID, true
+		key := citation.ReferenceKey
+		if key == "" {
+			key = types.PaperCitationReferenceKey(citation.RawReference)
+		}
+		if key == "" {
+			continue
+		}
+		_, exists := result[key]
+		if !exists || citation.EffectiveOrigin() == types.PaperCitationOriginManual {
+			result[key] = citation
 		}
 	}
-	if len(citations) == 0 {
-		return uuid.Nil, false
-	}
-	return citations[0].CitedDocumentID, true
+	return result
 }
 
-// applyReferenceCandidate persists only non-empty parsed fields to an unknown
-// citation placeholder. It never changes a resolved/uploaded paper and leaves
-// RawReference on the citation edge untouched.
-func (s *paperService) applyReferenceCandidate(
-	ctx context.Context,
-	documentID uuid.UUID,
-	candidate *types.PaperReferenceCandidate,
-	rawReference string,
+func newPaperCitation(citingID uuid.UUID, rawReference string) types.PaperCitation {
+	return types.PaperCitation{
+		PaperReference: types.PaperReference{
+			ReferenceID:         types.PaperReferenceIDForRaw(citingID, rawReference),
+			CitingDocumentID:    citingID,
+			ReferenceKey:        types.PaperCitationReferenceKey(rawReference),
+			RawReference:        rawReference,
+			Authors:             []types.PaperAuthor{},
+			ResolutionStatus:    types.DocumentStageNotStarted,
+			MetadataSource:      types.PaperMetadataSourceUnknown,
+			ResolutionUpdatedAt: time.Now().UTC(),
+		},
+	}
+}
+
+// applyCitationTarget validates a manual target and copies its canonical
+// metadata into the citation row.
+func (s *paperService) applyCitationTarget(
+	ctx context.Context, citation *types.PaperCitation, targetID uuid.UUID,
 ) error {
-	if candidate == nil {
-		return nil
+	if targetID == citation.CitingDocumentID {
+		return types.ErrSelfPaperCitation
 	}
-	if err := candidate.Validate(); err != nil {
-		return err
-	}
-	if compactPaperText(candidate.RawReference) != compactPaperText(rawReference) {
-		return fmt.Errorf("%w: reference candidate does not match raw reference", types.ErrInvalidPaperExtraction)
-	}
-	document, err := s.documents.Get(ctx, documentID)
+	document, err := s.documents.Get(ctx, targetID)
 	if err != nil {
 		return err
 	}
-	if document.SourceState != types.DocumentSourceMissing {
-		return nil
+	if document.SourceState != types.DocumentSourceAvailable {
+		return ErrCitationTargetNotResolved
 	}
-	if doi := strings.TrimSpace(candidate.DOI); doi != "" {
-		if _, err := s.documents.SetDOIIfEmpty(ctx, documentID, doi); err != nil {
-			logger.Warn(ctx, "persist reference candidate DOI skipped",
-				"document_id", documentID, "error", err)
-		}
+	patch, err := s.referenceMetadataPatchForDocument(ctx, document)
+	if err != nil {
+		return err
 	}
-	update := referenceCandidateMetadataUpdate(*candidate)
-	if !update.HasChanges() {
-		return nil
-	}
-	if _, err := s.metadata.Upsert(ctx, documentID, update); err != nil {
-		return fmt.Errorf("persist reference candidate metadata: %w", err)
-	}
-	logger.Info(ctx, "reference candidate metadata persisted", "document_id", documentID)
+	applyReferencePatch(&citation.PaperReference, patch, types.PaperMetadataSourceManual)
+	citation.CitedDocumentID = &targetID
+	citation.ResolutionStatus = types.DocumentStageSucceeded
+	citation.ResolutionErrorCode = nil
+	citation.ResolutionErrorMsg = nil
+	citation.ResolutionUpdatedAt = time.Now().UTC()
 	return nil
 }
 
-func referenceCandidateMetadataUpdate(candidate types.PaperReferenceCandidate) types.PaperMetadataUpdate {
-	update := types.PaperMetadataUpdate{}
+// applyReferenceCandidate merges non-empty parsed fields into one citation
+// row. It never overwrites a manual/catalog field with extraction.
+func (s *paperService) applyReferenceCandidate(
+	citation types.PaperCitation,
+	candidate *types.PaperReferenceCandidate,
+	rawReference string,
+) (types.PaperCitation, error) {
+	var patch *types.PaperReferenceMetadataPatch
+	if candidate != nil {
+		if err := candidate.Validate(); err != nil {
+			return citation, err
+		}
+		if compactPaperText(candidate.RawReference) != compactPaperText(rawReference) {
+			return citation, fmt.Errorf("%w: reference candidate does not match raw reference", types.ErrInvalidPaperExtraction)
+		}
+		patch = referenceMetadataPatchFromCandidate(*candidate)
+	}
+	if patch == nil {
+		patch = &types.PaperReferenceMetadataPatch{}
+	}
+	// Rules extraction may provide only raw text. Parse a DOI/title/URL from it
+	// so immediate local matching still works without an external lookup.
+	fallback := referenceLookupQuery(rawReference)
+	if patch.DOI == nil && fallback.DOI != "" {
+		doi := fallback.DOI
+		patch.DOI = &doi
+	}
+	if patch.Title == nil && fallback.Title != "" {
+		title := fallback.Title
+		patch.Title = &title
+	}
+	if patch.SourceURL == nil && fallback.SourceURL != "" {
+		sourceURL := fallback.SourceURL
+		patch.SourceURL = &sourceURL
+	}
+	if !patch.HasChanges() {
+		return citation, nil
+	}
+	if patch.MetadataSource == nil {
+		source := types.PaperMetadataSourceExtraction
+		patch.MetadataSource = &source
+	}
+	applyReferencePatch(&citation.PaperReference, patch, types.PaperMetadataSourceExtraction)
+	return citation, nil
+}
+
+func applyReferencePatch(
+	reference *types.PaperReference,
+	patch *types.PaperReferenceMetadataPatch,
+	source types.PaperMetadataSource,
+) {
+	if patch == nil || !patch.HasChanges() {
+		return
+	}
+	if patch.MetadataSource != nil {
+		source = *patch.MetadataSource
+	}
+	overwrite := paperMetadataSourceRank(source) >= paperMetadataSourceRank(reference.EffectiveMetadataSource())
+	setString := func(destination *string, value *string) {
+		if value == nil || strings.TrimSpace(*value) == "" {
+			return
+		}
+		if *destination == "" || overwrite {
+			*destination = strings.TrimSpace(*value)
+		}
+	}
+	setString(&reference.DOI, patch.DOI)
+	if reference.DOI != "" {
+		reference.DOI = strings.ToLower(reference.DOI)
+	}
+	setString(&reference.Title, patch.Title)
+	setString(&reference.Venue, patch.Venue)
+	setString(&reference.Volume, patch.Volume)
+	setString(&reference.Issue, patch.Issue)
+	setString(&reference.Pages, patch.Pages)
+	setString(&reference.SourceURL, patch.SourceURL)
+	if patch.Authors != nil && len(*patch.Authors) > 0 && (len(reference.Authors) == 0 || overwrite) {
+		reference.Authors = *patch.Authors
+	}
+	if patch.PublishedAt != nil && (reference.PublishedAt == nil || overwrite) {
+		reference.PublishedAt = patch.PublishedAt
+	}
+	if reference.MetadataSource == "" || overwrite {
+		reference.MetadataSource = source
+	}
+	reference.UpdatedAt = time.Now().UTC()
+}
+
+func paperMetadataSourceRank(source types.PaperMetadataSource) int {
+	switch source {
+	case types.PaperMetadataSourceManual:
+		return 3
+	case types.PaperMetadataSourceCatalog:
+		return 2
+	case types.PaperMetadataSourceExtraction:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func referenceMetadataPatchFromCandidate(candidate types.PaperReferenceCandidate) *types.PaperReferenceMetadataPatch {
+	patch := &types.PaperReferenceMetadataPatch{}
+	if doi := normalizePaperDOI(candidate.DOI); doi != "" {
+		patch.DOI = &doi
+	}
 	if arxivID := paperArXivID(candidate.ArXivID); arxivID != "" {
-		sourceURL := "https://arxiv.org/abs/" + arxivID
-		update.SourceURL = &sourceURL
+		url := "https://arxiv.org/abs/" + arxivID
+		patch.SourceURL = &url
 	}
 	if title := strings.TrimSpace(candidate.Title); title != "" {
-		update.Title = &title
+		patch.Title = &title
 	}
 	if venue := strings.TrimSpace(candidate.Venue); venue != "" {
-		update.Venue = &venue
+		patch.Venue = &venue
 	}
 	if volume := strings.TrimSpace(candidate.Volume); volume != "" {
-		update.Volume = &volume
+		patch.Volume = &volume
 	}
 	if pages := strings.TrimSpace(candidate.Pages); pages != "" {
-		update.Pages = &pages
+		patch.Pages = &pages
 	}
 	authors := make([]types.PaperAuthor, 0, len(candidate.Authors))
 	for _, value := range candidate.Authors {
@@ -390,42 +484,81 @@ func referenceCandidateMetadataUpdate(candidate types.PaperReferenceCandidate) t
 		}
 	}
 	if len(authors) > 0 {
-		update.Authors = &authors
+		patch.Authors = &authors
 	}
 	if candidate.PublishedYear >= 1000 {
 		publishedAt := time.Date(candidate.PublishedYear, time.January, 1, 0, 0, 0, 0, time.UTC)
-		update.PublishedAt = &publishedAt
+		patch.PublishedAt = &publishedAt
 	}
-	if update.HasDataChanges() {
+	if patch.HasChanges() {
 		source := types.PaperMetadataSourceExtraction
-		update.MetadataSource = &source
+		patch.MetadataSource = &source
 	}
-	return update
+	return patch
+}
+
+func (s *paperService) referenceMetadataPatchForDocument(
+	ctx context.Context, document types.Document,
+) (*types.PaperReferenceMetadataPatch, error) {
+	metadata, err := s.metadata.GetByDocumentID(ctx, document.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		metadata = types.PaperMetadata{DocumentID: document.ID, Authors: []types.PaperAuthor{}}
+	} else if err != nil {
+		return nil, err
+	}
+	patch := &types.PaperReferenceMetadataPatch{}
+	if doi := normalizePaperDOI(document.DOI); doi != "" {
+		patch.DOI = &doi
+	}
+	if title := strings.TrimSpace(metadata.Title); title != "" {
+		patch.Title = &title
+	}
+	if len(metadata.Authors) > 0 {
+		authors := metadata.Authors
+		patch.Authors = &authors
+	}
+	if venue := strings.TrimSpace(metadata.Venue); venue != "" {
+		patch.Venue = &venue
+	}
+	if volume := strings.TrimSpace(metadata.Volume); volume != "" {
+		patch.Volume = &volume
+	}
+	if issue := strings.TrimSpace(metadata.Issue); issue != "" {
+		patch.Issue = &issue
+	}
+	if pages := strings.TrimSpace(metadata.Pages); pages != "" {
+		patch.Pages = &pages
+	}
+	if sourceURL := strings.TrimSpace(metadata.SourceURL); sourceURL != "" {
+		patch.SourceURL = &sourceURL
+	}
+	if metadata.PublishedAt != nil {
+		patch.PublishedAt = metadata.PublishedAt
+	}
+	source := types.PaperMetadataSourceManual
+	patch.MetadataSource = &source
+	return patch, nil
 }
 
 func (s *paperService) RemoveCitation(
 	ctx context.Context,
 	citingDocumentID string,
-	citedDocumentID string,
+	referenceID string,
 ) error {
 	citingID, _, err := s.requireCitingDocument(ctx, citingDocumentID)
 	if err != nil {
 		return err
 	}
-	citedID, err := parsePaperDocumentID(citedDocumentID)
+	refID, err := parsePaperReferenceID(referenceID)
 	if err != nil {
 		return err
 	}
-	if _, err := s.documents.Get(ctx, citedID); err != nil {
+	if err := s.citations.RemoveCitation(ctx, citingID, refID); err != nil {
 		return err
 	}
-	if err := s.citations.RemoveCitation(ctx, citingID, citedID); err != nil {
-		return err
-	}
-	s.cleanupUnknown(ctx, citedID)
 	logger.Info(ctx, "paper citation removal completed",
 		"citing_document_id", citingID,
-		"cited_document_id", citedID)
+		"reference_id", refID)
 	return nil
 }
 
@@ -482,45 +615,53 @@ func (s *paperService) ResolveCitation(
 	if err != nil {
 		return nil, err
 	}
-	resolved, err := s.documents.Get(ctx, resolvedID)
-	if err != nil {
-		return nil, err
-	}
-	if resolved.SourceState != types.DocumentSourceAvailable {
-		return nil, ErrCitationTargetNotResolved
-	}
 	rawReference, err = validateRawReference(rawReference)
 	if err != nil {
 		return nil, err
 	}
-	placeholderID := unknownPaperDocumentID(rawReference)
-	placeholder, err := s.documents.Get(ctx, placeholderID)
+	citation := newPaperCitation(citingID, rawReference)
+	previous, listErr := s.citations.ListByCitingDocumentID(ctx, citingID)
+	if listErr != nil {
+		return nil, listErr
+	}
+	for _, existing := range previous {
+		if existing.ReferenceID != citation.ReferenceID {
+			continue
+		}
+		document, getErr := s.documents.Get(ctx, resolvedID)
+		if getErr != nil {
+			return nil, getErr
+		}
+		if document.SourceState != types.DocumentSourceAvailable {
+			return nil, ErrCitationTargetNotResolved
+		}
+		if resolvedID == citingID {
+			return nil, types.ErrSelfPaperCitation
+		}
+		updated, _, linkErr := s.citations.LinkResolvedDocument(ctx, citation.ReferenceID, resolvedID, true)
+		if linkErr != nil {
+			return nil, linkErr
+		}
+		saved := types.PaperCitation{PaperReference: updated, Origin: existing.Origin}
+		logger.Info(ctx, "paper citation resolution completed",
+			"citing_document_id", citingID,
+			"reference_id", saved.ReferenceID,
+			"cited_document_id", resolvedID)
+		return &saved, nil
+	}
+	citation.Origin = types.PaperCitationOriginManual
+	if err := s.applyCitationTarget(ctx, &citation, resolvedID); err != nil {
+		return nil, err
+	}
+	saved, err := s.citations.AddCitation(ctx, citation)
 	if err != nil {
 		return nil, err
 	}
-	if placeholder.SourceState != types.DocumentSourceMissing {
-		return nil, types.ErrUnknownDocumentConflict
-	}
-	if err := s.citations.RepointCitation(
-		ctx,
-		citingID,
-		placeholderID,
-		resolvedID,
-		rawReference,
-	); err != nil {
-		return nil, err
-	}
-	s.cleanupUnknown(ctx, placeholderID)
-	citation := &types.PaperCitation{
-		CitingDocumentID: citingID,
-		CitedDocumentID:  resolvedID,
-		RawReference:     rawReference,
-	}
 	logger.Info(ctx, "paper citation resolution completed",
 		"citing_document_id", citingID,
-		"cited_document_id", resolvedID,
-		"placeholder_document_id", placeholderID)
-	return citation, nil
+		"reference_id", saved.ReferenceID,
+		"cited_document_id", resolvedID)
+	return &saved, nil
 }
 
 func (s *paperService) requireCitingDocument(
@@ -535,50 +676,170 @@ func (s *paperService) requireCitingDocument(
 		return uuid.Nil, types.Document{}, err
 	}
 	if document.SourceState != types.DocumentSourceAvailable {
-		return uuid.Nil, types.Document{}, ErrUnknownPaperCannotCite
+		return uuid.Nil, types.Document{}, ErrPaperCannotCite
 	}
 	return id, document, nil
 }
 
-func (s *paperService) resolveCitationTarget(
-	ctx context.Context,
-	citedDocumentID *uuid.UUID,
-	rawReference string,
+func (s *paperService) GetReference(
+	ctx context.Context, referenceID string,
+) (*types.PaperReference, error) {
+	id, err := parsePaperReferenceID(referenceID)
+	if err != nil {
+		return nil, err
+	}
+	reference, err := s.citations.GetReference(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	return &reference, nil
+}
+
+func (s *paperService) ResolveReference(
+	ctx context.Context, referenceID, resolvedDocumentID string,
+) (*types.PaperReference, error) {
+	refID, err := parsePaperReferenceID(referenceID)
+	if err != nil {
+		return nil, err
+	}
+	documentID, err := parsePaperDocumentID(resolvedDocumentID)
+	if err != nil {
+		return nil, err
+	}
+	document, err := s.documents.Get(ctx, documentID)
+	if err != nil {
+		return nil, err
+	}
+	if document.SourceState != types.DocumentSourceAvailable {
+		return nil, ErrCitationTargetNotResolved
+	}
+	reference, applied, err := s.citations.LinkResolvedDocument(ctx, refID, documentID, true)
+	if err != nil {
+		return nil, err
+	}
+	if applied {
+		logger.Info(ctx, "paper reference manually resolved",
+			"reference_id", refID, "document_id", documentID)
+	}
+	return &reference, nil
+}
+
+func (s *paperService) LinkReferenceDocument(
+	ctx context.Context, referenceID, documentID uuid.UUID, overwrite bool,
+) (*types.PaperReference, error) {
+	reference, applied, err := s.citations.LinkResolvedDocument(ctx, referenceID, documentID, overwrite)
+	if err != nil {
+		return nil, err
+	}
+	if applied {
+		logger.Info(ctx, "paper reference linked to document",
+			"reference_id", referenceID, "document_id", documentID)
+	}
+	return &reference, nil
+}
+
+func (s *paperService) FindLocalReferenceMatch(
+	ctx context.Context, reference types.PaperReference, excludeDocumentID uuid.UUID,
 ) (uuid.UUID, bool, error) {
-	if citedDocumentID != nil {
-		if *citedDocumentID == uuid.Nil {
-			return uuid.Nil, false, types.ErrInvalidPaperCitation
-		}
-		if _, err := s.documents.Get(ctx, *citedDocumentID); err != nil {
+	if reference.CitedDocumentID != nil {
+		return *reference.CitedDocumentID, true, nil
+	}
+	if excludeDocumentID == uuid.Nil {
+		excludeDocumentID = reference.CitingDocumentID
+	}
+	exclude := make([]uuid.UUID, 0, 1)
+	if excludeDocumentID != uuid.Nil {
+		exclude = append(exclude, excludeDocumentID)
+	}
+	if doi := normalizePaperDOI(reference.DOI); doi != "" {
+		page, err := s.documents.Search(ctx, types.DocumentSearch{
+			DOI: doi, SourceState: types.DocumentSourceAvailable,
+			ExcludeIDs: exclude, Page: 1, PageSize: 2,
+		})
+		if err != nil {
 			return uuid.Nil, false, err
 		}
-		return *citedDocumentID, false, nil
+		for _, document := range page.Items {
+			if document.SourceState == types.DocumentSourceAvailable {
+				return document.ID, true, nil
+			}
+		}
 	}
-	placeholderID := unknownPaperDocumentID(rawReference)
-	_, created, err := s.documents.EnsureUnknown(ctx, placeholderID)
-	return placeholderID, created, err
+	titleKey := normalizedPaperTitle(reference.Title)
+	if titleKey == "" {
+		return uuid.Nil, false, nil
+	}
+	result, err := s.metadata.Search(ctx, types.PaperSearch{
+		Title: paperTitleSearchSeed(titleKey), Page: 1, PageSize: localPaperTitleSearchSize,
+	})
+	if err != nil {
+		return uuid.Nil, false, err
+	}
+	for _, metadata := range result.Items {
+		if metadata.DocumentID == excludeDocumentID ||
+			normalizedPaperTitle(metadata.Title) != titleKey {
+			continue
+		}
+		document, err := s.documents.Get(ctx, metadata.DocumentID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return uuid.Nil, false, err
+		}
+		if document.SourceState != types.DocumentSourceAvailable {
+			continue
+		}
+		if len(reference.Authors) > 0 && len(metadata.Authors) > 0 &&
+			paperAuthorSimilarity(paperAuthorNames(reference.Authors), metadata.Authors) == 0 {
+			continue
+		}
+		if reference.PublishedAt != nil && metadata.PublishedAt != nil {
+			delta := reference.PublishedAt.Year() - metadata.PublishedAt.Year()
+			if delta < 0 {
+				delta = -delta
+			}
+			if delta > 1 {
+				continue
+			}
+		}
+		return document.ID, true, nil
+	}
+	return uuid.Nil, false, nil
 }
 
-func (s *paperService) cleanupUnknown(ctx context.Context, documentID uuid.UUID) {
-	if _, err := s.documents.DeleteUnknownIfUnreferenced(ctx, documentID); err != nil {
-		logger.Warn(ctx, "unknown document cleanup deferred", "document_id", documentID, "error", err)
-	}
+func (s *paperService) QueueReferenceResolution(
+	ctx context.Context, referenceID uuid.UUID,
+) (types.PaperReference, bool, error) {
+	return s.citations.QueueResolution(ctx, referenceID)
 }
 
-func (s *paperService) cleanupUnknownSet(
-	ctx context.Context, documentIDs map[uuid.UUID]struct{},
-) {
-	for documentID := range documentIDs {
-		s.cleanupUnknown(ctx, documentID)
-	}
+func (s *paperService) StartReferenceResolution(
+	ctx context.Context, referenceID uuid.UUID, generation int64,
+) (types.PaperReference, bool, error) {
+	return s.citations.StartResolution(ctx, referenceID, generation)
 }
 
-func unknownPaperDocumentID(rawReference string) uuid.UUID {
-	normalized := types.PaperCitationReferenceKey(rawReference)
-	return uuid.NewSHA1(
-		uuid.NameSpaceURL,
-		[]byte("paperMaster:unknown-paper-reference:"+normalized),
+func (s *paperService) FinishReferenceResolution(
+	ctx context.Context,
+	referenceID uuid.UUID,
+	generation int64,
+	status types.DocumentStageStatus,
+	provider, errorCode, errorMessage string,
+	update *types.PaperReferenceMetadataPatch,
+	resolvedDocumentID *uuid.UUID,
+) (types.PaperReference, bool, error) {
+	return s.citations.FinishResolution(
+		ctx, referenceID, generation, status, provider, errorCode, errorMessage, update, resolvedDocumentID,
 	)
+}
+
+func parsePaperReferenceID(value string) (uuid.UUID, error) {
+	id, err := uuid.Parse(strings.TrimSpace(value))
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("invalid reference id: %w", err)
+	}
+	return id, nil
 }
 
 func validateRawReference(rawReference string) (string, error) {

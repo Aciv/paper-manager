@@ -15,7 +15,7 @@ const (
 	MaxPaperExtractionMarkdownBytes = 32 << 20
 	// MaxPaperExtractionBlocks prevents unbounded protobuf and model input.
 	MaxPaperExtractionBlocks = 50_000
-	// MaxPaperExtractionReferences bounds placeholder creation and follow-up
+	// MaxPaperExtractionReferences bounds citation-row creation and follow-up
 	// catalog calls from one malformed or adversarial extraction response.
 	MaxPaperExtractionReferences = 2_000
 )
@@ -122,8 +122,8 @@ type PaperReferenceCandidate struct {
 	Confidence    float64  `json:"confidence"`
 }
 
-// Validate ensures the structured candidate is safe to apply to an unknown
-// placeholder. Bibliographic fields are intentionally optional.
+// Validate ensures the structured candidate is safe to apply to one citation
+// row. Bibliographic fields are intentionally optional.
 func (candidate PaperReferenceCandidate) Validate() error {
 	if strings.TrimSpace(candidate.RawReference) == "" {
 		return fmt.Errorf("%w: reference candidate raw_reference is required", ErrInvalidPaperExtraction)

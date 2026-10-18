@@ -54,6 +54,10 @@ func (*paperInfoInspectorStub) HasQueuedTaskForStage(context.Context, string, ty
 	return false, nil
 }
 
+func (*paperInfoInspectorStub) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
+	return false, nil
+}
+
 func TestPaperInfoControlRetries(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()
@@ -151,39 +155,6 @@ func TestEnqueueDocumentStageTaskTreatsSameGenerationConflictAsSuccess(t *testin
 	}
 }
 
-func TestPaperInfoControlRejectsUnknownSourceCatalogRetry(t *testing.T) {
-	ctx := context.Background()
-	placeholderID := uuid.New()
-	citingID := uuid.New()
-	documents := newPaperDocumentRepoStub(
-		types.Document{ID: placeholderID, SourceState: types.DocumentSourceMissing},
-		types.Document{ID: citingID, SourceState: types.DocumentSourceAvailable},
-	)
-	papers := newPaperInfoPaperServiceStub()
-	papers.citations[citingID.String()] = []types.PaperCitation{{
-		CitingDocumentID: citingID, CitedDocumentID: placeholderID, RawReference: "A referenced paper.",
-	}}
-	queue := &paperInfoQueueStub{}
-	controls := newPaperInfoServiceForTest(
-		config.Config{},
-		documents,
-		nil,
-		nil,
-		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}},
-		papers,
-		queue,
-		&paperInfoInspectorStub{queued: map[string]bool{}},
-		nil,
-	)
-
-	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); !errors.Is(err, ErrPaperInfoCatalogUnavailable) {
-		t.Fatalf("RetryCatalogResolution() error = %v, want ErrPaperInfoCatalogUnavailable", err)
-	}
-	if len(queue.tasks) != 0 {
-		t.Fatalf("unknown source retry queued tasks = %#v", queue.tasks)
-	}
-}
-
 func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()
@@ -207,35 +178,5 @@ func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
 	if payload.DocumentID != documentID.String() ||
 		payload.Stage != types.DocumentStageReferenceLookup || payload.Generation != 1 {
 		t.Fatalf("reference retry payload = %#v", payload)
-	}
-}
-
-func TestPaperInfoControlRejectsUnknownReferenceAsSourceRetry(t *testing.T) {
-	ctx := context.Background()
-	placeholderID := uuid.New()
-	firstSourceID := uuid.New()
-	secondSourceID := uuid.New()
-	documents := newPaperDocumentRepoStub(
-		types.Document{ID: placeholderID, SourceState: types.DocumentSourceMissing},
-		types.Document{ID: firstSourceID, SourceState: types.DocumentSourceAvailable},
-		types.Document{ID: secondSourceID, SourceState: types.DocumentSourceAvailable},
-	)
-	papers := newPaperInfoPaperServiceStub()
-	papers.citations[firstSourceID.String()] = []types.PaperCitation{{
-		CitingDocumentID: firstSourceID, CitedDocumentID: placeholderID, RawReference: "First reference.",
-	}}
-	papers.citations[secondSourceID.String()] = []types.PaperCitation{{
-		CitingDocumentID: secondSourceID, CitedDocumentID: placeholderID, RawReference: "Second reference.",
-	}}
-	queue := &paperInfoQueueStub{}
-	controls := newPaperInfoServiceForTest(
-		config.Config{}, documents, nil, nil, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}}, papers, queue,
-		&paperInfoInspectorStub{queued: map[string]bool{}}, nil,
-	)
-	if err := controls.RetryCatalogResolution(ctx, placeholderID.String()); !errors.Is(err, ErrPaperInfoCatalogUnavailable) {
-		t.Fatalf("RetryCatalogResolution() error = %v, want ErrPaperInfoCatalogUnavailable", err)
-	}
-	if len(queue.tasks) != 0 {
-		t.Fatalf("unknown source retry queued tasks = %#v", queue.tasks)
 	}
 }

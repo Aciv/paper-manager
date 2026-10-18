@@ -84,11 +84,14 @@ type Config struct {
 	PaperReferenceCatalogMaxPerDocument         int
 	PaperReferenceCatalogConcurrency            int
 	PaperReferenceCatalogPerDocumentConcurrency int
-	RemotePDFDownloadTimeout                    time.Duration
-	RemotePDFMaxRedirects                       int
-	RemotePDFDownloadConcurrency                int
-	RemotePDFHostConcurrency                    int
-	RemotePDFHostSpacing                        time.Duration
+	// PaperReferenceAutoResolve enables external provider lookups immediately
+	// after extraction. Local DOI/title matching always runs regardless.
+	PaperReferenceAutoResolve    bool
+	RemotePDFDownloadTimeout     time.Duration
+	RemotePDFMaxRedirects        int
+	RemotePDFDownloadConcurrency int
+	RemotePDFHostConcurrency     int
+	RemotePDFHostSpacing         time.Duration
 }
 
 func Load() (Config, error) {
@@ -201,6 +204,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	paperReferenceAutoResolve := false
+	if value := strings.TrimSpace(os.Getenv("PAPER_REFERENCE_AUTO_RESOLVE")); value != "" {
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return Config{}, fmt.Errorf("PAPER_REFERENCE_AUTO_RESOLVE must be true or false")
+		}
+		paperReferenceAutoResolve = parsed
+	}
 	remotePDFDownloadTimeout, err := durationEnv("REMOTE_PDF_DOWNLOAD_TIMEOUT", defaultRemotePDFDownloadTimeout)
 	if err != nil {
 		return Config{}, err
@@ -258,6 +269,7 @@ func Load() (Config, error) {
 		PaperReferenceCatalogMaxPerDocument:         paperReferenceCatalogMaxPerDocument,
 		PaperReferenceCatalogConcurrency:            paperReferenceCatalogConcurrency,
 		PaperReferenceCatalogPerDocumentConcurrency: paperReferenceCatalogPerDocumentConcurrency,
+		PaperReferenceAutoResolve:                   paperReferenceAutoResolve,
 		RemotePDFDownloadTimeout:                    remotePDFDownloadTimeout,
 		RemotePDFMaxRedirects:                       remotePDFMaxRedirects,
 		RemotePDFDownloadConcurrency:                remotePDFDownloadConcurrency,

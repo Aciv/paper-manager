@@ -1,6 +1,6 @@
 import { ChangeEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 
-import { api, Document, DocumentBase, PaperCitation, PaperMetadata } from './api';
+import { api, Document, DocumentBase, PaperCitation, PaperMetadata, PaperReference } from './api';
 import { LibrarySelect } from './LibrarySelect';
 import { isDocumentRead, localFileReadingKey, subscribeReadingState, transferReadingRecord } from './readingState';
 import './PaperLibraryPage.css';
@@ -177,6 +177,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [citedBy, setCitedBy] = useState<PaperCitation[]>([]);
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
   const [citationPaperInfo, setCitationPaperInfo] = useState<PaperMetadata>();
+  const [citationReference, setCitationReference] = useState<PaperReference>();
   const [citationPaperInfoLoading, setCitationPaperInfoLoading] = useState(false);
   const [citationPaperInfoError, setCitationPaperInfoError] = useState('');
   const [citationRawReference, setCitationRawReference] = useState('');
@@ -499,21 +500,26 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     return () => { active = false; };
   }, [selected?.id, localMode]);
 
-  function openCitationPaperInfo(documentID: string, rawReference: string) {
+  function openCitationPaperInfo(documentID: string | undefined, rawReference: string, reference?: PaperReference) {
     const requestID = citationInfoRequest.current + 1;
     citationInfoRequest.current = requestID;
     setCitationPaperInfoOpen(true);
     setCitationPaperInfo(undefined);
+    setCitationReference(reference);
     setCitationPaperInfoError('');
-    setCitationPaperInfoLoading(true);
     setCitationRawReference(rawReference.trim());
     setCitationRawReferenceVisible(false);
+    if (!documentID) {
+      setCitationPaperInfoLoading(false);
+      return;
+    }
+    setCitationPaperInfoLoading(true);
     void api.getPaperMetadata(documentID)
       .then((result) => {
         if (citationInfoRequest.current === requestID) setCitationPaperInfo(result.paperMetadata);
       })
       .catch((error) => {
-        if (citationInfoRequest.current !== requestID) return;
+        if (citationInfoRequest.current !== requestID || reference) return;
         setCitationPaperInfoError(error instanceof Error ? error.message : '无法读取引用论文信息。');
       })
       .finally(() => {
@@ -696,8 +702,8 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
         <div className="library-citation-group">
           <h3>本论文引用 <span className="library-count">{citations.length}</span></h3>
           {citations.length === 0 ? <p className="hint">没有已提取的参考文献。</p> : <ol>
-            {citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}>
-              <button className="library-citation-item" type="button" onClick={() => openCitationPaperInfo(citation.citedDocumentId, citation.rawReference)}>
+            {citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}>
+              <button className="library-citation-item" type="button" onClick={() => openCitationPaperInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>
                 <span className="library-citation-index">{index + 1}</span>
                 <span className="library-citation-text">{citationLabel(citation, index)}</span>
               </button>
@@ -707,8 +713,8 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
         <div className="library-citation-group">
           <h3>库内引用本论文 <span className="library-count">{citedBy.length}</span></h3>
           {citedBy.length === 0 ? <p className="hint">暂无库内论文引用它。</p> : <ol>
-            {citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}>
-              <button className="library-citation-item" type="button" onClick={() => openCitationPaperInfo(citation.citingDocumentId, citation.rawReference)}>
+            {citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}>
+              <button className="library-citation-item" type="button" onClick={() => openCitationPaperInfo(citation.citingDocumentId, citation.rawReference || '')}>
                 <span className="library-citation-index">{index + 1}</span>
                 <span className="library-citation-text">{citationLabel(citation, index)}</span>
               </button>
@@ -763,8 +769,16 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
         <header><h2 id="citation-detail-title">引用论文信息</h2><div className="citation-detail-actions"><button type="button" onClick={() => setCitationRawReferenceVisible((visible) => !visible)}>{citationRawReferenceVisible ? '收起引用原文' : '查看引用原文'}</button><button type="button" onClick={() => setCitationPaperInfoOpen(false)}>关闭</button></div></header>
         {citationRawReferenceVisible && <section className="citation-raw-reference"><h3>引用原文</h3><p>{citationRawReference || '未保留引用原文。'}</p></section>}
         {citationPaperInfoLoading && <p className="hint">正在读取提取的论文信息…</p>}
-        {!citationPaperInfoLoading && citationPaperInfoError && <p className="detail-error">读取失败：{citationPaperInfoError}</p>}
-        {!citationPaperInfoLoading && !citationPaperInfoError && citationPaperInfo && <dl>
+        {!citationPaperInfoLoading && citationPaperInfoError && !citationReference && <p className="detail-error">读取失败：{citationPaperInfoError}</p>}
+        {!citationPaperInfoLoading && citationReference && <dl>
+          <dt>标题</dt><dd>{citationReference.title || '未提取标题'}</dd>
+          <dt>作者</dt><dd>{formatAuthors(citationReference.authors)}</dd>
+          <dt>发表信息</dt><dd>{[citationReference.venue, citationReference.publishedAt?.slice(0, 10)].filter(Boolean).join(' · ') || '未提取发表信息'}</dd>
+          <dt>DOI</dt><dd>{citationReference.doi || '未提取 DOI'}</dd>
+          <dt>解析状态</dt><dd>{citationReference.resolutionStatus}{citationReference.citedDocumentId ? ' · 已关联库内文档' : ''}</dd>
+          {citationReference.resolutionErrorMessage && <><dt>解析错误</dt><dd>{citationReference.resolutionErrorMessage}</dd></>}
+        </dl>}
+        {!citationPaperInfoLoading && !citationReference && !citationPaperInfoError && citationPaperInfo && <dl>
           <dt>标题</dt><dd>{citationPaperInfo.title || '未提取标题'}</dd>
           <dt>作者</dt><dd>{formatAuthors(citationPaperInfo.authors)}</dd>
           <dt>发表日期</dt><dd>{citationPaperInfo.publishedAt?.slice(0, 10) || '未提取发表日期'}</dd>

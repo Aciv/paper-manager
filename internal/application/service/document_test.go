@@ -56,6 +56,10 @@ func (*documentTaskInspectorStub) HasQueuedTaskForStage(context.Context, string,
 	return false, nil
 }
 
+func (*documentTaskInspectorStub) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
+	return false, nil
+}
+
 type documentStatusRepoStub struct {
 	document types.Document
 	markdown types.DocumentMarkdown
@@ -162,30 +166,6 @@ func (s *documentStatusRepoStub) Get(_ context.Context, id uuid.UUID) (types.Doc
 	return s.document, nil
 }
 
-func (s *documentStatusRepoStub) EnsureUnknown(
-	_ context.Context, id uuid.UUID,
-) (types.Document, bool, error) {
-	if s.document.ID == id {
-		return s.document, false, nil
-	}
-	s.document = types.Document{
-		ID:          id,
-		StorageKey:  types.UnknownDocumentStorageScheme + id.String(),
-		SourceState: types.DocumentSourceMissing,
-	}
-	return s.document, true, nil
-}
-
-func (s *documentStatusRepoStub) DeleteUnknownIfUnreferenced(
-	_ context.Context, id uuid.UUID,
-) (bool, error) {
-	if s.document.ID != id || s.document.SourceState != types.DocumentSourceMissing {
-		return false, nil
-	}
-	s.deleted = true
-	return true, nil
-}
-
 func (s *documentStatusRepoStub) Search(context.Context, types.DocumentSearch) (types.DocumentPage, error) {
 	return types.DocumentPage{}, nil
 }
@@ -279,17 +259,6 @@ func (s *documentStatusRepoStub) SetDOIIfEmpty(_ context.Context, id uuid.UUID, 
 		return false, nil
 	}
 	s.document.DOI = doi
-	return true, nil
-}
-
-func (s *documentStatusRepoStub) PromoteUnknown(_ context.Context, document types.Document) (bool, error) {
-	s.document = normalizeTestDocumentSource(s.document)
-	if s.document.ID != document.ID || s.document.SourceState != types.DocumentSourceMissing {
-		return false, nil
-	}
-	document.SourceState = types.DocumentSourceAvailable
-	document.SourceState = types.DocumentSourceAvailable
-	s.document = document
 	return true, nil
 }
 
@@ -484,12 +453,13 @@ func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 	}
 }
 
-func TestUnknownDocumentHasNoSourceFile(t *testing.T) {
+func TestNonAvailableDocumentHasNoSourceFile(t *testing.T) {
 	documentID := uuid.New()
 	repo := &documentStatusRepoStub{
 		document: types.Document{
 			ID:          documentID,
-			SourceState: types.DocumentSourceMissing,
+			StorageKey:  "source/" + documentID.String(),
+			SourceState: types.DocumentSourceDeleting,
 		},
 	}
 	svc := NewDocumentService(repo, nil)
@@ -497,29 +467,10 @@ func TestUnknownDocumentHasNoSourceFile(t *testing.T) {
 	reader, _, err := svc.GetDocumentFile(context.Background(), documentID.String())
 	if reader != nil {
 		reader.Close()
-		t.Fatal("GetDocumentFile() returned a reader for an unknown placeholder")
+		t.Fatal("GetDocumentFile() returned a reader for a non-available document")
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("GetDocumentFile() error = %v, want sql.ErrNoRows", err)
-	}
-}
-
-func TestDeleteUnknownDocumentSkipsObjectStorage(t *testing.T) {
-	documentID := uuid.New()
-	repo := &documentStatusRepoStub{
-		document: types.Document{
-			ID:          documentID,
-			StorageKey:  "unknown://" + documentID.String(),
-			SourceState: types.DocumentSourceMissing,
-		},
-	}
-	svc := NewDocumentService(repo, nil)
-
-	if err := svc.DeleteDocument(context.Background(), documentID.String()); err != nil {
-		t.Fatalf("DeleteDocument() error = %v", err)
-	}
-	if !repo.deleted {
-		t.Fatal("unknown placeholder was not deleted from the repository")
 	}
 }
 

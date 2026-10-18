@@ -518,7 +518,7 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 	}
 	// Stop active bibliography runs before the row goes "deleting" (the
 	// paper-info cancel guard refuses that status). Best-effort: scheduler
-	// job keys are per unknown target and would otherwise keep blocking a
+	// job keys are per citation row and would otherwise keep blocking a
 	// re-uploaded paper for up to the 24h TTL.
 	if s.paperInfo != nil {
 		if cancelErr := s.paperInfo.Cancel(ctx, id); cancelErr != nil {
@@ -558,16 +558,14 @@ func (s *documentService) deleteDocumentRelations(
 	ctx context.Context, document *types.Document, markdown *types.DocumentMarkdown,
 	blocks []types.Block, previousSourceState types.DocumentSourceState,
 ) error {
-	if document.SourceState != types.DocumentSourceMissing {
-		if s.storage == nil {
-			return errors.New("file storage is not configured")
-		}
-		if err := s.storage.Delete(ctx, document.StorageKey); err != nil {
-			s.restoreDocumentSourceStateAfterDeleteFailure(ctx, document.ID, previousSourceState)
-			return err
-		}
-		logger.Info(ctx, "document source file deleted", "document_id", document.ID, "storage_key", document.StorageKey)
+	if s.storage == nil {
+		return errors.New("file storage is not configured")
 	}
+	if err := s.storage.Delete(ctx, document.StorageKey); err != nil {
+		s.restoreDocumentSourceStateAfterDeleteFailure(ctx, document.ID, previousSourceState)
+		return err
+	}
+	logger.Info(ctx, "document source file deleted", "document_id", document.ID, "storage_key", document.StorageKey)
 
 	if markdown != nil && markdown.StorageKey != "" && markdown.StorageKey != document.StorageKey {
 		if s.storage == nil {

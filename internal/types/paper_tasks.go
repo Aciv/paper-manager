@@ -41,15 +41,19 @@ type PaperReferenceDispatchPayload struct {
 // catalog lookup. Query inputs are always reloaded from durable storage; title,
 // providers, fallback history, and reference-run ownership never enter Redis.
 //
-// DocumentID is either the current source paper or an independently scheduled
-// citation target; Stage identifies which lookup semantics apply.
+// ReferenceID selects shared-reference resolution; DocumentID is then only the
+// origin citing document for logs/spans. Without ReferenceID, DocumentID is the
+// source paper and Stage identifies its document stage.
 type PaperCatalogResolvePayload struct {
 	// RequestID carries HTTP correlation into asynchronous work.
 	RequestID string `json:"request_id,omitempty"`
-	// DocumentID identifies exactly one document to query.
-	DocumentID string        `json:"document_id"`
-	Stage      DocumentStage `json:"stage,omitempty"`
-	Generation int64         `json:"generation,omitempty"`
+	// DocumentID identifies the source paper, or the origin citing document for
+	// reference work.
+	DocumentID string `json:"document_id,omitempty"`
+	// ReferenceID selects the shared-reference resolution branch.
+	ReferenceID string        `json:"reference_id,omitempty"`
+	Stage       DocumentStage `json:"stage,omitempty"`
+	Generation  int64         `json:"generation,omitempty"`
 }
 
 // Validate verifies that the extraction payload is safe to enqueue.
@@ -105,6 +109,28 @@ func (p PaperCatalogResolvePayload) Validate() error {
 
 // Command converts the JSON-oriented payload into an application command.
 func (p PaperCatalogResolvePayload) Command() (PaperCatalogResolveCommand, error) {
+	if strings.TrimSpace(p.ReferenceID) != "" {
+		referenceID, err := parsePaperTaskUUID("reference_id", p.ReferenceID)
+		if err != nil {
+			return PaperCatalogResolveCommand{}, err
+		}
+		var documentID uuid.UUID
+		if strings.TrimSpace(p.DocumentID) != "" {
+			documentID, err = parsePaperTaskUUID("document_id", p.DocumentID)
+			if err != nil {
+				return PaperCatalogResolveCommand{}, err
+			}
+		}
+		if p.Generation < 1 {
+			return PaperCatalogResolveCommand{}, fmt.Errorf("%w: reference generation must be positive", ErrInvalidPaperInfoTaskPayload)
+		}
+		return PaperCatalogResolveCommand{
+			RequestID:   strings.TrimSpace(p.RequestID),
+			DocumentID:  documentID,
+			ReferenceID: referenceID,
+			Generation:  p.Generation,
+		}, nil
+	}
 	documentID, err := parsePaperTaskUUID("document_id", p.DocumentID)
 	if err != nil {
 		return PaperCatalogResolveCommand{}, err

@@ -19,6 +19,10 @@ func (s *documentQueueProbeStub) HasQueuedTaskForStage(_ context.Context, docume
 	return s.queued[documentID], s.errs[documentID]
 }
 
+func (*documentQueueProbeStub) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
+	return false, nil
+}
+
 func (*documentQueueProbeStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
 	return 0, 0, nil
 }

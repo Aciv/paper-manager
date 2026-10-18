@@ -3,14 +3,13 @@ package types
 import (
 	"errors"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 )
 
 var (
 	// ErrInvalidPaperCitation means one of the relation endpoints is missing.
-	ErrInvalidPaperCitation = errors.New("paper citation requires two document IDs")
+	ErrInvalidPaperCitation = errors.New("paper citation requires a citing document and a reference")
 	// ErrSelfPaperCitation prevents a document from citing itself.
 	ErrSelfPaperCitation = errors.New("paper citation cannot reference the same document")
 )
@@ -30,30 +29,25 @@ func (origin PaperCitationOrigin) IsValid() bool {
 	return origin == PaperCitationOriginManual || origin == PaperCitationOriginExtraction
 }
 
-// PaperCitation is a directional citation between two document records. The
-// cited record may be an unknown bibliographic placeholder until catalog
-// resolution matches it to a stored paper. RawReference preserves the exact
-// extraction text that produced the edge.
+// PaperCitation is one directional bibliography entry owned by a stored
+// document. The embedded PaperReference carries the bibliographic metadata and
+// resolution state; CitedDocumentID is the single resolved target and stays nil
+// until a local or catalog match is found.
 type PaperCitation struct {
-	// source document
-	CitingDocumentID uuid.UUID `gorm:"column:citing_document_id;type:uuid;primaryKey" json:"citingDocumentId"`
-	// cite document
-	CitedDocumentID uuid.UUID `gorm:"column:cited_document_id;type:uuid;primaryKey" json:"citedDocumentId"`
-	RawReference    string    `gorm:"column:raw_reference;type:text;not null" json:"rawReference"`
+	PaperReference `gorm:"embedded"`
 	// Origin is internal merge state and is deliberately not exposed by the
 	// public citation API.
-	Origin    PaperCitationOrigin `gorm:"column:origin;type:text;not null;default:'manual'" json:"-"`
-	CreatedAt time.Time           `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
+	Origin PaperCitationOrigin `gorm:"column:origin;type:text;not null;default:'manual'" json:"-"`
 }
 
 // PaperCitationInput is a paper-domain write request. A nil CitedDocumentID
-// means the extraction reference has not matched a stored paper yet, so
-// PaperService must create or reuse an unknown placeholder.
+// means the reference has not matched a stored paper yet; PaperService creates
+// a reference row owned by this citing paper.
 type PaperCitationInput struct {
 	CitedDocumentID *uuid.UUID `json:"citedDocumentId,omitempty"`
 	RawReference    string     `json:"rawReference"`
-	// Candidate is internal extraction evidence for a newly created/reused
-	// unknown placeholder. It is not accepted from the public citation API.
+	// Candidate is internal extraction evidence for a reference row. It is not
+	// accepted from the public citation API.
 	Candidate *PaperReferenceCandidate `json:"-"`
 }
 
@@ -71,10 +65,10 @@ func (PaperCitation) TableName() string { return "paper_citations" }
 // ValidateEndpoints rejects incomplete and self-referential citation endpoints.
 // Read and delete operations do not need raw extraction evidence.
 func (citation PaperCitation) ValidateEndpoints() error {
-	if citation.CitingDocumentID == uuid.Nil || citation.CitedDocumentID == uuid.Nil {
+	if citation.CitingDocumentID == uuid.Nil || citation.ReferenceID == uuid.Nil {
 		return ErrInvalidPaperCitation
 	}
-	if citation.CitingDocumentID == citation.CitedDocumentID {
+	if citation.CitedDocumentID != nil && *citation.CitedDocumentID == citation.CitingDocumentID {
 		return ErrSelfPaperCitation
 	}
 	return nil
@@ -86,8 +80,8 @@ func (citation PaperCitation) Validate() error {
 	if err := citation.ValidateEndpoints(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(citation.RawReference) == "" {
-		return ErrInvalidPaperCitation
+	if err := citation.PaperReference.Validate(); err != nil {
+		return err
 	}
 	if citation.Origin != "" && !citation.Origin.IsValid() {
 		return ErrInvalidPaperCitation

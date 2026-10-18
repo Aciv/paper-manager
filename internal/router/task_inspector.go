@@ -56,9 +56,10 @@ func NewTaskInspector() interfaces.TaskInspector {
 // so a single struct covers Document / ImageMultimodal / PostProcess /
 // Question / Summary / Extract / Manual.
 type DocumentIDProbe struct {
-	DocumentID string              `json:"document_id,omitempty"`
-	Stage      types.DocumentStage `json:"stage,omitempty"`
-	Generation int64               `json:"generation,omitempty"`
+	DocumentID  string              `json:"document_id,omitempty"`
+	ReferenceID string              `json:"reference_id,omitempty"`
+	Stage       types.DocumentStage `json:"stage,omitempty"`
+	Generation  int64               `json:"generation,omitempty"`
 }
 
 // queuesScanned is the fixed set of queue names this codebase enqueues
@@ -259,6 +260,44 @@ func (a *asynqTaskInspector) HasQueuedTaskTypeForDocument(
 				lister.list,
 			) {
 				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+// HasQueuedTaskForReference reports whether the exact reference resolution
+// task is pending, scheduled, retrying, or active.
+func (a *asynqTaskInspector) HasQueuedTaskForReference(ctx context.Context, referenceID string, generation int64) (bool, error) {
+	if a == nil || a.inspector == nil || referenceID == "" || generation < 1 {
+		return false, nil
+	}
+	listers := []func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error){
+		a.inspector.ListPendingTasks, a.inspector.ListScheduledTasks, a.inspector.ListRetryTasks, a.inspector.ListActiveTasks,
+	}
+	for _, queue := range queuesScanned {
+		for _, list := range listers {
+			for page := 1; ; page++ {
+				tasks, err := list(queue, asynq.PageSize(listPageSize), asynq.Page(page))
+				if err != nil {
+					if errors.Is(err, asynq.ErrQueueNotFound) {
+						break
+					}
+					return false, fmt.Errorf("inspect reference tasks in %s: %w", queue, err)
+				}
+				for _, task := range tasks {
+					if task.Type != types.TypePaperCatalogResolve {
+						continue
+					}
+					var probe DocumentIDProbe
+					if json.Unmarshal(task.Payload, &probe) == nil &&
+						probe.ReferenceID == referenceID && probe.Generation == generation {
+						return true, nil
+					}
+				}
+				if len(tasks) < listPageSize {
+					break
+				}
 			}
 		}
 	}
@@ -517,5 +556,9 @@ func (noopTaskInspector) HasQueuedTaskTypeForDocument(
 }
 
 func (noopTaskInspector) HasQueuedTaskForStage(context.Context, string, types.DocumentStage, int64) (bool, error) {
+	return false, nil
+}
+
+func (noopTaskInspector) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
 	return false, nil
 }

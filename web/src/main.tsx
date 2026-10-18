@@ -1,6 +1,6 @@
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, ProcessingSpan, ProcessingSpanStatus } from './api';
+import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, PaperReference, ProcessingSpan, ProcessingSpanStatus } from './api';
 import './PaperInfo.css';
 import '@fontsource-variable/manrope';
 import '@fontsource-variable/noto-sans-sc';
@@ -42,7 +42,7 @@ function formatDate(value: string) {
 }
 
 const DOCUMENT_STATUS_LABELS: Record<string, string> = {
-  missing: '未解析引用', available: '可用', uploaded: '已上传', queued: '排队中',
+  available: '可用', uploaded: '已上传', queued: '排队中',
   processing: '处理中', ready: '就绪', failed: '失败', cancelled: '已取消',
   deleting: '删除中', merged: '已合并',
 };
@@ -51,11 +51,23 @@ function statusLabel(value: string): string {
   return DOCUMENT_STATUS_LABELS[value] ?? value;
 }
 
+function citationReferenceStatusLabel(value: DocumentStageStatus): string {
+  const labels: Record<DocumentStageStatus, string> = {
+    not_started: '未解析',
+    queued: '排队中',
+    running: '解析中',
+    succeeded: '已解析',
+    failed: '解析失败',
+    cancelled: '已取消',
+    skipped: '已跳过',
+  };
+  return labels[value] ?? value;
+}
+
 function documentLabel(document: Document, paper?: PaperMetadata) {
   if (paper?.title) return paper.title;
   if (document.originalFilename) return document.originalFilename;
-  // Unresolved citation placeholders carry neither a title nor a filename.
-  return `${document.sourceState === 'missing' ? '未解析引用' : '未命名文档'} · ${document.id.slice(0, 8)}`;
+  return `未命名文档 · ${document.id.slice(0, 8)}`;
 }
 
 function parseTags(value: string) {
@@ -132,6 +144,7 @@ function App() {
   const [citedBy, setCitedBy] = useState<PaperCitation[]>([]);
   const [citationSourceInfoOpen, setCitationSourceInfoOpen] = useState(false);
   const [citationSourceMetadata, setCitationSourceMetadata] = useState<PaperMetadata>();
+  const [citationSourceReference, setCitationSourceReference] = useState<PaperReference>();
   const [citationSourceDocument, setCitationSourceDocument] = useState<Document>();
   const [citationSourceRawReference, setCitationSourceRawReference] = useState('');
   const [citationSourceRawVisible, setCitationSourceRawVisible] = useState(false);
@@ -183,16 +196,21 @@ function App() {
 	setSelected((prev) => (prev ? { ...prev, sourceState: view.sourceState } : prev));
   }
 
-  function openCitationSourceInfo(documentID: string, rawReference: string) {
+  function openCitationSourceInfo(documentID: string | undefined, rawReference: string, reference?: PaperReference) {
     const requestID = citationSourceRequest.current + 1;
     citationSourceRequest.current = requestID;
     setCitationSourceInfoOpen(true);
     setCitationSourceMetadata(undefined);
+    setCitationSourceReference(reference);
     setCitationSourceDocument(undefined);
     setCitationSourceError('');
-    setCitationSourceLoading(true);
     setCitationSourceRawReference(rawReference.trim());
     setCitationSourceRawVisible(false);
+    if (!documentID) {
+      setCitationSourceLoading(false);
+      return;
+    }
+    setCitationSourceLoading(true);
 
     void Promise.allSettled([
       api.getPaperMetadata(documentID),
@@ -201,7 +219,7 @@ function App() {
       if (citationSourceRequest.current !== requestID) return;
       if (metadataResult.status === 'fulfilled') {
         setCitationSourceMetadata(metadataResult.value.paperMetadata);
-      } else {
+      } else if (!reference) {
         setCitationSourceError(metadataResult.reason instanceof Error ? metadataResult.reason.message : '无法读取引用的提取信息。');
       }
       if (documentResult.status === 'fulfilled') {
@@ -628,13 +646,13 @@ function App() {
     }
   }
 
-  async function downloadReferencePDF(documentID: string) {
+  async function downloadReferencePDF(referenceID: string) {
     setBusy(true);
     try {
-      await api.downloadReferencePDF(documentID);
-      setMessage('已提交该引用文献的 PDF 下载。');
+      await api.downloadReferencePDF(referenceID);
+      setMessage('已提交该引用的 PDF 下载。');
     } catch (error) {
-      setMessage(error instanceof Error ? `引用文献下载未提交：${error.message}` : '引用文献下载未提交。');
+      setMessage(error instanceof Error ? `引用 PDF 下载未提交：${error.message}` : '引用 PDF 下载未提交。');
     } finally {
       setBusy(false);
     }
@@ -909,7 +927,6 @@ function App() {
                 void load({ page: 1, sourceState }, baseFilterID);
               }}>
               <option value="">全部源状态</option>
-              <option value="missing">missing</option>
               <option value="available">available</option>
               <option value="deleting">deleting</option>
               <option value="merged">merged</option>
@@ -996,8 +1013,8 @@ function App() {
 			{detailMenu === 'citations' && <section className="citation-panel">
 			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>
 			  <div className="citation-columns">
-				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference)}>查看第 {index + 1} 条的 Python 提取信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.citedDocumentId)} disabled={busy}>下载 PDF</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
-				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.citedDocumentId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference)}>查看第 {index + 1} 条的已落库信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
+				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>查看第 {index + 1} 条的引用信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId) || !citation.sourceUrl}>下载 PDF</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
+				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference || '')}>查看第 {index + 1} 条的已落库信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 			  </div>
 			</section>}
           </div>
@@ -1005,9 +1022,19 @@ function App() {
 			  <section className="citation-source-dialog" role="dialog" aria-modal="true" aria-labelledby="citation-source-title" onMouseDown={(event) => event.stopPropagation()}>
 				<header><div><p className="eyebrow">Citation extraction</p><h4 id="citation-source-title">Python 提取的引用源信息</h4></div><div className="detail-actions"><button type="button" onClick={() => setCitationSourceRawVisible((visible) => !visible)}>{citationSourceRawVisible ? '收起引用原文' : '查看引用原文'}</button><button type="button" onClick={() => setCitationSourceInfoOpen(false)}>关闭</button></div></header>
 				{citationSourceRawVisible && <section className="citation-source-raw"><h5>引用原文</h5><p>{citationSourceRawReference || '未保留引用原文。'}</p></section>}
-				{citationSourceLoading && <p className="hint">正在读取 Python 提取后已落库的引用信息…</p>}
-				{!citationSourceLoading && citationSourceError && <p className="detail-error">读取失败：{citationSourceError}</p>}
-				{!citationSourceLoading && !citationSourceError && citationSourceMetadata && <><p className="hint">字段初始由 Python 提取写入；若后续论文库查询补全过字段，当前来源会在下方标明。</p><dl>
+				{citationSourceLoading && <p className="hint">正在读取引用信息…</p>}
+				{!citationSourceLoading && citationSourceError && !citationSourceReference && <p className="detail-error">读取失败：{citationSourceError}</p>}
+				{!citationSourceLoading && citationSourceReference && <><p className="hint">该参考文献属于当前论文；解析状态：{citationReferenceStatusLabel(citationSourceReference.resolutionStatus)}。</p><dl>
+				  <dt>当前来源</dt><dd>{citationSourceReference.metadataSource}</dd>
+				  <dt>标题</dt><dd>{citationSourceReference.title || '未提取标题'}</dd>
+				  <dt>作者</dt><dd>{citationSourceReference.authors.map((author) => author.name).filter(Boolean).join('、') || '未提取作者'}</dd>
+				  <dt>发表信息</dt><dd>{[citationSourceReference.venue, citationSourceReference.publishedAt?.slice(0, 10), citationSourceReference.volume, citationSourceReference.issue, citationSourceReference.pages].filter(Boolean).join(' · ') || '未提取发表信息'}</dd>
+				  <dt>DOI</dt><dd>{citationSourceReference.doi || citationSourceDocument?.doi || '未提取 DOI'}</dd>
+				  <dt>来源</dt><dd>{citationSourceReference.sourceUrl ? <a href={citationSourceReference.sourceUrl} target="_blank" rel="noreferrer">打开来源</a> : '未提取来源'}</dd>
+				  {citationSourceReference.citedDocumentId && <><dt>已关联文档</dt><dd><code>{citationSourceReference.citedDocumentId}</code></dd></>}
+				  {citationSourceReference.resolutionErrorMessage && <><dt>解析错误</dt><dd>{citationSourceReference.resolutionErrorMessage}</dd></>}
+				</dl></>}
+				{!citationSourceLoading && !citationSourceReference && !citationSourceError && citationSourceMetadata && <><p className="hint">字段初始由 Python 提取写入；若后续论文库查询补全过字段，当前来源会在下方标明。</p><dl>
 				  <dt>当前来源</dt><dd>{citationSourceMetadata.metadataSource}</dd>
 				  <dt>标题</dt><dd>{citationSourceMetadata.title || '未提取标题'}</dd>
 				  <dt>作者</dt><dd>{citationSourceMetadata.authors.map((author) => author.name).filter(Boolean).join('、') || '未提取作者'}</dd>

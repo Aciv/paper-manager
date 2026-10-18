@@ -9,12 +9,9 @@ import (
 
 // ErrDuplicateDOI is returned when a non-empty DOI already belongs to a document.
 var (
-	ErrDuplicateDOI            = errors.New("document with this DOI already exists")
-	ErrDuplicateFileHash       = errors.New("document with this file hash already exists")
-	ErrDocumentNotProcessing   = errors.New("document is no longer processing")
-	ErrUnknownDocumentConflict = errors.New(
-		"unknown placeholder ID belongs to a source document",
-	)
+	ErrDuplicateDOI          = errors.New("document with this DOI already exists")
+	ErrDuplicateFileHash     = errors.New("document with this file hash already exists")
+	ErrDocumentNotProcessing = errors.New("document is no longer processing")
 )
 
 // DocumentSourceState describes only whether a durable source object exists.
@@ -22,7 +19,6 @@ var (
 type DocumentSourceState string
 
 const (
-	DocumentSourceMissing   DocumentSourceState = "missing"
 	DocumentSourceAvailable DocumentSourceState = "available"
 	DocumentSourceDeleting  DocumentSourceState = "deleting"
 	DocumentSourceMerged    DocumentSourceState = "merged"
@@ -30,21 +26,12 @@ const (
 
 func (state DocumentSourceState) Valid() bool {
 	switch state {
-	case DocumentSourceMissing, DocumentSourceAvailable, DocumentSourceDeleting, DocumentSourceMerged:
+	case DocumentSourceAvailable, DocumentSourceDeleting, DocumentSourceMerged:
 		return true
 	default:
 		return false
 	}
 }
-
-const (
-	// UnknownDocumentContentType distinguishes bibliographic placeholders from
-	// uploaded source files.
-	UnknownDocumentContentType = "application/x-paper-reference"
-	// UnknownDocumentStorageScheme provides a collision-free internal key for a
-	// placeholder that deliberately has no object in FileStorage.
-	UnknownDocumentStorageScheme = "unknown://"
-)
 
 // Document maps to the documents table.
 type Document struct {
@@ -93,8 +80,11 @@ type DocumentSearch struct {
 	DOI         string
 	FileSHA256  string
 	SourceState DocumentSourceState
-	// ExcludeUnknown omits bibliography placeholders that do not have a
-	// locally stored source file. It is primarily used by reading views.
+	// ExcludeIDs removes known documents from a lookup. Reference matching uses
+	// it to avoid linking a reference to a document that cites it.
+	ExcludeIDs []uuid.UUID
+	// ExcludeUnknown restricts results to documents whose source file is
+	// available. It is primarily used by reading views.
 	ExcludeUnknown bool
 	Page           int
 	PageSize       int

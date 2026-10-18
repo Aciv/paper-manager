@@ -130,7 +130,7 @@ Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，
 
 服务通过 DI 容器按环境变量选择基础设施：`DB_DRIVER=postgres`（默认）、`DATABASE_URL`、`FILE_STORAGE_DRIVER=local`（默认）、`UPLOAD_DIR`，以及可选的 `FILE_MAX_UPLOAD_SIZE`（字节数）。数据库启动时会执行嵌入式的版本化 PostgreSQL 迁移，SQL 文件位于 `migrations/postgres/`；生产环境若由外部迁移流程管理，可设置 `AUTO_MIGRATE=false`。当前只实现 PostgreSQL 与本地文件存储；选择其他驱动会在启动时返回明确错误。
 
-远程 PDF 可通过 `POST /api/document/import-url` 导入，请求体为 `{"url":"https://arxiv.org/abs/2401.01234","doi":"可选","filename":"可选.pdf"}`。服务会区分论文落地页和实际 PDF URL，逐跳执行 SSRF 校验并流式写入；普通出版社落地页不会被猜测或抓取，当前内建转换仅支持 arXiv 和显式 `.pdf` URL。参考文献批量获取通过 `POST /api/paper/:documentID/references/download` 启动，通过对应的 `/cancel` 路由取消。
+远程 PDF 可通过 `POST /api/document/import-url` 导入，请求体为 `{"url":"https://arxiv.org/abs/2401.01234","doi":"可选","filename":"可选.pdf"}`。服务会区分论文落地页和实际 PDF URL，逐跳执行 SSRF 校验并流式写入；普通出版社落地页不会被猜测或抓取，当前内建转换仅支持 arXiv 和显式 `.pdf` URL。引用 PDF 通过 `POST /api/references/{referenceID}/download-pdf` 按单条引用显式获取。
 
 生产限流、重试、队列、状态排查和端到端测试方式见
 [`OPERATIONS.md`](OPERATIONS.md)。
@@ -154,10 +154,10 @@ Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，
 - `PATCH /api/document/{id}`：仅更新 `originalFilename`、`doi`。旧的请求字段 `filename` 暂作为输入别名兼容。
 - `GET /api/paper/{documentID}`、`PATCH /api/paper/{documentID}`：获取或更新独立的论文书目信息；标签通过 `paperMetadata.tags` 数组维护。
 - `GET /api/paper/search`：支持 `title`、`author`（作者姓名模糊匹配）、重复的 `tag` 参数、`tagMode=all|any` 及 `page`；标签查询使用 PostgreSQL JSONB GIN 索引。
-- `GET|POST|PUT /api/paper/{documentID}/citations`、`DELETE /api/paper/{documentID}/citations/{citedDocumentID}`：读取、新增、整体替换或删除本论文的引用关系；`GET /api/paper/{documentID}/cited-by` 查询反向引用，`POST /api/paper/{documentID}/citations/resolve` 可将一个原始引用显式指向库内论文。
+- `GET|POST|PUT /api/paper/{documentID}/citations`、`DELETE /api/paper/{documentID}/citations/{referenceID}`：读取、新增、整体替换或删除本论文的引用关系；`GET /api/paper/{documentID}/cited-by` 查询反向引用，`POST /api/paper/{documentID}/citations/resolve` 可将一个原始引用显式指向库内论文，`POST /api/references/{referenceID}/resolve` 可关联单条引用。
 - `GET /api/document/{id}/processing`：返回文档、论文信息、引用查询与引用 PDF 获取的持久化 span，以及紧凑引用进度；它是唯一处理状态读取接口。
 - `POST /api/paper/{documentID}/info/{extraction|catalog|reference}/retry`：分别重试元数据提取、源论文库查询或引用论文查询，不会隐式重跑其他阶段。
-- `POST /api/paper/{documentID}/references/download` 与对应的 `/cancel`：启动或取消独立的引用 PDF 获取批次；不会修改源文档生命周期状态。
+- `POST /api/references/{referenceID}/resolve`：把单条引用关联到已有文档；`POST /api/references/{referenceID}/download-pdf`：为该引用显式发起 PDF 获取。
 - `DELETE /api/document/{id}`：删除文档元数据及其已存储的原始文件。
 - `POST /api/document/bases`、`GET /api/document/bases`、`GET|PATCH|DELETE /api/document/bases/{baseID}`：管理文档 Base。
 - `PUT|DELETE /api/document/bases/{baseID}/documents/{documentID}`：加入或移除 Base 成员；`GET /api/document/bases/{baseID}/documents?page=1` 分页列出成员。
@@ -166,8 +166,8 @@ Python worker 位于 [`python/`](python/README.md)。启动它和 Redis 后，PD
 
 ## 论文信息异步流程
 
-正常上传只提交一个 `document:process`。该 worker 按固定顺序直接执行识别、元数据提取和源论文查询，在每个外部阶段之间重新检查取消/删除状态；完成源论文查询后只投递一个独立的引用 dispatcher。各操作保留独立重试入口，但不会自行推进下一阶段。解析成功后文档即可为 `ready`，后续引用查询失败不会把文档改回 `failed`。
+上传后文档独立推进 `markdown` → `metadata_extraction` → `source_lookup` / `reference_lookup` 四个阶段，每个阶段有自己的 generation fence、取消和重试入口。解析成功后文档即可为 `ready`，后续引用查询失败不会把文档改回 `failed`。`ExtractMetadata` 写入引用后会立即按 DOI/title 查询本地 available 文档；命中时直接填上 `cited_document_id`，不发起外部请求。
 
-引用 dispatcher 分页读取并去重未知引用，向全局 `PaperReferenceScheduler` 注册单目标任务。每个目标在执行前按权重轮转选择一个 provider；无匹配或可恢复错误会转向尚未尝试的 provider。默认权重固定为 arXiv 45、OpenAlex 35、Semantic Scholar 10、Crossref 10。`PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT`、全局/单文档并发租约以及 provider 的 timeout、spacing、concurrency 控制负载。Redis 存在时这些状态跨 worker 共享；Lite 模式只在当前进程有效。
+每条引用是 `paper_citations` 中的一行，归属于引用它的论文；同一篇被引论文出现在两篇论文中时是两条独立记录，各自解析、各自指向相同的 `cited_document_id`。引用 dispatcher 分页读取本论文尚未解析的行，向全局 `PaperReferenceScheduler` 注册单目标任务。每个目标在执行前按权重轮转选择一个 provider；无匹配或可恢复错误会转向尚未尝试的 provider。默认权重固定为 arXiv 45、OpenAlex 35、Semantic Scholar 10、Crossref 10。`PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT`、全局/单文档并发租约以及 provider 的 timeout、spacing、concurrency 控制负载。Redis 存在时这些状态跨 worker 共享；Lite 模式只在当前进程有效。
 
-引用 PDF 获取是另一个显式启动的两级流程：dispatcher 最多选择 `REMOTE_PDF_DISPATCH_LIMIT` 个已有 DOI 或可信源 URL 的未知引用，再向隔离的 `download` 队列投递单文档任务。每个任务重新解析最新 URL、流式下载、按 DOI/SHA256 去重并提交正常文档处理。`FILE_MAX_UPLOAD_SIZE` 同时是远程响应字节上限。任务重试遵循 `Retry-After` 或 Asynq 默认指数退避；取消只影响尚未完成的该批获取。
+引用 PDF 获取由用户对单条引用显式触发：`POST /api/references/{referenceID}/download-pdf` 向隔离的 `download` 队列投递任务。任务重新解析最新 URL、流式下载、按 DOI/SHA256 去重，成功后才创建文档并关联该引用。`FILE_MAX_UPLOAD_SIZE` 同时是远程响应字节上限。任务重试遵循 `Retry-After` 或 Asynq 默认指数退避。

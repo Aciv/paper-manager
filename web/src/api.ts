@@ -1,4 +1,4 @@
-export type DocumentSourceState = 'missing' | 'available' | 'deleting' | 'merged';
+export type DocumentSourceState = 'available' | 'deleting' | 'merged';
 export type DocumentStageStatus = 'not_started' | 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'skipped';
 
 export type Document = {
@@ -33,12 +33,33 @@ export type PaperMetadata = {
 
 export type PaperMetadataUpdate = Partial<Omit<PaperMetadata, 'documentId' | 'metadataSource'>>;
 
-export type PaperCitation = {
+export type PaperReference = {
+  referenceId: string;
   citingDocumentId: string;
-  citedDocumentId: string;
-  rawReference: string;
+  doi?: string;
+  title?: string;
+  authors: PaperAuthor[];
+  venue?: string;
+  publishedAt?: string;
+  volume?: string;
+  issue?: string;
+  pages?: string;
+  sourceUrl?: string;
+  metadataSource: 'unknown' | 'extraction' | 'catalog' | 'manual';
+  rawReference?: string;
+  resolutionStatus: DocumentStageStatus;
+  resolutionGeneration: number;
+  resolutionProvider?: string;
+  resolutionErrorCode?: string;
+  resolutionErrorMessage?: string;
+  citedDocumentId?: string;
   createdAt: string;
+  updatedAt: string;
 };
+
+// A citation is one bibliography row owned by its citing document. The API
+// exposes the reference fields directly instead of nesting a second object.
+export type PaperCitation = PaperReference;
 
 export type ProcessingSpanStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type ProcessingSpan = {
@@ -163,6 +184,7 @@ export type DocumentSelectionResult = {
 
 const baseUrl = (import.meta.env.VITE_API_URL ?? '/api/document').replace(/\/$/, '');
 const paperBaseUrl = baseUrl.endsWith('/document') ? `${baseUrl.slice(0, -'/document'.length)}/paper` : '/api/paper';
+const referenceBaseUrl = baseUrl.endsWith('/document') ? `${baseUrl.slice(0, -'/document'.length)}/references` : '/api/references';
 
 async function request<T>(pathname: string, options?: RequestInit): Promise<T> {
   return requestFrom<T>(baseUrl, pathname, options);
@@ -218,9 +240,19 @@ export const api = {
     '/batch-import-url',
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ urls: payload }) },
   ),
-  downloadReferencePDF: (id: string): Promise<void> => request<void>(
-    `/${encodeURIComponent(id)}/download-reference-pdf`,
+  downloadReferencePDF: (referenceID: string): Promise<{ accepted: boolean }> => requestFrom<{ accepted: boolean }>(
+    referenceBaseUrl,
+    `/${encodeURIComponent(referenceID)}/download-pdf`,
     { method: 'POST' },
+  ),
+  resolvePaperReference: (referenceID: string, resolvedDocumentID: string): Promise<{ reference: PaperReference }> => requestFrom<{ reference: PaperReference }>(
+    referenceBaseUrl,
+    `/${encodeURIComponent(referenceID)}/resolve`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ resolvedDocumentId: resolvedDocumentID }),
+    },
   ),
   updateDocument: (id: string, payload: { originalFilename?: string; doi?: string }): Promise<{ document: Document }> => request<{ document: Document }>(
     `/${encodeURIComponent(id)}`,

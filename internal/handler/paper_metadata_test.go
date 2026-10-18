@@ -9,12 +9,15 @@ import (
 	"testing"
 
 	"paperMaster/internal/types"
+	"paperMaster/internal/types/interfaces"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
 type paperHandlerServiceStub struct {
+	// Reference-specific operations are not exercised by these handler tests.
+	interfaces.PaperService
 	metadata   types.PaperMetadata
 	lastUpdate types.PaperMetadataUpdate
 	lastSearch types.PaperSearch
@@ -180,9 +183,15 @@ func TestPaperCitationHandlerListsForwardAndReverseEdges(t *testing.T) {
 	documentID := uuid.New()
 	otherID := uuid.New()
 	service := &paperHandlerServiceStub{citations: []types.PaperCitation{{
-		CitingDocumentID: documentID,
-		CitedDocumentID:  otherID,
-		RawReference:     "A reference",
+		PaperReference: types.PaperReference{
+			ReferenceID:      uuid.New(),
+			CitingDocumentID: documentID,
+			CitedDocumentID:  &otherID,
+			RawReference:     "A reference",
+			Authors:          []types.PaperAuthor{},
+			ResolutionStatus: types.DocumentStageSucceeded,
+			MetadataSource:   types.PaperMetadataSourceExtraction,
+		},
 	}}}
 	handler := NewPaperCitationHandler(service)
 	engine := gin.New()

@@ -7,9 +7,9 @@ import (
 	"github.com/google/uuid"
 )
 
-// PaperReferenceJob is the scheduler-owned state for resolving one unknown
-// cited-paper placeholder. It deliberately lives outside Asynq payloads so a
-// queue message can remain a stable, single-document command.
+// PaperReferenceJob is the scheduler-owned state for resolving one citation
+// row. It deliberately lives outside Asynq payloads so a queue message can
+// remain a stable, single-document command.
 type PaperReferenceJob struct {
 	TargetDocumentID uuid.UUID
 	// Generation ties scheduler deduplication to the durable source_lookup

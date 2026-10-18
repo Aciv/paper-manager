@@ -70,64 +70,6 @@ func (r *documentRepository) Get(ctx context.Context, id uuid.UUID) (types.Docum
 	return document, err
 }
 
-func (r *documentRepository) EnsureUnknown(
-	ctx context.Context, id uuid.UUID,
-) (types.Document, bool, error) {
-	if id == uuid.Nil {
-		return types.Document{}, false, errors.New("unknown document id is required")
-	}
-	placeholder := types.Document{
-		ID:               id,
-		OriginalFilename: "",
-		ContentType:      types.UnknownDocumentContentType,
-		SizeBytes:        0,
-		DOI:              "",
-		StorageKey:       types.UnknownDocumentStorageScheme + id.String(),
-		SourceState:      types.DocumentSourceMissing,
-	}
-	result := r.db.WithContext(ctx).Clauses(clause.OnConflict{DoNothing: true}).Create(&placeholder)
-	if result.Error != nil {
-		logger.Error(ctx, "ensure unknown document failed", "document_id", id, "error", result.Error)
-		return types.Document{}, false, result.Error
-	}
-	document, err := r.Get(ctx, id)
-	if err != nil {
-		return types.Document{}, false, err
-	}
-	if document.SourceState != types.DocumentSourceMissing {
-		return types.Document{}, false, fmt.Errorf("%w: %s", types.ErrUnknownDocumentConflict, id)
-	}
-	created := result.RowsAffected > 0
-	if created {
-		logger.Info(ctx, "unknown document created", "document_id", id)
-	}
-	return document, created, nil
-}
-
-func (r *documentRepository) DeleteUnknownIfUnreferenced(
-	ctx context.Context, id uuid.UUID,
-) (bool, error) {
-	result := r.db.WithContext(ctx).
-		Where(
-			`id = ? AND source_state = ? AND NOT EXISTS (
-				SELECT 1 FROM paper_citations
-				WHERE citing_document_id = documents.id OR cited_document_id = documents.id
-			)`,
-			id,
-			types.DocumentSourceMissing,
-		).
-		Delete(&types.Document{})
-	if result.Error != nil {
-		logger.Error(ctx, "delete unreferenced unknown document failed", "document_id", id, "error", result.Error)
-		return false, result.Error
-	}
-	deleted := result.RowsAffected > 0
-	if deleted {
-		logger.Info(ctx, "unreferenced unknown document deleted", "document_id", id)
-	}
-	return deleted, nil
-}
-
 func (r *documentRepository) Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
 	page := search.Page
 	if page < 1 {
@@ -154,6 +96,9 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	if search.SourceState != "" {
 		query = query.Where("documents.source_state = ?", search.SourceState)
 	}
+	if len(search.ExcludeIDs) > 0 {
+		query = query.Where("documents.id NOT IN ?", search.ExcludeIDs)
+	}
 	if search.ExcludeUnknown {
 		query = query.Where("documents.source_state = ?", types.DocumentSourceAvailable)
 	}
@@ -173,16 +118,15 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 func (r *documentRepository) CitationTargetProgress(ctx context.Context, citingDocumentID uuid.UUID) (types.PaperReferenceProgress, error) {
 	var progress types.PaperReferenceProgress
 	err := r.db.WithContext(ctx).Raw(`SELECT
-		COUNT(*) FILTER (WHERE d.source_state = 'missing' AND d.source_lookup_status IN ('not_started','queued')) AS queued,
-		COUNT(*) FILTER (WHERE d.source_state = 'missing' AND d.source_lookup_status = 'running') AS running,
-		COUNT(*) FILTER (WHERE d.source_state IN ('available','merged') OR (d.source_state = 'missing' AND d.source_lookup_status IN ('succeeded','skipped'))) AS completed,
-		COUNT(*) FILTER (WHERE d.source_state = 'missing' AND d.source_lookup_status = 'failed') AS failed,
-		COUNT(*) FILTER (WHERE d.source_state = 'deleting' OR (d.source_state = 'missing' AND d.source_lookup_status = 'cancelled')) AS cancelled
-	FROM paper_citations c
-	JOIN documents d ON d.id = c.cited_document_id
-	WHERE c.citing_document_id = ?`, citingDocumentID).Scan(&progress).Error
+		COUNT(*) FILTER (WHERE resolution_status IN ('not_started','queued')) AS queued,
+		COUNT(*) FILTER (WHERE resolution_status = 'running') AS running,
+		COUNT(*) FILTER (WHERE resolution_status IN ('succeeded','skipped') OR cited_document_id IS NOT NULL) AS completed,
+		COUNT(*) FILTER (WHERE resolution_status = 'failed') AS failed,
+		COUNT(*) FILTER (WHERE resolution_status = 'cancelled') AS cancelled
+	FROM paper_citations
+	WHERE citing_document_id = ?`, citingDocumentID).Scan(&progress).Error
 	if err != nil {
-		logger.Error(ctx, "load citation target progress failed", "document_id", citingDocumentID, "error", err)
+		logger.Error(ctx, "load reference resolution progress failed", "document_id", citingDocumentID, "error", err)
 	}
 	return progress, err
 }
@@ -282,6 +226,19 @@ func (r *documentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 		}
 		deadLettersDeleted = deadLetters.RowsAffected
 
+		// Bibliography rows that pointed at this document become unresolved
+		// again. Rows owned by the deleted document cascade with it.
+		now := time.Now().UTC()
+		if err := tx.Exec(`UPDATE paper_citations
+			SET cited_document_id = NULL,
+			    resolution_status = 'not_started',
+			    resolution_generation = resolution_generation + 1,
+			    resolution_provider = '', resolution_error_code = NULL,
+			    resolution_error_message = NULL, resolution_updated_at = ?, updated_at = ?
+			WHERE cited_document_id = ?`, now, now, id).Error; err != nil {
+			return err
+		}
+
 		result := tx.Delete(&types.Document{}, "id = ?", id)
 		if result.Error != nil {
 			return result.Error
@@ -332,7 +289,7 @@ func (r *documentRepository) MarkDeleting(ctx context.Context, id uuid.UUID) (ty
 }
 
 func (r *documentRepository) RestoreSourceState(ctx context.Context, id uuid.UUID, state types.DocumentSourceState) error {
-	if state != types.DocumentSourceMissing && state != types.DocumentSourceAvailable {
+	if state != types.DocumentSourceAvailable {
 		return nil
 	}
 	result := r.db.WithContext(ctx).Model(&types.Document{}).
@@ -401,40 +358,6 @@ func (r *documentRepository) SetDOIIfEmpty(ctx context.Context, id uuid.UUID, do
 	return false, nil
 }
 
-func (r *documentRepository) PromoteUnknown(
-	ctx context.Context, document types.Document,
-) (bool, error) {
-	if document.ID == uuid.Nil || document.StorageKey == "" || document.FileSHA256 == "" {
-		return false, errors.New("promoted document source fields are required")
-	}
-	result := r.db.WithContext(ctx).Model(&types.Document{}).
-		Where("id = ? AND source_state = ?", document.ID, types.DocumentSourceMissing).
-		Updates(map[string]interface{}{
-			"original_filename": document.OriginalFilename,
-			"content_type":      document.ContentType,
-			"size_bytes":        document.SizeBytes,
-			"doi":               strings.ToLower(strings.TrimSpace(document.DOI)),
-			"file_sha256":       strings.ToLower(strings.TrimSpace(document.FileSHA256)),
-			"storage_key":       document.StorageKey,
-			"source_state":      types.DocumentSourceAvailable,
-		})
-	if isDuplicateDOIError(result.Error) {
-		return false, fmt.Errorf("%w: %s", types.ErrDuplicateDOI, document.DOI)
-	}
-	if isDuplicateFileHashError(result.Error) {
-		return false, fmt.Errorf("%w: %s", types.ErrDuplicateFileHash, document.FileSHA256)
-	}
-	if result.Error != nil {
-		logger.Error(ctx, "promote unknown document failed", "document_id", document.ID, "error", result.Error)
-		return false, result.Error
-	}
-	if result.RowsAffected > 0 {
-		logger.Info(ctx, "unknown document promoted", "document_id", document.ID, "storage_key", document.StorageKey)
-		return true, nil
-	}
-	return false, nil
-}
-
 func (r *documentRepository) MergeIntoCanonical(ctx context.Context, loserID, canonicalID uuid.UUID) error {
 	if loserID == uuid.Nil || canonicalID == uuid.Nil || loserID == canonicalID {
 		return errors.New("distinct loser and canonical document ids are required")
@@ -468,23 +391,45 @@ func (r *documentRepository) MergeIntoCanonical(ctx context.Context, loserID, ca
 		if canonical.SourceState != types.DocumentSourceAvailable {
 			return fmt.Errorf("canonical document source is not available")
 		}
-		// Redirect both directions before tombstoning. ON CONFLICT preserves an
-		// existing canonical edge and prevents a duplicate shared citation.
-		if err := tx.Exec(`INSERT INTO paper_citations
-			(citing_document_id, cited_document_id, raw_reference, origin, created_at)
-			SELECT citing_document_id, ?, raw_reference, origin, created_at
-			FROM paper_citations WHERE cited_document_id = ? AND citing_document_id <> ?
-			ON CONFLICT (citing_document_id, cited_document_id) DO NOTHING`, canonicalID, loserID, canonicalID).Error; err != nil {
+		if err := tx.Exec(`UPDATE documents SET canonical_document_id = ? WHERE canonical_document_id = ?`,
+			canonicalID, loserID).Error; err != nil {
 			return err
 		}
-		if err := tx.Exec(`INSERT INTO paper_citations
-			(citing_document_id, cited_document_id, raw_reference, origin, created_at)
-			SELECT ?, cited_document_id, raw_reference, origin, created_at
-			FROM paper_citations WHERE citing_document_id = ? AND cited_document_id <> ?
-			ON CONFLICT (citing_document_id, cited_document_id) DO NOTHING`, canonicalID, loserID, canonicalID).Error; err != nil {
+		// Incoming bibliography rows now resolve to the canonical document.
+		now := time.Now().UTC()
+		if err := tx.Exec(`UPDATE paper_citations
+			SET cited_document_id = ?, resolution_status = 'succeeded',
+			    resolution_updated_at = ?, updated_at = ?
+			WHERE cited_document_id = ?`,
+			canonicalID, now, now, loserID).Error; err != nil {
 			return err
 		}
-		if err := tx.Where("citing_document_id = ? OR cited_document_id = ?", loserID, loserID).Delete(&types.PaperCitation{}).Error; err != nil {
+		// Preserve the loser's outgoing bibliography under the canonical owner.
+		// Drop duplicate bibliography entries first so the owner/key unique
+		// constraint cannot block the move.
+		if err := tx.Exec(`DELETE FROM paper_citations
+			WHERE citing_document_id = ? AND cited_document_id = ?`,
+			loserID, canonicalID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`DELETE FROM paper_citations loser
+			WHERE loser.citing_document_id = ?
+			  AND EXISTS (
+				SELECT 1 FROM paper_citations existing
+				WHERE existing.citing_document_id = ?
+				  AND existing.reference_key = loser.reference_key
+			  )`, loserID, canonicalID).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`UPDATE paper_citations
+			SET citing_document_id = ?, updated_at = ?
+			WHERE citing_document_id = ?`, canonicalID, now, loserID).Error; err != nil {
+			return err
+		}
+		// A merge can create self-citations in both directions.
+		if err := tx.Exec(`DELETE FROM paper_citations
+			WHERE citing_document_id = ? AND cited_document_id = ?`,
+			canonicalID, canonicalID).Error; err != nil {
 			return err
 		}
 		updates := map[string]interface{}{

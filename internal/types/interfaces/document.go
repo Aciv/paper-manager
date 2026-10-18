@@ -17,13 +17,6 @@ type DocumentRepository interface {
 	Create(ctx context.Context, document types.Document) (types.Document, error)
 	// Get retrieves one document by UUID.
 	Get(ctx context.Context, id uuid.UUID) (types.Document, error)
-	// EnsureUnknown creates an internal bibliographic placeholder when absent
-	// and returns whether this call inserted it. A conflicting non-placeholder
-	// row with the same deterministic ID is an error.
-	EnsureUnknown(ctx context.Context, id uuid.UUID) (document types.Document, created bool, err error)
-	// DeleteUnknownIfUnreferenced deletes an unknown placeholder only when no
-	// citation points from or to it. The boolean reports whether it was deleted.
-	DeleteUnknownIfUnreferenced(ctx context.Context, id uuid.UUID) (deleted bool, err error)
 	// Search returns a paginated document result using ID or DOI filters.
 	Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
 	CitationTargetProgress(ctx context.Context, citingDocumentID uuid.UUID) (types.PaperReferenceProgress, error)
@@ -58,10 +51,6 @@ type DocumentRepository interface {
 	// supplied a DOI first, and returns ErrDuplicateDOI if another document owns
 	// the provider DOI.
 	SetDOIIfEmpty(ctx context.Context, id uuid.UUID, doi string) (bool, error)
-	// PromoteUnknown atomically attaches a durable source object to a
-	// bibliographic placeholder. It returns false if another worker already
-	// promoted or deleted the placeholder.
-	PromoteUnknown(ctx context.Context, document types.Document) (bool, error)
 	// MergeIntoCanonical atomically redirects all citation edges from loser to
 	// canonical and retains loser as a canonical tombstone.
 	MergeIntoCanonical(ctx context.Context, loserID, canonicalID uuid.UUID) error

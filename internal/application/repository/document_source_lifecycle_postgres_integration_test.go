@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 
@@ -11,46 +10,46 @@ import (
 	"github.com/google/uuid"
 )
 
-func TestDocumentCanonicalizationPostgres(t *testing.T) {
+func TestDocumentCanonicalizationMovesCitationsPostgres(t *testing.T) {
 	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
-	repo := NewDocumentRepository(db)
+	documents := NewDocumentRepository(db)
+	citations := NewPaperCitationRepository(db)
 
-	canonicalID := uuid.New()
-	if _, err := repo.Create(ctx, sourceDocumentForCanonicalTest(canonicalID, "canonical.pdf", "canonical/key", "")); err != nil {
-		t.Fatalf("create canonical document: %v", err)
+	canonicalID, sourceOne, sourceTwo := uuid.New(), uuid.New(), uuid.New()
+	loserOne, loserTwo := uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{canonicalID, sourceOne, sourceTwo, loserOne, loserTwo} {
+		if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(id, "source.pdf", "canonical/"+id.String(), "")); err != nil {
+			t.Fatalf("create document %s: %v", id, err)
+		}
 	}
-	sourceIDs := []uuid.UUID{uuid.New(), uuid.New()}
-	loserIDs := []uuid.UUID{uuid.New(), uuid.New()}
-	for i := range sourceIDs {
-		if _, err := repo.Create(ctx, sourceDocumentForCanonicalTest(sourceIDs[i], "source.pdf", "source/"+sourceIDs[i].String(), "")); err != nil {
-			t.Fatalf("create citing document: %v", err)
-		}
-		if _, _, err := repo.EnsureUnknown(ctx, loserIDs[i]); err != nil {
-			t.Fatalf("create placeholder: %v", err)
-		}
-		if _, applied, err := repo.QueueStageNewGeneration(ctx, loserIDs[i], types.DocumentStageSourceLookup); err != nil || !applied {
-			t.Fatalf("queue placeholder source lookup applied=%t error=%v", applied, err)
-		}
-		citation := types.PaperCitation{
-			CitingDocumentID: sourceIDs[i], CitedDocumentID: loserIDs[i],
-			RawReference: "shared paper", Origin: types.PaperCitationOriginExtraction,
-		}
-		if err := db.Create(&citation).Error; err != nil {
-			t.Fatalf("create citation: %v", err)
-		}
+	first := testResolvedCitation(sourceOne, "Shared reference one", loserOne)
+	second := testResolvedCitation(sourceTwo, "Shared reference two", loserTwo)
+	if _, err := citations.AddCitation(ctx, first); err != nil {
+		t.Fatalf("add first citation: %v", err)
+	}
+	if _, err := citations.AddCitation(ctx, second); err != nil {
+		t.Fatalf("add second citation: %v", err)
+	}
+	// The loser itself cites the canonical document. The merge must drop this
+	// row before rewriting citing_document_id, otherwise the self-citation
+	// CHECK would block the move.
+	loserOutgoing := testResolvedCitation(loserOne, "Loser outgoing reference", canonicalID)
+	loserOutgoing.Origin = types.PaperCitationOriginExtraction
+	if err := db.Create(&loserOutgoing).Error; err != nil {
+		t.Fatalf("add loser outgoing citation: %v", err)
 	}
 
 	gate := make(chan struct{})
-	errs := make(chan error, len(loserIDs))
+	errs := make(chan error, 2)
 	var wait sync.WaitGroup
-	for _, loserID := range loserIDs {
+	for _, loserID := range []uuid.UUID{loserOne, loserTwo} {
 		wait.Add(1)
 		go func(id uuid.UUID) {
 			defer wait.Done()
 			<-gate
-			errs <- repo.MergeIntoCanonical(ctx, id, canonicalID)
+			errs <- documents.MergeIntoCanonical(ctx, id, canonicalID)
 		}(loserID)
 	}
 	close(gate)
@@ -62,131 +61,94 @@ func TestDocumentCanonicalizationPostgres(t *testing.T) {
 		}
 	}
 
-	for _, loserID := range loserIDs {
-		loser, err := repo.Get(ctx, loserID)
+	for _, source := range []uuid.UUID{sourceOne, sourceTwo} {
+		items, err := citations.ListByCitingDocumentID(ctx, source)
+		if err != nil {
+			t.Fatalf("list citations: %v", err)
+		}
+		if len(items) != 1 || items[0].CitedDocumentID == nil || *items[0].CitedDocumentID != canonicalID {
+			t.Fatalf("citation target = %#v, want canonical %s", items, canonicalID)
+		}
+	}
+	for _, loserID := range []uuid.UUID{loserOne, loserTwo} {
+		loser, err := documents.Get(ctx, loserID)
 		if err != nil {
 			t.Fatalf("load loser: %v", err)
 		}
-		if loser.SourceState != types.DocumentSourceMerged || loser.CanonicalDocumentID == nil || *loser.CanonicalDocumentID != canonicalID {
+		if loser.SourceState != types.DocumentSourceMerged ||
+			loser.CanonicalDocumentID == nil || *loser.CanonicalDocumentID != canonicalID {
 			t.Fatalf("loser lifecycle = %#v", loser)
 		}
-		if _, applied, err := repo.TryStartStage(ctx, loserID, types.DocumentStageSourceLookup, 1); err != nil || applied {
-			t.Fatalf("late loser stage start applied=%t error=%v", applied, err)
+	}
+	var selfCitations int64
+	if err := db.Table("paper_citations").
+		Where("citing_document_id = cited_document_id").Count(&selfCitations).Error; err != nil {
+		t.Fatalf("count self citations: %v", err)
+	}
+	if selfCitations != 0 {
+		t.Fatalf("self citations after merge = %d, want 0", selfCitations)
+	}
+	// P0-2: deleting a canonical paper must cascade merged tombstones instead of
+	// being blocked by the self-referencing foreign key.
+	if err := documents.Delete(ctx, canonicalID); err != nil {
+		t.Fatalf("delete canonical: %v", err)
+	}
+	for _, loserID := range []uuid.UUID{loserOne, loserTwo} {
+		if _, err := documents.Get(ctx, loserID); err == nil {
+			t.Fatalf("merged child %s still exists after canonical deletion", loserID)
 		}
-		if err := repo.MergeIntoCanonical(ctx, loserID, canonicalID); err != nil {
-			t.Fatalf("idempotent merge: %v", err)
-		}
-	}
-	var canonicalEdges, loserEdges int64
-	if err := db.Model(&types.PaperCitation{}).Where("cited_document_id = ?", canonicalID).Count(&canonicalEdges).Error; err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Model(&types.PaperCitation{}).Where("cited_document_id IN ? OR citing_document_id IN ?", loserIDs, loserIDs).Count(&loserEdges).Error; err != nil {
-		t.Fatal(err)
-	}
-	if canonicalEdges != int64(len(sourceIDs)) || loserEdges != 0 {
-		t.Fatalf("citation redirect canonical=%d loser=%d", canonicalEdges, loserEdges)
 	}
 }
 
-func TestConcurrentPlaceholderPromotionUsesHashCanonical(t *testing.T) {
+func TestReferenceProgressIsDisjointPostgres(t *testing.T) {
 	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
 	ctx := context.Background()
-	repo := NewDocumentRepository(db)
-	ids := []uuid.UUID{uuid.New(), uuid.New()}
-	for _, id := range ids {
-		if _, _, err := repo.EnsureUnknown(ctx, id); err != nil {
-			t.Fatal(err)
-		}
-	}
-	hash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	type result struct {
-		id       uuid.UUID
-		promoted bool
-		err      error
-	}
-	results := make(chan result, 2)
-	gate := make(chan struct{})
-	for _, id := range ids {
-		go func(documentID uuid.UUID) {
-			<-gate
-			promoted, err := repo.PromoteUnknown(ctx, sourceDocumentForCanonicalTest(
-				documentID, "same.pdf", "download/"+documentID.String(), hash,
-			))
-			results <- result{documentID, promoted, err}
-		}(id)
-	}
-	close(gate)
-	first, second := <-results, <-results
-	all := []result{first, second}
-	var canonical, loser uuid.UUID
-	for _, item := range all {
-		switch {
-		case item.err == nil && item.promoted:
-			canonical = item.id
-		case errors.Is(item.err, types.ErrDuplicateFileHash):
-			loser = item.id
-		default:
-			t.Fatalf("promotion result = %#v", item)
-		}
-	}
-	if canonical == uuid.Nil || loser == uuid.Nil {
-		t.Fatalf("canonical=%s loser=%s", canonical, loser)
-	}
-	if err := repo.MergeIntoCanonical(ctx, loser, canonical); err != nil {
-		t.Fatalf("merge hash loser: %v", err)
-	}
-	var available int64
-	if err := db.Model(&types.Document{}).Where("file_sha256 = ? AND source_state = ?", hash, types.DocumentSourceAvailable).Count(&available).Error; err != nil {
-		t.Fatal(err)
-	}
-	if available != 1 {
-		t.Fatalf("available canonical rows = %d, want 1", available)
-	}
-}
+	documents := NewDocumentRepository(db)
 
-func TestCitationTargetProgressIsBoundedAndDisjointPostgres(t *testing.T) {
-	db, cleanup := openPostgresTestDatabase(t)
-	defer cleanup()
-	ctx := context.Background()
-	repo := NewDocumentRepository(db)
 	sourceID := uuid.New()
-	if _, err := repo.Create(ctx, sourceDocumentForCanonicalTest(sourceID, "source.pdf", "progress/source", "")); err != nil {
+	if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(sourceID, "source.pdf", "progress/source", "")); err != nil {
 		t.Fatal(err)
 	}
-	targets := map[types.DocumentStageStatus]uuid.UUID{
-		types.DocumentStageQueued: uuid.New(), types.DocumentStageRunning: uuid.New(),
-		types.DocumentStageFailed: uuid.New(), types.DocumentStageCancelled: uuid.New(),
+	statuses := []types.DocumentStageStatus{
+		types.DocumentStageQueued, types.DocumentStageRunning, types.DocumentStageSucceeded,
+		types.DocumentStageFailed, types.DocumentStageCancelled,
 	}
-	for status, id := range targets {
-		if _, _, err := repo.EnsureUnknown(ctx, id); err != nil {
-			t.Fatal(err)
-		}
-		if err := db.Model(&types.Document{}).Where("id = ?", id).Updates(map[string]interface{}{
-			"source_lookup_status": status, "source_lookup_generation": 1,
-		}).Error; err != nil {
-			t.Fatal(err)
-		}
-		if err := db.Create(&types.PaperCitation{CitingDocumentID: sourceID, CitedDocumentID: id, RawReference: string(status)}).Error; err != nil {
+	for index, status := range statuses {
+		citation := testResolvedCitation(sourceID, "Progress reference "+string(rune('a'+index)), uuid.Nil)
+		citation.ResolutionStatus = status
+		if err := db.Create(&citation).Error; err != nil {
 			t.Fatal(err)
 		}
 	}
-	availableID := uuid.New()
-	if _, err := repo.Create(ctx, sourceDocumentForCanonicalTest(availableID, "available.pdf", "progress/available", "")); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Create(&types.PaperCitation{CitingDocumentID: sourceID, CitedDocumentID: availableID, RawReference: "available"}).Error; err != nil {
-		t.Fatal(err)
-	}
-
-	progress, err := repo.CitationTargetProgress(ctx, sourceID)
+	progress, err := documents.CitationTargetProgress(ctx, sourceID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if progress.Queued != 1 || progress.Running != 1 || progress.Completed != 1 || progress.Failed != 1 || progress.Cancelled != 1 {
-		t.Fatalf("citation target progress = %#v", progress)
+	if progress.Queued != 1 || progress.Running != 1 || progress.Completed != 1 ||
+		progress.Failed != 1 || progress.Cancelled != 1 {
+		t.Fatalf("reference progress = %#v", progress)
 	}
+}
+
+func testResolvedCitation(citingID uuid.UUID, raw string, citedDocumentID uuid.UUID) types.PaperCitation {
+	citation := types.PaperCitation{
+		PaperReference: types.PaperReference{
+			ReferenceID:      types.PaperReferenceIDForRaw(citingID, raw),
+			CitingDocumentID: citingID,
+			ReferenceKey:     types.PaperCitationReferenceKey(raw),
+			RawReference:     raw,
+			ResolutionStatus: types.DocumentStageNotStarted,
+			MetadataSource:   types.PaperMetadataSourceExtraction,
+			Authors:          []types.PaperAuthor{},
+		},
+		Origin: types.PaperCitationOriginExtraction,
+	}
+	if citedDocumentID != uuid.Nil {
+		citation.CitedDocumentID = &citedDocumentID
+		citation.ResolutionStatus = types.DocumentStageSucceeded
+	}
+	return citation
 }
 
 func sourceDocumentForCanonicalTest(id uuid.UUID, filename, storageKey, hash string) types.Document {

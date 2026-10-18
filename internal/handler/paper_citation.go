@@ -89,16 +89,46 @@ func (h *PaperCitationHandler) Remove(c *gin.Context) {
 	if !validPaperDocumentParam(c, h.writeError) {
 		return
 	}
-	if _, err := uuid.Parse(c.Param("citedDocumentID")); err != nil {
-		h.writeError(c, apperrors.NewBadRequestError("invalid cited document id"), err)
+	if _, err := uuid.Parse(c.Param("referenceID")); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid reference id"), err)
 		return
 	}
-	if err := h.papers.RemoveCitation(c.Request.Context(), c.Param("documentID"), c.Param("citedDocumentID")); err != nil {
+	if err := h.papers.RemoveCitation(c.Request.Context(), c.Param("documentID"), c.Param("referenceID")); err != nil {
 		h.handleServiceError(c, err)
 		return
 	}
-	logger.Info(c.Request.Context(), "paper citation removed", "citing_document_id", c.Param("documentID"), "cited_document_id", c.Param("citedDocumentID"))
+	logger.Info(c.Request.Context(), "paper citation removed",
+		"citing_document_id", c.Param("documentID"), "reference_id", c.Param("referenceID"))
 	c.Status(http.StatusNoContent)
+}
+
+// ResolveReference links one bibliography row owned by its citing paper to a
+// stored document. Other papers citing the same work are unaffected.
+func (h *PaperCitationHandler) ResolveReference(c *gin.Context) {
+	referenceID := strings.TrimSpace(c.Param("referenceID"))
+	if _, err := uuid.Parse(referenceID); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid reference id"), err)
+		return
+	}
+	var request struct {
+		ResolvedDocumentID string `json:"resolvedDocumentId"`
+	}
+	if err := c.ShouldBindJSON(&request); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
+		return
+	}
+	if _, err := uuid.Parse(strings.TrimSpace(request.ResolvedDocumentID)); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid resolved document id"), err)
+		return
+	}
+	reference, err := h.papers.ResolveReference(c.Request.Context(), referenceID, request.ResolvedDocumentID)
+	if err != nil {
+		h.handleServiceError(c, err)
+		return
+	}
+	logger.Info(c.Request.Context(), "paper reference resolved",
+		"reference_id", referenceID, "cited_document_id", reference.CitedDocumentID)
+	c.JSON(http.StatusOK, gin.H{"reference": reference})
 }
 
 func (h *PaperCitationHandler) Resolve(c *gin.Context) {
@@ -131,10 +161,12 @@ func (h *PaperCitationHandler) handleServiceError(c *gin.Context, err error) {
 	case errors.Is(err, sql.ErrNoRows):
 		h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)
 	case errors.Is(err, types.ErrInvalidPaperCitation),
+		errors.Is(err, types.ErrInvalidPaperReference),
 		errors.Is(err, types.ErrSelfPaperCitation),
-		errors.Is(err, appservice.ErrUnknownPaperCannotCite),
+		errors.Is(err, appservice.ErrPaperCannotCite),
 		errors.Is(err, appservice.ErrCitationTargetNotResolved),
-		strings.Contains(err.Error(), "invalid document id"):
+		strings.Contains(err.Error(), "invalid document id"),
+		strings.Contains(err.Error(), "invalid reference id"):
 		h.writeError(c, apperrors.NewBadRequestError("invalid paper citation request"), err)
 	default:
 		h.writeError(c, apperrors.NewInternalServerError("operate paper citation"), err)

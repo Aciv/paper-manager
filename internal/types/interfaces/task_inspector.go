@@ -59,4 +59,8 @@ type TaskInspector interface {
 	// still pending, scheduled, retrying, or active. Stage recovery must never
 	// let another generation mask an orphaned one.
 	HasQueuedTaskForStage(ctx context.Context, documentID string, stage types.DocumentStage, generation int64) (bool, error)
+
+	// HasQueuedTaskForReference reports whether a reference-resolution task for
+	// this exact reference generation is still queued or active.
+	HasQueuedTaskForReference(ctx context.Context, referenceID string, generation int64) (bool, error)
 }

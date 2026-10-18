@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +20,7 @@ import (
 	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
 
 const (
@@ -288,8 +288,10 @@ func (s *paperInfoService) ExtractMetadata(
 	if err := s.enqueueSourceLookupIfNeeded(ctx, command.DocumentID, command.RequestID); err != nil {
 		logger.Warn(ctx, "queue source lookup after extraction failed", "document_id", command.DocumentID, "error", err)
 	}
-	if err := s.enqueueReferenceLookupIfNeeded(ctx, command.DocumentID, command.RequestID); err != nil {
-		logger.Warn(ctx, "queue reference lookup after extraction failed", "document_id", command.DocumentID, "error", err)
+	if s.cfg.PaperReferenceAutoResolve {
+		if err := s.enqueueReferenceLookupIfNeeded(ctx, command.DocumentID, command.RequestID); err != nil {
+			logger.Warn(ctx, "queue reference lookup after extraction failed", "document_id", command.DocumentID, "error", err)
+		}
 	}
 	return catalogResolvable, nil
 }
@@ -306,6 +308,9 @@ func (s *paperInfoService) ResolveMetadata(
 ) (outputErr error) {
 	if err := command.Validate(); err != nil {
 		return err
+	}
+	if command.ReferenceID != uuid.Nil {
+		return s.ResolveReference(ctx, command)
 	}
 	_, err := startDocumentStageTask(ctx, s.documents, command.DocumentID, command.Stage, command.Generation)
 	if err != nil {
@@ -342,9 +347,6 @@ func (s *paperInfoService) ResolveMetadata(
 	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
 		return fmt.Errorf("%w: document is being deleted", ErrStalePaperInfo)
 	}
-	if document.SourceState == types.DocumentSourceMissing {
-		return s.resolveScheduledReference(ctx, document, command)
-	}
 	if err := ensureDocumentStageWork(ctx, s.documents, command.DocumentID, command.Stage, command.Generation); err != nil {
 		return err
 	}
@@ -359,12 +361,6 @@ func paperAttempt(attempt int) int {
 }
 
 func (s *paperInfoService) resolveSourceMetadata(ctx context.Context, document types.Document, command types.PaperCatalogResolveCommand, spanID uuid.UUID) error {
-	// Unknown rows are bibliographic placeholders only. They have no source
-	// document of their own, so catalog work must always be rooted at the
-	// uploaded document that cited them (reference scope).
-	if document.SourceState == types.DocumentSourceMissing {
-		return ErrPaperInfoCatalogUnavailable
-	}
 	metadata, err := s.papers.GetMetadata(ctx, document.ID.String())
 	if err != nil {
 		return err
@@ -435,9 +431,6 @@ func (s *paperInfoService) DispatchReferences(
 	if err != nil {
 		return err
 	}
-	if document.SourceState == types.DocumentSourceMissing {
-		return ErrPaperInfoCatalogUnavailable
-	}
 	if err := s.ensureCatalogSourceCurrent(ctx, document); err != nil {
 		return err
 	}
@@ -450,78 +443,92 @@ func (s *paperInfoService) DispatchReferences(
 	return nil
 }
 
-// resolveScheduledReference claims exactly one provider for an unresolved
-// placeholder, then reports the result to the global scheduler. All source
-// documents that cite the placeholder are updated together when it resolves.
-func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited types.Document, command types.PaperCatalogResolveCommand) (outputErr error) {
-	if cited.SourceState != types.DocumentSourceMissing || s.referenceScheduler == nil {
-		return nil
+// ResolveReference executes one provider attempt for one citation row owned by
+// its citing paper, then reports the result to the global scheduler. Local
+// DOI/title matching runs before any provider request and again after a
+// candidate is selected, so an already-imported paper never causes an external
+// lookup and a stale provider never wins over local data.
+func (s *paperInfoService) ResolveReference(
+	ctx context.Context,
+	command types.PaperCatalogResolveCommand,
+) (outputErr error) {
+	if command.ReferenceID == uuid.Nil || s.referenceScheduler == nil {
+		return ErrPaperInfoCatalogUnavailable
 	}
-	claim, err := s.referenceScheduler.Claim(ctx, cited.ID)
+	reference, applied, err := s.papers.StartReferenceResolution(ctx, command.ReferenceID, command.Generation)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return fmt.Errorf("%w: reference resolution generation %d is no longer active", asynq.RevokeTask, command.Generation)
+	}
+	defer func() {
+		if outputErr == nil || errors.Is(outputErr, asynq.RevokeTask) {
+			return
+		}
+		status := types.DocumentStageQueued
+		code, message := "", ""
+		if errors.Is(outputErr, asynq.SkipRetry) || documentStageErrorTerminal(outputErr) || finalAsynqAttempt(ctx) {
+			status = types.DocumentStageFailed
+			code, message = spanFailure(outputErr)
+		}
+		if _, _, finishErr := s.papers.FinishReferenceResolution(
+			context.WithoutCancel(ctx), command.ReferenceID, command.Generation,
+			status, "", code, message, nil, nil,
+		); finishErr != nil {
+			logger.Warn(ctx, "finish failed reference resolution task failed",
+				"reference_id", command.ReferenceID, "error", finishErr)
+		}
+	}()
+
+	ctx = paperInfoContext(ctx, command.RequestID, command.DocumentID)
+	ctx = logger.WithAttrs(ctx, "catalog_scope", "reference")
+	if reference.CitedDocumentID != nil {
+		return s.finishReferenceSuccess(ctx, command, "", nil, nil)
+	}
+	excludeDocumentID := reference.CitingDocumentID
+	if excludeDocumentID == uuid.Nil {
+		excludeDocumentID = command.DocumentID
+	}
+	if documentID, found, matchErr := s.papers.FindLocalReferenceMatch(ctx, reference, excludeDocumentID); matchErr != nil {
+		return matchErr
+	} else if found {
+		logger.Info(ctx, "reference matched local library before provider lookup",
+			"reference_id", command.ReferenceID, "document_id", documentID)
+		return s.finishReferenceSuccess(ctx, command, "", nil, &documentID)
+	}
+
+	claim, err := s.referenceScheduler.Claim(ctx, command.ReferenceID)
 	if err != nil {
 		return err
 	}
 	if !claim.Ready() {
-		return nil
+		// A completed scheduler job means every provider was exhausted; a
+		// non-completed in-flight job must stay queued for a later retry rather
+		// than being reported as a successful no-op.
+		if claim.Job.Completed {
+			return s.finishReferenceSuccess(ctx, command, "", nil, nil)
+		}
+		return errReferenceProviderFallback
 	}
-	var referenceSpanID uuid.UUID
-	if s.spans != nil {
-		var spanErr error
-		referenceSpanID, spanErr = s.spans.BeginSpan(
-			ctx, cited.ID, 1,
-			types.ProcessingSpanCatalogReference, types.ProcessingSpanScopeCatalogReference,
-			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, cited.ID.String()), 0,
-		)
-		if spanErr != nil {
-			logger.Warn(ctx, "start reference target span failed", "document_id", cited.ID, "error", spanErr)
-		}
-	}
-	stopHeartbeat := keepSpanAlive(ctx, s.spans, referenceSpanID)
-	defer stopHeartbeat()
-	defer func() {
-		if s.spans == nil {
-			return
-		}
-		if outputErr != nil {
-			code, reason := spanFailure(outputErr)
-			_ = s.spans.FinishSpan(context.WithoutCancel(ctx), referenceSpanID, types.ProcessingSpanFailed, code, reason)
-			return
-		}
-		_ = s.spans.FinishSpan(context.WithoutCancel(ctx), referenceSpanID, types.ProcessingSpanSucceeded, "", "")
-	}()
 	if s.referenceLimiter != nil {
-		release, acquireErr := s.referenceLimiter.AcquireReference(ctx, cited.ID.String())
+		release, acquireErr := s.referenceLimiter.AcquireReference(ctx, command.ReferenceID.String())
 		if acquireErr != nil {
 			return acquireErr
 		}
 		defer release()
 	}
 
-	// The extraction pipeline persists a structured interpretation of each
-	// reference on the unknown placeholder before this worker is scheduled.
-	// Prefer that normalized DOI/title/author data over reparsing the rendered
-	// citation text. The raw text remains a compatibility fallback for older
-	// citations and for extractors that could not identify a usable lookup key.
-	incoming, err := s.papers.ListCitedBy(ctx, cited.ID.String())
-	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
-	}
-	if len(incoming) == 0 {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
-	}
-	metadata, err := s.papers.GetMetadata(ctx, cited.ID.String())
-	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
-	}
-
-	// get query
-	query, querySource := scheduledReferenceLookupQuery(cited, metadata, incoming[0].RawReference)
+	query := referenceLookupQueryFor(reference)
 	if err := query.Validate(); err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
+		reportErr := s.reportReferenceOutcome(ctx, command.ReferenceID, claim.Provider, types.PaperReferenceOutcomeTerminalFailure, nil)
+		if reportErr != nil {
+			return reportErr
+		}
+		return s.finishReferenceSuccess(ctx, command, claim.Provider.String(), nil, nil)
 	}
 	logger.Debug(ctx, "reference catalog lookup query selected",
-		"document_id", cited.ID,
-		"query_source", querySource,
+		"reference_id", command.ReferenceID,
 		"has_doi", strings.TrimSpace(query.DOI) != "",
 		"has_title", strings.TrimSpace(query.Title) != "",
 		"has_source_url", strings.TrimSpace(query.SourceURL) != "",
@@ -530,58 +537,139 @@ func (s *paperInfoService) resolveScheduledReference(ctx context.Context, cited 
 
 	provider, ok := s.catalogs.Get(claim.Provider.String())
 	if !ok {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
+		return s.reportReferenceFailure(ctx, command, claim.Provider, fmt.Errorf("catalog provider %q is unavailable", claim.Provider))
 	}
-	selected, found, err := s.selectCatalogCandidateFromProviders(ctx, query, cited.ID, 1, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, cited.ID.String()), referenceSpanID, []interfaces.PaperCatalogProvider{provider})
+	scopeID := types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, command.ReferenceID.String())
+	selected, found, err := s.selectCatalogCandidateFromProviders(
+		ctx, query, command.DocumentID, 1, scopeID, uuid.Nil, []interfaces.PaperCatalogProvider{provider},
+	)
 	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+		return s.reportReferenceFailure(ctx, command, claim.Provider, err)
 	}
 	if !found {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeNoMatch, nil)
+		if reportErr := s.reportReferenceOutcome(ctx, command.ReferenceID, claim.Provider, types.PaperReferenceOutcomeNoMatch, nil); reportErr != nil {
+			return reportErr
+		}
+		return s.finishReferenceSuccess(ctx, command, claim.Provider.String(), nil, nil)
 	}
-
 	if selected.DOI == "" && query.DOI != "" {
 		selected.DOI = query.DOI
 	}
-	if err := ensureDocumentStageWork(ctx, s.documents, cited.ID, command.Stage, command.Generation); err != nil {
+
+	patch := referenceMetadataPatchFromCatalog(selected)
+	candidateReference := reference
+	if selected.DOI != "" {
+		candidateReference.DOI = selected.DOI
+	}
+	if selected.Title != "" {
+		candidateReference.Title = selected.Title
+	}
+	if len(selected.Authors) > 0 {
+		candidateReference.Authors = selected.Authors
+	}
+	if selected.PublishedAt != nil {
+		candidateReference.PublishedAt = selected.PublishedAt
+	}
+	var resolvedDocumentID *uuid.UUID
+	if documentID, hit, matchErr := s.papers.FindLocalReferenceMatch(ctx, candidateReference, excludeDocumentID); matchErr != nil {
+		return s.reportReferenceFailure(ctx, command, claim.Provider, matchErr)
+	} else if hit {
+		resolvedDocumentID = &documentID
+	}
+	if reportErr := s.reportReferenceOutcome(ctx, command.ReferenceID, claim.Provider, types.PaperReferenceOutcomeMatched, nil); reportErr != nil {
+		return reportErr
+	}
+	return s.finishReferenceSuccess(ctx, command, claim.Provider.String(), patch, resolvedDocumentID)
+}
+
+func (s *paperInfoService) reportReferenceFailure(
+	ctx context.Context,
+	command types.PaperCatalogResolveCommand,
+	provider types.PaperCatalogProvider,
+	cause error,
+) error {
+	reportErr := s.reportReferenceOutcome(ctx, command.ReferenceID, provider, types.PaperReferenceOutcomeRetryableFailure, cause)
+	if reportErr != nil {
+		return reportErr
+	}
+	return s.finishReferenceSuccess(ctx, command, provider.String(), nil, nil)
+}
+
+func (s *paperInfoService) finishReferenceSuccess(
+	ctx context.Context,
+	command types.PaperCatalogResolveCommand,
+	provider string,
+	patch *types.PaperReferenceMetadataPatch,
+	resolvedDocumentID *uuid.UUID,
+) error {
+	_, applied, err := s.papers.FinishReferenceResolution(
+		context.WithoutCancel(ctx), command.ReferenceID, command.Generation,
+		types.DocumentStageSucceeded, provider, "", "", patch, resolvedDocumentID,
+	)
+	if err != nil {
 		return err
 	}
+	if !applied {
+		logger.Info(ctx, "reference resolution finish ignored after generation change",
+			"reference_id", command.ReferenceID, "generation", command.Generation)
+	}
+	return nil
+}
 
-	// dedup
-	resolvedID, err := s.findStoredCatalogDocument(ctx, selected, incoming[0].CitingDocumentID)
-	if err != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
+func referenceLookupQueryFor(reference types.PaperReference) types.PaperLookupQuery {
+	query := types.PaperLookupQuery{
+		DOI:       normalizePaperDOI(reference.DOI),
+		Title:     strings.TrimSpace(reference.Title),
+		SourceURL: strings.TrimSpace(reference.SourceURL),
+		Venue:     strings.TrimSpace(reference.Venue),
+		Limit:     types.DefaultPaperCatalogLimit,
 	}
-	if resolvedID != uuid.Nil {
-		if err := s.documents.MergeIntoCanonical(ctx, cited.ID, resolvedID); err != nil {
-			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, err)
-		}
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
-	}
-	if _, metadataErr := s.papers.UpdateMetadata(ctx, cited.ID.String(), catalogMetadataUpdate(selected)); metadataErr != nil {
-		return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, metadataErr)
-	}
-	doi := normalizePaperDOI(selected.DOI)
-	if doi != "" {
-		applied, doiErr := s.documents.SetDOIIfEmpty(ctx, cited.ID, doi)
-		if errors.Is(doiErr, types.ErrDuplicateDOI) {
-			canonicalID, lookupErr := s.findStoredCatalogDocument(ctx, selected, incoming[0].CitingDocumentID)
-			if lookupErr != nil {
-				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, lookupErr)
-			}
-			if canonicalID != uuid.Nil {
-				if mergeErr := s.documents.MergeIntoCanonical(ctx, cited.ID, canonicalID); mergeErr != nil {
-					return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, mergeErr)
-				}
-				return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
-			}
-		} else if doiErr != nil {
-			return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeRetryableFailure, doiErr)
-		} else if applied {
-			logger.Info(ctx, "catalog DOI applied to referenced document", "document_id", cited.ID, "doi", doi, "provider", claim.Provider)
+	for _, author := range reference.Authors {
+		if name := strings.TrimSpace(author.Name); name != "" {
+			query.Authors = append(query.Authors, name)
 		}
 	}
-	return s.reportReferenceOutcome(ctx, cited.ID, claim.Provider, types.PaperReferenceOutcomeMatched, nil)
+	if reference.PublishedAt != nil {
+		query.PublishedYear = reference.PublishedAt.Year()
+	}
+	if query.Validate() != nil {
+		return referenceLookupQuery(reference.RawReference)
+	}
+	return query
+}
+
+func referenceMetadataPatchFromCatalog(candidate types.PaperCatalogCandidate) *types.PaperReferenceMetadataPatch {
+	patch := &types.PaperReferenceMetadataPatch{}
+	if doi := normalizePaperDOI(candidate.DOI); doi != "" {
+		patch.DOI = &doi
+	}
+	if title := compactPaperText(candidate.Title); title != "" {
+		patch.Title = &title
+	}
+	authors := make([]types.PaperAuthor, 0, len(candidate.Authors))
+	for _, author := range candidate.Authors {
+		author.Name = compactPaperText(author.Name)
+		author.Affiliation = compactPaperText(author.Affiliation)
+		if author.Name != "" {
+			authors = append(authors, author)
+		}
+	}
+	if len(authors) > 0 {
+		patch.Authors = &authors
+	}
+	setCatalogMetadataText(&patch.Venue, candidate.Venue)
+	setCatalogMetadataText(&patch.Volume, candidate.Volume)
+	setCatalogMetadataText(&patch.Issue, candidate.Issue)
+	setCatalogMetadataText(&patch.Pages, candidate.Pages)
+	setCatalogMetadataURL(&patch.SourceURL, candidate.SourceURL)
+	if candidate.PublishedAt != nil {
+		patch.PublishedAt = candidate.PublishedAt
+	}
+	if patch.HasChanges() {
+		source := types.PaperMetadataSourceCatalog
+		patch.MetadataSource = &source
+	}
+	return patch
 }
 
 func (s *paperInfoService) reportReferenceOutcome(ctx context.Context, target uuid.UUID, provider types.PaperCatalogProvider, outcome types.PaperReferenceOutcome, cause error) error {
@@ -693,7 +781,7 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 }
 
 func (s *paperInfoService) deleteMergedSourceObject(ctx context.Context, document types.Document) {
-	if s.storage == nil || strings.TrimSpace(document.StorageKey) == "" || strings.HasPrefix(document.StorageKey, types.UnknownDocumentStorageScheme) {
+	if s.storage == nil || strings.TrimSpace(document.StorageKey) == "" {
 		return
 	}
 	if err := s.storage.Delete(context.WithoutCancel(ctx), document.StorageKey); err != nil {
@@ -701,7 +789,7 @@ func (s *paperInfoService) deleteMergedSourceObject(ctx context.Context, documen
 	}
 }
 
-// enqueueReferenceCatalogTasks registers each unique unresolved placeholder
+// enqueueReferenceCatalogTasks registers each unique unresolved citation row
 // with the global scheduler, then queues one small catalog task per accepted
 // target. Provider choice is deferred until that task actually executes.
 func (s *paperInfoService) enqueueReferenceCatalogTasks(
@@ -720,8 +808,8 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 	if limit <= 0 {
 		limit = defaultReferenceCatalogMaxPerDocument
 	}
-	seen := make(map[string]struct{}, len(citations))
-	candidates := make([]uuid.UUID, 0, len(citations))
+	seen := make(map[uuid.UUID]struct{}, len(citations))
+	candidates := make([]types.PaperReference, 0, len(citations))
 	for _, citation := range citations {
 		if len(candidates) >= limit {
 			break
@@ -729,60 +817,31 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		cited, err := s.documents.Get(ctx, citation.CitedDocumentID)
-		if errors.Is(err, sql.ErrNoRows) {
+		if citation.CitedDocumentID != nil {
 			continue
 		}
-		if err != nil {
-			return err
-		}
-		if cited.SourceState != types.DocumentSourceMissing {
+		if _, exists := seen[citation.ReferenceID]; exists {
 			continue
 		}
-		// Automatic catalog lookup covers only placeholders created by Python
-		// extraction candidates (metadata_source=extraction). Manually added
-		// unknown references stay out of the automatic run and are resolved
-		// through the explicit citation resolve API.
-		metadata, err := s.papers.GetMetadata(ctx, cited.ID.String())
-		if err != nil {
-			return err
-		}
-		if metadata.MetadataSource != types.PaperMetadataSourceExtraction {
-			continue
-		}
-		key := referenceCatalogDedupKey(citation.RawReference)
-		if key == "" {
-			continue
-		}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		candidates = append(candidates, cited.ID)
+		seen[citation.ReferenceID] = struct{}{}
+		candidates = append(candidates, citation.PaperReference)
 	}
 	if len(candidates) == 0 {
-		logger.Info(ctx, "reference dispatch completed without unresolved citations", "document_id", document.ID)
+		logger.Info(ctx, "reference dispatch completed without unresolved references", "document_id", document.ID)
 		return nil
 	}
 	queued := 0
-	for _, citedID := range candidates {
-		stage, stageErr := s.documents.GetStage(ctx, citedID, types.DocumentStageSourceLookup)
-		if stageErr != nil {
-			return stageErr
-		}
-		if stage.Status.Active() || stage.Status == types.DocumentStageSucceeded {
-			continue
-		}
-		stage, applied, stageErr := s.documents.QueueStageNewGeneration(ctx, citedID, types.DocumentStageSourceLookup)
-		if stageErr != nil {
-			return stageErr
+	for _, reference := range candidates {
+		updated, applied, queueErr := s.papers.QueueReferenceResolution(ctx, reference.ReferenceID)
+		if queueErr != nil {
+			return queueErr
 		}
 		if !applied {
 			continue
 		}
 		shouldQueue, registerErr := s.referenceScheduler.Register(ctx, types.PaperReferenceJob{
-			TargetDocumentID: citedID,
-			Generation:       stage.Generation,
+			TargetDocumentID: reference.ReferenceID,
+			Generation:       updated.ResolutionGeneration,
 		})
 		if registerErr != nil {
 			return registerErr
@@ -791,20 +850,26 @@ func (s *paperInfoService) enqueueReferenceCatalogTasks(
 			continue
 		}
 		task, options, buildErr := NewPaperCatalogResolveTask(types.PaperCatalogResolvePayload{
-			RequestID: command.RequestID, DocumentID: citedID.String(),
-			Stage: types.DocumentStageSourceLookup, Generation: stage.Generation,
+			RequestID:   command.RequestID,
+			DocumentID:  document.ID.String(),
+			ReferenceID: reference.ReferenceID.String(),
+			Generation:  updated.ResolutionGeneration,
 		}, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
 		if buildErr != nil {
-			return fmt.Errorf("build reference catalog task: %w", buildErr)
+			return fmt.Errorf("build reference resolution task: %w", buildErr)
 		}
-		if enqueueErr := enqueueDocumentStageTask(ctx, s.tasks, task, options, citedID.String()); enqueueErr != nil {
-			_, _, _ = s.documents.FinishStage(context.WithoutCancel(ctx), citedID, types.DocumentStageSourceLookup,
-				stage.Generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
+		if enqueueErr := enqueueDocumentStageTask(ctx, s.tasks, task, options, document.ID.String()); enqueueErr != nil {
+			_, _, _ = s.papers.FinishReferenceResolution(
+				context.WithoutCancel(ctx), reference.ReferenceID, updated.ResolutionGeneration,
+				types.DocumentStageFailed, "", types.ProcessingErrorTaskFailed,
+				"reference task could not be queued", nil, nil,
+			)
 			return enqueueErr
 		}
 		queued++
 	}
-	logger.Info(ctx, "independent reference targets queued", "document_id", document.ID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
+	logger.Info(ctx, "independent references queued",
+		"document_id", document.ID, "queued_count", queued, "citation_count", len(citations), "limit", limit)
 	return nil
 }
 
@@ -928,21 +993,6 @@ func (s *paperInfoService) ensureCatalogSourceCurrent(
 			ErrStalePaperInfo,
 		)
 	}
-	if initialDocument.SourceState == types.DocumentSourceMissing &&
-		current.SourceState != types.DocumentSourceMissing {
-		return fmt.Errorf(
-			"%w: source state changed from missing to %s",
-			ErrStalePaperInfo,
-			current.SourceState,
-		)
-	}
-	if initialDocument.SourceState != types.DocumentSourceMissing &&
-		current.SourceState == types.DocumentSourceMissing {
-		return fmt.Errorf(
-			"%w: source document changed to a source-free placeholder",
-			ErrStalePaperInfo,
-		)
-	}
 	return nil
 }
 
@@ -1037,23 +1087,6 @@ func metadataLookupQuery(
 		query.PublishedYear = metadata.PublishedAt.Year()
 	}
 	return query
-}
-
-// scheduledReferenceLookupQuery returns the best available catalog identity
-// for an unknown citation placeholder. Structured fields already persisted by
-// extraction are authoritative for lookup because they have been separated
-// from surrounding reference noise. Parsing RawReference is retained only for
-// legacy rows and extractor outputs without a DOI, title, or source URL.
-func scheduledReferenceLookupQuery(
-	cited types.Document,
-	metadata *types.PaperMetadata,
-	rawReference string,
-) (types.PaperLookupQuery, string) {
-	query := metadataLookupQuery(cited, metadata)
-	if query.Validate() == nil {
-		return query, "stored_metadata"
-	}
-	return referenceLookupQuery(rawReference), "raw_reference_fallback"
 }
 
 // reference recognition
@@ -1448,75 +1481,6 @@ func paperMetadataSourcePointer(
 	source types.PaperMetadataSource,
 ) *types.PaperMetadataSource {
 	return &source
-}
-
-func (s *paperInfoService) findStoredCatalogDocument(
-	ctx context.Context,
-	candidate types.PaperCatalogCandidate,
-	citingDocumentID uuid.UUID,
-) (uuid.UUID, error) {
-	doi := normalizePaperDOI(candidate.DOI)
-	if doi != "" {
-		result, err := s.documents.Search(ctx, types.DocumentSearch{
-			DOI:      doi,
-			Page:     1,
-			PageSize: 2,
-		})
-		if err != nil {
-			return uuid.Nil, err
-		}
-		for _, document := range result.Items {
-			if document.ID != citingDocumentID {
-				return document.ID, nil
-			}
-		}
-	}
-
-	titleKey := normalizedPaperTitle(candidate.Title)
-	if titleKey == "" {
-		return uuid.Nil, nil
-	}
-	result, err := s.papers.SearchMetadata(ctx, types.PaperSearch{
-		Title:    paperTitleSearchSeed(titleKey),
-		Page:     1,
-		PageSize: localPaperTitleSearchSize,
-	})
-	if err != nil {
-		return uuid.Nil, err
-	}
-	for _, metadata := range result.Items {
-		if metadata.DocumentID == citingDocumentID ||
-			normalizedPaperTitle(metadata.Title) != titleKey {
-			continue
-		}
-		document, err := s.documents.Get(ctx, metadata.DocumentID)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return uuid.Nil, err
-		}
-		if document.SourceState != types.DocumentSourceAvailable {
-			continue
-		}
-		if len(candidate.Authors) > 0 &&
-			len(metadata.Authors) > 0 &&
-			paperAuthorSimilarity(
-				paperAuthorNames(candidate.Authors),
-				metadata.Authors,
-			) == 0 {
-			continue
-		}
-		if candidate.PublishedAt != nil &&
-			metadata.PublishedAt != nil &&
-			int(math.Abs(float64(
-				candidate.PublishedAt.Year()-metadata.PublishedAt.Year(),
-			))) > 1 {
-			continue
-		}
-		return document.ID, nil
-	}
-	return uuid.Nil, nil
 }
 
 func normalizedPaperTitle(value string) string {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,106 +107,237 @@ func (s *documentService) CreateDocumentFromURL(
 	return processed, nil
 }
 
+// ErrReferenceAlreadyResolved prevents a second PDF import for a reference
+// that already points at a stored document.
+var ErrReferenceAlreadyResolved = errors.New("reference already resolved to a document")
+
 // RequestReferencePDFDownload queues a download only after an explicit user
-// action on one unresolved bibliography target. Parsing and catalog lookup do
-// not call this method.
-func (s *documentService) RequestReferencePDFDownload(ctx context.Context, id string) error {
-	documentID, err := uuid.Parse(strings.TrimSpace(id))
-	if err != nil || documentID == uuid.Nil {
-		return errors.New("invalid document id")
-	}
-	document, err := s.repo.Get(ctx, documentID)
-	if err != nil {
-		return err
-	}
-	if document.SourceState != types.DocumentSourceMissing {
-		return errors.New("reference already has a source document")
+// action on one unresolved reference. Parsing and catalog lookup never call it.
+func (s *documentService) RequestReferencePDFDownload(ctx context.Context, referenceID string) error {
+	id, err := uuid.Parse(strings.TrimSpace(referenceID))
+	if err != nil || id == uuid.Nil {
+		return errors.New("invalid reference id")
 	}
 	if s.papers == nil || s.taskEnqueuer == nil {
 		return errors.New("reference download is not configured")
 	}
-	metadata, err := s.papers.GetMetadata(ctx, documentID.String())
+	reference, err := s.papers.GetReference(ctx, id.String())
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(metadata.SourceURL) == "" {
+	if reference.CitedDocumentID != nil {
+		return ErrReferenceAlreadyResolved
+	}
+	if referenceSourceURL(*reference) == "" {
 		return types.ErrRemotePDFUnavailable
 	}
-	generation := document.SourceLookupGeneration
+	generation := reference.ResolutionGeneration
 	if generation < 1 {
 		generation = 1
 	}
 	task, options, err := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
-		DocumentID: documentID.String(), Generation: generation,
+		ReferenceID: id.String(), Generation: generation,
 	})
 	if err != nil {
 		return err
 	}
-	if err := enqueueManagedTask(ctx, s.taskEnqueuer, task, options, documentID.String()); err != nil && !errors.Is(err, asynq.ErrTaskIDConflict) {
+	if err := enqueueManagedTask(ctx, s.taskEnqueuer, task, options, id.String()); err != nil {
 		return err
 	}
-	logger.Info(ctx, "reference PDF download queued by user", "document_id", documentID)
+	logger.Info(ctx, "reference PDF download queued by user", "reference_id", id)
 	return nil
 }
 
 // ImportRemoteDocument executes only an explicit reference-download task.
 func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.Task) error {
 	if task == nil {
-		return errors.New("remote document import task is required")
+		return errors.New("remote reference import task is required")
 	}
 	var payload types.DocumentRemoteImportPayload
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-		return fmt.Errorf("decode remote document import payload: %w", err)
+		return fmt.Errorf("decode remote reference import payload: %w", err)
 	}
 	if err := payload.Validate(); err != nil {
 		return err
 	}
-	documentID := uuid.MustParse(payload.DocumentID)
-	document, err := s.repo.Get(ctx, documentID)
-	if err != nil || document.SourceState != types.DocumentSourceMissing {
-		return err
+	if payload.ReferenceID == "" {
+		return fmt.Errorf("%w: legacy document remote import is retired", asynq.SkipRetry)
+	}
+	return s.importReferencePDF(ctx, payload.ReferenceID)
+}
+
+func (s *documentService) importReferencePDF(ctx context.Context, referenceID string) error {
+	id, err := uuid.Parse(strings.TrimSpace(referenceID))
+	if err != nil || id == uuid.Nil {
+		return fmt.Errorf("invalid reference id: %w", asynq.SkipRetry)
 	}
 	if s.papers == nil || s.urlResolver == nil {
 		return errors.New("remote paper dependencies are not configured")
 	}
-	metadata, err := s.papers.GetMetadata(ctx, documentID.String())
+	reference, err := s.papers.GetReference(ctx, id.String())
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: reference not found", asynq.SkipRetry)
+		}
 		return err
 	}
-	resolved, err := s.urlResolver.Resolve(ctx, types.PaperURLResolveRequest{SourceURL: metadata.SourceURL, ExplicitDOI: document.DOI})
+	if reference.CitedDocumentID != nil {
+		return s.ensureReferenceRecognition(ctx, *reference.CitedDocumentID)
+	}
+	sourceURL := referenceSourceURL(*reference)
+	if sourceURL == "" {
+		return terminalRemoteImportError(types.ErrRemotePDFUnavailable)
+	}
+	resolved, err := s.urlResolver.Resolve(ctx, types.PaperURLResolveRequest{
+		SourceURL: sourceURL, ExplicitDOI: reference.DOI,
+	})
 	if err != nil {
 		return terminalRemoteImportError(err)
 	}
-	if duplicate, err := s.findDuplicateDocument(ctx, documentID, resolved.DOI, ""); err != nil {
+	doi := resolved.DOI
+	if doi == "" {
+		doi = reference.DOI
+	}
+	if duplicate, err := s.findDuplicateDocument(ctx, reference.CitingDocumentID, doi, ""); err != nil {
 		return err
 	} else if duplicate != uuid.Nil {
-		return s.redirectIncomingCitations(ctx, documentID, duplicate)
+		return s.attachReferenceToDocument(ctx, id, duplicate)
 	}
 	stored, err := s.downloadResolvedPDF(ctx, resolved.DownloadURL, resolved.Filename)
 	if err != nil {
 		return terminalRemoteImportError(err)
 	}
-	cleanup := true
+	cleanupFile := true
 	defer func() {
-		if cleanup {
+		if cleanupFile {
 			_ = s.storage.Delete(context.WithoutCancel(ctx), stored.File.Key)
 		}
 	}()
-	if duplicate, err := s.findDuplicateDocument(ctx, documentID, "", stored.File.SHA256); err != nil {
+	if duplicate, err := s.findDuplicateDocument(ctx, reference.CitingDocumentID, "", stored.File.SHA256); err != nil {
 		return err
 	} else if duplicate != uuid.Nil {
-		return s.redirectIncomingCitations(ctx, documentID, duplicate)
+		return s.attachReferenceToDocument(ctx, id, duplicate)
 	}
-	promoted, err := s.repo.PromoteUnknown(ctx, types.Document{ID: documentID, OriginalFilename: stored.File.Filename, ContentType: stored.File.ContentType, SizeBytes: stored.File.Size, DOI: resolved.DOI, FileSHA256: stored.File.SHA256, StorageKey: stored.File.Key, SourceState: types.DocumentSourceAvailable})
-	if err != nil || !promoted {
+
+	documentID := uuid.New()
+	created, err := s.repo.Create(ctx, types.Document{
+		ID:               documentID,
+		OriginalFilename: stored.File.Filename,
+		ContentType:      stored.File.ContentType,
+		SizeBytes:        stored.File.Size,
+		DOI:              doi,
+		FileSHA256:       stored.File.SHA256,
+		StorageKey:       stored.File.Key,
+		SourceState:      types.DocumentSourceAvailable,
+	})
+	if err != nil {
+		if errors.Is(err, types.ErrDuplicateDOI) || errors.Is(err, types.ErrDuplicateFileHash) {
+			if duplicate, lookupErr := s.findDuplicateDocument(ctx, reference.CitingDocumentID, doi, stored.File.SHA256); lookupErr != nil {
+				return lookupErr
+			} else if duplicate != uuid.Nil {
+				return s.attachReferenceToDocument(ctx, id, duplicate)
+			}
+		}
 		return err
 	}
-	cleanup = false
-	if sourceURL := canonicalRemoteLandingURL(resolved, stored); sourceURL != "" {
-		source := types.PaperMetadataSourceCatalog
-		_, _ = s.papers.UpdateMetadata(ctx, documentID.String(), types.PaperMetadataUpdate{SourceURL: &sourceURL, MetadataSource: &source})
+	cleanupDocument := func() {
+		_ = s.repo.Delete(context.WithoutCancel(ctx), created.ID)
+		_ = s.storage.Delete(context.WithoutCancel(ctx), stored.File.Key)
+	}
+	if _, err := s.papers.UpdateMetadata(ctx, created.ID.String(), referenceDocumentMetadata(*reference, resolved, stored)); err != nil {
+		cleanupDocument()
+		return fmt.Errorf("persist imported reference metadata: %w", err)
+	}
+	linked, err := s.papers.LinkReferenceDocument(ctx, id, created.ID, false)
+	if err != nil {
+		cleanupDocument()
+		return err
+	}
+	if linked.CitedDocumentID == nil || *linked.CitedDocumentID != created.ID {
+		cleanupDocument()
+		if linked.CitedDocumentID != nil {
+			return s.ensureReferenceRecognition(ctx, *linked.CitedDocumentID)
+		}
+		return errors.New("reference link did not attach the imported document")
+	}
+	cleanupFile = false
+	if err := s.enqueueDocumentRecognition(ctx, created.ID); err != nil {
+		return err
+	}
+	logger.Info(ctx, "reference PDF imported",
+		"reference_id", id, "document_id", created.ID, "source_url", resolved.LandingURL)
+	return nil
+}
+
+func (s *documentService) attachReferenceToDocument(
+	ctx context.Context, referenceID, documentID uuid.UUID,
+) error {
+	linked, err := s.papers.LinkReferenceDocument(ctx, referenceID, documentID, false)
+	if err != nil {
+		return err
+	}
+	if linked.CitedDocumentID != nil && *linked.CitedDocumentID == documentID {
+		return s.ensureReferenceRecognition(ctx, documentID)
+	}
+	if linked.CitedDocumentID != nil {
+		return s.ensureReferenceRecognition(ctx, *linked.CitedDocumentID)
+	}
+	return errors.New("reference could not be attached to an existing document")
+}
+
+func (s *documentService) ensureReferenceRecognition(ctx context.Context, documentID uuid.UUID) error {
+	stage, err := s.repo.GetStage(ctx, documentID, types.DocumentStageMarkdown)
+	if err != nil {
+		return err
+	}
+	if stage.Status.Active() || stage.Status == types.DocumentStageSucceeded {
+		return nil
 	}
 	return s.enqueueDocumentRecognition(ctx, documentID)
+}
+
+func referenceSourceURL(reference types.PaperReference) string {
+	if value := strings.TrimSpace(reference.SourceURL); value != "" {
+		return value
+	}
+	return strings.TrimSpace(referenceLookupQuery(reference.RawReference).SourceURL)
+}
+
+func referenceDocumentMetadata(
+	reference types.PaperReference,
+	resolved types.ResolvedPaperURL,
+	stored interfaces.SaveFromURLResult,
+) types.PaperMetadataUpdate {
+	source := types.PaperMetadataSourceCatalog
+	update := types.PaperMetadataUpdate{MetadataSource: &source}
+	if title := strings.TrimSpace(reference.Title); title != "" {
+		update.Title = &title
+	}
+	if len(reference.Authors) > 0 {
+		authors := reference.Authors
+		update.Authors = &authors
+	}
+	if venue := strings.TrimSpace(reference.Venue); venue != "" {
+		update.Venue = &venue
+	}
+	if reference.PublishedAt != nil {
+		update.PublishedAt = reference.PublishedAt
+	}
+	if volume := strings.TrimSpace(reference.Volume); volume != "" {
+		update.Volume = &volume
+	}
+	if issue := strings.TrimSpace(reference.Issue); issue != "" {
+		update.Issue = &issue
+	}
+	if pages := strings.TrimSpace(reference.Pages); pages != "" {
+		update.Pages = &pages
+	}
+	if sourceURL := canonicalRemoteLandingURL(resolved, stored); sourceURL != "" {
+		update.SourceURL = &sourceURL
+	} else if value := referenceSourceURL(reference); value != "" {
+		update.SourceURL = &value
+	}
+	return update
 }
 
 func (s *documentService) downloadResolvedPDF(ctx context.Context, downloadURL, filename string) (interfaces.SaveFromURLResult, error) {
@@ -257,11 +389,11 @@ func (s *documentService) findDuplicateDocument(ctx context.Context, exclude uui
 	return uuid.Nil, nil
 }
 
-func (s *documentService) redirectIncomingCitations(ctx context.Context, placeholderID, canonicalID uuid.UUID) error {
-	if err := s.repo.MergeIntoCanonical(ctx, placeholderID, canonicalID); err != nil {
+func (s *documentService) redirectIncomingCitations(ctx context.Context, incomingDocumentID, canonicalID uuid.UUID) error {
+	if err := s.repo.MergeIntoCanonical(ctx, incomingDocumentID, canonicalID); err != nil {
 		return err
 	}
-	logger.Info(ctx, "reference document merged into canonical", "placeholder_document_id", placeholderID, "canonical_document_id", canonicalID)
+	logger.Info(ctx, "reference document merged into canonical", "incoming_document_id", incomingDocumentID, "canonical_document_id", canonicalID)
 	return nil
 }
 

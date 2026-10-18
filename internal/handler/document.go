@@ -105,19 +105,27 @@ func (h *DocumentHandler) ImportURLBatch(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
-// DownloadReferencePDF explicitly requests acquisition of one cited
-// placeholder. Reference parsing itself never triggers this operation.
+// DownloadReferencePDF explicitly requests acquisition of one shared
+// reference. Reference parsing itself never triggers this operation.
 func (h *DocumentHandler) DownloadReferencePDF(c *gin.Context) {
-	if err := h.documents.RequestReferencePDFDownload(c.Request.Context(), c.Param("id")); err != nil {
-		if errors.Is(err, types.ErrRemotePDFUnavailable) {
+	referenceID := c.Param("referenceID")
+	if err := h.documents.RequestReferencePDFDownload(c.Request.Context(), referenceID); err != nil {
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			h.writeError(c, apperrors.NewNotFoundError("reference not found"), nil)
+		case errors.Is(err, types.ErrRemotePDFUnavailable):
 			h.writeError(c, apperrors.NewBadRequestError("reference has no downloadable source"), err)
-			return
+		case errors.Is(err, appservice.ErrReferenceAlreadyResolved):
+			h.writeError(c, apperrors.NewConflictError("reference already has a source document"), err)
+		case strings.Contains(err.Error(), "invalid reference id"):
+			h.writeError(c, apperrors.NewBadRequestError("invalid reference id"), err)
+		default:
+			h.writeError(c, apperrors.NewInternalServerError("queue reference PDF download"), err)
 		}
-		h.writeError(c, apperrors.NewInternalServerError("queue reference PDF download"), err)
 		return
 	}
-	logger.Info(c.Request.Context(), "reference PDF download accepted", "document_id", c.Param("id"))
-	c.Status(http.StatusAccepted)
+	logger.Info(c.Request.Context(), "reference PDF download accepted", "reference_id", referenceID)
+	c.JSON(http.StatusAccepted, gin.H{"accepted": true})
 }
 
 // NewDocumentHandler receives the application service through DI; handlers do

@@ -45,10 +45,11 @@ func (status PaperCatalogStatus) IsValid() bool {
 // claim a provider and fallback state from PaperReferenceScheduler instead of
 // carrying either concern in the Asynq payload.
 type PaperCatalogResolveCommand struct {
-	RequestID  string
-	DocumentID uuid.UUID
-	Stage      DocumentStage
-	Generation int64
+	RequestID   string
+	DocumentID  uuid.UUID
+	ReferenceID uuid.UUID
+	Stage       DocumentStage
+	Generation  int64
 }
 
 // PaperReferenceDispatchCommand is the typed request to build a bounded,
@@ -76,8 +77,14 @@ func (command PaperReferenceDispatchCommand) Validate() error {
 	return nil
 }
 
-// Validate verifies the one target document identity.
+// Validate verifies the target identity: a reference ID or a source document.
 func (command PaperCatalogResolveCommand) Validate() error {
+	if command.ReferenceID != uuid.Nil {
+		if command.Generation < 1 {
+			return fmt.Errorf("%w: reference generation must be positive", ErrInvalidPaperCatalogData)
+		}
+		return nil
+	}
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
 	}

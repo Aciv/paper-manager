@@ -127,6 +127,7 @@ func (h *DocumentHousekeepingService) runSweep(ctx context.Context) {
 	cutoff := time.Now().UTC().Add(-h.staleThreshold)
 
 	h.recoverStaleStages(sweepCtx, cutoff)
+	h.recoverStaleReferences(sweepCtx, cutoff)
 	h.cleanupTerminalSpans(sweepCtx)
 }
 
@@ -141,7 +142,7 @@ func (h *DocumentHousekeepingService) recoverStaleStages(ctx context.Context, cu
 	var candidates []staleStageCandidate
 	query := `SELECT id AS document_id, 'markdown' AS stage, markdown_generation AS generation FROM documents WHERE source_state = 'available' AND markdown_status IN ('queued','running') AND markdown_updated_at < ?
 		UNION ALL SELECT id, 'metadata_extraction', metadata_extraction_generation FROM documents WHERE source_state = 'available' AND metadata_extraction_status IN ('queued','running') AND metadata_extraction_updated_at < ?
-		UNION ALL SELECT id, 'source_lookup', source_lookup_generation FROM documents WHERE source_state IN ('available','missing') AND source_lookup_status IN ('queued','running') AND source_lookup_updated_at < ?
+		UNION ALL SELECT id, 'source_lookup', source_lookup_generation FROM documents WHERE source_state = 'available' AND source_lookup_status IN ('queued','running') AND source_lookup_updated_at < ?
 		UNION ALL SELECT id, 'reference_lookup', reference_lookup_generation FROM documents WHERE source_state = 'available' AND reference_lookup_status IN ('queued','running') AND reference_lookup_updated_at < ?
 		LIMIT ?`
 	if err := h.db.WithContext(ctx).Raw(query, cutoff, cutoff, cutoff, cutoff, candidateLimit).Scan(&candidates).Error; err != nil {
@@ -154,8 +155,11 @@ func (h *DocumentHousekeepingService) recoverStaleStages(ctx context.Context, cu
 			var err error
 			queued, err = h.inspector.HasQueuedTaskForStage(ctx, candidate.DocumentID.String(), candidate.Stage, candidate.Generation)
 			if err != nil {
-				logger.Warn(ctx, "document stage queue probe failed; treating as stale", "document_id", candidate.DocumentID, "stage", candidate.Stage, "generation", candidate.Generation, "error", err)
-				queued = false
+				// A transient Redis error is not evidence that work disappeared.
+				logger.Warn(ctx, "document stage queue probe failed; leaving candidate for next sweep",
+					"document_id", candidate.DocumentID, "stage", candidate.Stage,
+					"generation", candidate.Generation, "error", err)
+				continue
 			}
 		}
 		if queued {
@@ -174,6 +178,57 @@ func (h *DocumentHousekeepingService) recoverStaleStages(ctx context.Context, cu
 		}
 		if result.RowsAffected > 0 {
 			logger.Info(ctx, "document stage recovered as stale", "document_id", candidate.DocumentID, "stage", candidate.Stage, "generation", candidate.Generation)
+		}
+	}
+}
+
+type staleReferenceCandidate struct {
+	ReferenceID uuid.UUID
+	Generation  int64
+}
+
+func (h *DocumentHousekeepingService) recoverStaleReferences(ctx context.Context, cutoff time.Time) {
+	const candidateLimit = 200
+	var candidates []staleReferenceCandidate
+	if err := h.db.WithContext(ctx).Raw(`SELECT id AS reference_id, resolution_generation AS generation
+		FROM paper_citations
+		WHERE cited_document_id IS NULL
+		  AND resolution_status IN ('queued','running')
+		  AND resolution_updated_at < ?
+		LIMIT ?`, cutoff, candidateLimit).Scan(&candidates).Error; err != nil {
+		logger.Warn(ctx, "reference resolution housekeeping candidate query failed", "error", err)
+		return
+	}
+	for _, candidate := range candidates {
+		queued := false
+		if h.inspector != nil {
+			var err error
+			queued, err = h.inspector.HasQueuedTaskForReference(ctx, candidate.ReferenceID.String(), candidate.Generation)
+			if err != nil {
+				logger.Warn(ctx, "reference resolution queue probe failed; leaving candidate for next sweep",
+					"reference_id", candidate.ReferenceID, "generation", candidate.Generation, "error", err)
+				continue
+			}
+		}
+		if queued {
+			continue
+		}
+		now := time.Now().UTC()
+		result := h.db.WithContext(ctx).Exec(`UPDATE paper_citations
+			SET resolution_status = 'failed', resolution_error_code = ?,
+			    resolution_error_message = ?, resolution_updated_at = ?, updated_at = ?
+			WHERE id = ? AND cited_document_id IS NULL
+			  AND resolution_status IN ('queued','running')
+			  AND resolution_generation = ? AND resolution_updated_at < ?`,
+			types.ProcessingErrorTaskFailed, "reference resolution task became stale without queued work",
+			now, now, candidate.ReferenceID, candidate.Generation, cutoff)
+		if result.Error != nil {
+			logger.Warn(ctx, "reference resolution housekeeping update failed", "reference_id", candidate.ReferenceID, "error", result.Error)
+			continue
+		}
+		if result.RowsAffected > 0 {
+			logger.Info(ctx, "reference resolution recovered as stale",
+				"reference_id", candidate.ReferenceID, "generation", candidate.Generation)
 		}
 	}
 }

@@ -87,7 +87,7 @@ func ServerFile(router gin.IRoutes, documentHandler *handler.DocumentHandler) {
 	router.POST("/api/document/import-url", documentHandler.ImportURL)
 	router.POST("/api/document/batch-upload", documentHandler.UploadBatch)
 	router.POST("/api/document/batch-import-url", documentHandler.ImportURLBatch)
-	router.POST("/api/document/:id/download-reference-pdf", documentHandler.DownloadReferencePDF)
+	router.POST("/api/references/:referenceID/download-pdf", documentHandler.DownloadReferencePDF)
 	router.GET("/api/document/search", documentHandler.Search)
 	router.GET("/api/document/:id/content", documentHandler.Content)
 	router.GET("/api/document/:id/blocks", documentHandler.ListBlocks)
@@ -129,7 +129,8 @@ func ServerPaperMetadata(
 		router.POST("/api/paper/:documentID/citations", citationHandler.Add)
 		router.PUT("/api/paper/:documentID/citations", citationHandler.Replace)
 		router.POST("/api/paper/:documentID/citations/resolve", citationHandler.Resolve)
-		router.DELETE("/api/paper/:documentID/citations/:citedDocumentID", citationHandler.Remove)
+		router.DELETE("/api/paper/:documentID/citations/:referenceID", citationHandler.Remove)
+		router.POST("/api/references/:referenceID/resolve", citationHandler.ResolveReference)
 		router.GET("/api/paper/:documentID/cited-by", citationHandler.ListCitedBy)
 	}
 	if infoHandler != nil {

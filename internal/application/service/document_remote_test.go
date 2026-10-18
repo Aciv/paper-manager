@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"mime/multipart"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"paperMaster/internal/utils"
 
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 )
 
 type documentBatchRepoStub struct {
@@ -228,19 +230,28 @@ func TestCreateDocumentFromURLReturnsCreatedDocumentWhenInitialQueueFails(t *tes
 }
 
 func TestRequestReferencePDFDownloadQueuesOnlyExplicitTarget(t *testing.T) {
-	documentID := uuid.New()
-	repo := newPaperDocumentRepoStub(types.Document{
-		ID: documentID, SourceState: types.DocumentSourceMissing, SourceLookupGeneration: 2,
-	})
+	referenceID := uuid.New()
+	repo := newPaperDocumentRepoStub()
 	papers := newPaperInfoPaperServiceStub()
-	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, SourceURL: "https://example.test/paper.pdf"}
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "Downloadable reference",
+		SourceURL:        "https://example.test/paper.pdf",
+		ResolutionStatus: types.DocumentStageNotStarted, ResolutionGeneration: 2,
+	}
 	tasks := &documentTaskEnqueuerStub{}
 	service := &documentService{repo: repo, papers: papers, taskEnqueuer: tasks}
-	if err := service.RequestReferencePDFDownload(context.Background(), documentID.String()); err != nil {
+	if err := service.RequestReferencePDFDownload(context.Background(), referenceID.String()); err != nil {
 		t.Fatal(err)
 	}
 	if len(tasks.tasks) != 1 || tasks.tasks[0].Type() != types.TypeDocumentRemoteImport {
 		t.Fatalf("queued tasks = %#v", tasks.tasks)
+	}
+	var payload types.DocumentRemoteImportPayload
+	if err := json.Unmarshal(tasks.tasks[0].Payload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ReferenceID != referenceID.String() {
+		t.Fatalf("payload reference = %q, want %s", payload.ReferenceID, referenceID)
 	}
 }
 
@@ -255,4 +266,51 @@ func remotePDFTestServer(t *testing.T) *httptest.Server {
 	}))
 	t.Cleanup(server.Close)
 	return server
+}
+
+func TestImportReferencePDFCreatesDocumentOnlyAfterDownload(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := newPaperDocumentRepoStub()
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := &documentTaskEnqueuerStub{}
+	papers := newPaperInfoPaperServiceStub()
+	referenceID := uuid.New()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "Downloadable reference",
+		Title: "Downloadable reference", SourceURL: server.URL + "/paper.pdf",
+		ResolutionStatus: types.DocumentStageNotStarted, ResolutionGeneration: 1,
+	}
+	service := &documentService{
+		repo: repo, storage: storage, taskEnqueuer: tasks,
+		papers: papers, urlResolver: paperurl.NewResolver(),
+	}
+	payload, err := json.Marshal(types.DocumentRemoteImportPayload{
+		ReferenceID: referenceID.String(), Generation: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ImportRemoteDocument(context.Background(), asynq.NewTask(types.TypeDocumentRemoteImport, payload)); err != nil {
+		t.Fatalf("ImportRemoteDocument() error = %v", err)
+	}
+	if len(repo.documents) != 1 {
+		t.Fatalf("created documents = %d, want 1", len(repo.documents))
+	}
+	var created types.Document
+	for _, document := range repo.documents {
+		created = document
+	}
+	if created.SourceState != types.DocumentSourceAvailable || created.FileSHA256 == "" {
+		t.Fatalf("created document = %#v", created)
+	}
+	linked := papers.references[referenceID]
+	if linked.CitedDocumentID == nil || *linked.CitedDocumentID != created.ID {
+		t.Fatalf("reference was not linked to the created document: %#v", linked)
+	}
+	if len(tasks.documents) != 1 || tasks.documents[0].DocumentID != created.ID.String() {
+		t.Fatalf("recognition tasks = %#v", tasks.documents)
+	}
 }

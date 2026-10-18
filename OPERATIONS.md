@@ -83,9 +83,9 @@ POST /api/paper/<id>/info/reference/retry
 ```
 
 Reference catalog cancellation does not stop extraction/source lookup.
-Reference PDF acquisition uses `/references/download` and
-`/references/download/cancel`; cancellation leaves the source document and
-already persisted target PDFs unchanged.
+Reference PDF acquisition is requested per citation with
+`POST /api/references/{referenceID}/download-pdf`; already persisted target PDFs
+are unchanged.
 
 For failures, inspect structured logs by `request_id`/`document_id`, then query
 `task_dead_letters` by `task_type`, `scope`, and `scope_id`. A failed document
@@ -113,3 +113,30 @@ PAPER_CATALOG_LIVE_TEST=1 go test ./internal/infrastructure/papercatalog \
 Never place provider credentials in scripts, logs, or committed `.env` files.
 Configuration is read at process startup, so restart API workers after changing
 limits.
+
+## Reference storage cutover
+
+Migration 26 merges `paper_references` into `paper_citations`: every
+bibliography row now belongs to one citing paper and `cited_document_id` is its
+only resolution result. The migration backfills existing rows, so a data reset
+is not required. If upgrading from a pre-migration-25 schema, apply migration
+25 first; it intentionally does not backfill historical placeholder metadata.
+For a test environment that still contains placeholders, stop the API/worker
+and reset before startup:
+
+```bash
+# Dev containers used by make dev
+docker exec -e PGPASSWORD=papers papers-manager-dev-postgres-1 \
+  psql -U papers -d papers -c 'TRUNCATE TABLE documents CASCADE; TRUNCATE TABLE document_bases CASCADE; TRUNCATE TABLE task_dead_letters;'
+docker exec papers-manager-dev-redis-1 redis-cli FLUSHDB
+
+# Then start the API; AUTO_MIGRATE applies all versions in order.
+```
+
+Uploaded objects are not deleted by the SQL reset. Remove obsolete files from
+`data/uploads/` separately only when you are sure no real document references
+them. After migration, `documents.source_state` no longer contains `missing`;
+unresolved references are `paper_citations` rows with `cited_document_id NULL`,
+and `reference_lookup` remains `not_started` until the manual
+`/api/paper/:id/info/reference/retry` action unless
+`PAPER_REFERENCE_AUTO_RESOLVE=true`.

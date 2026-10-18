@@ -7,48 +7,52 @@ import (
 	"github.com/google/uuid"
 )
 
+func testCitation(citingID, referenceID uuid.UUID, raw string) PaperCitation {
+	return PaperCitation{
+		PaperReference: PaperReference{
+			ReferenceID:      referenceID,
+			CitingDocumentID: citingID,
+			RawReference:     raw,
+			Authors:          []PaperAuthor{},
+			ResolutionStatus: DocumentStageNotStarted,
+			MetadataSource:   PaperMetadataSourceUnknown,
+		},
+	}
+}
+
 func TestPaperCitationValidate(t *testing.T) {
 	citingID := uuid.New()
 	citedID := uuid.New()
+	referenceID := uuid.New()
+	valid := testCitation(citingID, referenceID, "Example Author. Example Paper.")
 
 	tests := []struct {
 		name     string
 		citation PaperCitation
 		wantErr  error
 	}{
-		{
-			name: "valid directional relation",
-			citation: PaperCitation{
-				CitingDocumentID: citingID,
-				CitedDocumentID:  citedID,
-				RawReference:     "Example Author. Example Paper.",
-			},
-		},
-		{
-			name: "missing endpoint",
-			citation: PaperCitation{
-				CitingDocumentID: citingID,
-				RawReference:     "Example Author. Example Paper.",
-			},
-			wantErr: ErrInvalidPaperCitation,
-		},
-		{
-			name: "self citation",
-			citation: PaperCitation{
-				CitingDocumentID: citingID,
-				CitedDocumentID:  citingID,
-				RawReference:     "Example Author. Example Paper.",
-			},
-			wantErr: ErrSelfPaperCitation,
-		},
-		{
-			name: "missing raw reference",
-			citation: PaperCitation{
-				CitingDocumentID: citingID,
-				CitedDocumentID:  citedID,
-			},
-			wantErr: ErrInvalidPaperCitation,
-		},
+		{name: "valid directional relation", citation: func() PaperCitation {
+			citation := valid
+			citation.CitedDocumentID = &citedID
+			citation.ResolutionStatus = DocumentStageSucceeded
+			return citation
+		}()},
+		{name: "unresolved reference is valid", citation: valid},
+		{name: "missing reference", citation: func() PaperCitation {
+			citation := valid
+			citation.ReferenceID = uuid.Nil
+			return citation
+		}(), wantErr: ErrInvalidPaperCitation},
+		{name: "self citation", citation: func() PaperCitation {
+			citation := valid
+			citation.CitedDocumentID = &citingID
+			return citation
+		}(), wantErr: ErrSelfPaperCitation},
+		{name: "missing raw reference", citation: func() PaperCitation {
+			citation := valid
+			citation.RawReference = ""
+			return citation
+		}(), wantErr: ErrInvalidPaperReference},
 	}
 
 	for _, test := range tests {
@@ -68,11 +72,24 @@ func TestPaperCitationTableName(t *testing.T) {
 }
 
 func TestPaperCitationValidateEndpointsDoesNotRequireRawReference(t *testing.T) {
-	citation := PaperCitation{
-		CitingDocumentID: uuid.New(),
-		CitedDocumentID:  uuid.New(),
-	}
+	citedID := uuid.New()
+	citation := testCitation(uuid.New(), uuid.New(), "")
+	citation.CitedDocumentID = &citedID
 	if err := citation.ValidateEndpoints(); err != nil {
 		t.Fatalf("ValidateEndpoints() error = %v", err)
+	}
+}
+
+func TestPaperReferenceIdentityIsScopedToCitingPaper(t *testing.T) {
+	citingID := uuid.New()
+	otherCitingID := uuid.New()
+	raw := "  Example   Author. Example Paper.  "
+	first := PaperReferenceIDForRaw(citingID, raw)
+	second := PaperReferenceIDForRaw(citingID, "Example Author. Example Paper.")
+	if first != second {
+		t.Fatalf("normalized raw reference identity changed: %s != %s", first, second)
+	}
+	if PaperReferenceIDForRaw(otherCitingID, raw) == first {
+		t.Fatal("the same raw reference in another paper must have a distinct row identity")
 	}
 }
