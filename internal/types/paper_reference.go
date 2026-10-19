@@ -50,6 +50,16 @@ type PaperReference struct {
 	ResolutionErrorMsg   *string             `gorm:"column:resolution_error_message;type:text" json:"resolutionErrorMessage,omitempty"`
 	ResolutionUpdatedAt  time.Time           `gorm:"column:resolution_updated_at;not null;default:CURRENT_TIMESTAMP" json:"resolutionUpdatedAt"`
 
+	// Reference PDF download state. A reference can only be downloaded while
+	// CitedDocumentID is NULL; success is then represented by that link. These
+	// fields record the latest explicit attempt and its terminal failure so the
+	// UI can distinguish "pending" from "failed with a reason".
+	DownloadAttempt      *uuid.UUID `gorm:"column:download_attempt;type:uuid" json:"downloadAttempt,omitempty"`
+	DownloadRequestedAt  *time.Time `gorm:"column:download_requested_at" json:"downloadRequestedAt,omitempty"`
+	DownloadErrorCode    *string    `gorm:"column:download_error_code;type:text" json:"downloadErrorCode,omitempty"`
+	DownloadErrorMessage *string    `gorm:"column:download_error_message;type:text" json:"downloadErrorMessage,omitempty"`
+	DownloadUpdatedAt    *time.Time `gorm:"column:download_updated_at" json:"downloadUpdatedAt,omitempty"`
+
 	// CitedDocumentID is the single resolution result. NULL means the
 	// bibliography entry has no matching stored paper yet.
 	CitedDocumentID *uuid.UUID `gorm:"column:cited_document_id;type:uuid" json:"citedDocumentId,omitempty"`

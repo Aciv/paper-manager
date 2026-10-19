@@ -135,13 +135,21 @@ func (s *documentService) RequestReferencePDFDownload(ctx context.Context, refer
 	if generation < 1 {
 		generation = 1
 	}
+	attempt := uuid.New()
+	if _, err := s.papers.BeginReferenceDownload(ctx, id.String(), attempt.String()); err != nil {
+		return err
+	}
 	task, options, err := NewDocumentRemoteImportTask(types.DocumentRemoteImportPayload{
-		ReferenceID: id.String(), Generation: generation,
+		ReferenceID: id.String(), Generation: generation, DownloadAttempt: attempt.String(),
 	})
 	if err != nil {
+		_ = s.papers.FailReferenceDownload(ctx, id.String(), attempt.String(),
+			types.ProcessingErrorTaskBuild, "download task could not be created")
 		return err
 	}
 	if err := enqueueManagedTask(ctx, s.taskEnqueuer, task, options, id.String()); err != nil {
+		_ = s.papers.FailReferenceDownload(ctx, id.String(), attempt.String(),
+			types.ProcessingErrorQueue, "download task could not be queued")
 		return err
 	}
 	logger.Info(ctx, "reference PDF download queued by user", "reference_id", id)
@@ -149,7 +157,7 @@ func (s *documentService) RequestReferencePDFDownload(ctx context.Context, refer
 }
 
 // ImportRemoteDocument executes only an explicit reference-download task.
-func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.Task) error {
+func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.Task) (outputErr error) {
 	if task == nil {
 		return errors.New("remote reference import task is required")
 	}
@@ -163,7 +171,59 @@ func (s *documentService) ImportRemoteDocument(ctx context.Context, task *asynq.
 	if payload.ReferenceID == "" {
 		return fmt.Errorf("%w: legacy document remote import is retired", asynq.SkipRetry)
 	}
+	attempt := strings.TrimSpace(payload.DownloadAttempt)
+	if attempt != "" {
+		defer func() {
+			s.recordReferenceDownloadFailure(ctx, payload.ReferenceID, attempt, outputErr)
+		}()
+	}
 	return s.importReferencePDF(ctx, payload.ReferenceID)
+}
+
+// recordReferenceDownloadFailure persists only terminal outcomes. Retryable
+// errors leave the request in the pending state, and stale generations are
+// ignored by the repository's attempt fence.
+func (s *documentService) recordReferenceDownloadFailure(
+	ctx context.Context, referenceID, attempt string, taskErr error,
+) {
+	if taskErr == nil || s.papers == nil {
+		return
+	}
+	switch ClassifyTaskError(taskErr) {
+	case TaskDispositionRevoke:
+		return
+	case TaskDispositionSkip:
+	default:
+		if !finalAsynqAttempt(ctx) {
+			return
+		}
+	}
+	code, message := referenceDownloadFailure(taskErr)
+	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stageFinishTimeout)
+	defer cancel()
+	if err := s.papers.FailReferenceDownload(finishCtx, referenceID, attempt, code, message); err != nil {
+		logger.Warn(ctx, "record reference download failure failed",
+			"reference_id", referenceID, "error", err)
+	}
+}
+
+// referenceDownloadFailure maps download errors to bounded, client-safe codes
+// and messages. Raw transport/storage errors never reach the API.
+func referenceDownloadFailure(err error) (string, string) {
+	var remoteErr *fileservice.RemoteHTTPError
+	switch {
+	case errors.As(err, &remoteErr):
+		return types.ProcessingErrorTaskFailed, fmt.Sprintf("download failed with HTTP %d", remoteErr.StatusCode)
+	case errors.Is(err, fileservice.ErrInvalidPDF):
+		return types.ProcessingErrorTaskFailed, "downloaded content is not a valid PDF"
+	case errors.Is(err, fileservice.ErrUnsupportedFileType):
+		return types.ProcessingErrorTaskFailed, "downloaded file type is not supported"
+	case errors.Is(err, fileservice.ErrFileTooLarge):
+		return types.ProcessingErrorTaskFailed, "downloaded PDF exceeds the size limit"
+	case errors.Is(err, types.ErrRemotePDFUnavailable):
+		return types.ProcessingErrorServiceUnavailable, "reference has no downloadable PDF"
+	}
+	return spanFailure(err)
 }
 
 func (s *documentService) importReferencePDF(ctx context.Context, referenceID string) error {
@@ -391,11 +451,11 @@ func (s *documentService) findDuplicateDocument(ctx context.Context, exclude uui
 
 func terminalRemoteImportError(err error) error {
 	if errors.Is(err, types.ErrRemotePDFUnavailable) || errors.Is(err, fileservice.ErrInvalidPDF) || errors.Is(err, fileservice.ErrUnsupportedFileType) {
-		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+		return fmt.Errorf("%w: %w", asynq.SkipRetry, err)
 	}
 	var remoteErr *fileservice.RemoteHTTPError
 	if errors.As(err, &remoteErr) && !remoteErr.TaskRetryable() {
-		return fmt.Errorf("%w: %v", asynq.SkipRetry, err)
+		return fmt.Errorf("%w: %w", asynq.SkipRetry, err)
 	}
 	return err
 }

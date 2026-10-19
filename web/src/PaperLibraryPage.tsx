@@ -776,6 +776,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
           <dt>发表信息</dt><dd>{[citationReference.venue, citationReference.publishedAt?.slice(0, 10)].filter(Boolean).join(' · ') || '未提取发表信息'}</dd>
           <dt>DOI</dt><dd>{citationReference.doi || '未提取 DOI'}</dd>
           <dt>解析状态</dt><dd>{citationReference.resolutionStatus}{citationReference.citedDocumentId ? ' · 已关联库内文档' : ''}</dd>
+          <dt>PDF 下载</dt><dd>{citationReference.citedDocumentId ? '已获取文档' : citationReference.downloadErrorMessage ? `下载失败：${citationReference.downloadErrorMessage}` : citationReference.downloadRequestedAt ? '下载中' : '未请求下载'}</dd>
           {citationReference.resolutionErrorMessage && <><dt>解析错误</dt><dd>{citationReference.resolutionErrorMessage}</dd></>}
         </dl>}
         {!citationPaperInfoLoading && !citationReference && !citationPaperInfoError && citationPaperInfo && <dl>

@@ -120,10 +120,14 @@ func SuggestedPDFFilename(rawURL string) string {
 // download the source PDF for a citation row. ReferenceID selects the
 // reference path; the legacy DocumentID path is retained for old queue tasks.
 type DocumentRemoteImportPayload struct {
-	RequestID   string `json:"request_id,omitempty"`
-	DocumentID  string `json:"document_id,omitempty"`
-	ReferenceID string `json:"reference_id,omitempty"`
-	Generation  int64  `json:"generation"`
+	RequestID string `json:"request_id,omitempty"`
+	// DownloadAttempt identifies one explicit reference-PDF request. It fences
+	// terminal failure writes so a stale task cannot overwrite a newer retry.
+	// Older queued payloads may omit it.
+	DownloadAttempt string `json:"download_attempt,omitempty"`
+	DocumentID      string `json:"document_id,omitempty"`
+	ReferenceID     string `json:"reference_id,omitempty"`
+	Generation      int64  `json:"generation"`
 }
 
 func (payload DocumentRemoteImportPayload) Validate() error {
@@ -144,6 +148,11 @@ func (payload DocumentRemoteImportPayload) Validate() error {
 	}
 	if payload.Generation <= 0 {
 		return fmt.Errorf("generation must be positive")
+	}
+	if attempt := strings.TrimSpace(payload.DownloadAttempt); attempt != "" {
+		if id, err := uuid.Parse(attempt); err != nil || id == uuid.Nil {
+			return fmt.Errorf("download attempt must be a non-zero UUID")
+		}
 	}
 	return nil
 }

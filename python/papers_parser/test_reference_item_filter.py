@@ -1,11 +1,13 @@
 """Focused tests for 序号/overlap-based reference item consolidation."""
 from __future__ import annotations
 
+import time
 import unittest
 
 from papers_parser.paper_extractor import DeterministicPaperExtractionEngine, SourceBlock
 from papers_parser.regex_metadata_find import (
     filter_reference_items,
+    is_affiliation_only,
     reference_item_ordinal,
     split_reference_items,
 )
@@ -145,6 +147,34 @@ class UnnumberedRegionTest(unittest.TestCase):
             "- Image 3: Method B generated UI",
         ]
         self.assertEqual(filter_reference_items(items), items)
+
+
+class LinearTimeRegressionTest(unittest.TestCase):
+    """Hostile prefixes and long lines must stay linear (P1-7)."""
+
+    def test_marker_prefix_does_not_backtrack(self) -> None:
+        hostile = "- " * 5000 + "x"
+        started = time.monotonic()
+        self.assertIsNone(reference_item_ordinal(hostile))
+        self.assertEqual(split_reference_items(hostile), [hostile])
+        self.assertEqual(filter_reference_items([hostile]), [hostile])
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_email_scan_is_linear_on_long_affiliation_line(self) -> None:
+        hostile = "department " + ("a" * 50 + " ") * 4000 + "no email here"
+        started = time.monotonic()
+        self.assertTrue(is_affiliation_only(hostile))
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_reference_count_and_length_are_bounded(self) -> None:
+        numbered = "\n".join(f"[{index}] Reference {index}." for index in range(5100))
+        items = split_reference_items(numbered)
+        self.assertEqual(len(items), 5000)
+
+        long_item = "[1] " + "x" * 70000
+        bounded = split_reference_items(long_item)
+        self.assertEqual(len(bounded), 1)
+        self.assertEqual(len(bounded[0]), 65536)
 
 
 class RuleEngineReferenceTest(unittest.TestCase):

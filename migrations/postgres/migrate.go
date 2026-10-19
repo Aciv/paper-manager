@@ -114,6 +114,12 @@ var citationReferenceRowsUp string
 //go:embed 000026_citation_reference_rows.down.sql
 var citationReferenceRowsDown string
 
+//go:embed 000027_reference_download_status.up.sql
+var referenceDownloadStatusUp string
+
+//go:embed 000027_reference_download_status.down.sql
+var referenceDownloadStatusDown string
+
 type migration struct {
 	version int64
 	up      string
@@ -147,6 +153,7 @@ var migrations = []migration{
 	{version: 24, up: removeLegacyProcessingControlUp},
 	{version: 25, up: paperReferencesUp},
 	{version: 26, up: citationReferenceRowsUp},
+	{version: 27, up: referenceDownloadStatusUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

@@ -63,6 +63,11 @@ type PaperService interface {
 	) (*types.PaperCitation, error)
 	// GetReference returns one citation row by reference ID.
 	GetReference(ctx context.Context, referenceID string) (*types.PaperReference, error)
+	// BeginReferenceDownload records a new explicit download attempt. It
+	// returns ErrReferenceAlreadyResolved when the reference is linked.
+	BeginReferenceDownload(ctx context.Context, referenceID, attemptID string) (*types.PaperReference, error)
+	// FailReferenceDownload records a terminal failure for one attempt.
+	FailReferenceDownload(ctx context.Context, referenceID, attemptID, errorCode, errorMessage string) error
 	// ResolveReference manually links one citation row to a stored document.
 	ResolveReference(ctx context.Context, referenceID, resolvedDocumentID string) (*types.PaperReference, error)
 	// RematchReference retries local DOI/title matching for one citation row

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"paperMaster/internal/types"
 
@@ -634,6 +635,44 @@ func (r *paperCitationRepoStub) LinkResolvedDocument(
 	citation.ResolutionStatus = types.DocumentStageSucceeded
 	r.items[id] = citation
 	return citation.PaperReference, true, nil
+}
+
+func (r *paperCitationRepoStub) QueueDownload(
+	_ context.Context, id uuid.UUID, attempt uuid.UUID,
+) (types.PaperReference, bool, error) {
+	citation, ok := r.items[id]
+	if !ok {
+		return types.PaperReference{}, false, sql.ErrNoRows
+	}
+	if citation.CitedDocumentID != nil {
+		return citation.PaperReference, false, nil
+	}
+	now := time.Now().UTC()
+	citation.DownloadAttempt = &attempt
+	citation.DownloadRequestedAt = &now
+	citation.DownloadErrorCode = nil
+	citation.DownloadErrorMessage = nil
+	citation.DownloadUpdatedAt = &now
+	r.items[id] = citation
+	return citation.PaperReference, true, nil
+}
+
+func (r *paperCitationRepoStub) FailDownload(
+	_ context.Context, id uuid.UUID, attempt uuid.UUID, errorCode, errorMessage string,
+) (bool, error) {
+	citation, ok := r.items[id]
+	if !ok {
+		return false, sql.ErrNoRows
+	}
+	if citation.CitedDocumentID != nil || citation.DownloadAttempt == nil || *citation.DownloadAttempt != attempt {
+		return false, nil
+	}
+	now := time.Now().UTC()
+	citation.DownloadErrorCode = &errorCode
+	citation.DownloadErrorMessage = &errorMessage
+	citation.DownloadUpdatedAt = &now
+	r.items[id] = citation
+	return true, nil
 }
 
 func applyStubPatch(reference *types.PaperReference, patch *types.PaperReferenceMetadataPatch) {

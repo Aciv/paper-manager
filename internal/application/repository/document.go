@@ -234,7 +234,11 @@ func (r *documentRepository) Delete(ctx context.Context, id uuid.UUID) error {
 			    resolution_status = 'not_started',
 			    resolution_generation = resolution_generation + 1,
 			    resolution_provider = '', resolution_error_code = NULL,
-			    resolution_error_message = NULL, resolution_updated_at = ?, updated_at = ?
+			    resolution_error_message = NULL, resolution_updated_at = ?,
+			    download_attempt = NULL, download_requested_at = NULL,
+			    download_error_code = NULL, download_error_message = NULL,
+			    download_updated_at = NULL,
+			    updated_at = ?
 			WHERE cited_document_id = ?`, now, now, id).Error; err != nil {
 			return err
 		}

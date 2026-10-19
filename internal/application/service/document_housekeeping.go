@@ -120,17 +120,46 @@ func (h *DocumentHousekeepingService) run(ctx context.Context, done chan<- struc
 	}
 }
 
+// sweepTimeout bounds one whole housekeeping pass. It is intentionally much
+// longer than a single DB statement: a pass may probe up to 200 candidates and
+// a briefly slow Redis must delay classification, not turn it into a false
+// positive.
+const (
+	sweepTimeout = 2 * time.Minute
+	probeTimeout = 10 * time.Second
+)
+
 func (h *DocumentHousekeepingService) runSweep(ctx context.Context) {
 	if h == nil || h.db == nil {
 		return
 	}
-	sweepCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	sweepCtx, cancel := context.WithTimeout(ctx, sweepTimeout)
 	defer cancel()
 	cutoff := time.Now().UTC().Add(-h.staleThreshold)
 
 	h.recoverStaleStages(sweepCtx, cutoff)
 	h.recoverStaleReferences(sweepCtx, cutoff)
 	h.cleanupTerminalSpans(sweepCtx)
+	h.logPoolStats(ctx)
+}
+
+// logPoolStats keeps pool pressure visible without adding a metrics client.
+// wait_count/wait_duration reveal worker and HTTP traffic queueing on the
+// shared pool before latency turns into user-visible timeouts.
+func (h *DocumentHousekeepingService) logPoolStats(ctx context.Context) {
+	sqlDB, err := h.db.DB()
+	if err != nil {
+		return
+	}
+	stats := sqlDB.Stats()
+	logger.Debug(ctx, "database pool stats",
+		"open", stats.OpenConnections,
+		"in_use", stats.InUse,
+		"idle", stats.Idle,
+		"max_open", stats.MaxOpenConnections,
+		"wait_count", stats.WaitCount,
+		"wait_duration_ms", stats.WaitDuration.Milliseconds(),
+	)
 }
 
 type staleStageCandidate struct {
@@ -154,10 +183,13 @@ func (h *DocumentHousekeepingService) recoverStaleStages(ctx context.Context, cu
 	for _, candidate := range candidates {
 		queued := false
 		if h.inspector != nil {
+			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 			var err error
-			queued, err = h.inspector.HasQueuedTaskForStage(ctx, candidate.DocumentID.String(), candidate.Stage, candidate.Generation)
+			queued, err = h.inspector.HasQueuedTaskForStage(probeCtx, candidate.DocumentID.String(), candidate.Stage, candidate.Generation)
+			cancel()
 			if err != nil {
 				// A transient Redis error is not evidence that work disappeared.
+				// Keep the row untouched and retry on the next sweep.
 				logger.Warn(ctx, "document stage queue probe failed; leaving candidate for next sweep",
 					"document_id", candidate.DocumentID, "stage", candidate.Stage,
 					"generation", candidate.Generation, "error", err)
@@ -208,9 +240,11 @@ func (h *DocumentHousekeepingService) recoverStaleReferences(ctx context.Context
 			continue
 		}
 		if h.inspector != nil {
+			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 			queued, err := h.inspector.HasQueuedQueryApplyForReference(
-				ctx, candidate.ReferenceID.String(), candidate.Generation,
+				probeCtx, candidate.ReferenceID.String(), candidate.Generation,
 			)
+			cancel()
 			if err != nil {
 				logger.Warn(ctx, "reference result queue probe failed; leaving candidate for next sweep",
 					"reference_id", candidate.ReferenceID, "generation", candidate.Generation, "error", err)
@@ -259,6 +293,112 @@ func (h *DocumentHousekeepingService) cleanupTerminalSpans(ctx context.Context) 
 	if result.RowsAffected > 0 {
 		logger.Info(ctx, "terminal processing spans retained", "deleted", result.RowsAffected)
 	}
+}
+
+// FailInterruptedWork applies the restart policy to durable stage work. It
+// runs once at process startup, before the Asynq server starts consuming
+// tasks, so no recovered worker can observe a half-finished row first.
+//
+// The process is single-run by design: any row still marked running belongs
+// to an execution whose worker died with the previous process. Those rows are
+// failed immediately so the user can retry through the normal entry points,
+// instead of leaving the stage stuck until recoverStaleStages reaches its
+// stale threshold (70 minutes by default). The generation is deliberately
+// unchanged; a retry bumps it, which fences any recovered task payload that
+// Asynq redelivers later (TryStartStage then revokes it).
+//
+// Queued rows are left alone: their Asynq tasks survive a restart and are
+// redelivered normally. Catalog source/reference work is the exception
+// because its in-process dispatcher queue is gone; those rows are failed in
+// both queued and running states.
+func (h *DocumentHousekeepingService) FailInterruptedWork(ctx context.Context) error {
+	if h == nil || h.db == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	message := "server restarted before processing completed"
+
+	// Markdown recognition and metadata extraction own their Asynq tasks, so
+	// only running rows are orphaned here.
+	if err := h.db.WithContext(ctx).Exec(`UPDATE documents
+		SET markdown_status = 'failed',
+		    markdown_error_code = ?,
+		    markdown_error_message = ?,
+		    markdown_updated_at = ?
+		WHERE source_state = 'available'
+		  AND markdown_status = 'running'`,
+		types.ProcessingErrorTaskFailed, message, now).Error; err != nil {
+		return err
+	}
+	if err := h.db.WithContext(ctx).Exec(`UPDATE documents
+		SET metadata_extraction_status = 'failed',
+		    metadata_extraction_error_code = ?,
+		    metadata_extraction_error_message = ?,
+		    metadata_extraction_updated_at = ?
+		WHERE source_state = 'available'
+		  AND metadata_extraction_status = 'running'`,
+		types.ProcessingErrorTaskFailed, message, now).Error; err != nil {
+		return err
+	}
+
+	// Catalog lookups are handed to the in-process dispatcher and outlive the
+	// Asynq stage task. Both queued and running rows lose their execution
+	// state on restart.
+	if err := h.db.WithContext(ctx).Exec(`UPDATE documents
+		SET source_lookup_status = 'failed',
+		    source_lookup_error_code = ?,
+		    source_lookup_error_message = ?,
+		    source_lookup_updated_at = ?
+		WHERE source_state = 'available'
+		  AND source_lookup_status IN ('queued','running')`,
+		types.ProcessingErrorTaskFailed, message, now).Error; err != nil {
+		return err
+	}
+	if err := h.db.WithContext(ctx).Exec(`UPDATE documents
+		SET reference_lookup_status = 'failed',
+		    reference_lookup_error_code = ?,
+		    reference_lookup_error_message = ?,
+		    reference_lookup_updated_at = ?
+		WHERE source_state = 'available'
+		  AND reference_lookup_status IN ('queued','running')`,
+		types.ProcessingErrorTaskFailed, message, now).Error; err != nil {
+		return err
+	}
+	// Unresolved references are dispatched per row; resolved rows keep their
+	// result and must not be touched.
+	if err := h.db.WithContext(ctx).Exec(`UPDATE paper_citations
+		SET resolution_status = 'failed',
+		    resolution_error_code = ?,
+		    resolution_error_message = ?,
+		    resolution_updated_at = ?,
+		    updated_at = ?
+		WHERE cited_document_id IS NULL
+		  AND resolution_status IN ('queued','running')`,
+		types.ProcessingErrorTaskFailed, message, now, now).Error; err != nil {
+		return err
+	}
+
+	// Active observation spans belong to the process that just died. Mark
+	// them cancelled so the processing view does not show forever-running
+	// work after restart. Spans that are retried by their Asynq task (for
+	// example remote downloads) are deliberately excluded; the same task is
+	// redelivered and starts a new span.
+	if err := h.db.WithContext(ctx).Exec(`UPDATE document_processing_spans
+		SET status = 'cancelled',
+		    error_code = ?,
+		    error_reason = ?,
+		    finished_at = ?,
+		    updated_at = ?
+		WHERE status IN ('queued','running')
+		  AND kind IN (
+		      'recognition', 'metadata_extraction',
+		      'catalog_source', 'catalog_reference', 'catalog_provider'
+		  )`,
+		types.ProcessingErrorCancelled, message, now, now).Error; err != nil {
+		return err
+	}
+	logger.Info(ctx, "interrupted processing work marked failed", "reason", "server restart")
+	return nil
 }
 
 func stageStateColumn(stage types.DocumentStage) string      { return stageColumn(stage, "status") }

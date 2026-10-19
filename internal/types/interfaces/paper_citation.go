@@ -56,4 +56,10 @@ type PaperCitationRepository interface {
 	// LinkResolvedDocument links one citation row to a stored document.
 	// overwrite=false keeps an existing different resolution.
 	LinkResolvedDocument(ctx context.Context, id uuid.UUID, documentID uuid.UUID, overwrite bool) (types.PaperReference, bool, error)
+	// QueueDownload starts one explicit reference-PDF attempt. applied is
+	// false when the reference is already linked to a document.
+	QueueDownload(ctx context.Context, id uuid.UUID, attempt uuid.UUID) (types.PaperReference, bool, error)
+	// FailDownload records a terminal failure only when attempt is still the
+	// current download attempt.
+	FailDownload(ctx context.Context, id uuid.UUID, attempt uuid.UUID, errorCode, errorMessage string) (bool, error)
 }

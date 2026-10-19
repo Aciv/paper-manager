@@ -253,6 +253,68 @@ func TestRequestReferencePDFDownloadQueuesOnlyExplicitTarget(t *testing.T) {
 	if payload.ReferenceID != referenceID.String() {
 		t.Fatalf("payload reference = %q, want %s", payload.ReferenceID, referenceID)
 	}
+	if payload.DownloadAttempt == "" {
+		t.Fatal("download attempt was not recorded")
+	}
+	stored := papers.references[referenceID]
+	if stored.DownloadAttempt == nil || stored.DownloadAttempt.String() != payload.DownloadAttempt {
+		t.Fatalf("reference download attempt = %v, payload = %q", stored.DownloadAttempt, payload.DownloadAttempt)
+	}
+	if stored.DownloadRequestedAt == nil {
+		t.Fatal("reference download request time was not recorded")
+	}
+}
+
+func TestImportRemoteDocumentRecordsTerminalDownloadFailure(t *testing.T) {
+	referenceID := uuid.New()
+	attempt := uuid.New()
+	papers := newPaperInfoPaperServiceStub()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "No source URL",
+		DownloadAttempt: &attempt,
+	}
+	service := &documentService{papers: papers, urlResolver: paperurl.NewResolver()}
+	payload, err := json.Marshal(types.DocumentRemoteImportPayload{
+		ReferenceID: referenceID.String(), Generation: 1, DownloadAttempt: attempt.String(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	err = service.ImportRemoteDocument(context.Background(), asynq.NewTask(types.TypeDocumentRemoteImport, payload))
+	if !errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("ImportRemoteDocument() error = %v, want SkipRetry", err)
+	}
+	stored := papers.references[referenceID]
+	if stored.DownloadErrorCode == nil || *stored.DownloadErrorCode != types.ProcessingErrorServiceUnavailable {
+		t.Fatalf("download error code = %v", stored.DownloadErrorCode)
+	}
+	if stored.DownloadErrorMessage == nil || *stored.DownloadErrorMessage != "reference has no downloadable PDF" {
+		t.Fatalf("download error message = %v", stored.DownloadErrorMessage)
+	}
+}
+
+func TestImportRemoteDocumentIgnoresStaleDownloadAttempt(t *testing.T) {
+	referenceID := uuid.New()
+	currentAttempt := uuid.New()
+	staleAttempt := uuid.New()
+	papers := newPaperInfoPaperServiceStub()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "No source URL",
+		DownloadAttempt: &currentAttempt,
+	}
+	service := &documentService{papers: papers, urlResolver: paperurl.NewResolver()}
+	payload, err := json.Marshal(types.DocumentRemoteImportPayload{
+		ReferenceID: referenceID.String(), Generation: 1, DownloadAttempt: staleAttempt.String(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := service.ImportRemoteDocument(context.Background(), asynq.NewTask(types.TypeDocumentRemoteImport, payload)); err == nil {
+		t.Fatal("ImportRemoteDocument() error = nil, want terminal failure")
+	}
+	if stored := papers.references[referenceID]; stored.DownloadErrorMessage != nil {
+		t.Fatalf("stale attempt wrote download error: %v", stored.DownloadErrorMessage)
+	}
 }
 
 func remotePDFTestServer(t *testing.T) *httptest.Server {

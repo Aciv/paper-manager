@@ -3,9 +3,10 @@ from __future__ import annotations
 
 
 import logging
+import math
+import time
 
 import os
-import tempfile
 import urllib.request
 
 from pathlib import Path
@@ -22,6 +23,7 @@ import document_parser_pb2_grpc
 from logger import get_logger
 from papers_parser.markdown_cleaner import clean_markdown_page
 from papers_parser.paper_extractor import LayoutLine, SourceBlock
+from papers_parser.rpc_control import RpcCheckpoint, check_rpc
 
 
 
@@ -38,6 +40,11 @@ LOG = get_logger(__name__, _log_level_from_env())
 
 SUPPORTED_TYPES = {"application/pdf"}
 
+
+class ParserLimitExceeded(Exception):
+    """A PDF exceeded a configured page, crop, or response-size budget."""
+
+
 class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
     parser_name = "pymupdf4llm"
 
@@ -46,10 +53,27 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         upload_dir: Path,
         max_file_size: int,
         image_dpi: int,
+        *,
+        max_pages: int = 2000,
+        max_page_edge_points: float = 5000.0,
+        max_crop_pixels: int = 20_000_000,
+        max_crops_per_document: int = 500,
+        max_crop_bytes: int = 48 << 20,
+        max_markdown_bytes: int = 32 << 20,
+        max_response_bytes: int = 90 << 20,
+        rpc_max_seconds: float = 900,
     ):
         self.upload_dir = upload_dir.resolve()
         self.max_file_size = max_file_size
         self.image_dpi = image_dpi
+        self.max_pages = max_pages
+        self.max_page_edge_points = max_page_edge_points
+        self.max_crop_pixels = max_crop_pixels
+        self.max_crops_per_document = max_crops_per_document
+        self.max_crop_bytes = max_crop_bytes
+        self.max_markdown_bytes = max_markdown_bytes
+        self.max_response_bytes = max_response_bytes
+        self.rpc_max_seconds = rpc_max_seconds
 
     def Recognize(self, request, context):  # noqa: N802 - gRPC generated name
         if request.content_type not in SUPPORTED_TYPES:
@@ -61,25 +85,39 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         if not request.filename:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "filename is required")
 
-        source_path = None
-        temporary_path = None
+        pdf = None
+        started_at = time.monotonic()
+
+        def checkpoint() -> None:
+            check_rpc(context, started_at, self.rpc_max_seconds)
 
         try:
-            source_path, temporary_path = self._materialize_source(request, context)
-            if not context.is_active():
-                context.abort(grpc.StatusCode.CANCELLED, "recognition request was cancelled")
+            # The PDF stays in memory for every input mode. Writing content to a
+            # temporary file only moved the memory cost to a tmpfs that is
+            # commonly smaller than the upload limit.
+            pdf = self._open_source(request, context)
+            checkpoint()
 
-            pages = pymupdf4llm.to_markdown(str(source_path), page_chunks=True)
+            self._check_pdf_limits(pdf, checkpoint)
+            # to_markdown accepts an open Document; raw bytes are not a valid
+            # filename argument.
+            pages = pymupdf4llm.to_markdown(pdf, page_chunks=True)
+            if len(pages) > self.max_pages:
+                raise ParserLimitExceeded("document exceeds parser page limit")
 
             raw_page_text = [page["text"] if isinstance(page, dict) else str(page) for page in pages]
             cleaned_pages = [clean_markdown_page(text) for text in raw_page_text]
             page_text = [page.text for page in cleaned_pages]
             markdown = "\n\n".join(page_text).encode("utf-8")
-            if not context.is_active():
-                context.abort(grpc.StatusCode.CANCELLED, "recognition request was cancelled")
+            if len(markdown) > self.max_markdown_bytes:
+                raise ParserLimitExceeded("recognition Markdown exceeds parser size limit")
+            checkpoint()
 
             stem = Path(request.filename).stem or "document"
-            blocks = self._extract_blocks(source_path, pages, raw_page_text, cleaned_pages)
+            blocks = self._extract_blocks(
+                pdf, pages, raw_page_text, cleaned_pages, checkpoint,
+            )
+            self._check_response_budget(markdown, blocks)
             result = document_parser_pb2.RecognitionResult(
                 markdown=markdown,
                 markdown_filename=f"{stem}.md",
@@ -109,14 +147,20 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
             return result
         except grpc.RpcError:
             raise
+        except ParserLimitExceeded as exc:
+            LOG.warning("recognition limit exceeded for document=%s: %s", request.document_id, exc)
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(exc)[:8192])
         except Exception as exc:
             LOG.exception("recognition failed for document=%s", request.document_id)
             context.abort(grpc.StatusCode.INTERNAL, str(exc)[:8192])
         finally:
-            if temporary_path is not None:
-                temporary_path.unlink(missing_ok=True)
+            if pdf is not None:
+                pdf.close()
 
-    def _extract_blocks(self, source_path: Path, pages, raw_page_text: list[str], cleaned_pages):
+    def _extract_blocks(
+        self, pdf, pages, raw_page_text: list[str], cleaned_pages,
+        checkpoint: RpcCheckpoint = None,
+    ):
         """
         Return source-map blocks and 72-DPI PNG crops for visual blocks.
 
@@ -129,106 +173,153 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         """
         blocks = []
         markdown_offset = 0
-        with pymupdf.open(str(source_path)) as pdf:
-            for page_index, raw_page in enumerate(pages):
-                raw_text = raw_page_text[page_index]
-                cleaned_page = cleaned_pages[page_index]
-                text = cleaned_page.text
-                if not isinstance(raw_page, dict) or page_index >= len(pdf):
-                    markdown_offset += len(text) + (2 if page_index + 1 < len(cleaned_pages) else 0)
-                    continue
-                page_rect = pdf[page_index].rect
-                for box in raw_page.get("page_boxes", []):
-                    block_type = _block_type(box.get("class", ""))
-                    if block_type is None:
-                        continue
-                    bbox = box.get("bbox")
-                    if not _valid_bbox(bbox, page_rect):
-                        continue
-                    position = box.get("pos")
-                    if _valid_position(position, raw_text):
-                        raw_start, raw_end = position
-                        mapped_position = cleaned_page.map_range(raw_start, raw_end)
-                        if mapped_position is None:
-                            continue
-                        start, end = mapped_position
-                        block_text = text[start:end].strip()
-                    elif block_type in {"image", "table"}:
-                        # Some layout engines do not associate a Markdown
-                        # range with a visual region. Keep a zero-width anchor
-                        # on its page rather than discarding a usable crop.
-                        start = end = 0
-                        block_text = f"{block_type} on page {page_index + 1}"
-                    else:
-                        continue
-                    if not block_text and block_type not in {"image", "table"}:
-                        continue
-                    image_data = b""
-                    image_content_type = ""
-                    if block_type in {"image", "table"}:
-                        try:
-                            image_data = self._render_crop(pdf[page_index], bbox)
-                            image_content_type = "image/png"
-                        except Exception:
-                            LOG.warning("skip unreadable %s crop on page=%d", block_type, page_index + 1, exc_info=True)
-                            continue
-                    blocks.append(
-                        document_parser_pb2.RecognitionBlock(
-                            ordinal=len(blocks),
-                            type=block_type,
-                            text=block_text,
-                            page_number=page_index + 1,
-                            page_width=page_rect.width,
-                            page_height=page_rect.height,
-                            bbox_x0=float(bbox[0]),
-                            bbox_y0=float(bbox[1]),
-                            bbox_x1=float(bbox[2]),
-                            bbox_y1=float(bbox[3]),
-                            markdown_codepoint_start=markdown_offset + start,
-                            markdown_codepoint_end=markdown_offset + end,
-                            image_data=image_data,
-                            image_content_type=image_content_type,
-                        )
-                    )
+        crop_count = 0
+        crop_bytes = 0
+        for page_index, raw_page in enumerate(pages):
+            if checkpoint is not None:
+                checkpoint()
+            raw_text = raw_page_text[page_index]
+            cleaned_page = cleaned_pages[page_index]
+            text = cleaned_page.text
+            if not isinstance(raw_page, dict) or page_index >= len(pdf):
                 markdown_offset += len(text) + (2 if page_index + 1 < len(cleaned_pages) else 0)
+                continue
+            page_rect = pdf[page_index].rect
+            for box_index, box in enumerate(raw_page.get("page_boxes", [])):
+                # Cropping is the expensive per-box operation; poll often
+                # enough that cancellation releases the thread promptly.
+                if checkpoint is not None and box_index % 100 == 0:
+                    checkpoint()
+                block_type = _block_type(box.get("class", ""))
+                if block_type is None:
+                    continue
+                bbox = box.get("bbox")
+                if not _valid_bbox(bbox, page_rect):
+                    continue
+                position = box.get("pos")
+                if _valid_position(position, raw_text):
+                    raw_start, raw_end = position
+                    mapped_position = cleaned_page.map_range(raw_start, raw_end)
+                    if mapped_position is None:
+                        continue
+                    start, end = mapped_position
+                    block_text = text[start:end].strip()
+                elif block_type in {"image", "table"}:
+                    # Some layout engines do not associate a Markdown
+                    # range with a visual region. Keep a zero-width anchor
+                    # on its page rather than discarding a usable crop.
+                    start = end = 0
+                    block_text = f"{block_type} on page {page_index + 1}"
+                else:
+                    continue
+                if not block_text and block_type not in {"image", "table"}:
+                    continue
+                image_data = b""
+                image_content_type = ""
+                if block_type in {"image", "table"}:
+                    if crop_count >= self.max_crops_per_document:
+                        raise ParserLimitExceeded("document exceeds parser crop count limit")
+                    try:
+                        image_data = self._render_crop(pdf[page_index], bbox)
+                    except ParserLimitExceeded:
+                        raise
+                    except Exception:
+                        LOG.warning("skip unreadable %s crop on page=%d", block_type, page_index + 1, exc_info=True)
+                        continue
+                    crop_count += 1
+                    crop_bytes += len(image_data)
+                    if crop_bytes > self.max_crop_bytes:
+                        raise ParserLimitExceeded("document exceeds parser crop byte budget")
+                    image_content_type = "image/png"
+                blocks.append(
+                    document_parser_pb2.RecognitionBlock(
+                        ordinal=len(blocks),
+                        type=block_type,
+                        text=block_text,
+                        page_number=page_index + 1,
+                        page_width=page_rect.width,
+                        page_height=page_rect.height,
+                        bbox_x0=float(bbox[0]),
+                        bbox_y0=float(bbox[1]),
+                        bbox_x1=float(bbox[2]),
+                        bbox_y1=float(bbox[3]),
+                        markdown_codepoint_start=markdown_offset + start,
+                        markdown_codepoint_end=markdown_offset + end,
+                        image_data=image_data,
+                        image_content_type=image_content_type,
+                    )
+                )
+            markdown_offset += len(text) + (2 if page_index + 1 < len(cleaned_pages) else 0)
         return blocks
 
     def _render_crop(self, page, bbox) -> bytes:
-        """Render one bounded PDF rectangle as PNG at the configured DPI."""
+        """Render one bounded PDF rectangle as PNG at the configured DPI.
+
+        The raster is downsampled when the requested DPI would exceed the
+        per-crop pixel budget, so a huge MediaBox cannot allocate hundreds of
+        megabytes in one pixmap.
+        """
+        clip = pymupdf.Rect(bbox)
         scale = self.image_dpi / 72.0
+        requested_pixels = max(clip.width * scale, 1.0) * max(clip.height * scale, 1.0)
+        if requested_pixels > self.max_crop_pixels:
+            # Keep a small margin: PyMuPDF rounds pixmap dimensions up.
+            scale *= math.sqrt(self.max_crop_pixels / requested_pixels) * 0.99
         pixmap = page.get_pixmap(
             matrix=pymupdf.Matrix(scale, scale),
-            clip=pymupdf.Rect(bbox),
+            clip=clip,
             alpha=False,
         )
         return pixmap.tobytes("png")
 
-    def _materialize_source(self, request, context):
+    def _check_pdf_limits(self, pdf, checkpoint: RpcCheckpoint = None) -> None:
+        """Reject excessive page counts or page sizes before rendering work."""
+        if pdf.page_count > self.max_pages:
+            raise ParserLimitExceeded("document exceeds parser page limit")
+        for page in pdf:
+            if checkpoint is not None:
+                checkpoint()
+            if (
+                page.rect.width > self.max_page_edge_points
+                or page.rect.height > self.max_page_edge_points
+            ):
+                raise ParserLimitExceeded("document page exceeds parser size limit")
+
+    def _check_response_budget(self, markdown: bytes, blocks) -> None:
+        """Estimate the assembled gRPC response before paying to serialize it."""
+        response_bytes = len(markdown)
+        for block in blocks:
+            response_bytes += len(block.text.encode("utf-8"))
+            response_bytes += len(block.image_data)
+        if response_bytes > self.max_response_bytes:
+            raise ParserLimitExceeded("recognition response exceeds parser size limit")
+
+    def _open_source(self, request, context):
+        """Open the requested source as an in-memory PyMuPDF document.
+
+        Every input mode stays in memory: writing content or downloaded bytes
+        to a temporary file only relocated the memory pressure to a tmpfs that
+        is commonly smaller than the configured upload limit.
+        """
         source_type = request.WhichOneof("source")
         if source_type == "file_path":
             source = Path(request.file_path).resolve()
             if not source.is_relative_to(self.upload_dir) or not source.is_file():
                 context.abort(grpc.StatusCode.PERMISSION_DENIED, "file_path is outside the parser upload directory")
             self._assert_size(source.stat().st_size, context)
-            return source, None
+            return pymupdf.open(str(source))
 
         if source_type == "content":
             self._assert_size(len(request.content), context)
-            temporary = self._write_temporary_source(request.content)
-            return temporary, temporary
+            return pymupdf.open(stream=request.content, filetype="pdf")
 
         if source_type == "source_url":
-            return self._download_source(request.source_url, context)
+            content = self._download_source(request.source_url, context)
+            return pymupdf.open(stream=content, filetype="pdf")
 
         context.abort(grpc.StatusCode.INVALID_ARGUMENT, "exactly one recognition source is required")
 
-    def _write_temporary_source(self, content: bytes):
-        descriptor, path = tempfile.mkstemp(prefix="recognition-", suffix=".pdf")
-        with os.fdopen(descriptor, "wb") as output:
-            output.write(content)
-        return Path(path)
-
-    def _download_source(self, source_url: str, context):
+    def _download_source(self, source_url: str, context) -> bytes:
         parsed = urlsplit(source_url)
         if parsed.scheme not in {"http", "https"}:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, "source_url must use http or https")
@@ -240,8 +331,7 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         except Exception as exc:
             context.abort(grpc.StatusCode.UNAVAILABLE, f"download source_url: {exc}")
         self._assert_size(len(content), context)
-        temporary = self._write_temporary_source(content)
-        return temporary, temporary
+        return content
 
     def _assert_size(self, size: int, context) -> None:
         if size <= 0:
@@ -255,6 +345,7 @@ def extract_layout_lines_from_storage(
     source_storage_key: str,
     blocks: Sequence[SourceBlock],
     max_lines: int,
+    checkpoint: RpcCheckpoint = None,
 ) -> tuple[LayoutLine, ...]:
     """Derive temporary line facts from a Go-created key below ``upload_dir``.
 
@@ -271,13 +362,14 @@ def extract_layout_lines_from_storage(
         raise ValueError("source storage key is outside the parser upload directory")
     if source_path.suffix.lower() != ".pdf":
         raise ValueError("source storage key does not identify a PDF")
-    return extract_layout_lines_from_pdf(source_path, blocks, max_lines)
+    return extract_layout_lines_from_pdf(source_path, blocks, max_lines, checkpoint)
 
 
 def extract_layout_lines_from_pdf(
     source_path: Path,
     blocks: Sequence[SourceBlock],
     max_lines: int,
+    checkpoint: RpcCheckpoint = None,
 ) -> tuple[LayoutLine, ...]:
     """Build CRF-only layout facts from text lines inside persisted Blocks."""
     if max_lines <= 0:
@@ -285,6 +377,8 @@ def extract_layout_lines_from_pdf(
     output: list[LayoutLine] = []
     with pymupdf.open(str(source_path)) as pdf:
         for page_index, page in enumerate(pdf):
+            if checkpoint is not None:
+                checkpoint()
             page_blocks = [
                 block for block in blocks
                 if block.location is not None and block.location.page_number == page_index + 1
@@ -294,6 +388,8 @@ def extract_layout_lines_from_pdf(
             order_in_page = 0
             for raw_block in page.get_text("dict", sort=True).get("blocks", []):
                 for raw_line in raw_block.get("lines", []):
+                    if checkpoint is not None and len(output) % 1000 == 0:
+                        checkpoint()
                     spans = raw_line.get("spans", [])
                     text = "".join(str(span.get("text", "")) for span in spans).strip()
                     bbox = raw_line.get("bbox")

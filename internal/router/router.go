@@ -52,6 +52,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 	// begin Recovery
 	r.Use(middleware.ErrorHandler())
 	r.Use(middleware.Recovery())
+	r.Use(middleware.JSONBodyLimit(params.Config.HTTPMaxJSONBytes))
 
 	// healthy check
 	r.GET("/health", func(c *gin.Context) {

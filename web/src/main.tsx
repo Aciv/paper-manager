@@ -51,6 +51,13 @@ function statusLabel(value: string): string {
   return DOCUMENT_STATUS_LABELS[value] ?? value;
 }
 
+function referenceDownloadStatusLabel(reference: PaperReference): string {
+  if (reference.citedDocumentId) return '已获取文档';
+  if (reference.downloadErrorMessage) return `下载失败：${reference.downloadErrorMessage}`;
+  if (reference.downloadRequestedAt) return '下载中';
+  return '未请求下载';
+}
+
 function citationReferenceStatusLabel(value: DocumentStageStatus): string {
   const labels: Record<DocumentStageStatus, string> = {
     not_started: '未解析',
@@ -651,6 +658,10 @@ function App() {
     try {
       await api.downloadReferencePDF(referenceID);
       setMessage('已提交该引用的 PDF 下载。');
+      if (selected) {
+        const { items } = await api.listPaperCitations(selected.id);
+        setCitations(items);
+      }
     } catch (error) {
       setMessage(error instanceof Error ? `引用 PDF 下载未提交：${error.message}` : '引用 PDF 下载未提交。');
     } finally {
@@ -1029,7 +1040,7 @@ function App() {
 			{detailMenu === 'citations' && <section className="citation-panel">
 			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>
 			  <div className="citation-columns">
-				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>查看第 {index + 1} 条的引用信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId) || !citation.sourceUrl}>下载 PDF</button><button type="button" onClick={() => void rematchReference(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId)}>重新匹配</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
+				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>查看第 {index + 1} 条的引用信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId) || !citation.sourceUrl}>{citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}</button><button type="button" onClick={() => void rematchReference(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId)}>重新匹配</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference || '')}>查看第 {index + 1} 条的已落库信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
 			  </div>
 			</section>}
@@ -1048,6 +1059,7 @@ function App() {
 				  <dt>DOI</dt><dd>{citationSourceReference.doi || citationSourceDocument?.doi || '未提取 DOI'}</dd>
 				  <dt>来源</dt><dd>{citationSourceReference.sourceUrl ? <a href={citationSourceReference.sourceUrl} target="_blank" rel="noreferrer">打开来源</a> : '未提取来源'}</dd>
 				  {citationSourceReference.citedDocumentId && <><dt>已关联文档</dt><dd><code>{citationSourceReference.citedDocumentId}</code></dd></>}
+				  <dt>PDF 下载</dt><dd>{referenceDownloadStatusLabel(citationSourceReference)}</dd>
 				  {citationSourceReference.resolutionErrorMessage && <><dt>解析错误</dt><dd>{citationSourceReference.resolutionErrorMessage}</dd></>}
 				</dl></>}
 				{!citationSourceLoading && !citationSourceReference && !citationSourceError && citationSourceMetadata && <><p className="hint">字段初始由 Python 提取写入；若后续论文库查询补全过字段，当前来源会在下方标明。</p><dl>

@@ -58,6 +58,67 @@ func TestPaperCitationResolutionStateMachinePostgres(t *testing.T) {
 	}
 }
 
+func TestPaperCitationDownloadStatePostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	documents := NewDocumentRepository(db)
+	repo := NewPaperCitationRepository(db)
+
+	citingID, targetID := uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{citingID, targetID} {
+		if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(id, "source.pdf", "download/"+id.String(), "")); err != nil {
+			t.Fatalf("create document: %v", err)
+		}
+	}
+	saved, err := repo.AddCitation(ctx, testResolvedCitation(citingID, "Download target", uuid.Nil))
+	if err != nil {
+		t.Fatalf("seed citation: %v", err)
+	}
+
+	first := uuid.New()
+	queued, applied, err := repo.QueueDownload(ctx, saved.ReferenceID, first)
+	if err != nil || !applied || queued.DownloadAttempt == nil || *queued.DownloadAttempt != first ||
+		queued.DownloadRequestedAt == nil || queued.DownloadErrorMessage != nil {
+		t.Fatalf("first queue = %#v, applied=%v, err=%v", queued, applied, err)
+	}
+	stale := uuid.New()
+	if applied, err := repo.FailDownload(ctx, saved.ReferenceID, stale, "TASK_FAILED", "stale failure"); err != nil || applied {
+		t.Fatalf("stale failure applied=%v err=%v", applied, err)
+	}
+	if applied, err := repo.FailDownload(ctx, saved.ReferenceID, first, "TASK_FAILED", "download failed with HTTP 404"); err != nil || !applied {
+		t.Fatalf("record failure applied=%v err=%v", applied, err)
+	}
+	failed, err := repo.GetReference(ctx, saved.ReferenceID)
+	if err != nil || failed.DownloadErrorMessage == nil || *failed.DownloadErrorMessage != "download failed with HTTP 404" {
+		t.Fatalf("failed reference = %#v, err=%v", failed, err)
+	}
+
+	second := uuid.New()
+	retried, applied, err := repo.QueueDownload(ctx, saved.ReferenceID, second)
+	if err != nil || !applied || retried.DownloadAttempt == nil || *retried.DownloadAttempt != second ||
+		retried.DownloadErrorMessage != nil {
+		t.Fatalf("retry queue = %#v, applied=%v, err=%v", retried, applied, err)
+	}
+	if _, applied, err := repo.LinkResolvedDocument(ctx, saved.ReferenceID, targetID, false); err != nil || !applied {
+		t.Fatalf("link target applied=%v err=%v", applied, err)
+	}
+	if linked, applied, err := repo.QueueDownload(ctx, saved.ReferenceID, uuid.New()); err != nil || applied || linked.CitedDocumentID == nil {
+		t.Fatalf("queue after link = %#v, applied=%v, err=%v", linked, applied, err)
+	}
+	if err := documents.Delete(ctx, targetID); err != nil {
+		t.Fatalf("delete target: %v", err)
+	}
+	reset, err := repo.GetReference(ctx, saved.ReferenceID)
+	if err != nil {
+		t.Fatalf("reload reference: %v", err)
+	}
+	if reset.DownloadAttempt != nil || reset.DownloadRequestedAt != nil ||
+		reset.DownloadErrorCode != nil || reset.DownloadErrorMessage != nil || reset.DownloadUpdatedAt != nil {
+		t.Fatalf("download state was not reset after document delete: %#v", reset)
+	}
+}
+
 // TestPaperCitationRepositoryMergeAutomaticCitationsPostgres verifies the
 // row-locked reconciliation implementation against a real PostgreSQL database.
 // It is opt-in via PAPERS_MANAGER_TEST_POSTGRES_DSN.

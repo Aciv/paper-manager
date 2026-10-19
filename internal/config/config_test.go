@@ -91,3 +91,48 @@ func TestLoadRejectsInvalidPaperCatalogTimeout(t *testing.T) {
 		t.Fatal("expected invalid catalog timeout error")
 	}
 }
+
+func TestLoadRuntimeLimits(t *testing.T) {
+	t.Setenv("HTTP_READ_TIMEOUT", "3m")
+	t.Setenv("HTTP_WRITE_TIMEOUT", "7m")
+	t.Setenv("HTTP_IDLE_TIMEOUT", "90s")
+	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "45s")
+	t.Setenv("HTTP_MAX_JSON_BYTES", "2048")
+	t.Setenv("ASYNQ_CONCURRENCY", "12")
+	t.Setenv("ASYNQ_SHUTDOWN_TIMEOUT", "20s")
+	t.Setenv("DB_MAX_OPEN_CONNS", "30")
+	t.Setenv("DB_MAX_IDLE_CONNS", "15")
+	t.Setenv("DB_STATEMENT_TIMEOUT", "8s")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTPReadTimeout != 3*time.Minute ||
+		cfg.HTTPWriteTimeout != 7*time.Minute ||
+		cfg.HTTPIdleTimeout != 90*time.Second ||
+		cfg.HTTPShutdownTimeout != 45*time.Second ||
+		cfg.HTTPMaxJSONBytes != 2048 ||
+		cfg.AsynqConcurrency != 12 ||
+		cfg.AsynqShutdownTimeout != 20*time.Second ||
+		cfg.DBMaxOpenConns != 30 ||
+		cfg.DBMaxIdleConns != 15 ||
+		cfg.DBStatementTimeout != 8*time.Second {
+		t.Fatalf("unexpected runtime limits: %#v", cfg)
+	}
+}
+
+func TestLoadRejectsIdlePoolLargerThanOpenPool(t *testing.T) {
+	t.Setenv("DB_MAX_OPEN_CONNS", "10")
+	t.Setenv("DB_MAX_IDLE_CONNS", "11")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected idle pool validation error")
+	}
+}
+
+func TestLoadRejectsInvalidJSONBodyLimit(t *testing.T) {
+	t.Setenv("HTTP_MAX_JSON_BYTES", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid JSON body limit error")
+	}
+}

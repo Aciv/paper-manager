@@ -455,6 +455,64 @@ func (s *paperInfoPaperServiceStub) GetReference(_ context.Context, referenceID 
 	return &reference, nil
 }
 
+func (s *paperInfoPaperServiceStub) BeginReferenceDownload(
+	_ context.Context, referenceID, attemptID string,
+) (*types.PaperReference, error) {
+	id, err := uuid.Parse(referenceID)
+	if err != nil {
+		return nil, err
+	}
+	attempt, err := uuid.Parse(attemptID)
+	if err != nil || attempt == uuid.Nil {
+		return nil, errors.New("invalid download attempt")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reference, ok := s.references[id]
+	if !ok {
+		return nil, sql.ErrNoRows
+	}
+	if reference.CitedDocumentID != nil {
+		return &reference, ErrReferenceAlreadyResolved
+	}
+	now := time.Now().UTC()
+	reference.DownloadAttempt = &attempt
+	reference.DownloadRequestedAt = &now
+	reference.DownloadErrorCode = nil
+	reference.DownloadErrorMessage = nil
+	reference.DownloadUpdatedAt = &now
+	s.references[id] = reference
+	return &reference, nil
+}
+
+func (s *paperInfoPaperServiceStub) FailReferenceDownload(
+	_ context.Context, referenceID, attemptID, errorCode, errorMessage string,
+) error {
+	id, err := uuid.Parse(referenceID)
+	if err != nil {
+		return err
+	}
+	attempt, err := uuid.Parse(attemptID)
+	if err != nil || attempt == uuid.Nil {
+		return errors.New("invalid download attempt")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	reference, ok := s.references[id]
+	if !ok || reference.CitedDocumentID != nil {
+		return nil
+	}
+	if reference.DownloadAttempt == nil || *reference.DownloadAttempt != attempt {
+		return nil
+	}
+	now := time.Now().UTC()
+	reference.DownloadErrorCode = &errorCode
+	reference.DownloadErrorMessage = &errorMessage
+	reference.DownloadUpdatedAt = &now
+	s.references[id] = reference
+	return nil
+}
+
 func (s *paperInfoPaperServiceStub) ResolveReference(_ context.Context, referenceID, resolvedDocumentID string) (*types.PaperReference, error) {
 	id, err := uuid.Parse(referenceID)
 	if err != nil {

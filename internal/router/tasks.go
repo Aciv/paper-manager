@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,8 +20,6 @@ import (
 
 	"github.com/hibiken/asynq"
 	"go.uber.org/dig"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 type AsynqTaskParams struct {
@@ -120,39 +117,23 @@ func asynqRetryDelayFunc(n int, e error, t *asynq.Task) time.Duration {
 	return asynq.DefaultRetryDelayFunc(n, e, t)
 }
 
-// defaultAsynqConcurrency is the worker pool size used when
-// ASYNQ_CONCURRENCY is unset. The asynq library defaults to
-// runtime.NumCPU(), which under-provisions during batch document uploads:
-// a single 4-core container can only process 4 documents in parallel even
-// when 100 are queued, so the queue wait time eats into each task's
-// DocumentProcessTimeout budget. 32 is a safer default for the I/O-bound
-// nature of doc parsing (most time is spent in DocReader / embedding RPCs,
-// not on local CPU).
-const defaultAsynqConcurrency = 32
-
-func NewAsynqServer() *asynq.Server {
+// NewAsynqServer builds the worker pool. ASYNQ_CONCURRENCY and
+// ASYNQ_SHUTDOWN_TIMEOUT are parsed and validated by config.Load. A shutdown
+// timeout that is shorter than a running task interrupts it; the startup
+// cleanup then fails its stage so the user can retry explicitly.
+func NewAsynqServer(cfg config.Config) *asynq.Server {
 	opt := getAsynqRedisClientOpt()
-	concurrency := defaultAsynqConcurrency
 
-	if v := strings.TrimSpace(os.Getenv("ASYNQ_CONCURRENCY")); v != "" {
-		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
-			concurrency = parsed
-		}
-	}
-
-	// use system service to support multi priority setting, DB > Env > Defualt
-	//if svc != nil {
-	//	n := svc.GetInt(context.Background(), "asynq.concurrency", "ASYNQ_CONCURRENCY", defaultAsynqConcurrency)
-	//	if n > 0 {
-	//		concurrency = int(n)
-	//	}
-	//}
-	logger.Info(context.Background(), "asynq server configured", "concurrency", concurrency, "redis_op_timeout_ms", readRedisOpTimeoutMs())
+	logger.Info(context.Background(), "asynq server configured",
+		"concurrency", cfg.AsynqConcurrency,
+		"shutdown_timeout", cfg.AsynqShutdownTimeout.String(),
+		"redis_op_timeout_ms", readRedisOpTimeoutMs())
 
 	srv := asynq.NewServer(
 		opt,
 		asynq.Config{
-			Concurrency: concurrency,
+			Concurrency:     cfg.AsynqConcurrency,
+			ShutdownTimeout: cfg.AsynqShutdownTimeout,
 			Queues: map[string]int{
 				types.QueueCritical: 6, // Highest priority queue
 				types.QueueDefault:  3, // Default priority queue
@@ -367,69 +348,27 @@ func paperTaskContext(
 	)
 }
 
+// classifyPaperTaskError translates the shared service-level disposition into
+// the Asynq sentinel errors. The stage-finish path calls the same classifier,
+// so an archived task and its stage row can no longer disagree.
 func classifyPaperTaskError(err error) error {
-	if err == nil {
-		return nil
-	}
-	if errors.Is(err, context.Canceled) ||
-		errors.Is(err, sql.ErrNoRows) ||
-		errors.Is(err, service.ErrStalePaperInfo) {
+	switch service.ClassifyTaskError(err) {
+	case service.TaskDispositionRevoke:
 		return fmt.Errorf("%v: %w", err, asynq.RevokeTask)
-	}
-	if errors.Is(err, types.ErrInvalidPaperInfoTaskPayload) ||
-		errors.Is(err, types.ErrInvalidPaperExtraction) ||
-		errors.Is(err, types.ErrInvalidPaperCatalogData) ||
-		errors.Is(err, service.ErrInvalidPaperMetadata) ||
-		errors.Is(err, service.ErrPaperCatalogNoMatch) ||
-		errors.Is(err, service.ErrPaperInfoCatalogUnavailable) {
+	case service.TaskDispositionSkip:
 		return skipPaperTask(err)
+	default:
+		return err
 	}
-
-	retryableExternal, classifiedExternal := externalTaskRetryability(err)
-	if classifiedExternal && !retryableExternal {
-		return skipPaperTask(err)
-	}
-	return err
 }
 
 func skipPaperTask(err error) error {
 	return fmt.Errorf("%v: %w", err, asynq.SkipRetry)
 }
 
-func externalTaskRetryability(err error) (retryable bool, classified bool) {
-	walkTaskErrors(err, func(item error) {
-		if retryClass, ok := item.(interface{ TaskRetryable() bool }); ok {
-			classified = true
-			retryable = retryable || retryClass.TaskRetryable()
-		}
-		switch status.Code(item) {
-		case codes.Canceled:
-			classified = true
-		case codes.InvalidArgument,
-			codes.NotFound,
-			codes.AlreadyExists,
-			codes.PermissionDenied,
-			codes.Unauthenticated,
-			codes.FailedPrecondition,
-			codes.OutOfRange,
-			codes.Unimplemented:
-			classified = true
-		case codes.DeadlineExceeded,
-			codes.ResourceExhausted,
-			codes.Aborted,
-			codes.Internal,
-			codes.Unavailable,
-			codes.DataLoss:
-			classified = true
-			retryable = true
-		}
-	})
-	return retryable, classified
-}
-
 func paperTaskRetryAfter(err error) time.Duration {
 	var retryAfter time.Duration
-	walkTaskErrors(err, func(item error) {
+	service.WalkTaskErrors(err, func(item error) {
 		if delay, ok := item.(interface{ TaskRetryAfter() time.Duration }); ok {
 			if candidate := delay.TaskRetryAfter(); candidate > retryAfter {
 				retryAfter = candidate
@@ -437,21 +376,6 @@ func paperTaskRetryAfter(err error) time.Duration {
 		}
 	})
 	return retryAfter
-}
-
-func walkTaskErrors(err error, visit func(error)) {
-	if err == nil {
-		return
-	}
-	visit(err)
-	switch wrapped := err.(type) {
-	case interface{ Unwrap() []error }:
-		for _, nested := range wrapped.Unwrap() {
-			walkTaskErrors(nested, visit)
-		}
-	case interface{ Unwrap() error }:
-		walkTaskErrors(wrapped.Unwrap(), visit)
-	}
 }
 
 // deadLetterKnowledgePayload extracts only the field we need from any

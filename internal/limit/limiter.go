@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"paperMaster/internal/common"
+
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
@@ -69,12 +71,41 @@ func NewEngine() *Engine {
 	engine := NewMemoryEngine()
 	if addr := strings.TrimSpace(os.Getenv("REDIS_ADDR")); addr != "" {
 		db, _ := strconv.Atoi(strings.TrimSpace(os.Getenv("REDIS_DB")))
+		timeout := redisOpTimeout()
 		engine.redis = redis.NewClient(&redis.Options{
 			Addr: addr, Username: strings.TrimSpace(os.Getenv("REDIS_USERNAME")),
-			Password: os.Getenv("REDIS_PASSWORD"), DB: db,
+			Password:     os.Getenv("REDIS_PASSWORD"),
+			DB:           db,
+			TLSConfig:    common.RedisTLSConfig(),
+			ReadTimeout:  timeout,
+			WriteTimeout: 2 * timeout,
 		})
 	}
 	return engine
+}
+
+// Close releases the Redis client owned by the engine. It is safe to call on
+// memory-only engines and more than once.
+func (e *Engine) Close() error {
+	if e == nil || e.redis == nil {
+		return nil
+	}
+	return e.redis.Close()
+}
+
+// redisOpTimeout mirrors REDIS_OP_TIMEOUT_MS used by the Asynq client and
+// inspector so the limiter cannot bypass a deployment's timeout policy.
+func redisOpTimeout() time.Duration {
+	const fallback = 500 * time.Millisecond
+	value := strings.TrimSpace(os.Getenv("REDIS_OP_TIMEOUT_MS"))
+	if value == "" {
+		return fallback
+	}
+	milliseconds, err := strconv.Atoi(value)
+	if err != nil || milliseconds <= 0 {
+		return fallback
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 // NewMemoryEngine creates an isolated in-process limiter.

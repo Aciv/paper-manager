@@ -278,6 +278,11 @@ func TestClassifyPaperTaskError(t *testing.T) {
 			want: asynq.SkipRetry,
 		},
 		{
+			name: "catalog unavailable skips retry",
+			err:  appservice.ErrPaperInfoCatalogUnavailable,
+			want: asynq.SkipRetry,
+		},
+		{
 			name: "stale revision revokes",
 			err:  appservice.ErrStalePaperInfo,
 			want: asynq.RevokeTask,

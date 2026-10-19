@@ -425,6 +425,92 @@ func (r *paperCitationRepository) FinishResolution(
 	return result, applied, nil
 }
 
+// QueueDownload starts one explicit reference-PDF attempt. A new attempt
+// supersedes any previously recorded failure; an already-linked reference is
+// never queued again.
+func (r *paperCitationRepository) QueueDownload(
+	ctx context.Context, id uuid.UUID, attempt uuid.UUID,
+) (types.PaperReference, bool, error) {
+	if attempt == uuid.Nil {
+		return types.PaperReference{}, false, fmt.Errorf("%w: download attempt is required", types.ErrInvalidPaperReference)
+	}
+	var result types.PaperReference
+	applied := false
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var reference types.PaperReference
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			First(&reference, "id = ?", id).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return sql.ErrNoRows
+			}
+			return err
+		}
+		if reference.CitedDocumentID != nil {
+			result = reference
+			return nil
+		}
+		now := time.Now().UTC()
+		if err := tx.Model(&types.PaperReference{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"download_attempt":       attempt,
+			"download_requested_at":  now,
+			"download_error_code":    nil,
+			"download_error_message": nil,
+			"download_updated_at":    now,
+			"updated_at":             now,
+		}).Error; err != nil {
+			return err
+		}
+		if err := tx.First(&reference, "id = ?", id).Error; err != nil {
+			return err
+		}
+		result = reference
+		applied = true
+		return nil
+	})
+	if err != nil {
+		logger.Error(ctx, "queue reference download failed", "reference_id", id, "error", err)
+		return types.PaperReference{}, false, err
+	}
+	normalizeReferenceSlice(&result)
+	return result, applied, nil
+}
+
+// FailDownload records a terminal download failure for one attempt. A stale
+// attempt (a newer request replaced it) cannot overwrite the current state.
+func (r *paperCitationRepository) FailDownload(
+	ctx context.Context, id uuid.UUID, attempt uuid.UUID, errorCode, errorMessage string,
+) (bool, error) {
+	if attempt == uuid.Nil {
+		return false, fmt.Errorf("%w: download attempt is required", types.ErrInvalidPaperReference)
+	}
+	errorCode = strings.TrimSpace(errorCode)
+	errorMessage = strings.TrimSpace(errorMessage)
+	if len(errorCode) > types.MaxPaperReferenceErrorCodeBytes || len(errorMessage) > types.MaxPaperReferenceErrorMessageBytes {
+		return false, fmt.Errorf("%w: download error exceeds persisted bound", types.ErrInvalidPaperReference)
+	}
+	var code, message interface{}
+	if errorCode != "" {
+		code = errorCode
+	}
+	if errorMessage != "" {
+		message = errorMessage
+	}
+	now := time.Now().UTC()
+	result := r.db.WithContext(ctx).Model(&types.PaperReference{}).
+		Where("id = ? AND cited_document_id IS NULL AND download_attempt = ?", id, attempt).
+		Updates(map[string]interface{}{
+			"download_error_code":    code,
+			"download_error_message": message,
+			"download_updated_at":    now,
+			"updated_at":             now,
+		})
+	if result.Error != nil {
+		logger.Error(ctx, "record reference download failure failed", "reference_id", id, "error", result.Error)
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
 func (r *paperCitationRepository) LinkResolvedDocument(
 	ctx context.Context, id uuid.UUID, documentID uuid.UUID, overwrite bool,
 ) (types.PaperReference, bool, error) {

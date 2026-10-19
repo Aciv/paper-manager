@@ -80,3 +80,21 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	}
 	second()
 }
+
+func TestNewEngineUsesTLSAndTimeoutConfiguration(t *testing.T) {
+	t.Setenv("REDIS_ADDR", "127.0.0.1:6379")
+	t.Setenv("REDIS_USE_TLS", "true")
+	t.Setenv("REDIS_OP_TIMEOUT_MS", "250")
+	engine := NewEngine()
+	t.Cleanup(func() { _ = engine.Close() })
+	if engine.redis == nil {
+		t.Fatal("redis client was not created")
+	}
+	options := engine.redis.Options()
+	if options.TLSConfig == nil {
+		t.Fatal("TLS config was not applied")
+	}
+	if options.ReadTimeout != 250*time.Millisecond || options.WriteTimeout != 500*time.Millisecond {
+		t.Fatalf("timeouts = %s/%s, want 250ms/500ms", options.ReadTimeout, options.WriteTimeout)
+	}
+}

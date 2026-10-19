@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from array import array
 from dataclasses import dataclass
 
 
@@ -30,7 +31,10 @@ class MarkdownCleanupResult:
     """A cleaned page and a mapping from raw to cleaned string boundaries."""
 
     text: str
-    offset_map: tuple[int, ...]
+    # array('I') stores one 4-byte unsigned offset per code point instead of a
+    # tuple of Python ints (~28 bytes each), bounding a 32 MiB page's map to
+    # roughly 128 MiB rather than >1 GiB.
+    offset_map: array
     removed_lines: int
     removed_characters: int
 
@@ -50,9 +54,9 @@ def clean_markdown_page(text: str) -> MarkdownCleanupResult:
     fences are never removed merely for being short.
     """
     if not text:
-        return MarkdownCleanupResult(text="", offset_map=(0,), removed_lines=0, removed_characters=0)
+        return MarkdownCleanupResult(text="", offset_map=array("I", [0]), removed_lines=0, removed_characters=0)
 
-    keep = [not _is_invalid_character(char) for char in text]
+    keep = bytearray(0 if _is_invalid_character(char) else 1 for char in text)
     ranges = list(_line_ranges(text))
     nonblank_lines = [
         index
@@ -100,7 +104,7 @@ def clean_markdown_page(text: str) -> MarkdownCleanupResult:
             removed_lines += 1
 
     output: list[str] = []
-    offset_map = [0] * (len(text) + 1)
+    offset_map = array("I", bytes(4 * (len(text) + 1)))
     for index, char in enumerate(text):
         offset_map[index] = len(output)
         if keep[index]:
@@ -114,7 +118,7 @@ def clean_markdown_page(text: str) -> MarkdownCleanupResult:
     cleaned = "".join(output)
     return MarkdownCleanupResult(
         text=cleaned,
-        offset_map=tuple(offset_map),
+        offset_map=offset_map,
         removed_lines=removed_lines,
         removed_characters=len(text) - len(cleaned),
     )
@@ -136,7 +140,7 @@ def _line_ranges(text: str):
         yield start, len(text), len(text)
 
 
-def _visible_line(text: str, keep: list[bool], start: int, end: int) -> str:
+def _visible_line(text: str, keep: bytearray, start: int, end: int) -> str:
     return "".join(text[position] for position in range(start, end) if keep[position])
 
 
@@ -172,6 +176,6 @@ def _is_isolated_page_number(
     )
 
 
-def _drop(keep: list[bool], start: int, end: int) -> None:
+def _drop(keep: bytearray, start: int, end: int) -> None:
     for position in range(start, end):
         keep[position] = False

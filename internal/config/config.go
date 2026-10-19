@@ -32,24 +32,48 @@ const (
 	// provider spacing. It must comfortably exceed realistic bibliography
 	// sizes so a paper's whole reference list is submitted in one round; there
 	// is no automatic continuation beyond this cap.
-	defaultPaperReferenceCatalogMaxPerDocument         = 200
-	defaultPaperReferenceCatalogConcurrency            = 2
-	defaultPaperReferenceCatalogPerDocumentConcurrency = 1
-	defaultRemotePDFDownloadTimeout                    = 2 * time.Minute
-	defaultRemotePDFMaxRedirects                       = 5
-	defaultRemotePDFDownloadConcurrency                = 2
-	defaultRemotePDFHostConcurrency                    = 1
-	defaultRemotePDFHostSpacing                        = time.Second
+	defaultPaperReferenceCatalogMaxPerDocument               = 200
+	defaultPaperReferenceCatalogConcurrency                  = 2
+	defaultPaperReferenceCatalogPerDocumentConcurrency       = 1
+	defaultRemotePDFDownloadTimeout                          = 2 * time.Minute
+	defaultRemotePDFMaxRedirects                             = 5
+	defaultRemotePDFDownloadConcurrency                      = 2
+	defaultRemotePDFHostConcurrency                          = 1
+	defaultRemotePDFHostSpacing                              = time.Second
+	defaultHTTPReadTimeout                                   = 5 * time.Minute
+	defaultHTTPWriteTimeout                                  = 10 * time.Minute
+	defaultHTTPIdleTimeout                                   = 2 * time.Minute
+	defaultHTTPShutdownTimeout                               = 30 * time.Second
+	defaultHTTPMaxJSONBytes                            int64 = 1 << 20 // 1 MiB
+	defaultAsynqConcurrency                                  = 32
+	defaultAsynqShutdownTimeout                              = 30 * time.Second
+	defaultDBMaxOpenConns                                    = 48
+	defaultDBMaxIdleConns                                    = 24
+	defaultDBStatementTimeout                                = 30 * time.Second
 )
 
 // Config contains the infrastructure options selected at process startup.
 type Config struct {
-	HTTPAddress       string
-	DatabaseDriver    string
-	DatabaseURL       string
-	CORSOrigin        string
-	FileStorageDriver string
-	UploadDirectory   string
+	HTTPAddress string
+	// HTTP timeouts bound slow clients. Uploads and content downloads need a
+	// generous read/write budget; idle keep-alive connections do not.
+	HTTPReadTimeout     time.Duration
+	HTTPWriteTimeout    time.Duration
+	HTTPIdleTimeout     time.Duration
+	HTTPShutdownTimeout time.Duration
+	// HTTPMaxJSONBytes bounds non-multipart JSON request bodies. Multipart
+	// uploads keep their existing per-file and per-batch limits.
+	HTTPMaxJSONBytes int64
+	DatabaseDriver   string
+	DatabaseURL      string
+	// DB pool sizing must cover Asynq workers plus reserved HTTP/background
+	// connections; statement timeout bounds one query's hold on a connection.
+	DBMaxOpenConns     int
+	DBMaxIdleConns     int
+	DBStatementTimeout time.Duration
+	CORSOrigin         string
+	FileStorageDriver  string
+	UploadDirectory    string
 	// RecognitionOutputDirectory is the shared, trusted root where a
 	// directory-mode recognizer may create an output package. The API copies
 	// only the Markdown file from this directory into durable FileStorage.
@@ -64,6 +88,8 @@ type Config struct {
 	ProcessingSpanFailureRetention time.Duration
 	ProcessingSpanRetentionBatch   int
 	DocumentRecognitionDriver      string
+	AsynqConcurrency               int
+	AsynqShutdownTimeout           time.Duration
 	ParserGRPCAddress              string
 	ParserGRPCMaxMessageSize       int
 	PaperCatalogProviders          []string
@@ -245,10 +271,61 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	httpReadTimeout, err := durationEnv("HTTP_READ_TIMEOUT", defaultHTTPReadTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	httpWriteTimeout, err := durationEnv("HTTP_WRITE_TIMEOUT", defaultHTTPWriteTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	httpIdleTimeout, err := durationEnv("HTTP_IDLE_TIMEOUT", defaultHTTPIdleTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	httpShutdownTimeout, err := durationEnv("HTTP_SHUTDOWN_TIMEOUT", defaultHTTPShutdownTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	httpMaxJSONBytes, err := positiveInt64Env("HTTP_MAX_JSON_BYTES", defaultHTTPMaxJSONBytes, 64<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	asynqConcurrency, err := positiveIntEnv("ASYNQ_CONCURRENCY", defaultAsynqConcurrency, 512)
+	if err != nil {
+		return Config{}, err
+	}
+	asynqShutdownTimeout, err := durationEnv("ASYNQ_SHUTDOWN_TIMEOUT", defaultAsynqShutdownTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	dbMaxOpenConns, err := positiveIntEnv("DB_MAX_OPEN_CONNS", defaultDBMaxOpenConns, 500)
+	if err != nil {
+		return Config{}, err
+	}
+	dbMaxIdleConns, err := positiveIntEnv("DB_MAX_IDLE_CONNS", defaultDBMaxIdleConns, 500)
+	if err != nil {
+		return Config{}, err
+	}
+	if dbMaxIdleConns > dbMaxOpenConns {
+		return Config{}, fmt.Errorf("DB_MAX_IDLE_CONNS must not exceed DB_MAX_OPEN_CONNS")
+	}
+	dbStatementTimeout, err := durationEnv("DB_STATEMENT_TIMEOUT", defaultDBStatementTimeout)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		HTTPAddress:                                 env("HTTP_ADDR", "127.0.0.1:8080"),
+		HTTPReadTimeout:                             httpReadTimeout,
+		HTTPWriteTimeout:                            httpWriteTimeout,
+		HTTPIdleTimeout:                             httpIdleTimeout,
+		HTTPShutdownTimeout:                         httpShutdownTimeout,
+		HTTPMaxJSONBytes:                            httpMaxJSONBytes,
 		DatabaseDriver:                              strings.ToLower(env("DB_DRIVER", "postgres")),
 		DatabaseURL:                                 env("DATABASE_URL", "postgres://papers:papers@localhost:5432/papers?sslmode=disable"),
+		DBMaxOpenConns:                              dbMaxOpenConns,
+		DBMaxIdleConns:                              dbMaxIdleConns,
+		DBStatementTimeout:                          dbStatementTimeout,
 		CORSOrigin:                                  env("CORS_ORIGIN", "http://localhost:5173"),
 		FileStorageDriver:                           strings.ToLower(env("FILE_STORAGE_DRIVER", "local")),
 		UploadDirectory:                             uploadDirectory,
@@ -263,6 +340,8 @@ func Load() (Config, error) {
 		ProcessingSpanFailureRetention:              spanFailureRetention,
 		ProcessingSpanRetentionBatch:                spanRetentionBatch,
 		DocumentRecognitionDriver:                   strings.ToLower(env("DOCUMENT_RECOGNITION_DRIVER", "default")),
+		AsynqConcurrency:                            asynqConcurrency,
+		AsynqShutdownTimeout:                        asynqShutdownTimeout,
 		ParserGRPCAddress:                           env("PARSER_GRPC_ADDR", "127.0.0.1:50051"),
 		ParserGRPCMaxMessageSize:                    int(parserMessageSize),
 		PaperCatalogProviders:                       paperCatalogProviders,
@@ -363,6 +442,18 @@ func paperCatalogProviderPolicy(providers []string, fallbackTimeout time.Duratio
 		}
 	}
 	return timeouts, spacings, concurrency, nil
+}
+
+func positiveInt64Env(key string, fallback, maximum int64) (int64, error) {
+	value := strings.TrimSpace(os.Getenv(key))
+	if value == "" {
+		return fallback, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed <= 0 || parsed > maximum {
+		return 0, fmt.Errorf("%s must be between 1 and %d", key, maximum)
+	}
+	return parsed, nil
 }
 
 func positiveIntEnv(key string, fallback, maximum int) (int, error) {

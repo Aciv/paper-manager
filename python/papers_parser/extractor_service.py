@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import time
 from pathlib import Path
 from uuid import UUID
 
@@ -19,6 +20,7 @@ from papers_parser.paper_extractor import (
     SourceBlock,
     SourceLocation,
 )
+from papers_parser.rpc_control import RpcCheckpoint, check_rpc
 
 def _log_level_from_env() -> int:
     """Return a safe standard-library logging level from ``LOG_LEVEL``."""
@@ -42,6 +44,7 @@ class PaperMetadataExtractionRPC(
         max_blocks: int,
         upload_dir: Path | None = None,
         max_layout_lines: int = 100_000,
+        rpc_max_seconds: float = 900,
     ):
         """Build the extractor with limits selected by the server bootstrap."""
         if max_markdown_bytes <= 0:
@@ -55,30 +58,37 @@ class PaperMetadataExtractionRPC(
         self.max_blocks = max_blocks
         self.upload_dir = None if upload_dir is None else upload_dir.resolve()
         self.max_layout_lines = max_layout_lines
+        self.rpc_max_seconds = rpc_max_seconds
 
     def Extract(self, request, context):  # noqa: N802 - gRPC generated name
+        started_at = time.monotonic()
+
+        def checkpoint() -> None:
+            check_rpc(context, started_at, self.rpc_max_seconds)
+
         try:
             markdown, blocks, source_storage_key = _decode_extraction_request(
                 request,
                 self.max_markdown_bytes,
                 self.max_blocks,
+                checkpoint,
             )
         except ValueError as exc:
             return context.abort(
                 grpc.StatusCode.INVALID_ARGUMENT,
                 str(exc)[:8192],
             )
-        if not context.is_active():
-            context.abort(
-                grpc.StatusCode.CANCELLED,
-                "paper extraction request was cancelled",
-            )
+        checkpoint()
         try:
             layout_lines = ()
             if source_storage_key and self.upload_dir is not None and getattr(self.engine, "requires_layout", False):
                 try:
                     layout_lines = extract_layout_lines_from_storage(
-                        self.upload_dir, source_storage_key, blocks, self.max_layout_lines,
+                        self.upload_dir,
+                        source_storage_key,
+                        blocks,
+                        self.max_layout_lines,
+                        checkpoint,
                     )
                 except ValueError as exc:
                     # Layout is an optional CRF input. The raw PDF is never
@@ -86,13 +96,10 @@ class PaperMetadataExtractionRPC(
                     # source object degrades safely rather than losing an
                     # otherwise usable metadata extraction.
                     LOG.warning("lazy PDF layout unavailable document=%s error=%s", request.document_id, exc)
+            checkpoint()
             output = self.engine.extract(markdown, blocks, layout_lines)
+            checkpoint()
             response = _encode_extraction_output(output)
-            if not context.is_active():
-                context.abort(
-                    grpc.StatusCode.CANCELLED,
-                    "paper extraction request was cancelled",
-                )
             LOG.info(
                 "paper metadata extracted document=%s title_found=%s "
                 "author_count=%d reference_count=%d",
@@ -119,6 +126,7 @@ def _decode_extraction_request(
     request,
     max_markdown_bytes: int,
     max_blocks: int,
+    checkpoint: RpcCheckpoint = None,
 ) -> tuple[str, tuple[SourceBlock, ...], str]:
     """Validate a server-bounded protobuf request and map it to engine input."""
     try:
@@ -138,7 +146,9 @@ def _decode_extraction_request(
         raise ValueError("block count exceeds extraction limit")
     blocks: list[SourceBlock] = []
     ordinals: set[int] = set()
-    for block in request.blocks:
+    for block_index, block in enumerate(request.blocks):
+        if checkpoint is not None and block_index % 1000 == 0:
+            checkpoint()
         if block.ordinal < 0:
             raise ValueError("block ordinal cannot be negative")
         if block.ordinal in ordinals:

@@ -20,13 +20,25 @@ _HEADING_RE = re.compile(r"^(?P<marks>#+)\s+(?P<text>.*?)\s*$")
 _BOLD_RE = re.compile(r"\*\*(?P<text>.+?)\*\*")
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 _MULTI_SPACE_RE = re.compile(r"\s+")
-_EMAIL_RE = re.compile(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.IGNORECASE)
+# The domain groups cannot overlap (the dot is not part of the label class),
+# so long lines backtrack linearly instead of quadratically.
+_EMAIL_RE = re.compile(
+    r"[A-Z0-9._%+-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]{1,63})+",
+    re.IGNORECASE,
+)
 _SUPERSCRIPT_RE = re.compile(r"<sup>.*?</sup>", re.IGNORECASE)
 _AUTHOR_SEPARATOR_RE = re.compile(r"\s*(?:;|；|、|\s+and\s+|\s+和\s+)\s*", re.IGNORECASE)
 _COMMA_SEPARATOR_RE = re.compile(r"\s*[,，]\s*")
-# A ">" prefix is pymupdf4llm blockquote markup for footnote-style citation
-# lines ("> [1] Author ..."); it must not hide the 序号 from the style anchor.
-_REFERENCE_ITEM_START_RE = re.compile(r"^\s*(?:>\s*)*(?:\[\d+\]|\d+[.)]|[-*+])\s+")
+# Reference prefixes are parsed with linear scans below. The previous nested
+# quantifier (``(?:[-*+•▪◦>\s]\s*)*``) backtracked exponentially on a long run
+# of list markers followed by a non-number.
+_REFERENCE_MARKER_CHARS = "-*+•▪◦>"
+_ORDINAL_BRACKET_RE = re.compile(r"^\[(\d{1,9})\]")
+_ORDINAL_SUFFIX_RE = re.compile(r"^(\d{1,9})\s*[.)、]")
+_MAX_REFERENCE_ITEMS = 5000
+_MAX_REFERENCE_ITEM_CHARS = 65536
+_MAX_EXTRACTED_TEXT_CHARS = 200_000
+_MAX_EMAIL_SCAN_CHARS = 20_000
 
 _ABSTRACT_HEADINGS = {"abstract", "abstruct", "摘要"}
 _REFERENCES_HEADINGS = {"references", "bibliography", "参考文献"}
@@ -266,6 +278,9 @@ def _span_for_lines(
     if not value:
         return None
     leading = len(raw) - len(raw.lstrip())
+    # Title/abstract spans feed the RPC result directly; cap pathological
+    # sections while keeping the recorded offsets valid for the prefix.
+    value = value[:_MAX_EXTRACTED_TEXT_CHARS]
     return MarkdownTextSpan(
         value=value,
         start=line_offsets[start] + leading,
@@ -298,22 +313,24 @@ def _split_reference_items(section: str) -> list[str]:
     lines = [_strip_blockquote(line) for line in section.splitlines() if line.strip()]
     if not lines:
         return []
-    if not any(_REFERENCE_ITEM_START_RE.match(line) for line in lines):
-        return lines
+    if not any(_is_reference_item_start(line) for line in lines):
+        return [_bound_reference_item(line) for line in lines[:_MAX_REFERENCE_ITEMS]]
 
     items: list[str] = []
     current: list[str] = []
     for line in lines:
-        if _REFERENCE_ITEM_START_RE.match(line):
+        if _is_reference_item_start(line):
             if current:
-                items.append(" ".join(current))
+                items.append(_bound_reference_item(" ".join(current)))
+                if len(items) >= _MAX_REFERENCE_ITEMS:
+                    return items
             current = [line]
         elif current:
             current.append(line)
         else:
             current = [line]
-    if current:
-        items.append(" ".join(current))
+    if current and len(items) < _MAX_REFERENCE_ITEMS:
+        items.append(_bound_reference_item(" ".join(current)))
     return items
 
 
@@ -322,13 +339,58 @@ def split_reference_items(section: str) -> list[str]:
     return _split_reference_items(section)
 
 
-_REFERENCE_ORDINAL_RE = re.compile(r"^\s*(?:[-*+•▪◦>\s]\s*)*\[(\d+)\]")
-_REFERENCE_ORDINAL_SUFFIX_RE = re.compile(r"^\s*(?:[-*+•▪◦>\s]\s*)*(\d+)\s*[.)、]")
-
-
 def _strip_blockquote(line: str) -> str:
-    """Remove a leading pymupdf4llm blockquote marker ("> [1] ...")."""
-    return re.sub(r"^>\s*", "", line.strip())
+    """Remove leading pymupdf4llm blockquote markers ("> > [1] ...")."""
+    value = line.strip()
+    while value.startswith(">"):
+        value = value[1:].lstrip()
+    return value
+
+
+def _strip_reference_markers(value: str) -> str:
+    """Strip whitespace and prefix markers in one linear pass.
+
+    The marker set matches the historical grammar (blockquotes, list bullets,
+    and bullet glyphs) but never backtracks.
+    """
+    value = value.lstrip()
+    while value and value[0] in _REFERENCE_MARKER_CHARS:
+        value = value[1:].lstrip()
+    return value
+
+
+def _leading_ordinal(value: str) -> tuple[str, int] | None:
+    """Match ``[1]``/``1.``/``1)``/``1、`` at the start of ``value``."""
+    match = _ORDINAL_BRACKET_RE.match(value)
+    if match is None:
+        match = _ORDINAL_SUFFIX_RE.match(value)
+    if match is None:
+        return None
+    return match.group(1), match.end()
+
+
+def _is_reference_item_start(line: str) -> bool:
+    """Linear equivalent of the old reference-item start regex."""
+    value = line.lstrip()
+    while value.startswith(">"):
+        value = value[1:].lstrip()
+    while value and value[0] in "-*+•▪◦":
+        candidate = value[1:].lstrip()
+        if _leading_ordinal(candidate) is not None:
+            value = candidate
+            continue
+        # A bare list bullet starts an item only when followed by whitespace.
+        return value[0] in "-*+" and len(value) > 1 and value[1].isspace() and bool(candidate)
+    ordinal = _leading_ordinal(value)
+    if ordinal is None:
+        return False
+    _, end = ordinal
+    return end < len(value) and value[end].isspace()
+
+
+def _bound_reference_item(value: str) -> str:
+    """Bound one raw item before it reaches the RPC/DB size limits."""
+    return value[:_MAX_REFERENCE_ITEM_CHARS]
 
 
 def reference_item_ordinal(text: str) -> str | None:
@@ -339,10 +401,9 @@ def reference_item_ordinal(text: str) -> str | None:
     ``1)`` or ``1、``. Numbers later in the text are page/venue references, not
     the item identity.
     """
-    match = _REFERENCE_ORDINAL_RE.match(text)
-    if match is None:
-        match = _REFERENCE_ORDINAL_SUFFIX_RE.match(text)
-    return None if match is None else match.group(1)
+    value = _strip_reference_markers(text)
+    ordinal = _leading_ordinal(value)
+    return None if ordinal is None else ordinal[0]
 
 
 _OVERLAP_DUPLICATE_RATIO = 0.9
@@ -470,10 +531,14 @@ def _is_author_heading(value: str) -> bool:
 
 def _looks_like_affiliation_only(value: str) -> bool:
     """Detect affiliation/email text so it is not promoted to fallback abstract."""
-    normalized = value.casefold()
+    bounded = value[:_MAX_EMAIL_SCAN_CHARS]
+    normalized = bounded.casefold()
     has_affiliation_hint = any(hint in normalized for hint in _AFFILIATION_HINTS)
-    has_email = _EMAIL_RE.search(value) is not None
-    return has_affiliation_hint and (has_email or len(value.splitlines()) <= 2)
+    has_email = any(
+        len(match.group(0).rsplit(".", 1)[-1]) >= 2
+        for match in _EMAIL_RE.finditer(bounded)
+    )
+    return has_affiliation_hint and (has_email or len(bounded.splitlines()) <= 2)
 
 
 def _first_index(indexes) -> int | None:

@@ -299,8 +299,18 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 26 {
-		t.Fatalf("latest migration version = %d, want 26", got)
+	if got := migrations[len(migrations)-1].version; got != 27 {
+		t.Fatalf("latest migration version = %d, want 27", got)
+	}
+	for _, fragment := range []string{
+		"download_attempt UUID",
+		"download_requested_at TIMESTAMPTZ",
+		"download_error_code TEXT",
+		"download_error_message TEXT",
+	} {
+		if !strings.Contains(referenceDownloadStatusUp, fragment) {
+			t.Fatalf("reference download migration does not include %q", fragment)
+		}
 	}
 	for _, fragment := range []string{
 		"CREATE TABLE IF NOT EXISTS paper_references",

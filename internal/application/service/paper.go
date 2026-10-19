@@ -695,6 +695,42 @@ func (s *paperService) GetReference(
 	return &reference, nil
 }
 
+func (s *paperService) BeginReferenceDownload(
+	ctx context.Context, referenceID, attemptID string,
+) (*types.PaperReference, error) {
+	id, err := parsePaperReferenceID(referenceID)
+	if err != nil {
+		return nil, err
+	}
+	attempt, err := uuid.Parse(strings.TrimSpace(attemptID))
+	if err != nil || attempt == uuid.Nil {
+		return nil, fmt.Errorf("%w: invalid download attempt", types.ErrInvalidPaperReference)
+	}
+	reference, applied, err := s.citations.QueueDownload(ctx, id, attempt)
+	if err != nil {
+		return nil, err
+	}
+	if !applied {
+		return &reference, ErrReferenceAlreadyResolved
+	}
+	return &reference, nil
+}
+
+func (s *paperService) FailReferenceDownload(
+	ctx context.Context, referenceID, attemptID, errorCode, errorMessage string,
+) error {
+	id, err := parsePaperReferenceID(referenceID)
+	if err != nil {
+		return err
+	}
+	attempt, err := uuid.Parse(strings.TrimSpace(attemptID))
+	if err != nil || attempt == uuid.Nil {
+		return fmt.Errorf("%w: invalid download attempt", types.ErrInvalidPaperReference)
+	}
+	_, err = s.citations.FailDownload(ctx, id, attempt, errorCode, errorMessage)
+	return err
+}
+
 func (s *paperService) ResolveReference(
 	ctx context.Context, referenceID, resolvedDocumentID string,
 ) (*types.PaperReference, error) {

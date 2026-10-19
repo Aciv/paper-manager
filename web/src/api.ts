@@ -52,6 +52,11 @@ export type PaperReference = {
   resolutionProvider?: string;
   resolutionErrorCode?: string;
   resolutionErrorMessage?: string;
+  downloadAttempt?: string;
+  downloadRequestedAt?: string;
+  downloadErrorCode?: string;
+  downloadErrorMessage?: string;
+  downloadUpdatedAt?: string;
   citedDocumentId?: string;
   createdAt: string;
   updatedAt: string;
