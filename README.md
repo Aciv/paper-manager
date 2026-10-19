@@ -168,6 +168,8 @@ Python worker 位于 [`python/`](python/README.md)。启动它和 Redis 后，PD
 
 上传后文档独立推进 `markdown` → `metadata_extraction` → `source_lookup` / `reference_lookup` 四个阶段，每个阶段有自己的 generation fence、取消和重试入口。解析成功后文档即可为 `ready`，后续引用查询失败不会把文档改回 `failed`。`ExtractMetadata` 写入引用后会立即按 DOI/title 查询本地 available 文档；命中时直接填上 `cited_document_id`，不发起外部请求。
 
-每条引用是 `paper_citations` 中的一行，归属于引用它的论文；同一篇被引论文出现在两篇论文中时是两条独立记录，各自解析、各自指向相同的 `cited_document_id`。引用 dispatcher 分页读取本论文尚未解析的行，向全局 `PaperReferenceScheduler` 注册单目标任务。每个目标在执行前按权重轮转选择一个 provider；无匹配或可恢复错误会转向尚未尝试的 provider。默认权重固定为 arXiv 45、OpenAlex 35、Semantic Scholar 10、Crossref 10。`PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT`、全局/单文档并发租约以及 provider 的 timeout、spacing、concurrency 控制负载。Redis 存在时这些状态跨 worker 共享；Lite 模式只在当前进程有效。
+每条引用是 `paper_citations` 中的一行，归属于引用它的论文；同一篇被引论文出现在两篇论文中时是两条独立记录，各自解析、各自指向相同的 `cited_document_id`。`paper:reference_query_enqueue` 分页读取本论文尚未解析的行，把它们提交给进程内的 catalog dispatcher。dispatcher 使用共享优先级队列：论文自身查询永远优先；每个 provider 一个 worker，引用查询受全局 `PAPER_REFERENCE_CATALOG_CONCURRENCY`（默认 2）和单文档 1 的准入限制，因此不会占满全部 provider。一次 provider 失败或无匹配会换下一个 provider，整轮都没有可用响应才失败；论文自身查询在 exact DOI/arXiv 或分数达到 `PAPER_CATALOG_SOURCE_STOP_SCORE`（默认 0.9）时提前结束，否则最多尝试每个 provider 一次。
+
+查询结果通过 `paper:query_apply` 任务持久化；每个结果都带 generation，写入前按分数与当前数据库记录比较，因此并发/乱序完成不会用低分候选覆盖高分候选。dispatcher 的队列与在途状态在内存中：进程重启时，启动清理会把中断的 `source_lookup`/`reference_lookup`/引用解析行标为失败，由用户手动重试。`PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT` 仍限制一次 dispatch 提交的最大引用数。
 
 引用 PDF 获取由用户对单条引用显式触发：`POST /api/references/{referenceID}/download-pdf` 向隔离的 `download` 队列投递任务。任务重新解析最新 URL、流式下载、按 DOI/SHA256 去重，成功后才创建文档并关联该引用。`FILE_MAX_UPLOAD_SIZE` 同时是远程响应字节上限。任务重试遵循 `Retry-After` 或 Asynq 默认指数退避。

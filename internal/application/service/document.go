@@ -517,9 +517,9 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 		return err
 	}
 	// Stop active bibliography runs before the row goes "deleting" (the
-	// paper-info cancel guard refuses that status). Best-effort: scheduler
-	// job keys are per citation row and would otherwise keep blocking a
-	// re-uploaded paper for up to the 24h TTL.
+	// paper-info cancel guard refuses that status). Best-effort: pending
+	// in-memory dispatcher jobs are invalidated by the stage generation, and
+	// already-dispatched results are generation-fenced.
 	if s.paperInfo != nil {
 		if cancelErr := s.paperInfo.Cancel(ctx, id); cancelErr != nil {
 			logger.Warn(ctx, "cancel reference runs before document deletion failed", "document_id", doc.ID, "error", cancelErr)

@@ -72,9 +72,8 @@ set `REMOTE_IMPORT_REQUIRE_READY=0` only when testing download persistence
 without requiring successful recognition. Catalog no-match, provider outage,
 and retry exhaustion are operational Asynq outcomes and are covered
 deterministically by focused Go tests. Stale-input guards are covered by
-`TestPaperInfoExtractMetadataRejectsStatusChangedDuringRPC`,
-`TestPaperInfoResolveMetadataRejectsStatusChangedDuringLookup`, and
-`TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup`; cancellation
-and deletion remain covered by `test_cancel_api.sh` and the document CRUD
-script. Candidate ambiguity has no user-selection API by design: the resolver
+`TestPaperInfoExtractMetadataRejectsStatusChangedDuringRPC`; catalog result
+generation/state guards are covered by the dispatcher result tests.
+Cancellation and deletion remain covered by `test_cancel_api.sh` and the
+document CRUD script. Candidate ambiguity has no user-selection API by design: the resolver
 uses deterministic scoring and only persists a safe automatic match.

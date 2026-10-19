@@ -40,23 +40,20 @@ func (status PaperCatalogStatus) IsValid() bool {
 	}
 }
 
-// PaperCatalogResolveCommand is the typed command for exactly one stored
-// document. Source tasks use the configured provider fan-out. Reference tasks
-// claim a provider and fallback state from PaperReferenceScheduler instead of
-// carrying either concern in the Asynq payload.
-type PaperCatalogResolveCommand struct {
-	RequestID   string
-	DocumentID  uuid.UUID
-	ReferenceID uuid.UUID
-	Stage       DocumentStage
-	Generation  int64
+// PaperSourceQueryEnqueueCommand is the typed command for exactly one stored
+// document. Source tasks submit to the in-process catalog dispatcher; provider
+// assignment and reference fallback state never enter the Asynq payload.
+type PaperSourceQueryEnqueueCommand struct {
+	RequestID  string
+	DocumentID uuid.UUID
+	Stage      DocumentStage
+	Generation int64
 }
 
-// PaperReferenceDispatchCommand is the typed request to build a bounded,
-// provider-partitioned bibliography lookup run from persisted citations. It is
-// intentionally separate from PaperCatalogResolveCommand: dispatch schedules
-// work, whereas catalog resolution executes one source or provider batch.
-type PaperReferenceDispatchCommand struct {
+// PaperReferenceQueryEnqueueCommand is the typed request to build a bounded
+// bibliography lookup run from persisted citations. Dispatch persists queued
+// state and submits reference jobs to the in-process catalog dispatcher.
+type PaperReferenceQueryEnqueueCommand struct {
 	RequestID  string
 	DocumentID uuid.UUID
 	Stage      DocumentStage
@@ -65,7 +62,7 @@ type PaperReferenceDispatchCommand struct {
 
 // Validate verifies that the dispatcher has a stable run ID for idempotent
 // queueing and cancellation.
-func (command PaperReferenceDispatchCommand) Validate() error {
+func (command PaperReferenceQueryEnqueueCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
 	}
@@ -77,14 +74,8 @@ func (command PaperReferenceDispatchCommand) Validate() error {
 	return nil
 }
 
-// Validate verifies the target identity: a reference ID or a source document.
-func (command PaperCatalogResolveCommand) Validate() error {
-	if command.ReferenceID != uuid.Nil {
-		if command.Generation < 1 {
-			return fmt.Errorf("%w: reference generation must be positive", ErrInvalidPaperCatalogData)
-		}
-		return nil
-	}
+// Validate verifies the source document target identity.
+func (command PaperSourceQueryEnqueueCommand) Validate() error {
 	if command.DocumentID == uuid.Nil {
 		return fmt.Errorf("%w: document_id is required", ErrInvalidPaperCatalogData)
 	}

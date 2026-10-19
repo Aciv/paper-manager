@@ -35,6 +35,25 @@ func main() {
 	logger.InitFromEnv()
 
 	dependencies := container.Build()
+	var catalogDispatcher *service.CatalogDispatcher
+	var housekeeping *service.DocumentHousekeepingService
+	if err := dependencies.Invoke(func(dispatcher *service.CatalogDispatcher, h *service.DocumentHousekeepingService) {
+		catalogDispatcher = dispatcher
+		housekeeping = h
+	}); err != nil {
+		logger.Error(context.Background(), "resolve catalog dispatcher", "error", err)
+		return
+	}
+	// The in-process queue is lost on restart; fail durable rows before any
+	// worker can observe them as queued/running.
+	if err := housekeeping.FailInterruptedCatalogWork(context.Background()); err != nil {
+		logger.Error(context.Background(), "fail interrupted catalog work", "error", err)
+		return
+	}
+	// The dispatcher must accept submissions before the Asynq workers start
+	// consuming stage tasks.
+	catalogDispatcher.Start(context.Background())
+	defer catalogDispatcher.Stop()
 	if err := dependencies.Invoke(router.RunAsynqServer); err != nil {
 		logger.Error(context.Background(), "start asynq server", "error", err)
 		return
@@ -45,12 +64,17 @@ func main() {
 		router *gin.Engine,
 		db *gorm.DB,
 		documentHousekeeping *service.DocumentHousekeepingService,
+		catalogDispatcher *service.CatalogDispatcher,
 		worker *asynq.Server,
 		taskClient *asynq.Client,
 	) error {
+		// Defer order is intentional (LIFO): stop consuming, drain the
+		// dispatcher while the task client is still open, then close the queue
+		// and database. Drained jobs are persisted as failed before DB close.
 		defer repository.CloseDatabase(db)
-		defer worker.Shutdown()
 		defer taskClient.Close()
+		defer catalogDispatcher.Stop()
+		defer worker.Shutdown()
 		if err := documentHousekeeping.Start(context.Background()); err != nil {
 			logger.Warn(context.Background(), "start document housekeeping failed", "error", err)
 		}

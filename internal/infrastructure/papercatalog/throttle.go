@@ -14,7 +14,6 @@ import (
 
 const (
 	catalogProviderNamespace = "catalog-provider"
-	referenceWorkNamespace   = "reference-work"
 )
 
 // providerThrottle is a catalog-specific adapter over the shared limiter. It
@@ -113,36 +112,3 @@ func (e *throttledProviderError) Error() string {
 }
 func (e *throttledProviderError) TaskRetryable() bool           { return true }
 func (e *throttledProviderError) TaskRetryAfter() time.Duration { return e.retryAfter }
-
-// referenceCatalogLimiter maps the reference-work hierarchy onto the shared
-// limiter. Global and per-document capacity are acquired atomically.
-type referenceCatalogLimiter struct {
-	limiter     limit.Limiter
-	global      int
-	perDocument int
-	leaseTTL    time.Duration
-}
-
-func NewReferenceCatalogLimiter(cfg config.Config, shared *limit.Engine) interfaces.PaperReferenceCatalogLimiter {
-	global, perDocument := cfg.PaperReferenceCatalogConcurrency, cfg.PaperReferenceCatalogPerDocumentConcurrency
-	if global <= 0 {
-		global = 2
-	}
-	if perDocument <= 0 {
-		perDocument = 1
-	}
-	return &referenceCatalogLimiter{limiter: shared, global: global, perDocument: perDocument,
-		leaseTTL: cfg.PaperCatalogTaskTimeout + 30*time.Second}
-}
-
-func (l *referenceCatalogLimiter) AcquireReference(ctx context.Context, documentID string) (func(), error) {
-	if l == nil || l.limiter == nil {
-		return nil, errors.New("reference work limiter is unavailable")
-	}
-	return l.limiter.Acquire(ctx, limit.Request{Dimensions: []limit.Dimension{
-		{Namespace: referenceWorkNamespace, Key: "global", Concurrency: l.global},
-		{Namespace: referenceWorkNamespace, Key: "document-" + documentID, Concurrency: l.perDocument},
-	}, LeaseTTL: l.leaseTTL})
-}
-
-var _ interfaces.PaperReferenceCatalogLimiter = (*referenceCatalogLimiter)(nil)

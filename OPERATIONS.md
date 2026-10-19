@@ -4,14 +4,25 @@
 
 PostgreSQL stores documents, metadata, citations, dead letters, and processing
 spans. Redis stores Asynq queues plus shared provider/download limiter state.
-With `REDIS_ADDR` configured, concurrency, spacing, cooldown, and reference
-scheduler state are global across API workers. Without Redis, the in-memory
-fallback protects only one process and is intended for Lite development.
+With `REDIS_ADDR` configured, provider/download concurrency, spacing, and
+cooldown are shared across processes. The catalog dispatcher's queue and
+provider assignment state are intentionally process-local: run a single API
+process, and expect queued/running catalog work to be failed on restart.
 
 The `critical`, `default`, and `low` queues handle application work. Remote PDF
 acquisition uses the isolated `download` queue so slow hosts cannot consume all
 parser/catalog capacity. `ASYNQ_CONCURRENCY` controls the total worker pool;
 queue weights are configured in `internal/router/tasks.go`.
+
+On graceful shutdown the catalog dispatcher drains its in-memory queue and
+persists remaining source/reference attempts as failed before the database
+closes. A hard crash still relies on the startup reconciliation sweep.
+
+The catalog task names changed with the dispatcher cutover
+(`paper:source_query_enqueue`, `paper:reference_query_enqueue`,
+`paper:query_apply`). Tasks queued under the old names have no handler; after
+deploying, report and remove them with `go run ./cmd/asynq-maintenance -purge`.
+The startup sweep also fails the corresponding durable catalog rows.
 
 Docker builds use `https://proxy.golang.org,direct` for Go modules by default.
 If that endpoint is unavailable in the deployment network, select a reachable
@@ -31,24 +42,28 @@ API_HOST_PORT=18080 WEB_HOST_PORT=15173 docker compose up -d
 
 ## Catalog Controls
 
-`PAPER_CATALOG_PROVIDERS` enables adapters. Shared
-`PAPER_CATALOG_TIMEOUT`/`PAPER_CATALOG_CONCURRENCY` are fallbacks;
-`PAPER_CATALOG_<PROVIDER>_TIMEOUT`, `_SPACING`, and `_CONCURRENCY` override
-them. Provider names are `ARXIV`, `SEMANTIC_SCHOLAR`, `OPENALEX`, and
+`PAPER_CATALOG_PROVIDERS` enables adapters. Shared `PAPER_CATALOG_TIMEOUT` is a
+fallback; `PAPER_CATALOG_<PROVIDER>_TIMEOUT`, `_SPACING`, and `_CONCURRENCY`
+override it. Provider names are `ARXIV`, `SEMANTIC_SCHOLAR`, `OPENALEX`, and
 `CROSSREF`. Spacing is the minimum interval between starts, while concurrency
-limits simultaneous requests.
+limits simultaneous requests made through the shared provider limiter.
 
-Reference scheduling uses fixed initial weights: arXiv 45, OpenAlex 35,
-Semantic Scholar 10, and Crossref 10. Cooling or already-tried providers are
-skipped. `PAPER_REFERENCE_CATALOG_MAX_PER_DOCUMENT` limits selection;
+The in-process catalog dispatcher runs one worker per provider. Source jobs are
+taken before reference jobs; reference admission is bounded by
 `PAPER_REFERENCE_CATALOG_CONCURRENCY` and
-`PAPER_REFERENCE_CATALOG_PER_DOCUMENT_CONCURRENCY` bound distributed work.
+`PAPER_REFERENCE_CATALOG_PER_DOCUMENT_CONCURRENCY`, leaving provider slots for
+source lookups. Each job records its own tried-provider set and falls back to
+the next provider after a failure or definitive no-match. Source lookup stops
+early on an exact DOI/arXiv match or a score at or above
+`PAPER_CATALOG_SOURCE_STOP_SCORE`.
 
 `PAPER_EXTRACTION_TASK_TIMEOUT`/`_MAX_RETRY` and
-`PAPER_CATALOG_TASK_TIMEOUT`/`_MAX_RETRY` set task budgets. Asynq's exponential
-retry delay is the fallback. Provider `Retry-After` is honored and updates a
-shared Redis cooldown; lease contention waits context-safely instead of
-failing a task. API keys remain optional for low-volume use:
+`PAPER_CATALOG_TASK_TIMEOUT`/`_MAX_RETRY` set dispatch/post-processing task
+budgets; provider HTTP calls use the provider-specific timeout. Asynq's
+exponential retry delay is the fallback. Provider `Retry-After` updates the
+shared cooldown and the dispatcher's per-provider cooling wait. The dispatcher
+queue is process-local: run one API process and expect interrupted catalog rows
+to be failed on restart. API keys remain optional for low-volume use:
 `SEMANTIC_SCHOLAR_API_KEY`, `OPENALEX_API_KEY`, and `CROSSREF_MAILTO`.
 
 ## Remote PDF Controls

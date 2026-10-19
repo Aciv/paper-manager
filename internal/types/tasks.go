@@ -22,12 +22,17 @@ const (
 	// resulting Markdown/Blocks revision.
 	TypeDocumentRecognize    = "document:recognize"
 	TypePaperMetadataExtract = "paper:metadata_extract" // 从 Markdown 和版面块提取论文元数据候选
-	// TypePaperReferenceDispatch reads persisted bibliography entries and
-	// schedules provider-owned catalog batches. It performs no provider HTTP
-	// request itself.
-	TypePaperReferenceDispatch = "paper:reference_dispatch"
-	TypePaperCatalogResolve    = "paper:catalog_resolve" // 查询外部论文库并解析规范元数据
-	TypeDocumentRemoteImport   = "document:remote_import"
+	// TypePaperReferenceQueryEnqueue reads persisted bibliography entries and
+	// submits them to the in-process catalog dispatcher. It performs no
+	// provider HTTP request itself.
+	TypePaperReferenceQueryEnqueue = "paper:reference_query_enqueue"
+	// TypePaperSourceQueryEnqueue starts one source-paper catalog lookup and hands
+	// it to the in-process dispatcher; it does not query providers itself.
+	TypePaperSourceQueryEnqueue = "paper:source_query_enqueue"
+	// TypePaperQueryApply applies one dispatcher result and finalizes the
+	// corresponding source stage or reference resolution.
+	TypePaperQueryApply      = "paper:query_apply"
+	TypeDocumentRemoteImport = "document:remote_import"
 	//TypeKnowledgePostProcess = "knowledge:postprocess"
 	//TypeManualProcess        = "knowledge:manual"
 	//TypeKnowledgeListDelete  = "knowledge:list_delete"

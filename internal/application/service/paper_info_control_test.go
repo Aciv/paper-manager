@@ -54,7 +54,7 @@ func (*paperInfoInspectorStub) HasQueuedTaskForStage(context.Context, string, ty
 	return false, nil
 }
 
-func (*paperInfoInspectorStub) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
+func (*paperInfoInspectorStub) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
 	return false, nil
 }
 
@@ -89,14 +89,14 @@ func TestPaperInfoControlRetries(t *testing.T) {
 	if err := controls.RetryCatalogResolution(ctx, documentID.String()); err != nil {
 		t.Fatalf("RetryCatalogResolution() error = %v", err)
 	}
-	if len(queue.tasks) != 2 || queue.tasks[0].Type() != types.TypePaperMetadataExtract || queue.tasks[1].Type() != types.TypePaperCatalogResolve {
+	if len(queue.tasks) != 2 || queue.tasks[0].Type() != types.TypePaperMetadataExtract || queue.tasks[1].Type() != types.TypePaperSourceQueryEnqueue {
 		t.Fatalf("queued tasks = %#v", queue.tasks)
 	}
 	var extraction types.PaperMetadataExtractPayload
 	if err := json.Unmarshal(queue.tasks[0].Payload(), &extraction); err != nil {
 		t.Fatal(err)
 	}
-	var catalog types.PaperCatalogResolvePayload
+	var catalog types.PaperSourceQueryEnqueuePayload
 	if err := json.Unmarshal(queue.tasks[1].Payload(), &catalog); err != nil {
 		t.Fatal(err)
 	}
@@ -121,9 +121,9 @@ func TestPaperInfoControlRetries(t *testing.T) {
 }
 
 func TestPaperInfoTaskIDUsesManualAttempt(t *testing.T) {
-	base := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", 0)
-	firstRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", 1)
-	secondRetry := paperInfoTaskID(types.TypePaperCatalogResolve, "document-id", 2)
+	base := paperInfoTaskID(types.TypePaperSourceQueryEnqueue, "document-id", 0)
+	firstRetry := paperInfoTaskID(types.TypePaperSourceQueryEnqueue, "document-id", 1)
+	secondRetry := paperInfoTaskID(types.TypePaperSourceQueryEnqueue, "document-id", 2)
 	if base == firstRetry || firstRetry == secondRetry {
 		t.Fatalf("task IDs must distinguish manual attempts: %q, %q, %q", base, firstRetry, secondRetry)
 	}
@@ -133,7 +133,7 @@ func TestEnqueueManagedTaskReturnsTaskIDConflict(t *testing.T) {
 	err := enqueueManagedTask(
 		context.Background(),
 		&paperInfoQueueStub{err: asynq.ErrTaskIDConflict},
-		asynq.NewTask(types.TypePaperCatalogResolve, nil),
+		asynq.NewTask(types.TypePaperSourceQueryEnqueue, nil),
 		nil,
 		"document-id",
 	)
@@ -146,7 +146,7 @@ func TestEnqueueDocumentStageTaskTreatsSameGenerationConflictAsSuccess(t *testin
 	err := enqueueDocumentStageTask(
 		context.Background(),
 		&paperInfoQueueStub{err: asynq.ErrTaskIDConflict},
-		asynq.NewTask(types.TypePaperCatalogResolve, nil),
+		asynq.NewTask(types.TypePaperSourceQueryEnqueue, nil),
 		nil,
 		"document-id",
 	)
@@ -168,10 +168,10 @@ func TestPaperInfoControlRetriesReferenceDispatch(t *testing.T) {
 	if err := controls.RetryReferenceResolution(ctx, documentID.String()); err != nil {
 		t.Fatalf("RetryReferenceResolution() error = %v", err)
 	}
-	if len(queue.tasks) != 1 || queue.tasks[0].Type() != types.TypePaperReferenceDispatch {
+	if len(queue.tasks) != 1 || queue.tasks[0].Type() != types.TypePaperReferenceQueryEnqueue {
 		t.Fatalf("queued tasks = %#v, want one reference dispatch task", queue.tasks)
 	}
-	var payload types.PaperReferenceDispatchPayload
+	var payload types.PaperReferenceQueryEnqueuePayload
 	if err := json.Unmarshal(queue.tasks[0].Payload(), &payload); err != nil {
 		t.Fatal(err)
 	}

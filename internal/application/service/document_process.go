@@ -635,12 +635,12 @@ func NewPaperMetadataExtractTask(
 	}, nil
 }
 
-// NewPaperReferenceDispatchTask validates and creates the lightweight
+// NewPaperReferenceQueryEnqueueTask validates and creates the lightweight
 // bibliography dispatcher. The dispatcher is low priority: it only reads
 // durable citation rows and emits provider batches, while source catalog work
 // remains on the default queue.
-func NewPaperReferenceDispatchTask(
-	payload types.PaperReferenceDispatchPayload,
+func NewPaperReferenceQueryEnqueueTask(
+	payload types.PaperReferenceQueryEnqueuePayload,
 	timeout time.Duration,
 	maxRetry int,
 ) (*asynq.Task, []asynq.Option, error) {
@@ -653,7 +653,7 @@ func NewPaperReferenceDispatchTask(
 	if maxRetry <= 0 {
 		maxRetry = defaultPaperCatalogTaskMaxRetry
 	}
-	task, err := newPaperInfoJSONTask(types.TypePaperReferenceDispatch, payload)
+	task, err := newPaperInfoJSONTask(types.TypePaperReferenceQueryEnqueue, payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode paper reference dispatch task: %w", err)
 	}
@@ -663,7 +663,7 @@ func NewPaperReferenceDispatchTask(
 		asynq.MaxRetry(maxRetry),
 		asynq.Timeout(timeout),
 		asynq.TaskID(paperInfoTaskID(
-			types.TypePaperReferenceDispatch,
+			types.TypePaperReferenceQueryEnqueue,
 			payload.DocumentID,
 			0,
 			parts...,
@@ -671,12 +671,11 @@ func NewPaperReferenceDispatchTask(
 	}, nil
 }
 
-// NewPaperCatalogResolveTask creates one single-document catalog task. Source
-// work remains on the default queue; scheduler-owned reference work is low
-// priority. Provider assignment and fallback state intentionally stay out of
-// the payload and are claimed at execution time.
-func NewPaperCatalogResolveTask(
-	payload types.PaperCatalogResolvePayload,
+// NewPaperSourceQueryEnqueueTask creates the source-paper dispatch task. Provider
+// assignment and reference fallback stay out of the payload; the in-process
+// dispatcher owns them.
+func NewPaperSourceQueryEnqueueTask(
+	payload types.PaperSourceQueryEnqueuePayload,
 	timeout time.Duration,
 	maxRetry int,
 ) (*asynq.Task, []asynq.Option, error) {
@@ -689,28 +688,59 @@ func NewPaperCatalogResolveTask(
 	if maxRetry <= 0 {
 		maxRetry = defaultPaperCatalogTaskMaxRetry
 	}
-	task, err := newPaperInfoJSONTask(types.TypePaperCatalogResolve, payload)
+	task, err := newPaperInfoJSONTask(types.TypePaperSourceQueryEnqueue, payload)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode paper catalog resolution task: %w", err)
 	}
+	parts := stageTaskIDParts(payload.Stage, payload.Generation)
+	options := []asynq.Option{
+		asynq.Queue(types.QueueDefault),
+		asynq.MaxRetry(maxRetry),
+		asynq.Timeout(timeout),
+		asynq.TaskID(paperInfoTaskID(
+			types.TypePaperSourceQueryEnqueue, payload.DocumentID, 0, parts...,
+		)),
+	}
+	return task, options, nil
+}
+
+// NewPaperQueryApplyTask creates one durable post-processing task emitted
+// by the in-process catalog dispatcher. Source results stay on the default
+// queue; reference results remain on the low-priority lane.
+func NewPaperQueryApplyTask(
+	payload types.PaperQueryApplyPayload,
+	timeout time.Duration,
+	maxRetry int,
+) (*asynq.Task, []asynq.Option, error) {
+	if err := payload.Validate(); err != nil {
+		return nil, nil, err
+	}
+	if timeout <= 0 {
+		timeout = defaultPaperCatalogTaskTimeout
+	}
+	if maxRetry <= 0 {
+		maxRetry = defaultPaperCatalogTaskMaxRetry
+	}
+	task, err := newPaperInfoJSONTask(types.TypePaperQueryApply, payload)
+	if err != nil {
+		return nil, nil, fmt.Errorf("encode paper catalog result task: %w", err)
+	}
 	queue := types.QueueDefault
 	ownerID := payload.DocumentID
-	parts := stageTaskIDParts(payload.Stage, payload.Generation)
-	if payload.ReferenceID != "" {
-		// Reference lookups are user-triggered background work; keep them off the
-		// default lane so a large bibliography cannot starve upload processing.
+	if payload.Kind == types.CatalogJobReference {
 		queue = types.QueueLow
 		ownerID = payload.ReferenceID
-		parts = []string{"reference", strconv.FormatInt(payload.Generation, 10)}
+	}
+	parts := []string{string(payload.Kind), strconv.FormatInt(payload.Generation, 10), payload.Provider}
+	if payload.Final {
+		parts = append(parts, "final")
 	}
 	options := []asynq.Option{
 		asynq.Queue(queue),
 		asynq.MaxRetry(maxRetry),
 		asynq.Timeout(timeout),
+		asynq.TaskID(paperInfoTaskID(types.TypePaperQueryApply, ownerID, 0, parts...)),
 	}
-	options = append(options, asynq.TaskID(paperInfoTaskID(
-		types.TypePaperCatalogResolve, ownerID, 0, parts...,
-	)))
 	return task, options, nil
 }
 

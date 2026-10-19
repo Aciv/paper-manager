@@ -64,22 +64,3 @@ func TestMemoryProviderThrottleWaitHonorsCancellation(t *testing.T) {
 		t.Fatalf("Acquire() error = %v, want context cancellation", err)
 	}
 }
-
-func TestReferenceCatalogLimiterBoundsGlobalAndPerDocumentLeases(t *testing.T) {
-	limiter := &referenceCatalogLimiter{limiter: limit.NewMemoryEngine(), global: 1, perDocument: 1}
-	release, err := limiter.AcquireReference(context.Background(), "source-a")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if _, err := limiter.AcquireReference(ctx, "source-a"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("same document acquire error = %v, want context deadline", err)
-	}
-	ctx, cancel = context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if _, err := limiter.AcquireReference(ctx, "source-b"); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("second document acquire error = %v, want context deadline", err)
-	}
-}

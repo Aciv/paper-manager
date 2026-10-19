@@ -26,16 +26,23 @@ func (*paperInfoControlHandlerStub) ExtractMetadata(
 	return false, nil
 }
 
-func (*paperInfoControlHandlerStub) ResolveMetadata(
+func (*paperInfoControlHandlerStub) PaperSourceQueryEnqueue(
 	context.Context,
-	types.PaperCatalogResolveCommand,
+	types.PaperSourceQueryEnqueueCommand,
 ) error {
 	return nil
 }
 
-func (*paperInfoControlHandlerStub) DispatchReferences(
+func (*paperInfoControlHandlerStub) ReferenceQueryEnqueue(
 	context.Context,
-	types.PaperReferenceDispatchCommand,
+	types.PaperReferenceQueryEnqueueCommand,
+) error {
+	return nil
+}
+
+func (*paperInfoControlHandlerStub) QueryApply(
+	context.Context,
+	types.PaperQueryApplyCommand,
 ) error {
 	return nil
 }

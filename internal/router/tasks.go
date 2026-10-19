@@ -205,11 +205,14 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 		mux.HandleFunc(types.TypePaperMetadataExtract, func(ctx context.Context, task *asynq.Task) error {
 			return processPaperMetadataExtractTask(ctx, task, params.PaperInfoService)
 		})
-		mux.HandleFunc(types.TypePaperCatalogResolve, func(ctx context.Context, task *asynq.Task) error {
-			return processPaperCatalogResolveTask(ctx, task, params.PaperInfoService)
+		mux.HandleFunc(types.TypePaperSourceQueryEnqueue, func(ctx context.Context, task *asynq.Task) error {
+			return processPaperSourceQueryEnqueueTask(ctx, task, params.PaperInfoService)
 		})
-		mux.HandleFunc(types.TypePaperReferenceDispatch, func(ctx context.Context, task *asynq.Task) error {
-			return processPaperReferenceDispatchTask(ctx, task, params.PaperInfoService)
+		mux.HandleFunc(types.TypePaperQueryApply, func(ctx context.Context, task *asynq.Task) error {
+			return processPaperQueryApplyTask(ctx, task, params.PaperInfoService)
+		})
+		mux.HandleFunc(types.TypePaperReferenceQueryEnqueue, func(ctx context.Context, task *asynq.Task) error {
+			return processPaperReferenceQueryEnqueueTask(ctx, task, params.PaperInfoService)
 		})
 	}
 
@@ -279,7 +282,7 @@ func enqueueTask(
 	return nil
 }
 
-func processPaperCatalogResolveTask(
+func processPaperSourceQueryEnqueueTask(
 	ctx context.Context,
 	task *asynq.Task,
 	info interfaces.PaperInfoService,
@@ -287,7 +290,7 @@ func processPaperCatalogResolveTask(
 	if task == nil {
 		return skipPaperTask(errors.New("paper catalog resolution task is required"))
 	}
-	var payload types.PaperCatalogResolvePayload
+	var payload types.PaperSourceQueryEnqueuePayload
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		return skipPaperTask(fmt.Errorf("decode paper catalog resolution payload: %w", err))
 	}
@@ -296,13 +299,36 @@ func processPaperCatalogResolveTask(
 		return skipPaperTask(err)
 	}
 	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
-	if err := info.ResolveMetadata(ctx, command); err != nil {
+	if err := info.PaperSourceQueryEnqueue(ctx, command); err != nil {
 		return classifyPaperTaskError(err)
 	}
 	return nil
 }
 
-func processPaperReferenceDispatchTask(
+func processPaperQueryApplyTask(
+	ctx context.Context,
+	task *asynq.Task,
+	info interfaces.PaperInfoService,
+) error {
+	if task == nil {
+		return skipPaperTask(errors.New("paper catalog result task is required"))
+	}
+	var payload types.PaperQueryApplyPayload
+	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+		return skipPaperTask(fmt.Errorf("decode paper catalog result payload: %w", err))
+	}
+	command, err := payload.Command()
+	if err != nil {
+		return skipPaperTask(err)
+	}
+	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
+	if err := info.QueryApply(ctx, command); err != nil {
+		return classifyPaperTaskError(err)
+	}
+	return nil
+}
+
+func processPaperReferenceQueryEnqueueTask(
 	ctx context.Context,
 	task *asynq.Task,
 	info interfaces.PaperInfoService,
@@ -310,7 +336,7 @@ func processPaperReferenceDispatchTask(
 	if task == nil {
 		return skipPaperTask(errors.New("paper reference dispatch task is required"))
 	}
-	var payload types.PaperReferenceDispatchPayload
+	var payload types.PaperReferenceQueryEnqueuePayload
 	if err := json.Unmarshal(task.Payload(), &payload); err != nil {
 		return skipPaperTask(fmt.Errorf("decode paper reference dispatch payload: %w", err))
 	}
@@ -319,7 +345,7 @@ func processPaperReferenceDispatchTask(
 		return skipPaperTask(err)
 	}
 	ctx = paperTaskContext(ctx, payload.RequestID, payload.DocumentID, task.Type())
-	if err := info.DispatchReferences(ctx, command); err != nil {
+	if err := info.ReferenceQueryEnqueue(ctx, command); err != nil {
 		return classifyPaperTaskError(err)
 	}
 	return nil
@@ -457,10 +483,10 @@ type deadLetterDocumentPayload struct {
 // Question/Summary generation are NOT included: they run after parse_status
 // has already become "completed" and have their own status fields.
 var taskTypesAffectingKnowledgeStatus = map[string]struct{}{
-	types.TypeDocumentRecognize:      {},
-	types.TypePaperMetadataExtract:   {},
-	types.TypePaperCatalogResolve:    {},
-	types.TypePaperReferenceDispatch: {},
+	types.TypeDocumentRecognize:          {},
+	types.TypePaperMetadataExtract:       {},
+	types.TypePaperSourceQueryEnqueue:    {},
+	types.TypePaperReferenceQueryEnqueue: {},
 	// types.TypeKnowledgePostProcess: {},
 	// types.TypeManualProcess:        {},
 }

@@ -19,7 +19,7 @@ func (s *documentQueueProbeStub) HasQueuedTaskForStage(_ context.Context, docume
 	return s.queued[documentID], s.errs[documentID]
 }
 
-func (*documentQueueProbeStub) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
+func (*documentQueueProbeStub) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
 	return false, nil
 }
 

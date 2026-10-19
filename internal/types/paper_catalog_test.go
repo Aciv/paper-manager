@@ -65,8 +65,8 @@ func TestPaperCatalogCandidateValidate(t *testing.T) {
 	}
 }
 
-func TestPaperCatalogResolveCommandValidate(t *testing.T) {
-	command := PaperCatalogResolveCommand{
+func TestPaperSourceQueryEnqueueCommandValidate(t *testing.T) {
+	command := PaperSourceQueryEnqueueCommand{
 		DocumentID: uuid.New(), Stage: DocumentStageSourceLookup, Generation: 1,
 	}
 	if err := command.Validate(); err != nil {
@@ -79,8 +79,8 @@ func TestPaperCatalogResolveCommandValidate(t *testing.T) {
 	}
 }
 
-func TestPaperCatalogResolveCommandAllowsDirectInternalCallWithoutFence(t *testing.T) {
-	command := PaperCatalogResolveCommand{DocumentID: uuid.New()}
+func TestPaperSourceQueryEnqueueCommandAllowsDirectInternalCallWithoutFence(t *testing.T) {
+	command := PaperSourceQueryEnqueueCommand{DocumentID: uuid.New()}
 	if err := command.Validate(); err != nil {
 		t.Fatalf("direct command rejected: %v", err)
 	}

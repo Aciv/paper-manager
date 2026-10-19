@@ -20,17 +20,18 @@ const (
 	defaultProcessingSpanRetentionBatch   = 500
 	defaultPaperCatalogTimeout            = 10 * time.Second
 	defaultPaperCatalogConcurrency        = 4
+	defaultPaperCatalogSourceStopScore    = 0.9
 	defaultPaperExtractionTaskTimeout     = 2 * time.Minute
 	defaultPaperExtractionTaskMaxRetry    = 3
 	defaultPaperCatalogTaskTimeout        = 10 * time.Minute
 	defaultPaperCatalogTaskMaxRetry       = 5
 	// defaultPaperReferenceCatalogMaxPerDocument is the per-document
-	// registration budget, not a running-concurrency bound: it caps how many
-	// unresolved citations one dispatch registers into the scheduler queue,
-	// while actual parallelism is governed by the per-document concurrency
-	// lease and provider spacing. It must comfortably exceed realistic
-	// bibliography sizes so a paper's whole reference list is scheduled in a
-	// single round; there is no automatic continuation beyond this cap.
+	// admission budget, not a running-concurrency bound: it caps how many
+	// unresolved citations one dispatch submits to the in-process dispatcher,
+	// while actual parallelism is governed by the reference admission caps and
+	// provider spacing. It must comfortably exceed realistic bibliography
+	// sizes so a paper's whole reference list is submitted in one round; there
+	// is no automatic continuation beyond this cap.
 	defaultPaperReferenceCatalogMaxPerDocument         = 200
 	defaultPaperReferenceCatalogConcurrency            = 2
 	defaultPaperReferenceCatalogPerDocumentConcurrency = 1
@@ -67,7 +68,10 @@ type Config struct {
 	ParserGRPCMaxMessageSize       int
 	PaperCatalogProviders          []string
 	PaperCatalogTimeout            time.Duration
-	PaperCatalogConcurrency        int
+	// PaperCatalogConcurrency is retained for configuration compatibility.
+	// Source provider fan-out moved to the in-process dispatcher, which runs
+	// one worker per configured provider.
+	PaperCatalogConcurrency int
 	// Per-provider policies override the legacy shared timeout/concurrency.
 	// Keys use the stable catalog provider name (for example "arxiv").
 	PaperCatalogProviderTimeouts                map[string]time.Duration
@@ -81,6 +85,7 @@ type Config struct {
 	PaperExtractionTaskMaxRetry                 int
 	PaperCatalogTaskTimeout                     time.Duration
 	PaperCatalogTaskMaxRetry                    int
+	PaperCatalogSourceStopScore                 float64
 	PaperReferenceCatalogMaxPerDocument         int
 	PaperReferenceCatalogConcurrency            int
 	PaperReferenceCatalogPerDocumentConcurrency int
@@ -146,6 +151,14 @@ func Load() (Config, error) {
 	)
 	if err != nil {
 		return Config{}, err
+	}
+	paperCatalogSourceStopScore := defaultPaperCatalogSourceStopScore
+	if value := strings.TrimSpace(os.Getenv("PAPER_CATALOG_SOURCE_STOP_SCORE")); value != "" {
+		parsed, parseErr := strconv.ParseFloat(value, 64)
+		if parseErr != nil || parsed <= 0 || parsed > 1 {
+			return Config{}, fmt.Errorf("PAPER_CATALOG_SOURCE_STOP_SCORE must be between 0 and 1")
+		}
+		paperCatalogSourceStopScore = parsed
 	}
 	paperCatalogProviders := listEnv(
 		"PAPER_CATALOG_PROVIDERS",
@@ -266,6 +279,7 @@ func Load() (Config, error) {
 		PaperExtractionTaskMaxRetry:                 paperExtractionTaskMaxRetry,
 		PaperCatalogTaskTimeout:                     paperCatalogTaskTimeout,
 		PaperCatalogTaskMaxRetry:                    paperCatalogTaskMaxRetry,
+		PaperCatalogSourceStopScore:                 paperCatalogSourceStopScore,
 		PaperReferenceCatalogMaxPerDocument:         paperReferenceCatalogMaxPerDocument,
 		PaperReferenceCatalogConcurrency:            paperReferenceCatalogConcurrency,
 		PaperReferenceCatalogPerDocumentConcurrency: paperReferenceCatalogPerDocumentConcurrency,

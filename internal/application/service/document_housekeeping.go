@@ -22,6 +22,7 @@ import (
 type DocumentHousekeepingService struct {
 	db                   *gorm.DB
 	inspector            interfaces.TaskInspector
+	dispatcher           *CatalogDispatcher
 	enabled              bool
 	interval             time.Duration
 	staleThreshold       time.Duration
@@ -40,6 +41,7 @@ type DocumentHousekeepingService struct {
 // effects and the server owns its lifecycle.
 func NewDocumentHousekeepingService(
 	db *gorm.DB, cfg config.Config, inspector interfaces.TaskInspector,
+	dispatcher *CatalogDispatcher,
 ) *DocumentHousekeepingService {
 	interval := cfg.DocumentHousekeepingInterval
 	if interval <= 0 {
@@ -50,7 +52,7 @@ func NewDocumentHousekeepingService(
 		staleThreshold = time.Hour + 10*time.Minute
 	}
 	return &DocumentHousekeepingService{
-		db: db, inspector: inspector,
+		db: db, inspector: inspector, dispatcher: dispatcher,
 		enabled:  cfg.DocumentHousekeepingEnabled,
 		interval: interval, staleThreshold: staleThreshold,
 		spanRetentionEnabled: cfg.ProcessingSpanRetentionEnabled,
@@ -200,18 +202,23 @@ func (h *DocumentHousekeepingService) recoverStaleReferences(ctx context.Context
 		return
 	}
 	for _, candidate := range candidates {
-		queued := false
+		// Reference queries are process-local now; the dispatcher can answer
+		// exactly whether this generation is still queued or executing.
+		if h.dispatcher != nil && h.dispatcher.HasReference(candidate.ReferenceID, candidate.Generation) {
+			continue
+		}
 		if h.inspector != nil {
-			var err error
-			queued, err = h.inspector.HasQueuedTaskForReference(ctx, candidate.ReferenceID.String(), candidate.Generation)
+			queued, err := h.inspector.HasQueuedQueryApplyForReference(
+				ctx, candidate.ReferenceID.String(), candidate.Generation,
+			)
 			if err != nil {
-				logger.Warn(ctx, "reference resolution queue probe failed; leaving candidate for next sweep",
+				logger.Warn(ctx, "reference result queue probe failed; leaving candidate for next sweep",
 					"reference_id", candidate.ReferenceID, "generation", candidate.Generation, "error", err)
 				continue
 			}
-		}
-		if queued {
-			continue
+			if queued {
+				continue
+			}
 		}
 		now := time.Now().UTC()
 		result := h.db.WithContext(ctx).Exec(`UPDATE paper_citations

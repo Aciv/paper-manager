@@ -102,6 +102,7 @@ func main() {
 
 	printHandlers(handlers)
 	printProducers(handlers)
+	printInProcessPaths()
 
 	missing := 0
 	values := make([]string, 0, len(constants))
@@ -167,6 +168,17 @@ func printProducers(rows []taskRow) {
 		}
 	}
 	_ = writer.Flush()
+}
+
+// printInProcessPaths makes the dispatcher boundary explicit: provider calls
+// are not Asynq tasks anymore, so producers alone cannot describe the flow.
+func printInProcessPaths() {
+	fmt.Println()
+	fmt.Println("## In-process catalog paths (no Asynq task)")
+	fmt.Println()
+	fmt.Println("source_lookup:      paper:source_query_enqueue -> CatalogDispatcher -> provider worker -> paper:query_apply")
+	fmt.Println("reference_lookup:   paper:reference_query_enqueue -> CatalogDispatcher -> provider worker -> paper:query_apply")
+	fmt.Println("paper:source_query_enqueue only submits source jobs; reference queries never create a paper:source_query_enqueue task.")
 }
 
 func loadTaskConstants(fset *token.FileSet, dir string) (map[string]string, error) {

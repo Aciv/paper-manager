@@ -146,7 +146,7 @@ func TestMiddleware_RevokeTaskDoesNotCreateDeadLetter(t *testing.T) {
 	repo := &fakeRepo{}
 	err := runMiddleware(
 		repo,
-		types.TypePaperCatalogResolve,
+		types.TypePaperSourceQueryEnqueue,
 		[]byte(`{"document_id":"doc-1"}`),
 		fmt.Errorf("stale revision: %w", asynq.RevokeTask),
 	)

@@ -10,12 +10,10 @@ import (
 	"math"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"paperMaster/internal/config"
-	"paperMaster/internal/infrastructure/papercatalog"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
 
@@ -25,9 +23,39 @@ import (
 
 func serviceUUIDPtr(value uuid.UUID) *uuid.UUID { return &value }
 
-// newPaperInfoServiceForTest keeps test setup concise while still injecting
-// the same infrastructure memory scheduler used by Lite mode. Production
-// constructors must receive their scheduler from DI explicitly.
+// paperInfoDispatcherStub records submissions. Tests that need provider
+// execution use CatalogDispatcher directly; service tests that only exercise
+// dispatch/validation stay deterministic.
+type paperInfoDispatcherStub struct {
+	mu         sync.Mutex
+	sources    []types.CatalogSourceJob
+	references []types.CatalogReferenceJob
+	err        error
+}
+
+func (s *paperInfoDispatcherStub) SubmitSource(_ context.Context, job types.CatalogSourceJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.sources = append(s.sources, job)
+	return nil
+}
+
+func (s *paperInfoDispatcherStub) SubmitReference(_ context.Context, job types.CatalogReferenceJob) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.err != nil {
+		return s.err
+	}
+	s.references = append(s.references, job)
+	return nil
+}
+
+// newPaperInfoServiceForTest keeps test setup concise while injecting a
+// deterministic dispatcher stub. Provider-execution behavior is covered by
+// catalog dispatcher tests.
 func newPaperInfoServiceForTest(
 	cfg config.Config,
 	documents interfaces.DocumentRepository,
@@ -37,40 +65,12 @@ func newPaperInfoServiceForTest(
 	papers interfaces.PaperService,
 	tasks interfaces.TaskEnqueuer,
 	inspector interfaces.TaskInspector,
-	referenceLimiter interfaces.PaperReferenceCatalogLimiter,
+	_ any,
 ) interfaces.PaperInfoService {
-	schedulerCfg := cfg
-	if len(schedulerCfg.PaperCatalogProviders) == 0 && catalogs != nil {
-		for _, provider := range catalogs.Providers() {
-			schedulerCfg.PaperCatalogProviders = append(
-				schedulerCfg.PaperCatalogProviders, provider.Name(),
-			)
-		}
-	}
 	return NewPaperInfoService(
-		cfg, documents, storage, extractor, catalogs, papers, tasks, inspector,
-		referenceLimiter, papercatalog.NewMemoryReferenceScheduler(schedulerCfg),
+		cfg, documents, storage, extractor, papers, tasks, inspector,
+		&paperInfoDispatcherStub{},
 	)
-}
-
-// registerReferenceJobForTest mirrors the production dispatcher boundary:
-// reference workers may claim only jobs that were registered beforehand.
-func registerReferenceJobForTest(
-	t *testing.T,
-	service interfaces.PaperInfoService,
-	targetDocumentID uuid.UUID,
-	sourceDocumentID uuid.UUID,
-) {
-	t.Helper()
-	implementation, ok := service.(*paperInfoService)
-	if !ok || implementation.referenceScheduler == nil {
-		t.Fatal("paper info service has no reference scheduler")
-	}
-	if _, err := implementation.referenceScheduler.Register(context.Background(), types.PaperReferenceJob{
-		TargetDocumentID: targetDocumentID,
-	}); err != nil {
-		t.Fatalf("register reference job: %v", err)
-	}
 }
 
 type paperInfoStorageStub struct {
@@ -160,9 +160,17 @@ type paperInfoSpanStart struct {
 	scopeID    types.ProcessingSpanScopeID
 }
 
+type paperInfoSpanFinish struct {
+	spanID uuid.UUID
+	status types.ProcessingSpanStatus
+	code   string
+	reason string
+}
+
 type paperInfoSpanStub struct {
-	mu     sync.Mutex
-	starts []paperInfoSpanStart
+	mu       sync.Mutex
+	starts   []paperInfoSpanStart
+	finishes []paperInfoSpanFinish
 }
 
 func (s *paperInfoSpanStub) BeginSpan(
@@ -211,7 +219,14 @@ func (s *paperInfoSpanStub) BeginChildSpan(
 	return s.record(parentSpanID, documentID, attempt, kind, scope, scopeID)
 }
 func (*paperInfoSpanStub) Heartbeat(context.Context, uuid.UUID) error { return nil }
-func (*paperInfoSpanStub) FinishSpan(context.Context, uuid.UUID, types.ProcessingSpanStatus, string, string) error {
+func (s *paperInfoSpanStub) FinishSpan(
+	_ context.Context, spanID uuid.UUID, status types.ProcessingSpanStatus, code, reason string,
+) error {
+	s.mu.Lock()
+	s.finishes = append(s.finishes, paperInfoSpanFinish{
+		spanID: spanID, status: status, code: code, reason: reason,
+	})
+	s.mu.Unlock()
 	return nil
 }
 func (*paperInfoSpanStub) CancelStageProjection(context.Context, uuid.UUID, types.DocumentStage, int64, string, string) error {
@@ -663,11 +678,11 @@ func TestPaperInfoExtractMetadataQueuesIndependentDownstreamStages(t *testing.T)
 	if len(queue.tasks) != 2 {
 		t.Fatalf("queued task count = %d, want 2", len(queue.tasks))
 	}
-	var source types.PaperCatalogResolvePayload
+	var source types.PaperSourceQueryEnqueuePayload
 	if err := json.Unmarshal(queue.tasks[0].Payload(), &source); err != nil {
 		t.Fatal(err)
 	}
-	var references types.PaperReferenceDispatchPayload
+	var references types.PaperReferenceQueryEnqueuePayload
 	if err := json.Unmarshal(queue.tasks[1].Payload(), &references); err != nil {
 		t.Fatal(err)
 	}
@@ -865,119 +880,6 @@ func TestPaperInfoExtractMetadataRejectsCancelledGenerationAfterRPC(t *testing.T
 	}
 }
 
-func TestPaperInfoResolveMetadataBoundsProvidersAndRanksExactDOI(t *testing.T) {
-	documentID := uuid.New()
-	documents := readyPaperInfoDocumentRepo(documentID)
-	documents.documents[documentID] = types.Document{
-		ID:          documentID,
-		DOI:         "10.1000/exact",
-		SourceState: types.DocumentSourceAvailable,
-	}
-	papers := newPaperInfoPaperServiceStub()
-	papers.metadata[documentID.String()] = types.PaperMetadata{
-		DocumentID: documentID,
-		Title:      "A Reliable Paper",
-	}
-
-	var active atomic.Int32
-	var maximum atomic.Int32
-	provider := func(name string, candidate types.PaperCatalogCandidate) interfaces.PaperCatalogProvider {
-		return &paperInfoProviderStub{
-			name: name,
-			search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-				now := active.Add(1)
-				for {
-					previous := maximum.Load()
-					if now <= previous || maximum.CompareAndSwap(previous, now) {
-						break
-					}
-				}
-				time.Sleep(20 * time.Millisecond)
-				active.Add(-1)
-				return []types.PaperCatalogCandidate{candidate}, nil
-			},
-		}
-	}
-	registry := &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{
-		provider("arxiv", testCatalogCandidate("arxiv", "wrong", "Wrong title", 0.99)),
-		provider("crossref", testCatalogCandidate("crossref", "10.1000/exact", "Exact DOI title", 0.1)),
-		provider("openalex", testCatalogCandidate("openalex", "", "A Reliable Paper", 1)),
-	}}
-	service := newPaperInfoServiceForTest(
-		config.Config{PaperCatalogConcurrency: 2},
-		documents,
-		&paperInfoStorageStub{},
-		&paperInfoExtractorStub{},
-		registry,
-		papers,
-		nil,
-		nil,
-		nil,
-	)
-
-	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: documentID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if maximum.Load() < 2 || maximum.Load() > 2 {
-		t.Fatalf("maximum provider concurrency = %d, want 2", maximum.Load())
-	}
-	if len(papers.updates) != 1 ||
-		papers.updates[0].update.Title == nil ||
-		*papers.updates[0].update.Title != "Exact DOI title" {
-		t.Fatalf("exact DOI candidate was not selected: %#v", papers.updates)
-	}
-}
-
-func TestProviderSpansDistinguishConcurrentReferenceTargets(t *testing.T) {
-	sourceID, firstReferenceID, secondReferenceID := uuid.New(), uuid.New(), uuid.New()
-	spans := &paperInfoSpanStub{}
-	service := newPaperInfoService(
-		config.Config{PaperCatalogConcurrency: 1},
-		nil,
-		nil,
-		nil,
-		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{
-			&paperInfoProviderStub{name: "openalex", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-				return []types.PaperCatalogCandidate{testCatalogCandidate("openalex", "10.1000/example", "Example Paper", 1)}, nil
-			}},
-		}},
-		nil,
-		nil,
-		nil,
-		nil,
-		spans,
-	).(*paperInfoService)
-	query := types.PaperLookupQuery{Title: "Example Paper"}
-	for _, targetID := range []uuid.UUID{firstReferenceID, secondReferenceID} {
-		if _, _, err := service.selectCatalogCandidate(
-			context.Background(),
-			query,
-			sourceID,
-			1,
-			types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, targetID.String()),
-			uuid.Nil,
-		); err != nil {
-			t.Fatalf("selectCatalogCandidate() error = %v", err)
-		}
-	}
-	if len(spans.starts) != 2 {
-		t.Fatalf("provider span starts = %d, want 2", len(spans.starts))
-	}
-	first, second := spans.starts[0], spans.starts[1]
-	if first.scope != types.ProcessingSpanScopeProvider || second.scope != types.ProcessingSpanScopeProvider || first.scopeID == second.scopeID {
-		t.Fatalf("provider span scopes = %#v, %#v; reference targets must not share a span key", first, second)
-	}
-	if want := types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, firstReferenceID.String()).String(), types.PaperCatalogProviderOpenAlex.String()); first.scopeID != want {
-		t.Fatalf("first provider scope id = %q, want %q", first.scopeID, want)
-	}
-	if want := types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogProvider, types.ComposeProcessingSpanScopeID(types.ProcessingSpanCatalogReference, secondReferenceID.String()).String(), types.PaperCatalogProviderOpenAlex.String()); second.scopeID != want {
-		t.Fatalf("second provider scope id = %q, want %q", second.scopeID, want)
-	}
-}
-
 func TestPaperInfoReferenceDispatcherQueuesBoundedReferences(t *testing.T) {
 	documentID := uuid.New()
 	documents := readyPaperInfoDocumentRepo(documentID)
@@ -997,27 +899,27 @@ func TestPaperInfoReferenceDispatcherQueuesBoundedReferences(t *testing.T) {
 		{PaperReference: papers.references[firstID]},
 		{PaperReference: papers.references[secondID]},
 	}
-	queue := &paperInfoQueueStub{}
-	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1, PaperReferenceCatalogMaxPerDocument: 2}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/source", "Source Paper", 1)}, nil
-	}}}}, papers, queue, nil, nil)
-	if err := service.DispatchReferences(context.Background(), types.PaperReferenceDispatchCommand{
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1, PaperReferenceCatalogMaxPerDocument: 2}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{}, papers, nil, nil, nil)
+	if err := service.ReferenceQueryEnqueue(context.Background(), types.PaperReferenceQueryEnqueueCommand{
 		DocumentID: documentID,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(queue.tasks) != 2 {
-		t.Fatalf("reference tasks = %d, want two", len(queue.tasks))
+	dispatcher := service.(*paperInfoService).dispatcher.(*paperInfoDispatcherStub)
+	dispatcher.mu.Lock()
+	submitted := append([]types.CatalogReferenceJob(nil), dispatcher.references...)
+	dispatcher.mu.Unlock()
+	if len(submitted) != 2 {
+		t.Fatalf("reference submissions = %d, want two", len(submitted))
 	}
-	seen := map[string]bool{}
-	for _, task := range queue.tasks {
-		var payload types.PaperCatalogResolvePayload
-		if err := json.Unmarshal(task.Payload(), &payload); err != nil {
-			t.Fatal(err)
+	seen := map[uuid.UUID]bool{}
+	for _, job := range submitted {
+		seen[job.Reference.ReferenceID] = true
+		if job.Generation != 1 {
+			t.Fatalf("reference generation = %d, want 1", job.Generation)
 		}
-		seen[payload.ReferenceID] = true
 	}
-	if !seen[firstID.String()] || !seen[secondID.String()] {
+	if !seen[firstID] || !seen[secondID] {
 		t.Fatalf("dispatched references = %#v", seen)
 	}
 }
@@ -1044,20 +946,22 @@ func TestPaperInfoReferenceDispatcherQueuesEachPapersOwnReference(t *testing.T) 
 			PaperReference: papers.references[referenceID],
 		}}
 	}
-	queue := &paperInfoQueueStub{}
 	service := newPaperInfoServiceForTest(config.Config{}, documents, nil, nil,
-		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{&paperInfoProviderStub{name: "crossref"}}},
-		papers, queue, nil, nil)
+		&paperInfoRegistryStub{}, papers, nil, nil, nil)
 
 	for _, sourceID := range []uuid.UUID{firstSource, secondSource} {
-		if err := service.DispatchReferences(context.Background(), types.PaperReferenceDispatchCommand{
+		if err := service.ReferenceQueryEnqueue(context.Background(), types.PaperReferenceQueryEnqueueCommand{
 			DocumentID: sourceID,
 		}); err != nil {
-			t.Fatalf("DispatchReferences(%s): %v", sourceID, err)
+			t.Fatalf("ReferenceQueryEnqueue(%s): %v", sourceID, err)
 		}
 	}
-	if len(queue.tasks) != 2 {
-		t.Fatalf("reference tasks = %d, want one per citing paper", len(queue.tasks))
+	dispatcher := service.(*paperInfoService).dispatcher.(*paperInfoDispatcherStub)
+	dispatcher.mu.Lock()
+	submitted := append([]types.CatalogReferenceJob(nil), dispatcher.references...)
+	dispatcher.mu.Unlock()
+	if len(submitted) != 2 {
+		t.Fatalf("reference submissions = %d, want one per citing paper", len(submitted))
 	}
 	for _, referenceID := range ids {
 		reference := papers.references[referenceID]
@@ -1068,14 +972,14 @@ func TestPaperInfoReferenceDispatcherQueuesEachPapersOwnReference(t *testing.T) 
 }
 
 func TestPaperInfoReferenceTaskCarriesOnlyTarget(t *testing.T) {
-	payload := types.PaperCatalogResolvePayload{DocumentID: uuid.NewString(), Stage: types.DocumentStageSourceLookup, Generation: 1}
+	payload := types.PaperSourceQueryEnqueuePayload{DocumentID: uuid.NewString(), Stage: types.DocumentStageSourceLookup, Generation: 1}
 	command, err := payload.Command()
 	if err != nil || command.DocumentID.String() != payload.DocumentID {
 		t.Fatalf("single-target reference command = %#v, err=%v", command, err)
 	}
 }
 
-func TestPaperInfoResolveSourceKeepsNewestDocumentOnDOIConflict(t *testing.T) {
+func TestPaperInfoApplySourceKeepsNewestDocumentOnDOIConflict(t *testing.T) {
 	documentID := uuid.New()
 	otherID := uuid.New()
 	documents := newPaperDocumentRepoStub(
@@ -1084,18 +988,20 @@ func TestPaperInfoResolveSourceKeepsNewestDocumentOnDOIConflict(t *testing.T) {
 	)
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
-	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1)}, nil
-	}}
-	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
-	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{}, papers, nil, nil, nil).(*paperInfoService)
+	document, err := documents.Get(context.Background(), documentID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	applied, err := service.applySourceCatalogCandidate(context.Background(), document,
+		testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1))
+	if err != nil || !applied {
+		t.Fatalf("applySourceCatalogCandidate() applied=%t err=%v", applied, err)
 	}
 	if _, exists := documents.documents[otherID]; exists {
 		t.Fatal("older DOI-owning document still exists")
 	}
-	kept := documents.documents[documentID]
-	if kept.DOI != "10.1000/owned" {
+	if kept := documents.documents[documentID]; kept.DOI != "10.1000/owned" {
 		t.Fatalf("newest document DOI = %q", kept.DOI)
 	}
 	if len(papers.updates) != 1 {
@@ -1103,7 +1009,7 @@ func TestPaperInfoResolveSourceKeepsNewestDocumentOnDOIConflict(t *testing.T) {
 	}
 }
 
-func TestPaperInfoResolveSourceDeletesOlderCurrentDocument(t *testing.T) {
+func TestPaperInfoApplySourceDeletesOlderCurrentDocument(t *testing.T) {
 	documentID := uuid.New()
 	otherID := uuid.New()
 	documents := newPaperDocumentRepoStub(
@@ -1118,12 +1024,15 @@ func TestPaperInfoResolveSourceDeletesOlderCurrentDocument(t *testing.T) {
 	)
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
-	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1)}, nil
-	}}
-	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
-	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{}, papers, nil, nil, nil).(*paperInfoService)
+	document, err := documents.Get(context.Background(), documentID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	applied, err := service.applySourceCatalogCandidate(context.Background(), document,
+		testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1))
+	if err != nil || applied {
+		t.Fatalf("applySourceCatalogCandidate() applied=%t err=%v, want false", applied, err)
 	}
 	if _, exists := documents.documents[documentID]; exists {
 		t.Fatal("older current document still exists")
@@ -1164,7 +1073,7 @@ func TestNewestPaperDocumentPrefersStoredSourceOverCreationTime(t *testing.T) {
 	}
 }
 
-func TestPaperInfoResolveSourceRetriesDuplicateReplacementRace(t *testing.T) {
+func TestPaperInfoApplySourceRetriesDuplicateReplacementRace(t *testing.T) {
 	documentID := uuid.New()
 	otherID := uuid.New()
 	documents := newPaperDocumentRepoStub(
@@ -1174,103 +1083,21 @@ func TestPaperInfoResolveSourceRetriesDuplicateReplacementRace(t *testing.T) {
 	documents.replaceFailures = 1
 	papers := newPaperInfoPaperServiceStub()
 	papers.metadata[documentID.String()] = types.PaperMetadata{DocumentID: documentID, Title: "Source Paper"}
-	provider := &paperInfoProviderStub{name: "crossref", search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-		return []types.PaperCatalogCandidate{testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1)}, nil
-	}}
-	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}}, papers, nil, nil, nil)
-	if err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{DocumentID: documentID}); err != nil {
+	service := newPaperInfoServiceForTest(config.Config{PaperCatalogConcurrency: 1}, documents, &paperInfoStorageStub{}, &paperInfoExtractorStub{}, &paperInfoRegistryStub{}, papers, nil, nil, nil).(*paperInfoService)
+	document, err := documents.Get(context.Background(), documentID)
+	if err != nil {
 		t.Fatal(err)
+	}
+	applied, err := service.applySourceCatalogCandidate(context.Background(), document,
+		testCatalogCandidate("crossref", "10.1000/owned", "Source Paper", 1))
+	if err != nil || !applied {
+		t.Fatalf("applySourceCatalogCandidate() applied=%t err=%v", applied, err)
 	}
 	if _, exists := documents.documents[otherID]; exists {
 		t.Fatal("older DOI-owning document still exists after retry")
 	}
 	if kept := documents.documents[documentID]; kept.DOI != "10.1000/owned" {
 		t.Fatalf("newest document DOI = %q after retry", kept.DOI)
-	}
-}
-
-func TestPaperInfoResolveMetadataRejectsStatusChangedDuringLookup(t *testing.T) {
-	documentID := uuid.New()
-	documents := readyPaperInfoDocumentRepo(documentID)
-	papers := newPaperInfoPaperServiceStub()
-	papers.metadata[documentID.String()] = types.PaperMetadata{
-		DocumentID: documentID,
-		Title:      "Original",
-	}
-	provider := &paperInfoProviderStub{
-		name: "crossref",
-		search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-			document := documents.documents[documentID]
-			document.SourceState = types.DocumentSourceDeleting
-			document.SourceState = types.DocumentSourceDeleting
-			documents.documents[documentID] = document
-			return []types.PaperCatalogCandidate{
-				testCatalogCandidate("crossref", "10.1000/new", "Original", 1),
-			}, nil
-		},
-	}
-	service := newPaperInfoServiceForTest(
-		config.Config{PaperCatalogConcurrency: 1},
-		documents,
-		&paperInfoStorageStub{},
-		&paperInfoExtractorStub{},
-		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
-		papers,
-		nil,
-		nil,
-		nil,
-	)
-
-	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: documentID,
-	})
-	if !errors.Is(err, ErrStalePaperInfo) {
-		t.Fatalf("expected stale revision error, got %v", err)
-	}
-	if len(papers.updates) != 0 {
-		t.Fatalf("stale catalog lookup wrote metadata: %#v", papers.updates)
-	}
-}
-
-func TestPaperInfoResolveMetadataRejectsDOIChangedDuringLookup(t *testing.T) {
-	documentID := uuid.New()
-	documents := newPaperDocumentRepoStub(types.Document{
-		ID:          documentID,
-		SourceState: types.DocumentSourceAvailable,
-		DOI:         "10.1000/original",
-	})
-	papers := newPaperInfoPaperServiceStub()
-	provider := &paperInfoProviderStub{
-		name: "crossref",
-		search: func(types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-			document := documents.documents[documentID]
-			document.DOI = "10.1000/replacement"
-			documents.documents[documentID] = document
-			return []types.PaperCatalogCandidate{
-				testCatalogCandidate("crossref", "10.1000/original", "Original", 1),
-			}, nil
-		},
-	}
-	service := newPaperInfoServiceForTest(
-		config.Config{PaperCatalogConcurrency: 1},
-		documents,
-		&paperInfoStorageStub{},
-		&paperInfoExtractorStub{},
-		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
-		papers,
-		nil,
-		nil,
-		nil,
-	)
-
-	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
-		DocumentID: documentID,
-	})
-	if !errors.Is(err, ErrStalePaperInfo) {
-		t.Fatalf("expected stale DOI error, got %v", err)
-	}
-	if len(papers.updates) != 0 {
-		t.Fatalf("stale DOI lookup wrote metadata: %#v", papers.updates)
 	}
 }
 
@@ -1287,61 +1114,7 @@ func TestPaperArXivIDAcceptsBareAndWrappedIDsWithoutDamagingLegacyIDs(t *testing
 	}
 }
 
-func TestPaperInfoReferenceProviderFailureUsesNeutralFallbackRetry(t *testing.T) {
-	tests := []struct {
-		name       string
-		retryable  bool
-		retryAfter time.Duration
-	}{
-		{name: "provider rejects query", retryable: false},
-		{name: "provider rate limited", retryable: true, retryAfter: 24 * time.Hour},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			scheduler := papercatalog.NewMemoryReferenceScheduler(config.Config{
-				PaperCatalogProviders: []string{"openalex", "crossref"},
-			})
-			target := uuid.New()
-			if queued, err := scheduler.Register(context.Background(), types.PaperReferenceJob{
-				TargetDocumentID: target,
-				Generation:       1,
-			}); err != nil || !queued {
-				t.Fatalf("Register() queued=%t err=%v", queued, err)
-			}
-			claim, err := scheduler.Claim(context.Background(), target)
-			if err != nil || !claim.Ready() {
-				t.Fatalf("Claim()=%#v err=%v", claim, err)
-			}
-			cause := &papercatalog.ProviderError{
-				Provider:   claim.Provider.String(),
-				StatusCode: map[bool]int{false: 400, true: 429}[test.retryable],
-				RetryAfter: test.retryAfter,
-				Retryable:  test.retryable,
-			}
-			service := &paperInfoService{cfg: config.Config{}, referenceScheduler: scheduler}
-			err = service.reportReferenceOutcome(
-				context.Background(), target, claim.Provider,
-				types.PaperReferenceOutcomeRetryableFailure, cause,
-			)
-			if !errors.Is(err, errReferenceProviderFallback) {
-				t.Fatalf("report error=%v, want neutral fallback", err)
-			}
-			var delayed interface{ TaskRetryAfter() time.Duration }
-			if errors.As(err, &delayed) {
-				t.Fatalf("fallback retained provider Retry-After=%s", delayed.TaskRetryAfter())
-			}
-			if errors.Is(err, cause) {
-				t.Fatal("fallback retained provider terminal classification")
-			}
-			next, err := scheduler.Claim(context.Background(), target)
-			if err != nil || !next.Ready() || next.Provider == claim.Provider {
-				t.Fatalf("fallback Claim()=%#v err=%v", next, err)
-			}
-		})
-	}
-}
-
-func TestPaperInfoResolveMetadataAllowsProcessingDocumentWithoutMarkdown(t *testing.T) {
+func TestPaperInfoSourceQueryEnqueueSubmitsWithoutMarkdown(t *testing.T) {
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID:          documentID,
@@ -1352,50 +1125,37 @@ func TestPaperInfoResolveMetadataAllowsProcessingDocumentWithoutMarkdown(t *test
 		DocumentID: documentID,
 		Title:      "Concurrent Paper Lookup",
 	}
-	provider := &paperInfoProviderStub{
-		name: "crossref",
-		search: func(query types.PaperLookupQuery) ([]types.PaperCatalogCandidate, error) {
-			if query.Title != "Concurrent Paper Lookup" {
-				t.Fatalf("query title = %q", query.Title)
-			}
-			return []types.PaperCatalogCandidate{
-				testCatalogCandidate(
-					"crossref",
-					"10.1000/concurrent",
-					"Concurrent Paper Lookup",
-					1,
-				),
-			}, nil
-		},
-	}
 	service := newPaperInfoServiceForTest(
 		config.Config{PaperCatalogConcurrency: 1},
 		documents,
 		&paperInfoStorageStub{},
 		&paperInfoExtractorStub{},
-		&paperInfoRegistryStub{providers: []interfaces.PaperCatalogProvider{provider}},
+		&paperInfoRegistryStub{},
 		papers,
 		nil,
 		nil,
 		nil,
 	)
 
-	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
+	err := service.PaperSourceQueryEnqueue(context.Background(), types.PaperSourceQueryEnqueueCommand{
 		DocumentID: documentID,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(papers.updates) != 1 {
-		t.Fatalf("metadata writes = %d, want 1", len(papers.updates))
+	dispatcher := service.(*paperInfoService).dispatcher.(*paperInfoDispatcherStub)
+	dispatcher.mu.Lock()
+	submitted := append([]types.CatalogSourceJob(nil), dispatcher.sources...)
+	dispatcher.mu.Unlock()
+	if len(submitted) != 1 {
+		t.Fatalf("source submissions = %d, want 1", len(submitted))
 	}
-	if source := papers.updates[0].update.MetadataSource; source == nil ||
-		*source != types.PaperMetadataSourceCatalog {
-		t.Fatalf("metadata source = %v, want catalog", source)
+	if submitted[0].DocumentID != documentID || submitted[0].Query.Title != "Concurrent Paper Lookup" {
+		t.Fatalf("source job = %#v", submitted[0])
 	}
 }
 
-func TestPaperInfoResolveMetadataRejectsDeletingDocument(t *testing.T) {
+func TestPaperInfoSourceQueryEnqueueRejectsDeletingDocument(t *testing.T) {
 	documentID := uuid.New()
 	documents := newPaperDocumentRepoStub(types.Document{
 		ID:          documentID,
@@ -1413,7 +1173,7 @@ func TestPaperInfoResolveMetadataRejectsDeletingDocument(t *testing.T) {
 		nil,
 	)
 
-	err := service.ResolveMetadata(context.Background(), types.PaperCatalogResolveCommand{
+	err := service.PaperSourceQueryEnqueue(context.Background(), types.PaperSourceQueryEnqueueCommand{
 		DocumentID: documentID,
 	})
 	if !errors.Is(err, ErrStalePaperInfo) {

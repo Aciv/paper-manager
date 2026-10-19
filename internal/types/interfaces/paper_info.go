@@ -15,21 +15,24 @@ type PaperInfoService interface {
 		ctx context.Context,
 		command types.PaperMetadataExtractCommand,
 	) (catalogResolvable bool, err error)
-	// ResolveMetadata reloads canonical metadata and unresolved citations,
-	// queries configured catalogs, ranks candidates, and applies selected data.
-	// Source-backed documents use a Markdown revision guard; citation rows
-	// resolve directly from metadata or their stored raw reference.
-	ResolveMetadata(
+	// PaperSourceQueryEnqueue starts the source_lookup stage, builds the
+	// provider-neutral query, and submits one source job to the in-process
+	// catalog dispatcher. Provider HTTP and candidate application happen in the
+	// dispatcher and QueryApply respectively.
+	PaperSourceQueryEnqueue(
 		ctx context.Context,
-		command types.PaperCatalogResolveCommand,
+		command types.PaperSourceQueryEnqueueCommand,
 	) error
-	// DispatchReferences reloads persisted citations for one Markdown revision,
-	// deduplicates unresolved rows, then queues provider-owned
-	// catalog-resolution batches. It does not call providers.
-	DispatchReferences(
+	// ReferenceQueryEnqueue reloads persisted citations for one Markdown revision,
+	// deduplicates unresolved rows, then submits provider-owned catalog jobs to
+	// the in-process dispatcher. It does not call providers.
+	ReferenceQueryEnqueue(
 		ctx context.Context,
-		command types.PaperReferenceDispatchCommand,
+		command types.PaperReferenceQueryEnqueueCommand,
 	) error
+	// QueryApply persists one provider result emitted by the catalog
+	// dispatcher. It is idempotent and generation-fenced.
+	QueryApply(ctx context.Context, command types.PaperQueryApplyCommand) error
 	// RetryExtraction enqueues extraction for the current durable Markdown
 	// revision. It rejects documents without an available source file, unparsed
 	// documents, and active span attempts.

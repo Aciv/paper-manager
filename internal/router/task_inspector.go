@@ -56,10 +56,9 @@ func NewTaskInspector() interfaces.TaskInspector {
 // so a single struct covers Document / ImageMultimodal / PostProcess /
 // Question / Summary / Extract / Manual.
 type DocumentIDProbe struct {
-	DocumentID  string              `json:"document_id,omitempty"`
-	ReferenceID string              `json:"reference_id,omitempty"`
-	Stage       types.DocumentStage `json:"stage,omitempty"`
-	Generation  int64               `json:"generation,omitempty"`
+	DocumentID string              `json:"document_id,omitempty"`
+	Stage      types.DocumentStage `json:"stage,omitempty"`
+	Generation int64               `json:"generation,omitempty"`
 }
 
 // queuesScanned is the fixed set of queue names this codebase enqueues
@@ -79,11 +78,11 @@ var queuesScanned = []string{
 // deliberately narrow: we don't touch FAQ import / KB-level tasks
 // because the cancel API is per-Document.
 var taskTypesForDocumentCancel = map[string]struct{}{
-	types.TypeDocumentRecognize:      {},
-	types.TypePaperMetadataExtract:   {},
-	types.TypePaperReferenceDispatch: {},
-	types.TypePaperCatalogResolve:    {},
-	types.TypeDocumentRemoteImport:   {},
+	types.TypeDocumentRecognize:          {},
+	types.TypePaperMetadataExtract:       {},
+	types.TypePaperReferenceQueryEnqueue: {},
+	types.TypePaperSourceQueryEnqueue:    {},
+	types.TypeDocumentRemoteImport:       {},
 }
 
 // listPageSize caps each Redis LIST call. Asynq pages tasks, so we
@@ -192,6 +191,17 @@ func (a *asynqTaskInspector) listStageTaskIDs(queue, state, documentID string, s
 }
 
 func matchesDocumentStage(taskType string, payload []byte, documentID string, stage types.DocumentStage, generation int64) bool {
+	if taskType == types.TypePaperQueryApply {
+		var probe struct {
+			Kind       types.CatalogJobKind `json:"kind"`
+			DocumentID string               `json:"document_id"`
+			Stage      types.DocumentStage  `json:"stage"`
+			Generation int64                `json:"generation"`
+		}
+		return json.Unmarshal(payload, &probe) == nil &&
+			probe.Kind == types.CatalogJobSource &&
+			probe.DocumentID == documentID && probe.Stage == stage && probe.Generation == generation
+	}
 	if _, ok := taskTypesForDocumentCancel[taskType]; !ok {
 		return false
 	}
@@ -266,9 +276,12 @@ func (a *asynqTaskInspector) HasQueuedTaskTypeForDocument(
 	return false, nil
 }
 
-// HasQueuedTaskForReference reports whether the exact reference resolution
-// task is pending, scheduled, retrying, or active.
-func (a *asynqTaskInspector) HasQueuedTaskForReference(ctx context.Context, referenceID string, generation int64) (bool, error) {
+// HasQueuedQueryApplyForReference reports whether the exact reference result
+// task is still pending, scheduled, retrying, or active. Housekeeping uses it
+// to avoid failing a reference between dispatcher finalization and DB apply.
+func (a *asynqTaskInspector) HasQueuedQueryApplyForReference(
+	ctx context.Context, referenceID string, generation int64,
+) (bool, error) {
 	if a == nil || a.inspector == nil || referenceID == "" || generation < 1 {
 		return false, nil
 	}
@@ -283,14 +296,19 @@ func (a *asynqTaskInspector) HasQueuedTaskForReference(ctx context.Context, refe
 					if errors.Is(err, asynq.ErrQueueNotFound) {
 						break
 					}
-					return false, fmt.Errorf("inspect reference tasks in %s: %w", queue, err)
+					return false, fmt.Errorf("inspect reference result tasks in %s: %w", queue, err)
 				}
 				for _, task := range tasks {
-					if task.Type != types.TypePaperCatalogResolve {
+					if task.Type != types.TypePaperQueryApply {
 						continue
 					}
-					var probe DocumentIDProbe
+					var probe struct {
+						Kind        types.CatalogJobKind `json:"kind"`
+						ReferenceID string               `json:"reference_id"`
+						Generation  int64                `json:"generation"`
+					}
 					if json.Unmarshal(task.Payload, &probe) == nil &&
+						probe.Kind == types.CatalogJobReference &&
 						probe.ReferenceID == referenceID && probe.Generation == generation {
 						return true, nil
 					}
@@ -559,6 +577,6 @@ func (noopTaskInspector) HasQueuedTaskForStage(context.Context, string, types.Do
 	return false, nil
 }
 
-func (noopTaskInspector) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
+func (noopTaskInspector) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
 	return false, nil
 }

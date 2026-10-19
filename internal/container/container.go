@@ -13,6 +13,7 @@ import (
 	"paperMaster/internal/infrastructure/paperurl"
 	"paperMaster/internal/limit"
 	"paperMaster/internal/router"
+	"paperMaster/internal/types/interfaces"
 
 	"go.uber.org/dig"
 )
@@ -39,8 +40,10 @@ func Build() *dig.Container {
 	must(dependencies.Provide(paperextraction.NewExtractor))
 	must(dependencies.Provide(limit.NewEngine))
 	must(dependencies.Provide(papercatalog.NewRegistryFromConfig))
-	must(dependencies.Provide(papercatalog.NewReferenceCatalogLimiter))
-	must(dependencies.Provide(papercatalog.NewReferenceScheduler))
+	must(dependencies.Provide(appservice.NewCatalogDispatcher))
+	must(dependencies.Provide(func(dispatcher *appservice.CatalogDispatcher) interfaces.CatalogDispatcher {
+		return dispatcher
+	}))
 	must(dependencies.Provide(paperurl.NewResolver))
 	must(dependencies.Provide(paperurl.NewDownloadLimiter))
 	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessingAndSpanRecorder))

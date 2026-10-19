@@ -22,6 +22,10 @@ var legacyTaskTypes = map[string]struct{}{
 	"paper:reference-dispatch": {},
 	"paper:catalog-resolve":    {},
 	"document:remote-import":   {},
+	// Catalog task types retired by the in-process dispatcher cutover.
+	"paper:catalog_resolve":    {},
+	"paper:reference_dispatch": {},
+	"paper:catalog_result":     {},
 }
 
 var queues = []string{

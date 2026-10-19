@@ -56,7 +56,7 @@ func (*documentTaskInspectorStub) HasQueuedTaskForStage(context.Context, string,
 	return false, nil
 }
 
-func (*documentTaskInspectorStub) HasQueuedTaskForReference(context.Context, string, int64) (bool, error) {
+func (*documentTaskInspectorStub) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
 	return false, nil
 }
 
@@ -483,7 +483,7 @@ type recognitionStub struct {
 type documentTaskEnqueuerStub struct {
 	documents   []types.DocumentProcessPayload
 	extractions []types.PaperMetadataExtractPayload
-	catalogs    []types.PaperCatalogResolvePayload
+	catalogs    []types.PaperSourceQueryEnqueuePayload
 	tasks       []*asynq.Task
 	extractErr  error
 	catalogErr  error
@@ -493,8 +493,8 @@ type documentTaskEnqueuerStub struct {
 
 type documentPaperInfoStub struct {
 	extract    []types.PaperMetadataExtractCommand
-	source     []types.PaperCatalogResolveCommand
-	references []types.PaperReferenceDispatchCommand
+	source     []types.PaperSourceQueryEnqueueCommand
+	references []types.PaperReferenceQueryEnqueueCommand
 	parents    []uuid.UUID
 }
 
@@ -503,12 +503,12 @@ func (stub *documentPaperInfoStub) ExtractMetadata(ctx context.Context, command 
 	stub.parents = append(stub.parents, uuid.Nil)
 	return true, nil
 }
-func (stub *documentPaperInfoStub) ResolveMetadata(ctx context.Context, command types.PaperCatalogResolveCommand) error {
+func (stub *documentPaperInfoStub) PaperSourceQueryEnqueue(ctx context.Context, command types.PaperSourceQueryEnqueueCommand) error {
 	stub.source = append(stub.source, command)
 	stub.parents = append(stub.parents, uuid.Nil)
 	return nil
 }
-func (stub *documentPaperInfoStub) DispatchReferences(context.Context, types.PaperReferenceDispatchCommand) error {
+func (stub *documentPaperInfoStub) ReferenceQueryEnqueue(context.Context, types.PaperReferenceQueryEnqueueCommand) error {
 	return nil
 }
 func (*documentPaperInfoStub) RetryExtraction(context.Context, string) error          { return nil }
@@ -538,8 +538,8 @@ func (stub *documentTaskEnqueuerStub) EnqueueContext(
 		_ = json.Unmarshal(task.Payload(), &payload)
 		stub.extractions = append(stub.extractions, payload)
 		return nil, stub.extractErr
-	case types.TypePaperCatalogResolve:
-		var payload types.PaperCatalogResolvePayload
+	case types.TypePaperSourceQueryEnqueue:
+		var payload types.PaperSourceQueryEnqueuePayload
 		_ = json.Unmarshal(task.Payload(), &payload)
 		stub.catalogs = append(stub.catalogs, payload)
 		return nil, stub.catalogErr

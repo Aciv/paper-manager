@@ -117,6 +117,7 @@ func documentStageErrorTerminal(err error) bool {
 		errors.Is(err, types.ErrInvalidPaperCatalogData) ||
 		errors.Is(err, types.ErrInvalidRemotePDFRequest) ||
 		errors.Is(err, types.ErrUnsupportedRecognitionContentType) ||
+		errors.Is(err, ErrPaperInfoCatalogUnavailable) ||
 		errors.Is(err, ErrInvalidPaperMetadata) ||
 		errors.Is(err, ErrPaperCatalogNoMatch)
 }

@@ -92,8 +92,8 @@ func (s *paperInfoService) RetryCatalogResolution(
 }
 
 // RetryReferenceResolution retries only the bibliography dispatcher for a
-// source document. The dispatcher reloads citations, registers scheduler jobs,
-// and queues provider-owned catalog tasks; it does not repeat extraction or
+// source document. The dispatcher reloads citations and submits reference jobs
+// to the in-process catalog dispatcher; it does not repeat extraction or
 // source-paper lookup.
 func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documentID string) error {
 	document, _, err := s.loadPaperStatusSource(ctx, documentID)
@@ -185,11 +185,11 @@ func (s *paperInfoService) enqueueMetadataStage(ctx context.Context, documentID 
 }
 
 func (s *paperInfoService) enqueueSourceStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
-	payload := types.PaperCatalogResolvePayload{
+	payload := types.PaperSourceQueryEnqueuePayload{
 		RequestID: requestID, DocumentID: documentID.String(),
 		Stage: types.DocumentStageSourceLookup, Generation: generation,
 	}
-	task, options, err := NewPaperCatalogResolveTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+	task, options, err := NewPaperSourceQueryEnqueueTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
 	if err == nil {
 		err = enqueueDocumentStageTask(ctx, s.tasks, task, options, documentID.String())
 	}
@@ -201,11 +201,11 @@ func (s *paperInfoService) enqueueSourceStage(ctx context.Context, documentID uu
 }
 
 func (s *paperInfoService) enqueueReferenceStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
-	payload := types.PaperReferenceDispatchPayload{
+	payload := types.PaperReferenceQueryEnqueuePayload{
 		RequestID: requestID, DocumentID: documentID.String(),
 		Stage: types.DocumentStageReferenceLookup, Generation: generation,
 	}
-	task, options, err := NewPaperReferenceDispatchTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
+	task, options, err := NewPaperReferenceQueryEnqueueTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
 	if err == nil {
 		err = enqueueDocumentStageTask(ctx, s.tasks, task, options, documentID.String())
 	}
