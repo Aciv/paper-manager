@@ -112,3 +112,54 @@ func TestDocumentProcessingSpanViewPostgres(t *testing.T) {
 		t.Fatalf("bounded span view did not use an index:\n%s", plan.String())
 	}
 }
+
+func TestListCurrentBatchAppliesLimitPerDocumentPostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	documents := NewDocumentRepository(db)
+	noisyID := uuid.MustParse("00000000-0000-4000-8000-000000000001")
+	quietID := uuid.MustParse("ffffffff-ffff-4fff-bfff-ffffffffffff")
+	for _, document := range []struct {
+		id   uuid.UUID
+		name string
+	}{{noisyID, "noisy.pdf"}, {quietID, "quiet.pdf"}} {
+		if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(
+			document.id, document.name, "span/"+document.id.String(), "",
+		)); err != nil {
+			t.Fatalf("create %s: %v", document.name, err)
+		}
+	}
+	now := time.Now().UTC()
+	rows := make([]types.DocumentProcessingSpan, 0, 251)
+	for index := 0; index < 250; index++ {
+		rows = append(rows, types.DocumentProcessingSpan{
+			ID: uuid.New(), DocumentID: noisyID, Attempt: 1,
+			Kind: types.ProcessingSpanCatalogProvider, Scope: types.ProcessingSpanScopeProvider,
+			ScopeID: types.ProcessingSpanScopeID("provider:" + strconv.Itoa(index)),
+			Status:  types.ProcessingSpanSucceeded, Attributes: types.JSON(`{}`), StartedAt: now,
+		})
+	}
+	rows = append(rows, types.DocumentProcessingSpan{
+		ID: uuid.New(), DocumentID: quietID, Attempt: 1,
+		Kind: types.ProcessingSpanRecognition, Scope: types.ProcessingSpanScopeDocument,
+		ScopeID: types.ComposeProcessingSpanScopeID(types.ProcessingSpanRecognition, quietID.String()),
+		Status:  types.ProcessingSpanSucceeded, Attributes: types.JSON(`{}`), StartedAt: now,
+	})
+	if err := db.CreateInBatches(rows, 100).Error; err != nil {
+		t.Fatalf("insert batch spans: %v", err)
+	}
+
+	grouped, err := NewDocumentProcessingSpanRepository(db).ListCurrentBatch(
+		ctx, []uuid.UUID{noisyID, quietID}, 100,
+	)
+	if err != nil {
+		t.Fatalf("ListCurrentBatch() error = %v", err)
+	}
+	if len(grouped[noisyID]) != 100 {
+		t.Fatalf("noisy document spans = %d, want 100", len(grouped[noisyID]))
+	}
+	if len(grouped[quietID]) != 1 {
+		t.Fatalf("quiet document spans = %d, want 1", len(grouped[quietID]))
+	}
+}

@@ -358,13 +358,18 @@ function App() {
     if (!selected?.id) return;
     if (!citations.some((citation) => citationDownloadInFlight(citation))) return;
     let active = true;
-    const timer = window.setTimeout(() => {
+    let timer = 0;
+    const poll = () => {
       void api.listPaperCitations(selected.id)
         .then(({ items: refreshed }) => { if (active) setCitations(refreshed); })
         .catch(() => {
-          // Keep the current list; the next tick retries while still in flight.
+          // Keep the current list; finally schedules another attempt.
+        })
+        .finally(() => {
+          if (active) timer = window.setTimeout(poll, 8000);
         });
-    }, 8000);
+    };
+    timer = window.setTimeout(poll, 8000);
     return () => {
       active = false;
       window.clearTimeout(timer);

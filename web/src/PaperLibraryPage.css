@@ -391,4 +391,3 @@
 .paper-library .pdf-viewer-panel .pdf-page-jump button:hover:not(:disabled) { border-color: var(--pl-border-3); background: var(--pl-surface-3); color: #fff; }
 .paper-library .pdf-viewer-panel .pdf-back-button { border-color: var(--pl-border-2); background: rgb(34 35 39 / 92%); color: var(--pl-dim); }
 .paper-library .pdf-viewer-panel .pdf-back-button:hover:not(:disabled) { border-color: var(--pl-border-3); background: var(--pl-surface-2); color: #fff; }
-

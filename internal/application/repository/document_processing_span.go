@@ -109,10 +109,6 @@ func (r *documentProcessingSpanRepository) ListCurrentBatch(
 		return rowsByDocument, nil
 	}
 	perDocumentLimit = boundedSpanQueryLimit(perDocumentLimit)
-	totalLimit := perDocumentLimit * len(documentIDs)
-	if maxTotal := 20000; totalLimit > maxTotal {
-		totalLimit = maxTotal
-	}
 	query := `WITH ranked AS (
 		SELECT document_processing_spans.*,
 			ROW_NUMBER() OVER (
@@ -121,23 +117,28 @@ func (r *documentProcessingSpanRepository) ListCurrentBatch(
 			) AS stage_rank
 		FROM document_processing_spans
 		WHERE document_id IN ?
-	), limited AS (
+	), current_spans AS (
 		SELECT * FROM ranked WHERE stage_rank = 1
+	), limited AS (
+		SELECT current_spans.*,
+			ROW_NUMBER() OVER (
+				PARTITION BY document_id
+				ORDER BY CASE WHEN scope IN ('process','document','source','reference_run','reference_download_run') THEN 0 ELSE 1 END,
+					updated_at DESC, id DESC
+			) AS display_rank
+		FROM current_spans
 	)
 	SELECT * FROM limited
+	WHERE display_rank <= ?
 	ORDER BY document_id,
 		CASE WHEN scope IN ('process','document','source','reference_run','reference_download_run') THEN 0 ELSE 1 END,
-		updated_at DESC, id DESC
-	LIMIT ?`
+		updated_at DESC, id DESC`
 	rows := make([]types.DocumentProcessingSpan, 0)
-	if err := r.db.WithContext(ctx).Raw(query, documentIDs, totalLimit).Scan(&rows).Error; err != nil {
+	if err := r.db.WithContext(ctx).Raw(query, documentIDs, perDocumentLimit).Scan(&rows).Error; err != nil {
 		logger.Error(ctx, "batch list processing spans failed", "document_count", len(documentIDs), "error", err)
 		return nil, err
 	}
 	for _, row := range rows {
-		if len(rowsByDocument[row.DocumentID]) >= perDocumentLimit {
-			continue
-		}
 		rowsByDocument[row.DocumentID] = append(rowsByDocument[row.DocumentID], row)
 	}
 	return rowsByDocument, nil

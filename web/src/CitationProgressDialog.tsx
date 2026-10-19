@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, Document, DocumentProcessingView } from './api';
+import { fetchAllDocumentPages } from './documentPagination';
 import './CitationProgressDialog.css';
 
 type ReferenceProgress = NonNullable<DocumentProcessingView['referenceProgress']>;
@@ -62,16 +63,7 @@ function documentName(documentItem: Document): string {
 }
 
 async function fetchAllDocuments(): Promise<Document[]> {
-  const documents = new Map<string, Document>();
-  let pageNumber = 1;
-  for (;;) {
-    const result = await api.searchDocuments({ page: pageNumber });
-    result.items.forEach((item) => documents.set(item.id, item));
-    const totalPages = Math.max(1, Math.ceil(result.total / Math.max(1, result.pageSize)));
-    if (pageNumber >= totalPages || result.items.length === 0 || pageNumber >= 100) break;
-    pageNumber += 1;
-  }
-  return Array.from(documents.values());
+  return fetchAllDocumentPages((pageNumber) => api.searchDocuments({ page: pageNumber }));
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, mapper: (item: T, index: number) => Promise<R>): Promise<R[]> {

@@ -15,6 +15,7 @@ import {
 } from './citations';
 import { LibrarySelect } from './LibrarySelect';
 import { ReferenceEditorDialog } from './ReferenceEditorDialog';
+import { fetchAllDocumentPages } from './documentPagination';
 import { isDocumentRead, localFileReadingKey, subscribeReadingState, transferReadingRecord } from './readingState';
 import './PaperLibraryPage.css';
 
@@ -97,22 +98,15 @@ function readLibraryView(): LibraryView {
   }
 }
 
-// The filters below run on the whole (small) library, so the catalog loads every
-// page once instead of paginating server-side. Keep a defensive bound so a bad
-// total can never loop forever.
+// The filters below run on the whole library, so the catalog loads every page
+// once instead of paginating server-side. The shared loader reports an explicit
+// error at the backend's page bound instead of returning a partial catalog.
 async function fetchAllDocuments(baseID: string): Promise<Document[]> {
-  const documents = new Map<string, Document>();
-  let pageNumber = 1;
-  for (;;) {
-    const result = baseID
-      ? await api.listDocumentBaseDocuments(baseID, pageNumber, true)
-      : await api.searchDocuments({ page: pageNumber, excludeUnknown: true });
-    result.items.forEach((item) => documents.set(item.id, item));
-    const totalPages = Math.max(1, Math.ceil(result.total / Math.max(1, result.pageSize)));
-    if (pageNumber >= totalPages || result.items.length === 0 || pageNumber >= 100) break;
-    pageNumber += 1;
-  }
-  return Array.from(documents.values());
+  return fetchAllDocumentPages((pageNumber) => (
+    baseID
+      ? api.listDocumentBaseDocuments(baseID, pageNumber, true)
+      : api.searchDocuments({ page: pageNumber, excludeUnknown: true })
+  ));
 }
 
 // Metadata is loaded in bounded batches instead of one request per document.
@@ -545,13 +539,18 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     if (!selected?.id || localMode) return;
     if (!citations.some((citation) => citationDownloadInFlight(citation))) return;
     let active = true;
-    const timer = window.setTimeout(() => {
+    let timer = 0;
+    const poll = () => {
       void api.listPaperCitations(selected.id)
         .then(({ items: refreshed }) => { if (active) setCitations(refreshed); })
         .catch(() => {
-          // Keep the current list; the next tick retries while still in flight.
+          // Keep the current list; finally schedules another attempt.
+        })
+        .finally(() => {
+          if (active) timer = window.setTimeout(poll, 8000);
         });
-    }, 8000);
+    };
+    timer = window.setTimeout(poll, 8000);
     return () => {
       active = false;
       window.clearTimeout(timer);
