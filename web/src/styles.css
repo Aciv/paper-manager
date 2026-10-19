@@ -167,10 +167,14 @@ body { margin: 0; background: #7fd5fa; }
 .upload-dropzone span { color: var(--ui-faint); font-size: 11.5px; line-height: 1.5; }
 .upload-dropzone:focus-within { outline: 3px solid rgb(37 99 235 / 16%); }
 .upload-file-input { position: absolute; width: 1px; height: 1px; padding: 0; opacity: 0; pointer-events: none; }
-.upload-file-list { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.upload-file-list li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 7px; background: var(--ui-surface-2); font-size: 12px; }
-.upload-file-name { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upload-file-size { color: var(--ui-faint); font-variant-numeric: tabular-nums; }
+/* Grid and flex items default to min-width:auto, so a long unbreakable
+   filename would widen the whole form past the sidebar and clip every field.
+   Zero the floor at each level and let the name ellipsize instead. */
+.upload-form > * { min-width: 0; }
+.upload-file-list { display: grid; gap: 4px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.upload-file-list li { display: flex; align-items: center; gap: 8px; min-width: 0; padding: 6px 8px; border-radius: 7px; background: var(--ui-surface-2); font-size: 12px; }
+.upload-file-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.upload-file-size { flex: 0 0 auto; color: var(--ui-faint); white-space: nowrap; font-variant-numeric: tabular-nums; }
 .document-console .upload-file-list button { padding: 1px 6px; border: 0; background: transparent; color: var(--ui-faint); font-size: 13px; line-height: 1; }
 .document-console .upload-file-list button:hover:not(:disabled) { border: 0; background: transparent; color: var(--ui-danger); }
 .field-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
@@ -293,10 +297,9 @@ body { margin: 0; background: #7fd5fa; }
 /* Document detail: grouped by function, same underline tabs as the menus. */
 .detail-menu { margin: 4px 0 14px; }
 .detail-body { display: grid; flex: 1 1 auto; align-content: start; gap: 14px; min-height: 0; overflow: auto; }
-/* The citations tab splits the panel into two independent scrollers. */
+/* The citations tab keeps one direction list scrolling inside the panel. */
 .detail-body-fixed { align-content: stretch; grid-template-rows: minmax(0, 1fr); overflow: hidden; }
 .detail-body-fixed .citation-panel { display: flex; flex-direction: column; min-height: 0; }
-.detail-body-fixed .citation-columns { flex: 1 1 auto; min-height: 0; }
 /* Sections are separated by their headings inside a tab. */
 .detail-body .paper-info-panel,
 .detail-body .citation-panel,

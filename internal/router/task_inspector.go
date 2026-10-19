@@ -353,6 +353,98 @@ func (a *asynqTaskInspector) HasQueuedTaskForStage(ctx context.Context, document
 	return false, nil
 }
 
+// Snapshot scan bounds. One sweep needs at most four queues x four states;
+// the caps keep a single snapshot proportional to the backlog and independent
+// of the number of stale candidates.
+const (
+	snapshotPageSize        = 500
+	snapshotMaxPagesPerList = 4
+	snapshotMaxTasks        = 5000
+)
+
+// SnapshotQueuedWork scans each queue/state list once and records only task
+// envelopes relevant to stage/reference recovery.
+func (a *asynqTaskInspector) SnapshotQueuedWork(
+	ctx context.Context,
+) (types.QueuedWorkSnapshot, error) {
+	snapshot := types.NewQueuedWorkSnapshot()
+	if a == nil || a.inspector == nil {
+		return snapshot, nil
+	}
+	listers := []func(string, ...asynq.ListOption) ([]*asynq.TaskInfo, error){
+		a.inspector.ListPendingTasks, a.inspector.ListScheduledTasks,
+		a.inspector.ListRetryTasks, a.inspector.ListActiveTasks,
+	}
+	scanned := 0
+	for _, queue := range queuesScanned {
+		for _, list := range listers {
+			for page := 1; page <= snapshotMaxPagesPerList; page++ {
+				if err := ctx.Err(); err != nil {
+					return snapshot, err
+				}
+				tasks, err := list(queue, asynq.PageSize(snapshotPageSize), asynq.Page(page))
+				if err != nil {
+					if errors.Is(err, asynq.ErrQueueNotFound) {
+						break
+					}
+					return snapshot, fmt.Errorf("snapshot %s queue tasks: %w", queue, err)
+				}
+				for _, task := range tasks {
+					scanned++
+					if scanned > snapshotMaxTasks {
+						snapshot.Complete = false
+						return snapshot, nil
+					}
+					recordSnapshotTask(&snapshot, task.Type, task.Payload)
+				}
+				if len(tasks) < snapshotPageSize {
+					break
+				}
+				if page == snapshotMaxPagesPerList {
+					snapshot.Complete = false
+					return snapshot, nil
+				}
+			}
+		}
+	}
+	return snapshot, nil
+}
+
+func recordSnapshotTask(snapshot *types.QueuedWorkSnapshot, taskType string, payload []byte) {
+	if taskType == types.TypePaperQueryApply {
+		var probe struct {
+			Kind        types.CatalogJobKind `json:"kind"`
+			DocumentID  string               `json:"document_id"`
+			ReferenceID string               `json:"reference_id"`
+			Stage       types.DocumentStage  `json:"stage"`
+			Generation  int64                `json:"generation"`
+		}
+		if json.Unmarshal(payload, &probe) != nil || probe.Generation < 1 {
+			return
+		}
+		switch probe.Kind {
+		case types.CatalogJobSource:
+			if probe.DocumentID != "" && probe.Stage.Valid() {
+				snapshot.StageTasks[types.QueuedStageKey(probe.DocumentID, probe.Stage, probe.Generation)] = struct{}{}
+			}
+		case types.CatalogJobReference:
+			if probe.ReferenceID != "" {
+				snapshot.ReferenceTasks[types.QueuedReferenceKey(probe.ReferenceID, probe.Generation)] = struct{}{}
+			}
+		}
+		return
+	}
+	if _, cancelable := taskTypesForDocumentCancel[taskType]; !cancelable {
+		return
+	}
+	var probe DocumentIDProbe
+	if json.Unmarshal(payload, &probe) != nil || probe.DocumentID == "" ||
+		!probe.Stage.Valid() || probe.Generation < 1 {
+		return
+	}
+	snapshot.StageTasks[types.QueuedStageKey(probe.DocumentID, probe.Stage, probe.Generation)] = struct{}{}
+}
+
 // queueStateHasMatch pages through one (queue, state) list looking for a
 // task that references DocumentID. Mirrors the delete* scanners but is
 // strictly read-only and returns early on the first hit. A backend error
@@ -579,4 +671,8 @@ func (noopTaskInspector) HasQueuedTaskForStage(context.Context, string, types.Do
 
 func (noopTaskInspector) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
 	return false, nil
+}
+
+func (noopTaskInspector) SnapshotQueuedWork(context.Context) (types.QueuedWorkSnapshot, error) {
+	return types.NewQueuedWorkSnapshot(), nil
 }

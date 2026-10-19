@@ -104,6 +104,14 @@ export type DocumentProcessingView = {
   };
 };
 
+// Batched first-paint row: the document, optional bibliography, and optional
+// processing view, fetched for up to 200 IDs per request.
+export type DocumentProjection = {
+  document: Document;
+  metadata?: PaperMetadata;
+  processing?: DocumentProcessingView;
+};
+
 export type DocumentBase = {
   id: string;
   name: string;
@@ -271,6 +279,23 @@ export const api = {
   cancelDocument: (id: string): Promise<{ document: Document }> => request<{ document: Document }>(`/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
   retryDocument: (id: string): Promise<{ document: Document }> => request<{ document: Document }>(`/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
   getDocumentProcessing: (id: string): Promise<{ processing: DocumentProcessingView }> => request<{ processing: DocumentProcessingView }>(`/${encodeURIComponent(id)}/processing`),
+  getDocumentProjections: async (
+    documentIDs: string[],
+    includeMetadata: boolean,
+    includeProcessing: boolean,
+  ): Promise<DocumentProjection[]> => {
+    const items: DocumentProjection[] = [];
+    for (let start = 0; start < documentIDs.length; start += 200) {
+      const documentIds = documentIDs.slice(start, start + 200);
+      const result = await request<{ items: DocumentProjection[] }>('/projections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ documentIds, includeMetadata, includeProcessing }),
+      });
+      items.push(...result.items);
+    }
+    return items;
+  },
   deleteDocument: (id: string): Promise<void> => request<void>(`/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   listDocumentBlocks: (id: string, page?: number): Promise<{ items: Block[] }> => {
     const query = page ? `?page=${encodeURIComponent(String(page))}` : '';

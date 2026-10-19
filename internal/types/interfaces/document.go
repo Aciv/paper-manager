@@ -17,9 +17,22 @@ type DocumentRepository interface {
 	Create(ctx context.Context, document types.Document) (types.Document, error)
 	// Get retrieves one document by UUID.
 	Get(ctx context.Context, id uuid.UUID) (types.Document, error)
+	// GetMany retrieves documents by UUID in one query. Missing IDs are
+	// omitted; returned rows preserve the input order.
+	GetMany(ctx context.Context, ids []uuid.UUID) ([]types.Document, error)
 	// Search returns a paginated document result using ID or DOI filters.
 	Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
+	// FindAvailableByDOIs resolves normalized DOIs to available document IDs in
+	// one query. A non-nil excludeDocumentID is omitted from the result.
+	FindAvailableByDOIs(
+		ctx context.Context, dois []string, excludeDocumentID uuid.UUID,
+	) (map[string]uuid.UUID, error)
 	CitationTargetProgress(ctx context.Context, citingDocumentID uuid.UUID) (types.PaperReferenceProgress, error)
+	// CitationTargetProgressBatch returns the reference progress buckets for
+	// many citing documents in one grouped query.
+	CitationTargetProgressBatch(
+		ctx context.Context, citingDocumentIDs []uuid.UUID,
+	) (map[uuid.UUID]types.PaperReferenceProgress, error)
 	// GetMarkdown returns the current parsed Markdown source for a document.
 	// It returns sql.ErrNoRows when the document has not been parsed yet.
 	GetMarkdown(ctx context.Context, documentID uuid.UUID) (types.DocumentMarkdown, error)
@@ -91,6 +104,11 @@ type DocumentService interface {
 	// GetDocumentByID parses and retrieves a document by its textual UUID.
 	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
 	GetReferenceProgress(ctx context.Context, id string) (types.PaperReferenceProgress, error)
+	// GetDocumentProjections returns a bounded batch read model for library and
+	// citation-progress first paint, replacing per-document HTTP fan-out.
+	GetDocumentProjections(
+		ctx context.Context, query types.DocumentProjectionQuery,
+	) ([]types.DocumentProjection, error)
 	// UpdateDocumentInfo updates original-file and DOI fields. Nil fields keep
 	// their stored value unchanged.
 	UpdateDocumentInfo(ctx context.Context, id string, originalFilename, doi *string) (*types.Document, error)
@@ -106,8 +124,10 @@ type DocumentService interface {
 	RetryDocumentProcess(ctx context.Context, id string) (*types.Document, error)
 	// SearchDocument performs paginated ID and DOI searches.
 	SearchDocument(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
-	// GetDocumentFile opens the stored object and returns its original filename.
-	GetDocumentFile(ctx context.Context, id string) (reader io.ReadCloser, filename string, err error)
+	// OpenDocumentFile loads the document and opens its stored object in one
+	// lookup. The returned document carries size, content type, hash, and
+	// update time for conditional/range responses.
+	OpenDocumentFile(ctx context.Context, id string) (document *types.Document, reader io.ReadCloser, filename string, err error)
 	// GetDocumentBlocks returns selectable source-map blocks, optionally scoped
 	// to one one-based PDF page (zero returns every page).
 	GetDocumentBlocks(ctx context.Context, id string, pageNumber int) ([]types.Block, error)

@@ -58,6 +58,10 @@ func (*paperInfoInspectorStub) HasQueuedQueryApplyForReference(context.Context, 
 	return false, nil
 }
 
+func (*paperInfoInspectorStub) SnapshotQueuedWork(context.Context) (types.QueuedWorkSnapshot, error) {
+	return types.NewQueuedWorkSnapshot(), nil
+}
+
 func TestPaperInfoControlRetries(t *testing.T) {
 	ctx := context.Background()
 	documentID := uuid.New()

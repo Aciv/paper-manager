@@ -162,41 +162,60 @@ func (h *DocumentHousekeepingService) logPoolStats(ctx context.Context) {
 	)
 }
 
+// loadQueuedWorkSnapshot performs one bounded queue scan for a sweep. In Lite
+// mode (no inspector) it returns an empty complete snapshot, which preserves
+// the old "inline work is never queued" behavior.
+func (h *DocumentHousekeepingService) loadQueuedWorkSnapshot(
+	ctx context.Context,
+) (types.QueuedWorkSnapshot, error) {
+	if h.inspector == nil {
+		return types.NewQueuedWorkSnapshot(), nil
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
+	defer cancel()
+	return h.inspector.SnapshotQueuedWork(probeCtx)
+}
+
 type staleStageCandidate struct {
 	DocumentID uuid.UUID
 	Stage      types.DocumentStage
 	Generation int64
+	UpdatedAt  time.Time
 }
 
 func (h *DocumentHousekeepingService) recoverStaleStages(ctx context.Context, cutoff time.Time) {
 	const candidateLimit = 200
 	var candidates []staleStageCandidate
-	query := `SELECT id AS document_id, 'markdown' AS stage, markdown_generation AS generation FROM documents WHERE source_state = 'available' AND markdown_status IN ('queued','running') AND markdown_updated_at < ?
-		UNION ALL SELECT id, 'metadata_extraction', metadata_extraction_generation FROM documents WHERE source_state = 'available' AND metadata_extraction_status IN ('queued','running') AND metadata_extraction_updated_at < ?
-		UNION ALL SELECT id, 'source_lookup', source_lookup_generation FROM documents WHERE source_state = 'available' AND source_lookup_status IN ('queued','running') AND source_lookup_updated_at < ?
-		UNION ALL SELECT id, 'reference_lookup', reference_lookup_generation FROM documents WHERE source_state = 'available' AND reference_lookup_status IN ('queued','running') AND reference_lookup_updated_at < ?
-		LIMIT ?`
+	// Oldest first prevents a permanently-queued set from occupying the limit
+	// and starving other stale rows.
+	query := `SELECT * FROM (
+		SELECT id AS document_id, 'markdown' AS stage, markdown_generation AS generation, markdown_updated_at AS updated_at FROM documents WHERE source_state = 'available' AND markdown_status IN ('queued','running') AND markdown_updated_at < ?
+		UNION ALL SELECT id, 'metadata_extraction', metadata_extraction_generation, metadata_extraction_updated_at FROM documents WHERE source_state = 'available' AND metadata_extraction_status IN ('queued','running') AND metadata_extraction_updated_at < ?
+		UNION ALL SELECT id, 'source_lookup', source_lookup_generation, source_lookup_updated_at FROM documents WHERE source_state = 'available' AND source_lookup_status IN ('queued','running') AND source_lookup_updated_at < ?
+		UNION ALL SELECT id, 'reference_lookup', reference_lookup_generation, reference_lookup_updated_at FROM documents WHERE source_state = 'available' AND reference_lookup_status IN ('queued','running') AND reference_lookup_updated_at < ?
+	) AS candidates ORDER BY updated_at ASC LIMIT ?`
 	if err := h.db.WithContext(ctx).Raw(query, cutoff, cutoff, cutoff, cutoff, candidateLimit).Scan(&candidates).Error; err != nil {
 		logger.Warn(ctx, "document stage housekeeping candidate query failed", "error", err)
 		return
 	}
-	for _, candidate := range candidates {
-		queued := false
-		if h.inspector != nil {
-			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-			var err error
-			queued, err = h.inspector.HasQueuedTaskForStage(probeCtx, candidate.DocumentID.String(), candidate.Stage, candidate.Generation)
-			cancel()
-			if err != nil {
-				// A transient Redis error is not evidence that work disappeared.
-				// Keep the row untouched and retry on the next sweep.
-				logger.Warn(ctx, "document stage queue probe failed; leaving candidate for next sweep",
-					"document_id", candidate.DocumentID, "stage", candidate.Stage,
-					"generation", candidate.Generation, "error", err)
-				continue
-			}
+	if len(candidates) == 0 {
+		return
+	}
+	snapshot, snapshotErr := h.loadQueuedWorkSnapshot(ctx)
+	if h.inspector != nil {
+		if snapshotErr != nil {
+			// A transient Redis error is not evidence that work disappeared.
+			// Keep every candidate untouched and retry on the next sweep.
+			logger.Warn(ctx, "document stage queue snapshot failed; leaving candidates for next sweep", "error", snapshotErr)
+			return
 		}
-		if queued {
+		if !snapshot.Complete {
+			logger.Warn(ctx, "document stage queue snapshot exceeded its budget; skipping stale classification")
+			return
+		}
+	}
+	for _, candidate := range candidates {
+		if h.inspector != nil && snapshot.HasStage(candidate.DocumentID.String(), candidate.Stage, candidate.Generation) {
 			continue
 		}
 		stateColumn := stageStateColumn(candidate.Stage)
@@ -229,9 +248,24 @@ func (h *DocumentHousekeepingService) recoverStaleReferences(ctx context.Context
 		WHERE cited_document_id IS NULL
 		  AND resolution_status IN ('queued','running')
 		  AND resolution_updated_at < ?
+		ORDER BY resolution_updated_at ASC
 		LIMIT ?`, cutoff, candidateLimit).Scan(&candidates).Error; err != nil {
 		logger.Warn(ctx, "reference resolution housekeeping candidate query failed", "error", err)
 		return
+	}
+	if len(candidates) == 0 {
+		return
+	}
+	snapshot, snapshotErr := h.loadQueuedWorkSnapshot(ctx)
+	if h.inspector != nil {
+		if snapshotErr != nil {
+			logger.Warn(ctx, "reference queue snapshot failed; leaving candidates for next sweep", "error", snapshotErr)
+			return
+		}
+		if !snapshot.Complete {
+			logger.Warn(ctx, "reference queue snapshot exceeded its budget; skipping stale classification")
+			return
+		}
 	}
 	for _, candidate := range candidates {
 		// Reference queries are process-local now; the dispatcher can answer
@@ -239,20 +273,8 @@ func (h *DocumentHousekeepingService) recoverStaleReferences(ctx context.Context
 		if h.dispatcher != nil && h.dispatcher.HasReference(candidate.ReferenceID, candidate.Generation) {
 			continue
 		}
-		if h.inspector != nil {
-			probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-			queued, err := h.inspector.HasQueuedQueryApplyForReference(
-				probeCtx, candidate.ReferenceID.String(), candidate.Generation,
-			)
-			cancel()
-			if err != nil {
-				logger.Warn(ctx, "reference result queue probe failed; leaving candidate for next sweep",
-					"reference_id", candidate.ReferenceID, "generation", candidate.Generation, "error", err)
-				continue
-			}
-			if queued {
-				continue
-			}
+		if h.inspector != nil && snapshot.HasReference(candidate.ReferenceID.String(), candidate.Generation) {
+			continue
 		}
 		now := time.Now().UTC()
 		result := h.db.WithContext(ctx).Exec(`UPDATE paper_citations

@@ -18,6 +18,7 @@ import (
 	"paperMaster/internal/handler"
 	"paperMaster/internal/router"
 	"paperMaster/internal/types"
+	"paperMaster/internal/types/interfaces"
 
 	"github.com/google/uuid"
 	"github.com/hibiken/asynq"
@@ -41,6 +42,12 @@ type documentCreatorStub struct {
 
 func (*documentCreatorStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
 	return types.PaperReferenceProgress{}, nil
+}
+
+func (*documentCreatorStub) FindAvailableByDOIs(
+	context.Context, []string, uuid.UUID,
+) (map[string]uuid.UUID, error) {
+	return map[string]uuid.UUID{}, nil
 }
 
 func (s *documentCreatorStub) GetStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, error) {
@@ -83,6 +90,22 @@ func (*documentCreatorStub) AllowsStageWork(context.Context, uuid.UUID, types.Do
 func (s *documentCreatorStub) Create(_ context.Context, doc types.Document) (types.Document, error) {
 	s.document = doc
 	return doc, nil
+}
+
+func (s *documentCreatorStub) GetMany(_ context.Context, ids []uuid.UUID) ([]types.Document, error) {
+	documents := make([]types.Document, 0, len(ids))
+	for _, id := range ids {
+		if !s.deleted && id == s.document.ID {
+			documents = append(documents, s.document)
+		}
+	}
+	return documents, nil
+}
+
+func (s *documentCreatorStub) CitationTargetProgressBatch(
+	_ context.Context, ids []uuid.UUID,
+) (map[uuid.UUID]types.PaperReferenceProgress, error) {
+	return make(map[uuid.UUID]types.PaperReferenceProgress, len(ids)), nil
 }
 
 func (s *documentCreatorStub) Get(_ context.Context, id uuid.UUID) (types.Document, error) {
@@ -234,6 +257,42 @@ func TestUploadRouteStoresDocument(t *testing.T) {
 	if contentResponse.Code != http.StatusOK || contentResponse.Body.String() != "uploaded text" {
 		t.Fatalf("content status = %d, body = %q", contentResponse.Code, contentResponse.Body.String())
 	}
+	if got := contentResponse.Header().Get("Accept-Ranges"); got != "bytes" {
+		t.Fatalf("Accept-Ranges = %q, want bytes", got)
+	}
+	etag := contentResponse.Header().Get("ETag")
+	if etag == "" {
+		t.Fatal("content response did not set an ETag")
+	}
+
+	rangeRequest := httptest.NewRequest(http.MethodGet, "/api/document/"+documents.document.ID.String()+"/content", nil)
+	rangeRequest.Header.Set("Range", "bytes=0-3")
+	rangeResponse := httptest.NewRecorder()
+	engine.ServeHTTP(rangeResponse, rangeRequest)
+	if rangeResponse.Code != http.StatusPartialContent || rangeResponse.Body.String() != "uplo" {
+		t.Fatalf("range status = %d, body = %q", rangeResponse.Code, rangeResponse.Body.String())
+	}
+	if got := rangeResponse.Header().Get("Content-Range"); got != "bytes 0-3/13" {
+		t.Fatalf("Content-Range = %q", got)
+	}
+
+	headRequest := httptest.NewRequest(http.MethodHead, "/api/document/"+documents.document.ID.String()+"/content", nil)
+	headResponse := httptest.NewRecorder()
+	engine.ServeHTTP(headResponse, headRequest)
+	if headResponse.Code != http.StatusOK || headResponse.Body.Len() != 0 {
+		t.Fatalf("head status = %d, body = %q", headResponse.Code, headResponse.Body.String())
+	}
+	if got := headResponse.Header().Get("Content-Length"); got != "13" {
+		t.Fatalf("HEAD Content-Length = %q, want 13", got)
+	}
+
+	conditionalRequest := httptest.NewRequest(http.MethodGet, "/api/document/"+documents.document.ID.String()+"/content", nil)
+	conditionalRequest.Header.Set("If-None-Match", etag)
+	conditionalResponse := httptest.NewRecorder()
+	engine.ServeHTTP(conditionalResponse, conditionalRequest)
+	if conditionalResponse.Code != http.StatusNotModified {
+		t.Fatalf("conditional status = %d, want 304", conditionalResponse.Code)
+	}
 
 	blocksRequest := httptest.NewRequest(http.MethodGet, "/api/document/"+documents.document.ID.String()+"/blocks?page=1", nil)
 	blocksResponse := httptest.NewRecorder()
@@ -253,6 +312,145 @@ func TestUploadRouteStoresDocument(t *testing.T) {
 	}
 	if _, err := storage.Open(context.Background(), documents.document.StorageKey); err == nil {
 		t.Fatal("stored file still exists after deletion")
+	}
+}
+
+type projectionDocumentServiceStub struct {
+	interfaces.DocumentService
+	query types.DocumentProjectionQuery
+	items []types.DocumentProjection
+}
+
+func (s *projectionDocumentServiceStub) GetDocumentProjections(
+	_ context.Context, query types.DocumentProjectionQuery,
+) ([]types.DocumentProjection, error) {
+	s.query = query
+	return s.items, nil
+}
+
+func TestProjectionRouteReturnsBatchedReadModel(t *testing.T) {
+	documentID := uuid.New()
+	stub := &projectionDocumentServiceStub{items: []types.DocumentProjection{{
+		Document:   types.Document{ID: documentID, OriginalFilename: "paper.pdf"},
+		Metadata:   &types.PaperMetadata{DocumentID: documentID, Title: "Paper"},
+		Processing: &types.DocumentProcessingView{DocumentID: documentID},
+	}}}
+	processHandler := handler.NewDocumentProcessHandlerWithProcessingViewQuery(stub, nil)
+	engine := router.NewRouter(router.RouterParams{DocumentProcessHandler: processHandler})
+
+	body := bytes.NewBufferString(`{"documentIds":["` + documentID.String() + `"],"includeMetadata":true,"includeProcessing":true}`)
+	request := httptest.NewRequest(http.MethodPost, "/api/document/projections", body)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	var payload struct {
+		Items []types.DocumentProjection `json:"items"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(payload.Items) != 1 || payload.Items[0].Metadata == nil ||
+		payload.Items[0].Processing == nil || payload.Items[0].Document.ID != documentID {
+		t.Fatalf("items = %#v", payload.Items)
+	}
+	if !stub.query.IncludeMetadata || !stub.query.IncludeProcessing {
+		t.Fatalf("query = %#v", stub.query)
+	}
+}
+
+func multipartUploadRequest(t *testing.T, path, field, filename string, content []byte) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile(field, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodPost, path, &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	return request
+}
+
+func TestUploadRejectsUnsupportedAndOversizedFilesBeforeService(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 4)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	repo := &documentCreatorStub{}
+	documentHandler := handler.NewDocumentHandler(config.Config{MaxUploadSize: 4},
+		service.NewDocumentService(repo, storage))
+	engine := router.NewRouter(router.RouterParams{DocumentHandler: documentHandler})
+
+	unsupported := httptest.NewRecorder()
+	engine.ServeHTTP(unsupported, multipartUploadRequest(
+		t, "/api/document/upload", "file", "malware.exe", []byte("payload")))
+	if unsupported.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("unsupported status = %d, want 415", unsupported.Code)
+	}
+
+	oversize := httptest.NewRecorder()
+	engine.ServeHTTP(oversize, multipartUploadRequest(
+		t, "/api/document/upload", "file", "paper.txt", []byte("0123456789")))
+	if oversize.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversize status = %d, want 413", oversize.Code)
+	}
+
+	batchOversize := httptest.NewRecorder()
+	engine.ServeHTTP(batchOversize, multipartUploadRequest(
+		t, "/api/document/batch-upload", "files", "paper.txt", []byte("0123456789")))
+	if batchOversize.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("batch oversize status = %d, want 413", batchOversize.Code)
+	}
+}
+
+func TestBlockImageRouteSupportsRangeAndHead(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
+	if err != nil {
+		t.Fatalf("create storage: %v", err)
+	}
+	stored, err := storage.SaveBytes(context.Background(), "crop.png", []byte("pngdata"))
+	if err != nil {
+		t.Fatalf("save image: %v", err)
+	}
+	documentID, blockID := uuid.New(), uuid.New()
+	repo := &documentCreatorStub{
+		document: types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable},
+		blocks: []types.Block{{
+			ID: blockID, DocumentID: documentID, Ordinal: 1, Type: "image", AssetKey: stored.Key,
+		}},
+	}
+	engine := router.NewRouter(router.RouterParams{
+		DocumentHandler: newDocumentHandler(storage, repo),
+	})
+
+	path := "/api/document/" + documentID.String() + "/blocks/" + blockID.String() + "/image"
+	rangeRequest := httptest.NewRequest(http.MethodGet, path, nil)
+	rangeRequest.Header.Set("Range", "bytes=0-2")
+	rangeResponse := httptest.NewRecorder()
+	engine.ServeHTTP(rangeResponse, rangeRequest)
+	if rangeResponse.Code != http.StatusPartialContent || rangeResponse.Body.String() != "png" {
+		t.Fatalf("range status = %d, body = %q", rangeResponse.Code, rangeResponse.Body.String())
+	}
+	if got := rangeResponse.Header().Get("Content-Range"); got != "bytes 0-2/7" {
+		t.Fatalf("Content-Range = %q", got)
+	}
+
+	headRequest := httptest.NewRequest(http.MethodHead, path, nil)
+	headResponse := httptest.NewRecorder()
+	engine.ServeHTTP(headResponse, headRequest)
+	if headResponse.Code != http.StatusOK || headResponse.Body.Len() != 0 ||
+		headResponse.Header().Get("Content-Length") != "7" {
+		t.Fatalf("head status = %d, length = %q, body = %q", headResponse.Code,
+			headResponse.Header().Get("Content-Length"), headResponse.Body.String())
 	}
 }
 

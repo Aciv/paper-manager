@@ -101,6 +101,48 @@ func (r *documentProcessingSpanRepository) ListCurrent(
 	return rows, nil
 }
 
+func (r *documentProcessingSpanRepository) ListCurrentBatch(
+	ctx context.Context, documentIDs []uuid.UUID, perDocumentLimit int,
+) (map[uuid.UUID][]types.DocumentProcessingSpan, error) {
+	rowsByDocument := make(map[uuid.UUID][]types.DocumentProcessingSpan, len(documentIDs))
+	if len(documentIDs) == 0 {
+		return rowsByDocument, nil
+	}
+	perDocumentLimit = boundedSpanQueryLimit(perDocumentLimit)
+	totalLimit := perDocumentLimit * len(documentIDs)
+	if maxTotal := 20000; totalLimit > maxTotal {
+		totalLimit = maxTotal
+	}
+	query := `WITH ranked AS (
+		SELECT document_processing_spans.*,
+			ROW_NUMBER() OVER (
+				PARTITION BY document_id, kind, scope, scope_id
+				ORDER BY attempt DESC, updated_at DESC, id DESC
+			) AS stage_rank
+		FROM document_processing_spans
+		WHERE document_id IN ?
+	), limited AS (
+		SELECT * FROM ranked WHERE stage_rank = 1
+	)
+	SELECT * FROM limited
+	ORDER BY document_id,
+		CASE WHEN scope IN ('process','document','source','reference_run','reference_download_run') THEN 0 ELSE 1 END,
+		updated_at DESC, id DESC
+	LIMIT ?`
+	rows := make([]types.DocumentProcessingSpan, 0)
+	if err := r.db.WithContext(ctx).Raw(query, documentIDs, totalLimit).Scan(&rows).Error; err != nil {
+		logger.Error(ctx, "batch list processing spans failed", "document_count", len(documentIDs), "error", err)
+		return nil, err
+	}
+	for _, row := range rows {
+		if len(rowsByDocument[row.DocumentID]) >= perDocumentLimit {
+			continue
+		}
+		rowsByDocument[row.DocumentID] = append(rowsByDocument[row.DocumentID], row)
+	}
+	return rowsByDocument, nil
+}
+
 func (r *documentProcessingSpanRepository) ListTimeline(
 	ctx context.Context, documentID uuid.UUID, limit int,
 ) ([]types.DocumentProcessingSpan, error) {

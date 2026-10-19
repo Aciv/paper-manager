@@ -63,4 +63,10 @@ type TaskInspector interface {
 	// HasQueuedQueryApplyForReference reports whether the exact reference
 	// generation still has a pending/scheduled/retrying/active result task.
 	HasQueuedQueryApplyForReference(ctx context.Context, referenceID string, generation int64) (bool, error)
+
+	// SnapshotQueuedWork scans each queue/state at most once and returns the
+	// stage/reference envelopes currently present. Housekeeping uses this to
+	// keep Redis calls bounded independently of the candidate count. Complete
+	// is false when the scan budget was exhausted.
+	SnapshotQueuedWork(ctx context.Context) (types.QueuedWorkSnapshot, error)
 }

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
@@ -33,6 +34,24 @@ func (r *paperMetadataRepository) GetByDocumentID(ctx context.Context, documentI
 		logger.Error(ctx, "get paper metadata failed", "document_id", documentID, "error", err)
 	}
 	return metadata, err
+}
+
+func (r *paperMetadataRepository) GetByDocumentIDs(
+	ctx context.Context, documentIDs []uuid.UUID,
+) (map[uuid.UUID]types.PaperMetadata, error) {
+	metadataByID := make(map[uuid.UUID]types.PaperMetadata, len(documentIDs))
+	if len(documentIDs) == 0 {
+		return metadataByID, nil
+	}
+	rows := make([]types.PaperMetadata, 0, len(documentIDs))
+	if err := r.db.WithContext(ctx).Where("document_id IN ?", documentIDs).Find(&rows).Error; err != nil {
+		logger.Error(ctx, "batch get paper metadata failed", "document_count", len(documentIDs), "error", err)
+		return nil, err
+	}
+	for _, row := range rows {
+		metadataByID[row.DocumentID] = row
+	}
+	return metadataByID, nil
 }
 
 func (r *paperMetadataRepository) Upsert(
@@ -111,12 +130,10 @@ func (r *paperMetadataRepository) Search(ctx context.Context, search types.Paper
 		query = query.Where("title ILIKE ?", "%"+search.Title+"%")
 	}
 	if search.Author != "" {
-		// Authors are stored as objects in a JSONB array. EXISTS avoids
-		// duplicating a paper when multiple authors match the same query.
-		query = query.Where(
-			"EXISTS (SELECT 1 FROM jsonb_array_elements(authors) AS author WHERE author->>'name' ILIKE ?)",
-			"%"+search.Author+"%",
-		)
+		// author_names is a trigger-maintained text projection indexed with
+		// pg_trgm. Searching the projection avoids expanding every JSONB array
+		// and keeps the substring predicate indexable.
+		query = query.Where("author_names ILIKE ?", "%"+search.Author+"%")
 	}
 	if len(search.Tags) > 0 {
 		if search.TagMode == types.PaperTagModeAny {
@@ -142,11 +159,88 @@ func (r *paperMetadataRepository) Search(ctx context.Context, search types.Paper
 		logger.Error(ctx, "count paper metadata search failed", "page", page, "error", err)
 		return result, err
 	}
-	err := query.Order("updated_at DESC").Offset((page - 1) * pageSize).Limit(pageSize).Find(&result.Items).Error
+	err := query.Order("updated_at DESC, document_id DESC").
+		Offset((page - 1) * pageSize).Limit(pageSize).Find(&result.Items).Error
 	if err != nil {
 		logger.Error(ctx, "search paper metadata failed", "page", page, "error", err)
 	}
 	return result, err
+}
+
+// SearchTitleSeeds batches the per-reference title probe used by local
+// reference matching. One query drives a LATERAL trigram lookup per seed, so
+// the round-trip count no longer grows with the bibliography size. The
+// per-seed limit is applied before the available-source filter, matching the
+// original single-reference search-then-check order.
+func (r *paperMetadataRepository) SearchTitleSeeds(
+	ctx context.Context, seeds []string, excludeDocumentID uuid.UUID, perSeedLimit int,
+) (map[string][]types.PaperMetadata, error) {
+	matches := make(map[string][]types.PaperMetadata, len(seeds))
+	if len(seeds) == 0 {
+		return matches, nil
+	}
+	limit := perSeedLimit
+	if limit <= 0 {
+		limit = types.DocumentPageSize
+	}
+	if limit > 200 {
+		limit = 200
+	}
+	encodedSeeds, err := json.Marshal(seeds)
+	if err != nil {
+		return nil, fmt.Errorf("encode title search seeds: %w", err)
+	}
+	var rows []struct {
+		Seed        string
+		DocumentID  uuid.UUID
+		Title       string
+		Authors     []byte
+		PublishedAt *time.Time
+	}
+	err = r.db.WithContext(ctx).Raw(`
+		WITH candidates AS MATERIALIZED (
+			SELECT seed_text AS seed,
+			       metadata.document_id,
+			       metadata.title,
+			       metadata.authors,
+			       metadata.published_at
+			FROM jsonb_array_elements_text(?::jsonb) AS seed_text
+			JOIN LATERAL (
+				SELECT pm.document_id, pm.title, pm.authors, pm.published_at
+				FROM paper_metadata pm
+				WHERE pm.title ILIKE '%' || seed_text || '%'
+				ORDER BY pm.updated_at DESC, pm.document_id DESC
+				LIMIT ?
+			) AS metadata ON TRUE
+		)
+		SELECT candidates.seed,
+		       candidates.document_id,
+		       candidates.title,
+		       candidates.authors,
+		       candidates.published_at
+		FROM candidates
+		JOIN documents d ON d.id = candidates.document_id
+		WHERE d.source_state = ?
+		  AND d.id <> ?`,
+		string(encodedSeeds), limit, types.DocumentSourceAvailable, excludeDocumentID,
+	).Scan(&rows).Error
+	if err != nil {
+		logger.Error(ctx, "batch paper title lookup failed", "seed_count", len(seeds), "error", err)
+		return nil, err
+	}
+	for _, row := range rows {
+		authors := []types.PaperAuthor{}
+		if len(row.Authors) > 0 {
+			if err := json.Unmarshal(row.Authors, &authors); err != nil {
+				return nil, fmt.Errorf("decode paper title candidate authors: %w", err)
+			}
+		}
+		matches[row.Seed] = append(matches[row.Seed], types.PaperMetadata{
+			DocumentID: row.DocumentID, Title: row.Title,
+			Authors: authors, PublishedAt: row.PublishedAt,
+		})
+	}
+	return matches, nil
 }
 
 func preparePaperMetadata(metadata *types.PaperMetadata, documentID uuid.UUID) {

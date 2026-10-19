@@ -39,31 +39,36 @@
 .paper-stage-succeeded::before { background: #12b76a; }
 .paper-stage-failed::before, .paper-stage-cancelled::before { background: #ef4444; }
 
-.citation-columns {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-  margin-top: 12px;
-  min-height: 0;
-}
-
-/* Each list is its own bordered card with an independent scrollbar. */
-.citation-columns > div {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  padding: 12px;
-  border: 1px solid var(--ui-border);
-  border-radius: 10px;
-  background: var(--ui-surface);
-}
-
-.citation-columns h5 { margin: 0; padding-bottom: 8px; border-bottom: 1px solid var(--ui-border); font-size: 13.5px; color: var(--ui-text); }
-.citation-columns ol { display: grid; flex: 1 1 auto; align-content: start; gap: 9px; min-height: 0; margin: 8px 0 0; padding: 0 4px 0 20px; overflow: auto; scrollbar-width: thin; }
-.citation-columns li { font-size: 12.5px; overflow-wrap: anywhere; }
-.citation-columns code { color: var(--ui-faint); font-size: 11px; }
-.citation-columns p { margin: 3px 0 0; color: var(--ui-dim); line-height: 1.45; }
-.citation-source-button { margin-top: 4px; font-size: 12px; text-align: left; }
+/* Citation tab: one full-height direction list, with scannable reference
+   cards instead of the old split of two raw-text columns. The `.document-console`
+   prefix outranks the console's base `button` rules in styles.css. */
+.document-console .citation-panel { display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+.document-console .citation-switch { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--ui-border); border-radius: 9px; background: var(--ui-surface-2); }
+.document-console .citation-switch button { display: flex; flex: 1 1 50%; align-items: center; justify-content: center; gap: 6px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--ui-dim); font-size: 12px; }
+.document-console .citation-switch button:hover:not(:disabled) { border: 0; background: rgb(8 34 48 / 5%); color: var(--ui-text); }
+.document-console .citation-switch button.active { border: 0; background: var(--ui-surface); color: var(--ui-text); box-shadow: 0 1px 2px rgb(16 24 40 / 10%); }
+.document-console .citation-count { padding: 0 7px; border: 1px solid var(--ui-border); border-radius: 999px; background: var(--ui-surface-2); color: var(--ui-faint); font-size: 11px; font-weight: 600; }
+.document-console .citation-filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.document-console .citation-filters button { padding: 3px 8px; border: 1px solid var(--ui-border); border-radius: 999px; background: transparent; color: var(--ui-faint); font-size: 11px; font-weight: 600; }
+.document-console .citation-filters button:hover:not(:disabled) { border-color: var(--ui-border-2); background: transparent; color: var(--ui-dim); }
+.document-console .citation-filters button.active { border-color: var(--ui-border-3); background: var(--ui-surface-3); color: var(--ui-text); }
+.document-console .citation-filters button span { margin-left: 3px; font-variant-numeric: tabular-nums; opacity: .75; }
+.document-console .citation-card-list { display: grid; flex: 1 1 auto; align-content: start; gap: 7px; min-height: 0; margin: 0; padding: 0 2px 0 0; overflow: auto; list-style: none; scrollbar-width: thin; }
+.document-console .citation-card { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--ui-border); border-radius: 9px; background: var(--ui-surface-2); }
+.document-console .citation-card-main { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; text-align: left; }
+.document-console .citation-card-main:hover:not(:disabled) { border: 0; background: transparent; }
+.document-console .citation-card-index { grid-row: 1 / span 3; min-width: 16px; color: var(--ui-faint); font-size: 11px; font-weight: 700; line-height: 1.55; text-align: right; }
+.document-console .citation-card-title { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; color: var(--ui-text); font-size: 12.5px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere; }
+.document-console .citation-card-main:hover .citation-card-title { text-decoration: underline; }
+.document-console .citation-card-meta, .document-console .citation-card-doi { overflow: hidden; color: var(--ui-faint); font-size: 11px; line-height: 1.45; text-overflow: ellipsis; white-space: nowrap; }
+.document-console .citation-card-doi { font-size: 10.5px; }
+.document-console .citation-card-footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.document-console .citation-badge { flex: 0 0 auto; padding: 1px 7px; border: 1px solid transparent; border-radius: 999px; background: var(--ui-surface-3); color: var(--ui-faint); font-size: 10.5px; font-weight: 700; }
+.document-console .citation-badge-linked { border-color: #a6e3c0; background: var(--ui-ok-bg); color: var(--ui-ok); }
+.document-console .citation-badge-pending { border-color: #ecd9a8; background: var(--ui-warn-bg); color: var(--ui-warn); }
+.document-console .citation-badge-failed { border-color: #f2c9c5; background: var(--ui-danger-bg); color: var(--ui-danger); }
+.document-console .citation-card-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.document-console .citation-card-actions button { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
 
 .citation-source-backdrop { position: fixed; z-index: 40; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(23 32 51 / 28%); }
 .citation-source-dialog { width: min(680px, 100%); max-height: min(760px, calc(100vh - 48px)); overflow: auto; padding: 20px; border: 1px solid var(--ui-border-2); border-radius: 12px; background: var(--ui-surface); box-shadow: 0 24px 64px rgb(16 24 40 / 22%); }
@@ -79,7 +84,6 @@
 @media (max-width: 720px) {
   .paper-info-stages > div { grid-template-columns: 1fr auto; }
   .paper-info-stages button { grid-column: 1 / -1; }
-  .citation-columns { grid-template-columns: 1fr; }
   .citation-source-backdrop { padding: 12px; }
   .citation-source-dialog dl { grid-template-columns: 1fr; gap: 4px; }
   .citation-source-dialog dd { margin-bottom: 8px; }

@@ -47,10 +47,13 @@ type PaperMetadataFieldSources map[string]PaperMetadataSource
 // PaperMetadata stores bibliographic facts about a document. It intentionally
 // excludes base-specific state such as reading progress and personal tags.
 type PaperMetadata struct {
-	DocumentID     uuid.UUID                 `gorm:"column:document_id;type:uuid;primaryKey" json:"documentId"`
-	Title          string                    `gorm:"column:title;type:text;not null;default:''" json:"title,omitempty"`
-	Abstract       string                    `gorm:"column:abstract;type:text;not null;default:''" json:"abstract,omitempty"`
-	Authors        []PaperAuthor             `gorm:"column:authors;type:jsonb;serializer:json;not null" json:"authors"`
+	DocumentID uuid.UUID     `gorm:"column:document_id;type:uuid;primaryKey" json:"documentId"`
+	Title      string        `gorm:"column:title;type:text;not null;default:''" json:"title,omitempty"`
+	Abstract   string        `gorm:"column:abstract;type:text;not null;default:''" json:"abstract,omitempty"`
+	Authors    []PaperAuthor `gorm:"column:authors;type:jsonb;serializer:json;not null" json:"authors"`
+	// AuthorNames is a database-maintained trigram-search projection of Authors.
+	// The migration trigger owns it; Go code must not write this field.
+	AuthorNames    string                    `gorm:"column:author_names;type:text;not null;default:''" json:"-"`
 	Tags           []string                  `gorm:"column:tags;type:jsonb;serializer:json;not null" json:"tags"`
 	SourceName     string                    `gorm:"column:source_name;type:text;not null;default:''" json:"sourceName,omitempty"`
 	SourceURL      string                    `gorm:"column:source_url;type:text;not null;default:''" json:"sourceUrl,omitempty"`

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -46,6 +47,16 @@ def main() -> None:
     parser.add_argument("--engine", choices=("rules", "crf", "hybrid", "shadow"), default="hybrid")
     parser.add_argument("--model-dir", type=Path, default=ROOT / "model_train" / "artifacts")
     parser.add_argument("--image-dpi", type=int, default=72)
+    # Production parser/extraction caps (see .env.example and server.py). The
+    # previous diagnostic used len(source)+1 / 64 MiB / 100k, which bypassed
+    # the size check and exercised a larger budget than deployments run with.
+    parser.add_argument("--max-file-size", type=int, default=int(os.getenv("PARSER_MAX_FILE_SIZE", 100 << 20)))
+    parser.add_argument("--extraction-markdown-bytes", type=int,
+                        default=int(os.getenv("PARSER_MAX_EXTRACTION_MARKDOWN_BYTES", 32 << 20)))
+    parser.add_argument("--extraction-blocks", type=int,
+                        default=int(os.getenv("PARSER_MAX_EXTRACTION_BLOCKS", 50_000)))
+    parser.add_argument("--layout-lines", type=int,
+                        default=int(os.getenv("PARSER_MAX_EXTRACTION_LAYOUT_LINES", 100_000)))
     parser.add_argument("--output", type=Path, help="optional JSON result path (always records every raw reference and candidate)")
     parser.add_argument("--include-references", action="store_true", help="also print every raw reference/candidate in the console view")
     args = parser.parse_args()
@@ -54,7 +65,7 @@ def main() -> None:
         parser.error("pdf must be an existing .pdf file")
 
     source = pdf.read_bytes()
-    recognizer = DocumentParser(pdf.parent, max(len(source) + 1, 1), args.image_dpi)
+    recognizer = DocumentParser(pdf.parent, args.max_file_size, args.image_dpi)
     started = time.perf_counter()
     recognition = recognizer.Recognize(document_parser_pb2.RecognitionRequest(
         document_id=str(uuid4()), filename=pdf.name, content_type="application/pdf", content=source,
@@ -72,10 +83,12 @@ def main() -> None:
             ),
         ) for block in recognition.blocks],
     )
-    markdown, blocks, _ = _decode_extraction_request(request, 64 << 20, 100_000)
+    markdown, blocks, _ = _decode_extraction_request(
+        request, args.extraction_markdown_bytes, args.extraction_blocks,
+    )
     engine = build_engine(args.engine, args.model_dir)
     started = time.perf_counter()
-    lines = extract_layout_lines_from_pdf(pdf, blocks, 100_000) if getattr(engine, "requires_layout", False) else ()
+    lines = extract_layout_lines_from_pdf(pdf, blocks, args.layout_lines) if getattr(engine, "requires_layout", False) else ()
     result = engine.extract(markdown, blocks, lines)
     extraction_seconds = time.perf_counter() - started
     references = list(result.references)

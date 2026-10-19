@@ -32,6 +32,7 @@ type documentService struct {
 	recognizer    interfaces.DocumentRecognizer
 	paperInfo     interfaces.PaperInfoService
 	spans         interfaces.SpanRecorder
+	processing    interfaces.ProcessingViewQuery
 	papers        interfaces.PaperService
 	urlResolver   interfaces.PaperURLResolver
 	downloads     interfaces.RemoteDownloadLimiter
@@ -40,6 +41,7 @@ type documentService struct {
 	// output is untrusted until ProcessDocument validates and copies it.
 	recognitionOutputDir     string
 	maxRecognitionOutputSize int64
+	maxUploadSize            int64
 }
 
 // Upload conflict sentinels are aliases so handlers do not depend on storage
@@ -76,7 +78,10 @@ func NewDocumentService(repo interfaces.DocumentRepository, storage interfaces.F
 func NewDocumentServiceWithTaskInspector(
 	repo interfaces.DocumentRepository, storage interfaces.FileStorage, taskInspector interfaces.TaskInspector,
 ) interfaces.DocumentService {
-	return &documentService{repo: repo, storage: storage, taskInspector: taskInspector}
+	return &documentService{
+		repo: repo, storage: storage, taskInspector: taskInspector,
+		maxUploadSize: fileservice.DefaultMaxUploadSize,
+	}
 }
 
 // NewDocumentServiceWithProcessing is the production constructor for source
@@ -103,11 +108,13 @@ func NewDocumentServiceWithProcessingAndSpanRecorder(
 	recognizer interfaces.DocumentRecognizer,
 	paperInfo interfaces.PaperInfoService,
 	spans interfaces.SpanRecorder,
+	processing interfaces.ProcessingViewQuery,
 	papers interfaces.PaperService,
 	urlResolver interfaces.PaperURLResolver,
 	downloads interfaces.RemoteDownloadLimiter,
 ) interfaces.DocumentService {
 	service := newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, paperInfo, spans).(*documentService)
+	service.processing = processing
 	service.papers = papers
 	service.urlResolver = urlResolver
 	service.downloads = downloads
@@ -119,16 +126,29 @@ func newDocumentServiceWithProcessing(
 	taskInspector interfaces.TaskInspector, taskEnqueuer interfaces.TaskEnqueuer,
 	recognizer interfaces.DocumentRecognizer, paperInfo interfaces.PaperInfoService, spans interfaces.SpanRecorder,
 ) interfaces.DocumentService {
+	maxUploadSize := cfg.MaxUploadSize
+	if maxUploadSize <= 0 {
+		maxUploadSize = fileservice.DefaultMaxUploadSize
+	}
 	return &documentService{
 		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer,
 		recognizer: recognizer, paperInfo: paperInfo, spans: spans, recognitionOutputDir: cfg.RecognitionOutputDirectory,
-		maxRecognitionOutputSize: cfg.MaxUploadSize,
+		maxRecognitionOutputSize: cfg.MaxUploadSize, maxUploadSize: maxUploadSize,
 	}
 }
 
 func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error) {
 	if file == nil {
 		return nil, errors.New("file is required")
+	}
+	// Reject cheaply before the full SHA-256 pass. The handler performs the
+	// same checks for an early 413/415; this keeps batch and future callers
+	// from hashing an invalid file.
+	if _, supported := fileservice.SupportedContentType(file.Filename); !supported {
+		return nil, fileservice.ErrUnsupportedFileType
+	}
+	if s.maxUploadSize > 0 && file.Size > s.maxUploadSize {
+		return nil, fileservice.ErrFileTooLarge
 	}
 	doi = strings.ToLower(strings.TrimSpace(doi))
 	if doi != "" {
@@ -418,6 +438,107 @@ func (s *documentService) GetReferenceProgress(ctx context.Context, id string) (
 	return s.repo.CitationTargetProgress(ctx, documentID)
 }
 
+// maxDocumentProjectionIDs bounds one batch read-model request. Callers page
+// documents and then batch only the current page.
+const maxDocumentProjectionIDs = 200
+
+func (s *documentService) GetDocumentProjections(
+	ctx context.Context, query types.DocumentProjectionQuery,
+) ([]types.DocumentProjection, error) {
+	ids := make([]uuid.UUID, 0, len(query.DocumentIDs))
+	seen := make(map[uuid.UUID]struct{}, len(query.DocumentIDs))
+	for _, raw := range query.DocumentIDs {
+		id, err := uuid.Parse(strings.TrimSpace(raw))
+		if err != nil || id == uuid.Nil {
+			return nil, errors.New("invalid document id")
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return []types.DocumentProjection{}, nil
+	}
+	if len(ids) > maxDocumentProjectionIDs {
+		return nil, fmt.Errorf("at most %d document ids are allowed", maxDocumentProjectionIDs)
+	}
+	documents, err := s.repo.GetMany(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	metadataByID := map[uuid.UUID]types.PaperMetadata{}
+	if query.IncludeMetadata && s.papers != nil {
+		if metadataByID, err = s.papers.GetMetadataBatch(ctx, ids); err != nil {
+			return nil, err
+		}
+	}
+	var views []types.DocumentProcessingView
+	if query.IncludeProcessing {
+		if s.processing != nil {
+			if views, err = s.processing.GetViews(ctx, documents); err != nil {
+				return nil, err
+			}
+		} else {
+			views = make([]types.DocumentProcessingView, len(documents))
+			for index, document := range documents {
+				views[index] = basicProcessingView(document)
+			}
+		}
+	}
+	progressByID := map[uuid.UUID]types.PaperReferenceProgress{}
+	if query.IncludeProcessing {
+		if progressByID, err = s.repo.CitationTargetProgressBatch(ctx, ids); err != nil {
+			// Progress is supplemental, matching the single-document endpoint.
+			logger.Warn(ctx, "load batched reference progress failed", "document_count", len(ids), "error", err)
+			progressByID = map[uuid.UUID]types.PaperReferenceProgress{}
+		}
+	}
+
+	projections := make([]types.DocumentProjection, 0, len(documents))
+	for index, document := range documents {
+		projection := types.DocumentProjection{Document: document}
+		if query.IncludeMetadata {
+			metadata, found := metadataByID[document.ID]
+			if !found {
+				metadata = types.PaperMetadata{
+					DocumentID: document.ID, Authors: []types.PaperAuthor{},
+					Tags: []string{}, Metadata: types.JSON(`{}`),
+					MetadataSource: types.PaperMetadataSourceUnknown,
+				}
+			}
+			projection.Metadata = &metadata
+		}
+		if query.IncludeProcessing {
+			view := views[index]
+			progress := progressByID[document.ID]
+			view.ReferenceProgress = &progress
+			projection.Processing = &view
+		}
+		projections = append(projections, projection)
+	}
+	return projections, nil
+}
+
+func basicProcessingView(document types.Document) types.DocumentProcessingView {
+	view := types.DocumentProcessingView{
+		DocumentID: document.ID, SourceState: document.SourceState,
+		CanonicalDocumentID: document.CanonicalDocumentID,
+		StageStates:         []types.DocumentStageState{},
+		Stages:              []types.DocumentProcessingSpan{},
+	}
+	for _, stage := range []types.DocumentStage{
+		types.DocumentStageMarkdown, types.DocumentStageMetadataExtraction,
+		types.DocumentStageSourceLookup, types.DocumentStageReferenceLookup,
+	} {
+		if state, err := document.StageState(stage); err == nil {
+			view.StageStates = append(view.StageStates, state)
+		}
+	}
+	return view
+}
+
 func (s *documentService) UpdateDocumentInfo(
 	ctx context.Context, id string, originalFilename, doi *string,
 ) (*types.Document, error) {
@@ -457,20 +578,22 @@ func (s *documentService) SearchDocument(ctx context.Context, search types.Docum
 	return s.repo.Search(ctx, search)
 }
 
-func (s *documentService) GetDocumentFile(ctx context.Context, id string) (io.ReadCloser, string, error) {
+func (s *documentService) OpenDocumentFile(
+	ctx context.Context, id string,
+) (*types.Document, io.ReadCloser, string, error) {
 	doc, err := s.GetDocumentByID(ctx, id)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, "", err
 	}
 	if doc.SourceState != types.DocumentSourceAvailable {
-		return nil, "", sql.ErrNoRows
+		return nil, nil, "", sql.ErrNoRows
 	}
 	rc, err := s.storage.Open(ctx, doc.StorageKey)
 	if err != nil {
 		logger.Error(ctx, "open document file failed", "document_id", doc.ID, "error", err)
-		return nil, "", err
+		return nil, nil, "", err
 	}
-	return rc, doc.OriginalFilename, nil
+	return doc, rc, doc.OriginalFilename, nil
 }
 
 func (s *documentService) GetDocumentBlocks(ctx context.Context, id string, pageNumber int) ([]types.Block, error) {

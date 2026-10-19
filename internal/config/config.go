@@ -45,6 +45,11 @@ const (
 	defaultHTTPIdleTimeout                                   = 2 * time.Minute
 	defaultHTTPShutdownTimeout                               = 30 * time.Second
 	defaultHTTPMaxJSONBytes                            int64 = 1 << 20 // 1 MiB
+	defaultHTTPWriteRatePerMinute                            = 300
+	defaultHTTPWriteRateBurst                                = 60
+	defaultHTTPUploadConcurrency                             = 4
+	defaultHTTPBatchConcurrency                              = 2
+	defaultBatchImportTimeout                                = 2 * time.Minute
 	defaultAsynqConcurrency                                  = 32
 	defaultAsynqShutdownTimeout                              = 30 * time.Second
 	defaultDBMaxOpenConns                                    = 48
@@ -64,8 +69,20 @@ type Config struct {
 	// HTTPMaxJSONBytes bounds non-multipart JSON request bodies. Multipart
 	// uploads keep their existing per-file and per-batch limits.
 	HTTPMaxJSONBytes int64
-	DatabaseDriver   string
-	DatabaseURL      string
+	// HTTPWriteRate* bound mutating requests per client IP. Concurrency limits
+	// separately cap in-flight uploads and batch imports.
+	HTTPWriteRatePerMinute int
+	HTTPWriteRateBurst     int
+	HTTPUploadConcurrency  int
+	HTTPBatchConcurrency   int
+	// HTTPTrustedProxies lists proxy CIDRs whose X-Forwarded-For is trusted.
+	// Empty means ClientIP uses RemoteAddr (no proxy spoofing).
+	HTTPTrustedProxies []string
+	// BatchImportTimeout caps one synchronous batch URL import request; each
+	// item also keeps its own remote download limits.
+	BatchImportTimeout time.Duration
+	DatabaseDriver     string
+	DatabaseURL        string
 	// DB pool sizing must cover Asynq workers plus reserved HTTP/background
 	// connections; statement timeout bounds one query's hold on a connection.
 	DBMaxOpenConns     int
@@ -291,6 +308,32 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	httpWriteRatePerMinute, err := positiveIntEnv("HTTP_WRITE_RATE_PER_MINUTE", defaultHTTPWriteRatePerMinute, 100000)
+	if err != nil {
+		return Config{}, err
+	}
+	httpWriteRateBurst, err := positiveIntEnv("HTTP_WRITE_RATE_BURST", defaultHTTPWriteRateBurst, 100000)
+	if err != nil {
+		return Config{}, err
+	}
+	httpUploadConcurrency, err := positiveIntEnv("HTTP_UPLOAD_CONCURRENCY", defaultHTTPUploadConcurrency, 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	httpBatchConcurrency, err := positiveIntEnv("HTTP_BATCH_CONCURRENCY", defaultHTTPBatchConcurrency, 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	batchImportTimeout, err := durationEnv("BATCH_IMPORT_TIMEOUT", defaultBatchImportTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	var httpTrustedProxies []string
+	for _, proxy := range strings.Split(env("HTTP_TRUSTED_PROXIES", ""), ",") {
+		if proxy = strings.TrimSpace(proxy); proxy != "" {
+			httpTrustedProxies = append(httpTrustedProxies, proxy)
+		}
+	}
 	asynqConcurrency, err := positiveIntEnv("ASYNQ_CONCURRENCY", defaultAsynqConcurrency, 512)
 	if err != nil {
 		return Config{}, err
@@ -321,6 +364,12 @@ func Load() (Config, error) {
 		HTTPIdleTimeout:                             httpIdleTimeout,
 		HTTPShutdownTimeout:                         httpShutdownTimeout,
 		HTTPMaxJSONBytes:                            httpMaxJSONBytes,
+		HTTPWriteRatePerMinute:                      httpWriteRatePerMinute,
+		HTTPWriteRateBurst:                          httpWriteRateBurst,
+		HTTPUploadConcurrency:                       httpUploadConcurrency,
+		HTTPBatchConcurrency:                        httpBatchConcurrency,
+		HTTPTrustedProxies:                          httpTrustedProxies,
+		BatchImportTimeout:                          batchImportTimeout,
 		DatabaseDriver:                              strings.ToLower(env("DB_DRIVER", "postgres")),
 		DatabaseURL:                                 env("DATABASE_URL", "postgres://papers:papers@localhost:5432/papers?sslmode=disable"),
 		DBMaxOpenConns:                              dbMaxOpenConns,

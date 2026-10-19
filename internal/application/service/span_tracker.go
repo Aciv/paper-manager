@@ -125,11 +125,7 @@ func (s *spanTracker) AggregateParentDisplay(ctx context.Context, childSpanID uu
 }
 
 func (s *spanTracker) GetView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error) {
-	view := types.DocumentProcessingView{
-		DocumentID: document.ID, SourceState: document.SourceState,
-		CanonicalDocumentID: document.CanonicalDocumentID,
-		StageStates:         documentStageStates(document), Stages: []types.DocumentProcessingSpan{},
-	}
+	view := newDocumentProcessingView(document)
 	if s == nil || s.repo == nil {
 		return view, nil
 	}
@@ -137,12 +133,51 @@ func (s *spanTracker) GetView(ctx context.Context, document types.Document) (typ
 	if err != nil {
 		return view, err
 	}
+	view.Stages = sanitizeProcessingSpans(rows)
+	return view, nil
+}
+
+func (s *spanTracker) GetViews(
+	ctx context.Context, documents []types.Document,
+) ([]types.DocumentProcessingView, error) {
+	views := make([]types.DocumentProcessingView, len(documents))
+	for index, document := range documents {
+		views[index] = newDocumentProcessingView(document)
+	}
+	if s == nil || s.repo == nil || len(documents) == 0 {
+		return views, nil
+	}
+	ids := make([]uuid.UUID, 0, len(documents))
+	for _, document := range documents {
+		ids = append(ids, document.ID)
+	}
+	rowsByDocument, err := s.repo.ListCurrentBatch(ctx, ids, 100)
+	if err != nil {
+		return nil, err
+	}
+	for index := range views {
+		views[index].Stages = sanitizeProcessingSpans(rowsByDocument[views[index].DocumentID])
+	}
+	return views, nil
+}
+
+func newDocumentProcessingView(document types.Document) types.DocumentProcessingView {
+	return types.DocumentProcessingView{
+		DocumentID: document.ID, SourceState: document.SourceState,
+		CanonicalDocumentID: document.CanonicalDocumentID,
+		StageStates:         documentStageStates(document), Stages: []types.DocumentProcessingSpan{},
+	}
+}
+
+func sanitizeProcessingSpans(rows []types.DocumentProcessingSpan) []types.DocumentProcessingSpan {
+	if rows == nil {
+		return []types.DocumentProcessingSpan{}
+	}
 	for i := range rows {
 		rows[i].ErrorCode, rows[i].ErrorReason = safeSpanOutcome(rows[i].ErrorCode, rows[i].ErrorReason)
 		rows[i].Attributes = types.JSON(`{}`)
 	}
-	view.Stages = rows
-	return view, nil
+	return rows
 }
 
 func documentStageStates(document types.Document) []types.DocumentStageState {

@@ -1,6 +1,7 @@
 package router
 
 import (
+	"net/http"
 	"strings"
 	"time"
 
@@ -33,14 +34,19 @@ type RouterParams struct {
 func NewRouter(params RouterParams) *gin.Engine {
 	r := gin.New()
 	r.ContextWithFallback = true
+	// Empty HTTP_TRUSTED_PROXIES disables forwarded-header trust so the write
+	// limiter keys on the actual peer instead of a spoofable X-Forwarded-For.
+	if err := r.SetTrustedProxies(params.Config.HTTPTrustedProxies); err != nil {
+		_ = r.SetTrustedProxies(nil)
+	}
 
 	// origin: protocol, domain, port
 	// CORS
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     corsOrigins(params.Config.CORSOrigin),
 		AllowMethods:     []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", "X-Request-ID", "X-Tenant-ID", "X-Embed-Session", "X-External-User-ID", "X-External-User-Token"},
-		ExposeHeaders:    []string{"Content-Length", "Access-Control-Allow-Origin"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", "X-Request-ID", "X-Tenant-ID", "X-Embed-Session", "X-External-User-ID", "X-External-User-Token", "Range", "If-Range", "If-None-Match", "If-Modified-Since"},
+		ExposeHeaders:    []string{"Content-Length", "Accept-Ranges", "Content-Range", "ETag", "Last-Modified", "Access-Control-Allow-Origin"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))
@@ -52,6 +58,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 	// begin Recovery
 	r.Use(middleware.ErrorHandler())
 	r.Use(middleware.Recovery())
+	r.Use(middleware.WriteLimit(params.Config))
 	r.Use(middleware.JSONBodyLimit(params.Config.HTTPMaxJSONBytes))
 
 	// healthy check
@@ -90,9 +97,11 @@ func ServerFile(router gin.IRoutes, documentHandler *handler.DocumentHandler) {
 	router.POST("/api/document/batch-import-url", documentHandler.ImportURLBatch)
 	router.POST("/api/references/:referenceID/download-pdf", documentHandler.DownloadReferencePDF)
 	router.GET("/api/document/search", documentHandler.Search)
-	router.GET("/api/document/:id/content", documentHandler.Content)
+	// HEAD shares the range-aware streaming handlers so players can probe
+	// length/type without transferring the body.
+	router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/content", documentHandler.Content)
 	router.GET("/api/document/:id/blocks", documentHandler.ListBlocks)
-	router.GET("/api/document/:id/blocks/:blockID/image", documentHandler.BlockImage)
+	router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/blocks/:blockID/image", documentHandler.BlockImage)
 	router.PATCH("/api/document/:id", documentHandler.UpdateDocument)
 	router.DELETE("/api/document/:id", documentHandler.DeleteFile)
 }
@@ -104,6 +113,7 @@ func ServerProcess(
 	selectionHandler *handler.DocumentSelectionHandler,
 ) {
 	if processHandler != nil {
+		router.POST("/api/document/projections", processHandler.Projections)
 		router.POST("/api/document/:id/cancel", processHandler.CancelDocumentParse)
 		router.POST("/api/document/:id/retry", processHandler.RetryDocumentParse)
 		router.GET("/api/document/:id/processing", processHandler.Status)

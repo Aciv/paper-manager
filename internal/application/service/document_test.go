@@ -60,6 +60,10 @@ func (*documentTaskInspectorStub) HasQueuedQueryApplyForReference(context.Contex
 	return false, nil
 }
 
+func (*documentTaskInspectorStub) SnapshotQueuedWork(context.Context) (types.QueuedWorkSnapshot, error) {
+	return types.NewQueuedWorkSnapshot(), nil
+}
+
 type documentStatusRepoStub struct {
 	document types.Document
 	markdown types.DocumentMarkdown
@@ -70,6 +74,28 @@ type documentStatusRepoStub struct {
 
 func (*documentStatusRepoStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
 	return types.PaperReferenceProgress{}, nil
+}
+
+func (*documentStatusRepoStub) FindAvailableByDOIs(
+	context.Context, []string, uuid.UUID,
+) (map[string]uuid.UUID, error) {
+	return map[string]uuid.UUID{}, nil
+}
+
+func (s *documentStatusRepoStub) GetMany(_ context.Context, ids []uuid.UUID) ([]types.Document, error) {
+	documents := make([]types.Document, 0, len(ids))
+	for _, id := range ids {
+		if id == s.document.ID {
+			documents = append(documents, s.document)
+		}
+	}
+	return documents, nil
+}
+
+func (s *documentStatusRepoStub) CitationTargetProgressBatch(
+	_ context.Context, ids []uuid.UUID,
+) (map[uuid.UUID]types.PaperReferenceProgress, error) {
+	return make(map[uuid.UUID]types.PaperReferenceProgress, len(ids)), nil
 }
 
 func (s *documentStatusRepoStub) GetStage(_ context.Context, _ uuid.UUID, stage types.DocumentStage) (types.DocumentStageState, error) {
@@ -453,6 +479,89 @@ func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 	}
 }
 
+func TestCreateDocumentFromFileRejectsBeforeHashingOrLookup(t *testing.T) {
+	repo := &documentBatchRepoStub{}
+	service := &documentService{repo: repo, maxUploadSize: 8}
+
+	_, err := service.CreateDocumentFromFile(context.Background(),
+		documentUploadFileHeader(t, "malware.exe", []byte("payload")), "")
+	if !errors.Is(err, fileservice.ErrUnsupportedFileType) {
+		t.Fatalf("invalid extension error = %v, want ErrUnsupportedFileType", err)
+	}
+	if repo.searchCalls != 0 {
+		t.Fatalf("duplicate lookup ran before extension rejection: %d", repo.searchCalls)
+	}
+
+	oversize := &multipart.FileHeader{Filename: "paper.pdf", Size: 9}
+	_, err = service.CreateDocumentFromFile(context.Background(), oversize, "")
+	if !errors.Is(err, fileservice.ErrFileTooLarge) {
+		t.Fatalf("oversize error = %v, want ErrFileTooLarge", err)
+	}
+	if repo.searchCalls != 0 {
+		t.Fatalf("duplicate lookup ran before size rejection: %d", repo.searchCalls)
+	}
+}
+
+func TestCreateDocumentsFromURLsStopsAtRequestDeadline(t *testing.T) {
+	service := &documentService{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result, err := service.CreateDocumentsFromURLs(ctx, []types.DocumentURLImportCommand{
+		{URL: "https://example.test/one.pdf"},
+		{URL: "https://example.test/two.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromURLs() error = %v", err)
+	}
+	if !result.Stopped || len(result.Items) != 2 {
+		t.Fatalf("result = %#v, want two stopped items", result)
+	}
+	for _, item := range result.Items {
+		if item.Status != types.DocumentImportItemFailed {
+			t.Fatalf("item = %#v, want failed", item)
+		}
+	}
+}
+
+func TestGetDocumentProjectionsBatchesMetadataAndProcessing(t *testing.T) {
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, OriginalFilename: "paper.pdf",
+		SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageSucceeded,
+	}}
+	metadataRepo := newPaperMetadataRepoStub()
+	metadataRepo.items[documentID] = types.PaperMetadata{
+		DocumentID: documentID, Title: "Projected Paper",
+		Authors: []types.PaperAuthor{}, Tags: []string{},
+	}
+	spanRepo := &spanRepositoryStub{rows: []types.DocumentProcessingSpan{{
+		ID: uuid.New(), DocumentID: documentID, Kind: types.ProcessingSpanRecognition,
+		Scope: types.ProcessingSpanScopeDocument, Status: types.ProcessingSpanSucceeded,
+	}}}
+	service := &documentService{
+		repo:       repo,
+		papers:     NewPaperService(repo, metadataRepo, newPaperCitationRepoStub()),
+		processing: NewSpanTracker(spanRepo),
+	}
+	items, err := service.GetDocumentProjections(context.Background(), types.DocumentProjectionQuery{
+		DocumentIDs:     []string{documentID.String(), documentID.String()},
+		IncludeMetadata: true, IncludeProcessing: true,
+	})
+	if err != nil {
+		t.Fatalf("GetDocumentProjections() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("items = %#v, want one deduplicated projection", items)
+	}
+	if items[0].Metadata == nil || items[0].Metadata.Title != "Projected Paper" {
+		t.Fatalf("metadata = %#v", items[0].Metadata)
+	}
+	if items[0].Processing == nil || len(items[0].Processing.Stages) != 1 ||
+		items[0].Processing.ReferenceProgress == nil {
+		t.Fatalf("processing = %#v", items[0].Processing)
+	}
+}
+
 func TestNonAvailableDocumentHasNoSourceFile(t *testing.T) {
 	documentID := uuid.New()
 	repo := &documentStatusRepoStub{
@@ -464,13 +573,13 @@ func TestNonAvailableDocumentHasNoSourceFile(t *testing.T) {
 	}
 	svc := NewDocumentService(repo, nil)
 
-	reader, _, err := svc.GetDocumentFile(context.Background(), documentID.String())
+	_, reader, _, err := svc.OpenDocumentFile(context.Background(), documentID.String())
 	if reader != nil {
 		reader.Close()
-		t.Fatal("GetDocumentFile() returned a reader for a non-available document")
+		t.Fatal("OpenDocumentFile() returned a reader for a non-available document")
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("GetDocumentFile() error = %v, want sql.ErrNoRows", err)
+		t.Fatalf("OpenDocumentFile() error = %v, want sql.ErrNoRows", err)
 	}
 }
 

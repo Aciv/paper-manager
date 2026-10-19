@@ -1,6 +1,16 @@
 import { ChangeEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, Document, DocumentBase, PaperCitation, PaperMetadata, PaperReference } from './api';
+import {
+  CITATION_STATUS_LABELS,
+  citationBadge,
+  citationFilterCounts,
+  citationLabel,
+  citationMatchesFilter,
+  citationMetaLine,
+  type CitationFilter,
+  type CitationGroup,
+} from './citations';
 import { LibrarySelect } from './LibrarySelect';
 import { isDocumentRead, localFileReadingKey, subscribeReadingState, transferReadingRecord } from './readingState';
 import './PaperLibraryPage.css';
@@ -15,11 +25,6 @@ function documentTitle(document: Document, metadata?: PaperMetadata) {
 
 function formatAuthors(authors: PaperMetadata['authors']) {
   return authors.map((author) => author.name).filter(Boolean).join('、') || '未识别';
-}
-
-function citationLabel(citation: PaperCitation, index: number) {
-  const reference = citation.rawReference?.replace(/^[\s\-–—•·]+/, '').trim();
-  return reference || `第 ${index + 1} 条引用`;
 }
 
 // A picked folder reports each file's path relative to it; the plain name is the
@@ -107,24 +112,21 @@ async function fetchAllDocuments(baseID: string): Promise<Document[]> {
   return Array.from(documents.values());
 }
 
-// Metadata requests are the expensive part of loading a full catalog; keep a
-// small pool so a large library does not open hundreds of sockets at once.
+// Metadata is loaded in bounded batches instead of one request per document.
+// A failed batch only disables metadata filters for that chunk's rows.
 async function fetchMetadataMap(documents: Document[]): Promise<Record<string, PaperMetadata>> {
   const metadataByID: Record<string, PaperMetadata> = {};
-  let cursor = 0;
-  const worker = async () => {
-    while (cursor < documents.length) {
-      const documentItem = documents[cursor];
-      cursor += 1;
-      try {
-        const { paperMetadata } = await api.getPaperMetadata(documentItem.id);
-        if (paperMetadata) metadataByID[documentItem.id] = paperMetadata;
-      } catch {
-        // Missing metadata only disables the metadata-based filters for that row.
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(6, documents.length) }, worker));
+  if (documents.length === 0) return metadataByID;
+  try {
+    const projections = await api.getDocumentProjections(
+      documents.map((documentItem) => documentItem.id), true, false,
+    );
+    projections.forEach((projection) => {
+      if (projection.metadata) metadataByID[projection.document.id] = projection.metadata;
+    });
+  } catch {
+    // Missing metadata only disables the metadata-based filters.
+  }
   return metadataByID;
 }
 
@@ -175,6 +177,12 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [metadata, setMetadata] = useState<PaperMetadata>();
   const [citations, setCitations] = useState<PaperCitation[]>([]);
   const [citedBy, setCitedBy] = useState<PaperCitation[]>([]);
+  const [citationsLoading, setCitationsLoading] = useState(false);
+  // One full-height list at a time: stacking outgoing and incoming split the
+  // panel in half and left both lists nearly unreadable.
+  const [citationGroup, setCitationGroup] = useState<CitationGroup>('outgoing');
+  const [citationFilter, setCitationFilter] = useState<CitationFilter>('all');
+  const [citationActionBusy, setCitationActionBusy] = useState('');
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
   const [citationPaperInfo, setCitationPaperInfo] = useState<PaperMetadata>();
   const [citationReference, setCitationReference] = useState<PaperReference>();
@@ -325,6 +333,16 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     return filtered;
     // readRevision invalidates the memo after a read flag is toggled elsewhere.
   }, [items, metadataByID, authorFilter, venueFilter, tagFilter, yearFilter, readFilter, sortBy, sortDesc, readRevision]);
+
+  const documentsByID = useMemo(
+    () => new Map(items.map((documentItem) => [documentItem.id, documentItem])),
+    [items],
+  );
+  const citationCounts = useMemo(() => citationFilterCounts(citations), [citations]);
+  const visibleCitations = useMemo(
+    () => citations.filter((citation) => citationMatchesFilter(citation, citationFilter)),
+    [citations, citationFilter],
+  );
 
   function resetFilters() {
     setAuthorFilter('');
@@ -479,12 +497,16 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       setMetadata(undefined);
       setCitations([]);
       setCitedBy([]);
+      setCitationsLoading(false);
       return;
     }
     let active = true;
     setMetadata(undefined);
     setCitations([]);
     setCitedBy([]);
+    setCitationGroup('outgoing');
+    setCitationFilter('all');
+    setCitationsLoading(true);
     setCitationPaperInfoOpen(false);
     void Promise.allSettled([
       api.getPaperMetadata(selected.id),
@@ -496,6 +518,8 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       if (metadataResult.status === 'fulfilled') setMetadata(metadataResult.value.paperMetadata);
       if (citationsResult.status === 'fulfilled') setCitations(citationsResult.value.items);
       if (citedByResult.status === 'fulfilled') setCitedBy(citedByResult.value.items);
+    }).finally(() => {
+      if (active) setCitationsLoading(false);
     });
     return () => { active = false; };
   }, [selected?.id, localMode]);
@@ -525,6 +549,55 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       .finally(() => {
         if (citationInfoRequest.current === requestID) setCitationPaperInfoLoading(false);
       });
+  }
+
+  async function refreshCitations() {
+    if (!selected || localMode) return;
+    const { items: refreshed } = await api.listPaperCitations(selected.id);
+    setCitations(refreshed);
+  }
+
+  async function openCitationDocument(documentID: string) {
+    const inScope = documentsByID.get(documentID);
+    if (inScope) {
+      setSelected(inScope);
+      return;
+    }
+    try {
+      // The linked paper may sit outside the current Base or filter scope.
+      const found = await api.searchDocuments({ id: documentID, page: 1 });
+      const documentItem = found.items.find((item) => item.id === documentID);
+      if (documentItem) setSelected(documentItem);
+      else setMessage('该论文不在当前论文库中。');
+    } catch (error) {
+      setMessage(error instanceof Error ? `打开关联论文失败：${error.message}` : '打开关联论文失败。');
+    }
+  }
+
+  async function downloadCitationPDF(citation: PaperCitation) {
+    setCitationActionBusy(citation.referenceId);
+    try {
+      await api.downloadReferencePDF(citation.referenceId);
+      setMessage('已提交该引用的 PDF 下载；完成后重新匹配或重新打开这篇论文即可看到结果。');
+      await refreshCitations();
+    } catch (error) {
+      setMessage(error instanceof Error ? `引用 PDF 下载未提交：${error.message}` : '引用 PDF 下载未提交。');
+    } finally {
+      setCitationActionBusy('');
+    }
+  }
+
+  async function rematchCitation(citation: PaperCitation) {
+    setCitationActionBusy(citation.referenceId);
+    try {
+      const { linked } = await api.rematchPaperReference(citation.referenceId);
+      setMessage(linked ? '已重新匹配到库内论文。' : '库内仍没有匹配的论文。');
+      await refreshCitations();
+    } catch (error) {
+      setMessage(error instanceof Error ? `重新匹配引用失败：${error.message}` : '重新匹配引用失败。');
+    } finally {
+      setCitationActionBusy('');
+    }
   }
 
   // A local PDF is uploaded through the same endpoint as the console; the
@@ -699,28 +772,100 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       </section>}
       {rightMenu === 'citations' && <section className="library-panel library-panel-citations" aria-label="引用信息">
         {localMode ? <p className="hint">本地论文没有引用信息。</p> : <>
-        <div className="library-citation-group">
-          <h3>本论文引用 <span className="library-count">{citations.length}</span></h3>
-          {citations.length === 0 ? <p className="hint">没有已提取的参考文献。</p> : <ol>
-            {citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}>
-              <button className="library-citation-item" type="button" onClick={() => openCitationPaperInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>
-                <span className="library-citation-index">{index + 1}</span>
-                <span className="library-citation-text">{citationLabel(citation, index)}</span>
-              </button>
-            </li>)}
-          </ol>}
+        <div className="library-citation-switch" role="tablist" aria-label="引用方向">
+          <button className={citationGroup === 'outgoing' ? 'active' : ''} type="button" role="tab"
+            aria-selected={citationGroup === 'outgoing'} onClick={() => setCitationGroup('outgoing')}>
+            本论文引用 <span className="library-count">{citations.length}</span>
+          </button>
+          <button className={citationGroup === 'incoming' ? 'active' : ''} type="button" role="tab"
+            aria-selected={citationGroup === 'incoming'} onClick={() => setCitationGroup('incoming')}>
+            被引用 <span className="library-count">{citedBy.length}</span>
+          </button>
         </div>
-        <div className="library-citation-group">
-          <h3>库内引用本论文 <span className="library-count">{citedBy.length}</span></h3>
-          {citedBy.length === 0 ? <p className="hint">暂无库内论文引用它。</p> : <ol>
-            {citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}>
-              <button className="library-citation-item" type="button" onClick={() => openCitationPaperInfo(citation.citingDocumentId, citation.rawReference || '')}>
-                <span className="library-citation-index">{index + 1}</span>
-                <span className="library-citation-text">{citationLabel(citation, index)}</span>
+        {citationsLoading ? <p className="hint">正在读取引用信息…</p> : citationGroup === 'outgoing' ? <>
+          <div className="library-citation-filters" role="group" aria-label="引用筛选">
+            {([
+              ['all', '全部', citations.length],
+              ['linked', '库内', citationCounts.linked],
+              ['pending', '未解析', citationCounts.pending],
+              ['failed', '失败', citationCounts.failed],
+            ] as Array<[CitationFilter, string, number]>).map(([key, label, count]) => (
+              <button key={key} className={citationFilter === key ? 'active' : ''} type="button"
+                aria-pressed={citationFilter === key} onClick={() => setCitationFilter(key)}>
+                {label} <span>{count}</span>
               </button>
-            </li>)}
+            ))}
+          </div>
+          {citations.length === 0
+            ? <p className="hint">没有已提取的参考文献。</p>
+            : visibleCitations.length === 0
+              ? <p className="hint">没有符合筛选条件的引用。</p>
+              : <ol className="library-citation-list">
+                {visibleCitations.map((citation, index) => {
+                  const linkedDocumentID = citation.citedDocumentId;
+                  const linkedMetadata = linkedDocumentID ? metadataByID[linkedDocumentID] : undefined;
+                  const linkedDocument = linkedDocumentID ? documentsByID.get(linkedDocumentID) : undefined;
+                  const title = linkedMetadata?.title?.trim() || citation.title?.trim() || citationLabel(citation, index);
+                  const authors = linkedMetadata?.authors?.length ? linkedMetadata.authors : citation.authors;
+                  const meta = citationMetaLine(
+                    authors,
+                    linkedMetadata?.venue || citation.venue,
+                    linkedMetadata?.publishedAt || citation.publishedAt,
+                  );
+                  const doi = linkedDocument?.doi || citation.doi;
+                  const badge = citationBadge(citation);
+                  const actionBusy = citationActionBusy === citation.referenceId;
+                  return <li className="library-citation-card" key={`${citation.citingDocumentId}-${citation.referenceId}`}>
+                    <button className="library-citation-card-main" type="button"
+                      onClick={() => openCitationPaperInfo(linkedDocumentID, citation.rawReference || '', citation)}>
+                      <span className="library-citation-index">{index + 1}</span>
+                      <span className="library-citation-title">{title}</span>
+                      {meta && <span className="library-citation-meta">{meta}</span>}
+                      {doi && <span className="library-citation-doi">DOI {doi}</span>}
+                    </button>
+                    <div className="library-citation-card-footer">
+                      <span className={`library-citation-badge badge-${badge.tone}`}>{badge.label}</span>
+                      <div className="library-citation-actions">
+                        {linkedDocumentID
+                          ? <button type="button" onClick={() => void openCitationDocument(linkedDocumentID)}>打开论文 →</button>
+                          : <>
+                            <button type="button" disabled={actionBusy || !citation.sourceUrl}
+                              title={citation.sourceUrl ? '提交该引用的 PDF 下载' : '该引用没有可用的来源链接'}
+                              onClick={() => void downloadCitationPDF(citation)}>
+                              {citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}
+                            </button>
+                            <button type="button" disabled={actionBusy} onClick={() => void rematchCitation(citation)}>重新匹配</button>
+                          </>}
+                      </div>
+                    </div>
+                  </li>;
+                })}
+              </ol>}
+        </> : citedBy.length === 0
+          ? <p className="hint">暂无库内论文引用它。</p>
+          : <ol className="library-citation-list">
+            {citedBy.map((citation, index) => {
+              const citingMetadata = metadataByID[citation.citingDocumentId];
+              const citingDocument = documentsByID.get(citation.citingDocumentId);
+              const title = citingMetadata?.title?.trim() || citingDocument?.originalFilename || '库内论文';
+              const meta = citationMetaLine(citingMetadata?.authors ?? [], citingMetadata?.venue, citingMetadata?.publishedAt);
+              return <li className="library-citation-card" key={`${citation.citingDocumentId}-${citation.referenceId}`}>
+                <button className="library-citation-card-main" type="button"
+                  onClick={() => openCitationPaperInfo(citation.citingDocumentId, citation.rawReference || '')}>
+                  <span className="library-citation-index">{index + 1}</span>
+                  <span className="library-citation-title">{title}</span>
+                  {meta && <span className="library-citation-meta">{meta}</span>}
+                  {citingDocument?.doi && <span className="library-citation-doi">DOI {citingDocument.doi}</span>}
+                </button>
+                <div className="library-citation-card-footer">
+                  <span className="library-citation-badge badge-linked">库内引用</span>
+                  <div className="library-citation-actions">
+                    <button type="button" onClick={() => void openCitationDocument(citation.citingDocumentId)}>打开论文 →</button>
+                  </div>
+                </div>
+              </li>;
+            })}
           </ol>}
-        </div>
         </>}
       </section>}
     </div>
@@ -775,7 +920,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
           <dt>作者</dt><dd>{formatAuthors(citationReference.authors)}</dd>
           <dt>发表信息</dt><dd>{[citationReference.venue, citationReference.publishedAt?.slice(0, 10)].filter(Boolean).join(' · ') || '未提取发表信息'}</dd>
           <dt>DOI</dt><dd>{citationReference.doi || '未提取 DOI'}</dd>
-          <dt>解析状态</dt><dd>{citationReference.resolutionStatus}{citationReference.citedDocumentId ? ' · 已关联库内文档' : ''}</dd>
+          <dt>解析状态</dt><dd>{CITATION_STATUS_LABELS[citationReference.resolutionStatus] ?? citationReference.resolutionStatus}{citationReference.citedDocumentId ? ' · 已关联库内文档' : ''}</dd>
           <dt>PDF 下载</dt><dd>{citationReference.citedDocumentId ? '已获取文档' : citationReference.downloadErrorMessage ? `下载失败：${citationReference.downloadErrorMessage}` : citationReference.downloadRequestedAt ? '下载中' : '未请求下载'}</dd>
           {citationReference.resolutionErrorMessage && <><dt>解析错误</dt><dd>{citationReference.resolutionErrorMessage}</dd></>}
         </dl>}

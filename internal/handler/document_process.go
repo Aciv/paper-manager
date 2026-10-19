@@ -9,6 +9,7 @@ import (
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -69,6 +70,32 @@ func (h *DocumentProcessHandler) Status(c *gin.Context) {
 		view.ReferenceProgress = &progress
 	}
 	c.JSON(http.StatusOK, gin.H{"processing": view})
+}
+
+// Projections returns a bounded batch read model for library and citation
+// progress first paint. It replaces per-document requests without exposing
+// repository details to the client.
+func (h *DocumentProcessHandler) Projections(c *gin.Context) {
+	var query types.DocumentProjectionQuery
+	if err := c.ShouldBindJSON(&query); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
+		return
+	}
+	if len(query.DocumentIDs) == 0 {
+		h.writeError(c, apperrors.NewBadRequestError("at least one document id is required"), nil)
+		return
+	}
+	items, err := h.documents.GetDocumentProjections(c.Request.Context(), query)
+	if err != nil {
+		if strings.Contains(err.Error(), "invalid document id") ||
+			strings.Contains(err.Error(), "at most") {
+			h.writeError(c, apperrors.NewBadRequestError("invalid document projection request"), err)
+			return
+		}
+		h.writeError(c, apperrors.NewInternalServerError("load document projections"), err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"items": items})
 }
 
 // CancelDocumentParse cancels queued or active parsing work for a document.

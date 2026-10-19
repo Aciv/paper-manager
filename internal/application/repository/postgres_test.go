@@ -22,6 +22,7 @@ func openPostgresTestDatabase(t *testing.T) (*gorm.DB, func()) {
 	if err != nil {
 		t.Fatalf("open PostgreSQL test database: %v", err)
 	}
+	ensurePostgresTrgmExtension(t, admin)
 	adminSQL, err := admin.DB()
 	if err != nil {
 		t.Fatalf("get PostgreSQL admin sql.DB: %v", err)
@@ -58,6 +59,34 @@ func openPostgresTestDatabase(t *testing.T) (*gorm.DB, func()) {
 		adminSQL.Close()
 	}
 	return db, cleanup
+}
+
+// ensurePostgresTrgmExtension pins pg_trgm to public before any test schema
+// migration. Package tests run concurrently, so an advisory lock prevents two
+// schemas from racing to install the extension in different schemas.
+func ensurePostgresTrgmExtension(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Connection(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_lock(?)", int64(2026101901)).Error; err != nil {
+			return err
+		}
+		defer func() { _ = tx.Exec("SELECT pg_advisory_unlock(?)", int64(2026101901)).Error }()
+		var schema string
+		if err := tx.Raw(`SELECT n.nspname FROM pg_extension e
+			JOIN pg_namespace n ON n.oid = e.extnamespace
+			WHERE e.extname = 'pg_trgm'`).Scan(&schema).Error; err != nil {
+			return err
+		}
+		if schema == "" {
+			return tx.Exec("CREATE EXTENSION pg_trgm SCHEMA public").Error
+		}
+		if schema != "public" {
+			return tx.Exec("ALTER EXTENSION pg_trgm SET SCHEMA public").Error
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ensure pg_trgm extension: %v", err)
+	}
 }
 
 func postgresSearchPathDSN(t *testing.T, dsn, schema string) string {

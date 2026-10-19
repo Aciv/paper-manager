@@ -105,17 +105,16 @@ export function CitationProgressDialog({ open, onClose }: { open: boolean; onClo
     setError('');
     try {
       const documents = await fetchAllDocuments();
-      const nextRows = await mapLimit(documents, 5, async (documentItem): Promise<ProgressRow> => {
-        try {
-          const { processing } = await api.getDocumentProcessing(documentItem.id);
-          return { document: documentItem, processing };
-        } catch (caught) {
-          return {
-            document: documentItem,
-            error: caught instanceof Error ? caught.message : '无法读取处理状态。',
-          };
-        }
-      });
+      // One batched projection per 200 documents instead of N /processing
+      // requests. The dialog only needs the processing view.
+      const projections = await api.getDocumentProjections(
+        documents.map((documentItem) => documentItem.id), false, true,
+      );
+      const processingByID = new Map(projections.map((projection) => [projection.document.id, projection.processing]));
+      const nextRows: ProgressRow[] = documents.map((documentItem) => ({
+        document: documentItem,
+        processing: processingByID.get(documentItem.id),
+      }));
       if (requestGeneration.current !== generation) return;
       setRows(nextRows);
       setSelected(new Set(nextRows.filter(retryable).map((row) => row.document.id)));
@@ -214,7 +213,7 @@ export function CitationProgressDialog({ open, onClose }: { open: boolean; onClo
         <div>
           <p className="eyebrow">Reference pipeline</p>
           <h2 id="citation-progress-title">引用解析进度</h2>
-          <p className="hint">遍历全部文档的 <code>/processing</code>，汇总 referenceProgress；批量重试会重新派发引用查询。</p>
+          <p className="hint">批量读取文档的 processing 投影并汇总 referenceProgress；批量重试会重新派发引用查询。</p>
         </div>
         <div className="detail-actions">
           <button type="button" onClick={() => void load()} disabled={loading || busy}>{loading ? '刷新中…' : '刷新'}</button>

@@ -1,6 +1,16 @@
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, PaperReference, ProcessingSpan, ProcessingSpanStatus } from './api';
+import {
+  CITATION_STATUS_LABELS,
+  citationBadge,
+  citationFilterCounts,
+  citationLabel,
+  citationMatchesFilter,
+  citationMetaLine,
+  type CitationFilter,
+  type CitationGroup,
+} from './citations';
 import './PaperInfo.css';
 import '@fontsource-variable/manrope';
 import '@fontsource-variable/noto-sans-sc';
@@ -59,16 +69,7 @@ function referenceDownloadStatusLabel(reference: PaperReference): string {
 }
 
 function citationReferenceStatusLabel(value: DocumentStageStatus): string {
-  const labels: Record<DocumentStageStatus, string> = {
-    not_started: '未解析',
-    queued: '排队中',
-    running: '解析中',
-    succeeded: '已解析',
-    failed: '解析失败',
-    cancelled: '已取消',
-    skipped: '已跳过',
-  };
-  return labels[value] ?? value;
+  return CITATION_STATUS_LABELS[value] ?? value;
 }
 
 function documentLabel(document: Document, paper?: PaperMetadata) {
@@ -149,6 +150,13 @@ function App() {
   const [processing, setProcessing] = useState<DocumentProcessingView>();
   const [citations, setCitations] = useState<PaperCitation[]>([]);
   const [citedBy, setCitedBy] = useState<PaperCitation[]>([]);
+  const [citationsLoading, setCitationsLoading] = useState(false);
+  const [citationGroup, setCitationGroup] = useState<CitationGroup>('outgoing');
+  const [citationFilter, setCitationFilter] = useState<CitationFilter>('all');
+  const [citationActionBusy, setCitationActionBusy] = useState('');
+  // Titles/authors for the papers on the other side of a citation edge: the
+  // cited document for outgoing rows, the citing document for incoming rows.
+  const [citationContext, setCitationContext] = useState<Record<string, { document: Document; metadata?: PaperMetadata }>>({});
   const [citationSourceInfoOpen, setCitationSourceInfoOpen] = useState(false);
   const [citationSourceMetadata, setCitationSourceMetadata] = useState<PaperMetadata>();
   const [citationSourceReference, setCitationSourceReference] = useState<PaperReference>();
@@ -184,6 +192,7 @@ function App() {
   const processingWatchDocumentID = useRef('');
   const [processingPollRevision, setProcessingPollRevision] = useState(0);
   const citationSourceRequest = useRef(0);
+  const citationContextRequest = useRef(0);
 
   const pageCount = Math.max(1, Math.ceil(page.total / page.pageSize));
   const hasPreviousPage = page.page > 1;
@@ -197,6 +206,11 @@ function App() {
   const markdownState = stageState('markdown');
 	const documentStatus = processing?.sourceState === 'deleting' ? 'deleting' : processing?.sourceState === 'merged' ? 'merged' : pipelineActive ? 'processing' : markdownState?.status === 'failed' ? 'failed' : markdownState?.status === 'cancelled' ? 'cancelled' : markdownState?.status === 'succeeded' ? 'ready' : selected?.sourceState ?? 'available';
   const remoteURLs = useMemo(() => remoteURL.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), [remoteURL]);
+  const citationCounts = useMemo(() => citationFilterCounts(citations), [citations]);
+  const visibleCitations = useMemo(
+    () => citations.filter((citation) => citationMatchesFilter(citation, citationFilter)),
+    [citations, citationFilter],
+  );
 
   function applyProcessingView(view: DocumentProcessingView) {
 	setProcessing(view);
@@ -276,12 +290,18 @@ function App() {
   useEffect(() => { void load({ page: 1 }); void loadBases(); }, []);
 
   useEffect(() => {
+    const contextRequestID = citationContextRequest.current + 1;
+    citationContextRequest.current = contextRequestID;
     setEditOriginalFilename(selected?.originalFilename ?? '');
     setEditDoi(selected?.doi ?? '');
     setPaperMetadata(undefined);
     setProcessing(undefined);
     setCitations([]);
     setCitedBy([]);
+    setCitationContext({});
+    setCitationGroup('outgoing');
+    setCitationFilter('all');
+    setCitationsLoading(Boolean(selected));
     processingPollDelay.current = 2500;
     if (!selected) {
       setEditTitle('');
@@ -298,10 +318,33 @@ function App() {
       api.listPaperCitations(selected.id),
       api.listPaperCitedBy(selected.id),
     ]).then(([{ processing: view }, { items: outgoing }, { items: incoming }]) => {
+      if (citationContextRequest.current !== contextRequestID) return;
       applyProcessingView(view);
       setCitations(outgoing);
       setCitedBy(incoming);
-    }).catch((error) => setMessage(error instanceof Error ? `加载论文任务或引用失败：${error.message}` : '加载论文任务或引用失败。'));
+      // Cards show the paper on the other side of each edge. One bounded batch
+      // read replaces per-row metadata requests; failures fall back to the
+      // citation row's own extracted fields.
+      const peerIDs = Array.from(new Set([
+        ...incoming.map((citation) => citation.citingDocumentId),
+        ...outgoing.map((citation) => citation.citedDocumentId).filter((id): id is string => Boolean(id)),
+      ]));
+      if (peerIDs.length === 0) return;
+      void api.getDocumentProjections(peerIDs, true, false).then((projections) => {
+        if (citationContextRequest.current !== contextRequestID) return;
+        setCitationContext(Object.fromEntries(
+          projections.map((projection) => [projection.document.id, projection]),
+        ));
+      }).catch(() => {
+        // Titles fall back to the citation row.
+      });
+    }).catch((error) => {
+      if (citationContextRequest.current === contextRequestID) {
+        setMessage(error instanceof Error ? `加载论文任务或引用失败：${error.message}` : '加载论文任务或引用失败。');
+      }
+    }).finally(() => {
+      if (citationContextRequest.current === contextRequestID) setCitationsLoading(false);
+    });
   }, [selected?.id]);
 
   useEffect(() => {
@@ -654,7 +697,7 @@ function App() {
   }
 
   async function downloadReferencePDF(referenceID: string) {
-    setBusy(true);
+    setCitationActionBusy(referenceID);
     try {
       await api.downloadReferencePDF(referenceID);
       setMessage('已提交该引用的 PDF 下载。');
@@ -665,12 +708,12 @@ function App() {
     } catch (error) {
       setMessage(error instanceof Error ? `引用 PDF 下载未提交：${error.message}` : '引用 PDF 下载未提交。');
     } finally {
-      setBusy(false);
+      setCitationActionBusy('');
     }
   }
 
   async function rematchReference(referenceID: string) {
-    setBusy(true);
+    setCitationActionBusy(referenceID);
     try {
       const { linked } = await api.rematchPaperReference(referenceID);
       setMessage(linked ? '已重新匹配到库内文档。' : '库内仍没有匹配的文档。');
@@ -681,7 +724,28 @@ function App() {
     } catch (error) {
       setMessage(error instanceof Error ? `重新匹配引用失败：${error.message}` : '重新匹配引用失败。');
     } finally {
-      setBusy(false);
+      setCitationActionBusy('');
+    }
+  }
+
+  async function openCitationDocument(documentID: string) {
+    const inPage = page.items.find((item) => item.id === documentID);
+    if (inPage) {
+      setSelected(inPage);
+      setDetailMenu('overview');
+      return;
+    }
+    try {
+      const found = await api.searchDocuments({ id: documentID, page: 1 });
+      const documentItem = found.items.find((item) => item.id === documentID);
+      if (documentItem) {
+        setSelected(documentItem);
+        setDetailMenu('overview');
+      } else {
+        setMessage('该论文不在当前论文库中。');
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? `打开关联论文失败：${error.message}` : '打开关联论文失败。');
     }
   }
 
@@ -806,7 +870,7 @@ function App() {
   }
 
 	const selectedDescription = useMemo(() => {
-	if (!selected) return '选择左侧列表中的文档，可查看其 ID、DOI、状态及删除操作。';
+	if (!selected) return '选择左侧列表中的文档，可查看标题、DOI、状态及删除操作。';
 	if (markdownState?.errorMessage) return markdownState.errorMessage;
 	if (selected.contentType === 'application/pdf' && documentStatus === 'ready') return '点「阅读 ↗」可在论文阅读库中打开这篇论文。';
 	if (selected.contentType === 'application/pdf') return 'PDF 解析完成后即可在论文阅读库中打开阅读。';
@@ -993,7 +1057,6 @@ function App() {
             <dl className="document-details">
               <dt>正式标题</dt><dd>{paperMetadata?.title || '未设置（使用原始文件名展示）'}</dd>
               <dt>原始文件名</dt><dd>{selected.originalFilename}</dd>
-              <dt>文档 ID</dt><dd><code>{selected.id}</code></dd>
               <dt>DOI</dt><dd>{selected.doi || '未设置'}</dd>
               <dt>学科标签</dt><dd>{paperMetadata?.tags.length ? paperMetadata.tags.join(' · ') : '未设置'}</dd>
 			  <dt>论文信息来源</dt><dd>{paperMetadata?.metadataSource ?? '加载中'}</dd>
@@ -1039,10 +1102,96 @@ function App() {
             </>}
 			{detailMenu === 'citations' && <section className="citation-panel">
 			  <div className="panel-heading"><h4>引用关系</h4><span>{citations.length} 条参考 · 被引用 {citedBy.length} 次</span></div>
-			  <div className="citation-columns">
-				<div><h5>本论文引用</h5>{citations.length === 0 ? <p className="hint">尚无已提取的参考文献。</p> : <ol>{citations.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citedDocumentId, citation.rawReference || '', citation)}>查看第 {index + 1} 条的引用信息</button><button type="button" onClick={() => void downloadReferencePDF(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId) || !citation.sourceUrl}>{citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}</button><button type="button" onClick={() => void rematchReference(citation.referenceId)} disabled={busy || Boolean(citation.citedDocumentId)}>重新匹配</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
-				<div><h5>引用本论文</h5>{citedBy.length === 0 ? <p className="hint">尚未被库内论文引用。</p> : <ol>{citedBy.map((citation, index) => <li key={`${citation.citingDocumentId}-${citation.referenceId}`}><button className="citation-source-button" type="button" onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference || '')}>查看第 {index + 1} 条的已落库信息</button><p>{citation.rawReference}</p></li>)}</ol>}</div>
+			  <div className="citation-switch" role="tablist" aria-label="引用方向">
+				<button className={citationGroup === 'outgoing' ? 'active' : ''} type="button" role="tab"
+				  aria-selected={citationGroup === 'outgoing'} onClick={() => setCitationGroup('outgoing')}>
+				  本论文引用 <span className="citation-count">{citations.length}</span>
+				</button>
+				<button className={citationGroup === 'incoming' ? 'active' : ''} type="button" role="tab"
+				  aria-selected={citationGroup === 'incoming'} onClick={() => setCitationGroup('incoming')}>
+				  被引用 <span className="citation-count">{citedBy.length}</span>
+				</button>
 			  </div>
+			  {citationsLoading ? <p className="hint">正在读取引用信息…</p> : citationGroup === 'outgoing' ? <>
+				<div className="citation-filters" role="group" aria-label="引用筛选">
+				  {([
+					['all', '全部', citations.length],
+					['linked', '库内', citationCounts.linked],
+					['pending', '未解析', citationCounts.pending],
+					['failed', '失败', citationCounts.failed],
+				  ] as Array<[CitationFilter, string, number]>).map(([key, label, count]) => (
+					<button key={key} className={citationFilter === key ? 'active' : ''} type="button"
+					  aria-pressed={citationFilter === key} onClick={() => setCitationFilter(key)}>
+					  {label} <span>{count}</span>
+					</button>
+				  ))}
+				</div>
+				{citations.length === 0
+				  ? <p className="hint">尚无已提取的参考文献。</p>
+				  : visibleCitations.length === 0
+					? <p className="hint">没有符合筛选条件的引用。</p>
+					: <ol className="citation-card-list">
+					  {visibleCitations.map((citation, index) => {
+						const linkedDocumentID = citation.citedDocumentId;
+						const linked = linkedDocumentID ? citationContext[linkedDocumentID] : undefined;
+						const linkedMetadata = linked?.metadata;
+						const title = linkedMetadata?.title?.trim() || citation.title?.trim() || citationLabel(citation, index);
+						const authors = linkedMetadata?.authors?.length ? linkedMetadata.authors : citation.authors;
+						const meta = citationMetaLine(authors, linkedMetadata?.venue || citation.venue, linkedMetadata?.publishedAt || citation.publishedAt);
+						const doi = linked?.document.doi || citation.doi;
+						const badge = citationBadge(citation);
+						const actionBusy = citationActionBusy === citation.referenceId;
+						return <li className="citation-card" key={`${citation.citingDocumentId}-${citation.referenceId}`}>
+						  <button className="citation-card-main" type="button"
+							onClick={() => openCitationSourceInfo(linkedDocumentID, citation.rawReference || '', citation)}>
+							<span className="citation-card-index">{index + 1}</span>
+							<span className="citation-card-title">{title}</span>
+							{meta && <span className="citation-card-meta">{meta}</span>}
+							{doi && <span className="citation-card-doi">DOI {doi}</span>}
+						  </button>
+						  <div className="citation-card-footer">
+							<span className={`citation-badge citation-badge-${badge.tone}`}>{badge.label}</span>
+							<div className="citation-card-actions">
+							  {linkedDocumentID
+								? <button type="button" onClick={() => void openCitationDocument(linkedDocumentID)}>打开论文 →</button>
+								: <>
+								  <button type="button" disabled={actionBusy || !citation.sourceUrl}
+									title={citation.sourceUrl ? '提交该引用的 PDF 下载' : '该引用没有可用的来源链接'}
+									onClick={() => void downloadReferencePDF(citation.referenceId)}>
+									{citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}
+								  </button>
+								  <button type="button" disabled={actionBusy} onClick={() => void rematchReference(citation.referenceId)}>重新匹配</button>
+								</>}
+							</div>
+						  </div>
+						</li>;
+					  })}
+					</ol>}
+			  </> : citedBy.length === 0
+				? <p className="hint">尚未被库内论文引用。</p>
+				: <ol className="citation-card-list">
+				  {citedBy.map((citation, index) => {
+					const peer = citationContext[citation.citingDocumentId];
+					const title = peer?.metadata?.title?.trim() || peer?.document.originalFilename || '库内论文';
+					const meta = citationMetaLine(peer?.metadata?.authors ?? [], peer?.metadata?.venue, peer?.metadata?.publishedAt);
+					const doi = peer?.document.doi;
+					return <li className="citation-card" key={`${citation.citingDocumentId}-${citation.referenceId}`}>
+					  <button className="citation-card-main" type="button"
+						onClick={() => openCitationSourceInfo(citation.citingDocumentId, citation.rawReference || '')}>
+						<span className="citation-card-index">{index + 1}</span>
+						<span className="citation-card-title">{title}</span>
+						{meta && <span className="citation-card-meta">{meta}</span>}
+						{doi && <span className="citation-card-doi">DOI {doi}</span>}
+					  </button>
+					  <div className="citation-card-footer">
+						<span className="citation-badge citation-badge-linked">库内引用</span>
+						<div className="citation-card-actions">
+						  <button type="button" onClick={() => void openCitationDocument(citation.citingDocumentId)}>打开论文 →</button>
+						</div>
+					  </div>
+					</li>;
+				  })}
+				</ol>}
 			</section>}
           </div>
 			{citationSourceInfoOpen && <div className="citation-source-backdrop" role="presentation" onMouseDown={() => setCitationSourceInfoOpen(false)}>
@@ -1058,7 +1207,7 @@ function App() {
 				  <dt>发表信息</dt><dd>{[citationSourceReference.venue, citationSourceReference.publishedAt?.slice(0, 10), citationSourceReference.volume, citationSourceReference.issue, citationSourceReference.pages].filter(Boolean).join(' · ') || '未提取发表信息'}</dd>
 				  <dt>DOI</dt><dd>{citationSourceReference.doi || citationSourceDocument?.doi || '未提取 DOI'}</dd>
 				  <dt>来源</dt><dd>{citationSourceReference.sourceUrl ? <a href={citationSourceReference.sourceUrl} target="_blank" rel="noreferrer">打开来源</a> : '未提取来源'}</dd>
-				  {citationSourceReference.citedDocumentId && <><dt>已关联文档</dt><dd><code>{citationSourceReference.citedDocumentId}</code></dd></>}
+				  {citationSourceReference.citedDocumentId && <><dt>关联论文</dt><dd>{citationContext[citationSourceReference.citedDocumentId]?.metadata?.title || '已关联库内文档'}</dd></>}
 				  <dt>PDF 下载</dt><dd>{referenceDownloadStatusLabel(citationSourceReference)}</dd>
 				  {citationSourceReference.resolutionErrorMessage && <><dt>解析错误</dt><dd>{citationSourceReference.resolutionErrorMessage}</dd></>}
 				</dl></>}

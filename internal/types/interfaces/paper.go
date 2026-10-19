@@ -14,6 +14,11 @@ import (
 type PaperService interface {
 	// GetMetadata retrieves one document's bibliographic metadata.
 	GetMetadata(ctx context.Context, documentID string) (*types.PaperMetadata, error)
+	// GetMetadataBatch loads metadata for many existing documents in one query.
+	// Missing metadata rows are absent from the map.
+	GetMetadataBatch(
+		ctx context.Context, documentIDs []uuid.UUID,
+	) (map[uuid.UUID]types.PaperMetadata, error)
 	// UpdateMetadata applies a validated partial bibliographic update. Calls
 	// without an internal MetadataSource are treated as manual edits.
 	UpdateMetadata(

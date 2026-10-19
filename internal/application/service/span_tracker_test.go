@@ -48,6 +48,21 @@ func (s *spanRepositoryStub) Finish(_ context.Context, _ uuid.UUID, status types
 func (s *spanRepositoryStub) ListCurrent(context.Context, uuid.UUID, int) ([]types.DocumentProcessingSpan, error) {
 	return append([]types.DocumentProcessingSpan(nil), s.rows...), nil
 }
+func (s *spanRepositoryStub) ListCurrentBatch(
+	_ context.Context, documentIDs []uuid.UUID, perDocumentLimit int,
+) (map[uuid.UUID][]types.DocumentProcessingSpan, error) {
+	result := make(map[uuid.UUID][]types.DocumentProcessingSpan, len(documentIDs))
+	for _, id := range documentIDs {
+		rows := make([]types.DocumentProcessingSpan, 0)
+		for _, row := range s.rows {
+			if row.DocumentID == id && len(rows) < perDocumentLimit {
+				rows = append(rows, row)
+			}
+		}
+		result[id] = rows
+	}
+	return result, nil
+}
 func (*spanRepositoryStub) ListTimeline(context.Context, uuid.UUID, int) ([]types.DocumentProcessingSpan, error) {
 	return nil, nil
 }

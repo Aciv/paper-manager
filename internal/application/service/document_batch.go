@@ -67,14 +67,45 @@ func (s *documentService) CreateDocumentsFromURLs(
 	}
 	result := types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(commands))}
 	for index, command := range commands {
+		if ctx.Err() != nil {
+			return stopBatchForContext(ctx, result, index, commands), nil
+		}
 		item := types.DocumentBatchItemResult{Index: index, URL: strings.TrimSpace(command.URL)}
 		created, err := s.CreateDocumentFromURL(ctx, command)
 		if errors.Is(err, errDocumentDuplicateLookup) {
 			return stopBatchForDeduplicationFailure(ctx, result, item, err), nil
 		}
 		result.Items = append(result.Items, batchResultForDocument(item, created, err))
+		if ctx.Err() != nil {
+			return stopBatchForContext(ctx, result, index+1, commands), nil
+		}
 	}
 	return result, nil
+}
+
+// stopBatchForContext preserves completed items and marks every unprocessed
+// URL failed. The handler returns the partial result within its deadline
+// instead of holding the HTTP connection for the full per-item budget.
+func stopBatchForContext(
+	ctx context.Context,
+	result types.DocumentBatchResult,
+	nextIndex int,
+	commands []types.DocumentURLImportCommand,
+) types.DocumentBatchResult {
+	result.Stopped = true
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		result.Error = "batch import deadline exceeded"
+	} else {
+		result.Error = "batch import cancelled"
+	}
+	for index := nextIndex; index < len(commands); index++ {
+		result.Items = append(result.Items, types.DocumentBatchItemResult{
+			Index: index, URL: strings.TrimSpace(commands[index].URL),
+			Status: types.DocumentImportItemFailed,
+			Error:  "batch import stopped before this item",
+		})
+	}
+	return result
 }
 
 func validateBatchLength(length int) error {

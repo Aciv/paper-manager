@@ -112,6 +112,28 @@ func (r *paperDocumentRepoStub) Get(
 	return document, nil
 }
 
+func (r *paperDocumentRepoStub) GetMany(
+	_ context.Context, ids []uuid.UUID,
+) ([]types.Document, error) {
+	documents := make([]types.Document, 0, len(ids))
+	for _, id := range ids {
+		document, ok := r.documents[id]
+		if !ok {
+			continue
+		}
+		document = normalizeTestDocumentSource(document)
+		r.documents[id] = document
+		documents = append(documents, document)
+	}
+	return documents, nil
+}
+
+func (r *paperDocumentRepoStub) CitationTargetProgressBatch(
+	_ context.Context, ids []uuid.UUID,
+) (map[uuid.UUID]types.PaperReferenceProgress, error) {
+	return make(map[uuid.UUID]types.PaperReferenceProgress, len(ids)), nil
+}
+
 func normalizeTestDocumentSource(document types.Document) types.Document {
 	if document.SourceState == "" {
 		document.SourceState = types.DocumentSourceAvailable
@@ -143,6 +165,27 @@ func (r *paperDocumentRepoStub) ReplaceOlderDocument(
 	r.documents[newestID] = newest
 	delete(r.documents, olderID)
 	return types.DocumentFileKeys{StorageKeys: []string{older.StorageKey}}, nil
+}
+
+func (r *paperDocumentRepoStub) FindAvailableByDOIs(
+	_ context.Context, dois []string, excludeDocumentID uuid.UUID,
+) (map[string]uuid.UUID, error) {
+	wanted := make(map[string]struct{}, len(dois))
+	for _, doi := range dois {
+		wanted[strings.ToLower(strings.TrimSpace(doi))] = struct{}{}
+	}
+	matches := make(map[string]uuid.UUID, len(dois))
+	for id, stored := range r.documents {
+		document := normalizeTestDocumentSource(stored)
+		r.documents[id] = document
+		doi := strings.ToLower(strings.TrimSpace(document.DOI))
+		if _, ok := wanted[doi]; !ok || doi == "" ||
+			document.SourceState != types.DocumentSourceAvailable || document.ID == excludeDocumentID {
+			continue
+		}
+		matches[doi] = document.ID
+	}
+	return matches, nil
 }
 
 func (r *paperDocumentRepoStub) Search(
@@ -309,6 +352,18 @@ func (r *paperMetadataRepoStub) GetByDocumentID(
 	return metadata, nil
 }
 
+func (r *paperMetadataRepoStub) GetByDocumentIDs(
+	_ context.Context, documentIDs []uuid.UUID,
+) (map[uuid.UUID]types.PaperMetadata, error) {
+	result := make(map[uuid.UUID]types.PaperMetadata, len(documentIDs))
+	for _, id := range documentIDs {
+		if metadata, ok := r.items[id]; ok {
+			result[id] = metadata
+		}
+	}
+	return result, nil
+}
+
 func (r *paperMetadataRepoStub) Upsert(
 	_ context.Context,
 	documentID uuid.UUID,
@@ -356,6 +411,26 @@ func (r *paperMetadataRepoStub) Search(
 		Page:     search.Page,
 		PageSize: search.PageSize,
 	}, nil
+}
+
+func (r *paperMetadataRepoStub) SearchTitleSeeds(
+	_ context.Context, seeds []string, excludeDocumentID uuid.UUID, perSeedLimit int,
+) (map[string][]types.PaperMetadata, error) {
+	if perSeedLimit <= 0 {
+		perSeedLimit = 10
+	}
+	matches := make(map[string][]types.PaperMetadata, len(seeds))
+	for _, seed := range seeds {
+		for _, metadata := range r.items {
+			if metadata.DocumentID == excludeDocumentID || len(matches[seed]) >= perSeedLimit {
+				continue
+			}
+			if strings.Contains(strings.ToLower(metadata.Title), strings.ToLower(seed)) {
+				matches[seed] = append(matches[seed], metadata)
+			}
+		}
+	}
+	return matches, nil
 }
 
 type paperCitationRepoStub struct {
@@ -1070,6 +1145,66 @@ func TestPaperServiceReferenceRowsAreScopedToCitingPaper(t *testing.T) {
 	}
 }
 
+func TestPaperServiceMergeExtractedCitationsMatchesBibliographyInBatches(t *testing.T) {
+	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	doiTarget := types.Document{
+		ID: uuid.New(), SourceState: types.DocumentSourceAvailable, DOI: "10.1000/batch-doi",
+	}
+	titleTarget := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	service, _, metadata, _ := newPaperServiceForTest(citing, doiTarget, titleTarget)
+	published := time.Date(2020, 5, 1, 0, 0, 0, 0, time.UTC)
+	metadata.items[doiTarget.ID] = types.PaperMetadata{
+		DocumentID: doiTarget.ID, Title: "DOI target",
+	}
+	metadata.items[titleTarget.ID] = types.PaperMetadata{
+		DocumentID: titleTarget.ID, Title: "Batched Local Matching",
+		Authors: []types.PaperAuthor{{Name: "Ada Lovelace"}}, PublishedAt: &published,
+	}
+
+	items, err := service.MergeExtractedCitations(context.Background(), citing.ID.String(), []types.PaperCitationInput{
+		{
+			RawReference: "Reference resolved by DOI",
+			Candidate: &types.PaperReferenceCandidate{
+				RawReference: "Reference resolved by DOI", DOI: "10.1000/batch-doi",
+			},
+		},
+		{
+			RawReference: "Reference resolved by title",
+			Candidate: &types.PaperReferenceCandidate{
+				RawReference: "Reference resolved by title", Title: "Batched Local Matching",
+				Authors: []string{"Ada Lovelace"}, PublishedYear: 2020,
+			},
+		},
+		{
+			RawReference: "Reference with no local target",
+			Candidate: &types.PaperReferenceCandidate{
+				RawReference: "Reference with no local target", Title: "Unrelated Work",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("MergeExtractedCitations() error = %v", err)
+	}
+	if len(items) != 3 {
+		t.Fatalf("citations = %#v, want three rows", items)
+	}
+	byRaw := make(map[string]types.PaperCitation, len(items))
+	for _, item := range items {
+		byRaw[item.RawReference] = item
+	}
+	if doi := byRaw["Reference resolved by DOI"]; doi.CitedDocumentID == nil || *doi.CitedDocumentID != doiTarget.ID ||
+		doi.ResolutionStatus != types.DocumentStageSucceeded {
+		t.Fatalf("DOI citation = %#v, want target %s", doi, doiTarget.ID)
+	}
+	if title := byRaw["Reference resolved by title"]; title.CitedDocumentID == nil || *title.CitedDocumentID != titleTarget.ID ||
+		title.ResolutionStatus != types.DocumentStageSucceeded {
+		t.Fatalf("title citation = %#v, want target %s", title, titleTarget.ID)
+	}
+	if unmatched := byRaw["Reference with no local target"]; unmatched.CitedDocumentID != nil {
+		t.Fatalf("unmatched citation = %#v, want unresolved", unmatched)
+	}
+}
+
 func TestPaperServiceMergeExtractedCitationsDoesNotRemoveManualEdge(t *testing.T) {
 	citing := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
 	manualTarget := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
@@ -1137,5 +1272,26 @@ func TestPaperServiceNormalizesMetadataUpdateAndSearch(t *testing.T) {
 		metadata.lastSearch.Tags[0] != "ai" ||
 		metadata.lastSearch.TagMode != types.PaperTagModeAll {
 		t.Fatalf("normalized search = %#v", metadata.lastSearch)
+	}
+}
+
+func TestPaperServiceSearchMetadataRejectsSingleASCIICharacterTerms(t *testing.T) {
+	document := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	service, _, _, _ := newPaperServiceForTest(document)
+
+	for _, search := range []types.PaperSearch{
+		{Title: " a ", Page: 1, PageSize: 10},
+		{Author: "X", Page: 1, PageSize: 10},
+	} {
+		if _, err := service.SearchMetadata(context.Background(), search); !errors.Is(err, ErrInvalidPaperMetadata) {
+			t.Fatalf("SearchMetadata(%#v) error = %v, want ErrInvalidPaperMetadata", search, err)
+		}
+	}
+	// Single CJK characters are legitimate surname/title queries and must not
+	// be rejected by the ASCII short-term guard.
+	if _, err := service.SearchMetadata(context.Background(), types.PaperSearch{
+		Author: "王", Page: 1, PageSize: 10,
+	}); err != nil {
+		t.Fatalf("SearchMetadata() single CJK author error = %v", err)
 	}
 }

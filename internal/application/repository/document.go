@@ -70,6 +70,30 @@ func (r *documentRepository) Get(ctx context.Context, id uuid.UUID) (types.Docum
 	return document, err
 }
 
+func (r *documentRepository) GetMany(
+	ctx context.Context, ids []uuid.UUID,
+) ([]types.Document, error) {
+	if len(ids) == 0 {
+		return []types.Document{}, nil
+	}
+	rows := make([]types.Document, 0, len(ids))
+	if err := r.db.WithContext(ctx).Where("id IN ?", ids).Find(&rows).Error; err != nil {
+		logger.Error(ctx, "batch document lookup failed", "document_count", len(ids), "error", err)
+		return nil, err
+	}
+	byID := make(map[uuid.UUID]types.Document, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	ordered := make([]types.Document, 0, len(rows))
+	for _, id := range ids {
+		if row, ok := byID[id]; ok {
+			ordered = append(ordered, row)
+		}
+	}
+	return ordered, nil
+}
+
 func (r *documentRepository) Search(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
 	page := search.Page
 	if page < 1 {
@@ -115,6 +139,36 @@ func (r *documentRepository) Search(ctx context.Context, search types.DocumentSe
 	return result, err
 }
 
+// FindAvailableByDOIs resolves a batch of normalized DOIs in one query. DOI
+// matching deliberately ignores documents whose source file is unavailable.
+func (r *documentRepository) FindAvailableByDOIs(
+	ctx context.Context, dois []string, excludeDocumentID uuid.UUID,
+) (map[string]uuid.UUID, error) {
+	matches := make(map[string]uuid.UUID, len(dois))
+	if len(dois) == 0 {
+		return matches, nil
+	}
+	var rows []struct {
+		ID  uuid.UUID
+		DOI string
+	}
+	query := r.db.WithContext(ctx).Model(&types.Document{}).
+		Select("id, doi").
+		Where("doi IN ?", dois).
+		Where("source_state = ?", types.DocumentSourceAvailable)
+	if excludeDocumentID != uuid.Nil {
+		query = query.Where("id <> ?", excludeDocumentID)
+	}
+	if err := query.Find(&rows).Error; err != nil {
+		logger.Error(ctx, "batch document DOI lookup failed", "doi_count", len(dois), "error", err)
+		return nil, err
+	}
+	for _, row := range rows {
+		matches[strings.ToLower(strings.TrimSpace(row.DOI))] = row.ID
+	}
+	return matches, nil
+}
+
 func (r *documentRepository) CitationTargetProgress(ctx context.Context, citingDocumentID uuid.UUID) (types.PaperReferenceProgress, error) {
 	var progress types.PaperReferenceProgress
 	err := r.db.WithContext(ctx).Raw(`SELECT
@@ -129,6 +183,45 @@ func (r *documentRepository) CitationTargetProgress(ctx context.Context, citingD
 		logger.Error(ctx, "load reference resolution progress failed", "document_id", citingDocumentID, "error", err)
 	}
 	return progress, err
+}
+
+func (r *documentRepository) CitationTargetProgressBatch(
+	ctx context.Context, citingDocumentIDs []uuid.UUID,
+) (map[uuid.UUID]types.PaperReferenceProgress, error) {
+	progressByID := make(map[uuid.UUID]types.PaperReferenceProgress, len(citingDocumentIDs))
+	if len(citingDocumentIDs) == 0 {
+		return progressByID, nil
+	}
+	var rows []struct {
+		CitingDocumentID uuid.UUID
+		Queued           int64
+		Running          int64
+		Completed        int64
+		Failed           int64
+		Cancelled        int64
+	}
+	err := r.db.WithContext(ctx).Raw(`SELECT
+		citing_document_id,
+		COUNT(*) FILTER (WHERE resolution_status IN ('not_started','queued')) AS queued,
+		COUNT(*) FILTER (WHERE resolution_status = 'running') AS running,
+		COUNT(*) FILTER (WHERE resolution_status IN ('succeeded','skipped') OR cited_document_id IS NOT NULL) AS completed,
+		COUNT(*) FILTER (WHERE resolution_status = 'failed') AS failed,
+		COUNT(*) FILTER (WHERE resolution_status = 'cancelled') AS cancelled
+	FROM paper_citations
+	WHERE citing_document_id IN ?
+	GROUP BY citing_document_id`, citingDocumentIDs).Scan(&rows).Error
+	if err != nil {
+		logger.Error(ctx, "load batched reference resolution progress failed",
+			"document_count", len(citingDocumentIDs), "error", err)
+		return nil, err
+	}
+	for _, row := range rows {
+		progressByID[row.CitingDocumentID] = types.PaperReferenceProgress{
+			Queued: int(row.Queued), Running: int(row.Running), Completed: int(row.Completed),
+			Failed: int(row.Failed), Cancelled: int(row.Cancelled),
+		}
+	}
+	return progressByID, nil
 }
 
 func (r *documentRepository) GetMarkdown(ctx context.Context, documentID uuid.UUID) (types.DocumentMarkdown, error) {

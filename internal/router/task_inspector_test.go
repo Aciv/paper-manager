@@ -35,6 +35,36 @@ func TestMatchesDocumentUsesDocumentIDPayloadField(t *testing.T) {
 	}
 }
 
+func TestRecordSnapshotTaskCapturesStageAndReferenceEnvelopes(t *testing.T) {
+	snapshot := types.NewQueuedWorkSnapshot()
+	recordSnapshotTask(&snapshot, types.TypeDocumentRecognize,
+		[]byte(`{"document_id":"doc-1","stage":"markdown","generation":2}`))
+	recordSnapshotTask(&snapshot, types.TypePaperQueryApply,
+		[]byte(`{"kind":"source","document_id":"doc-2","stage":"source_lookup","generation":3}`))
+	recordSnapshotTask(&snapshot, types.TypePaperQueryApply,
+		[]byte(`{"kind":"reference","reference_id":"ref-1","generation":4}`))
+	recordSnapshotTask(&snapshot, types.TypePaperQueryApply,
+		[]byte(`{"kind":"reference","reference_id":"ref-2","generation":0}`))
+	recordSnapshotTask(&snapshot, "unrelated:task",
+		[]byte(`{"document_id":"doc-3","stage":"markdown","generation":1}`))
+
+	if !snapshot.HasStage("doc-1", types.DocumentStageMarkdown, 2) {
+		t.Fatal("document stage task was not captured")
+	}
+	if !snapshot.HasStage("doc-2", types.DocumentStageSourceLookup, 3) {
+		t.Fatal("source query-apply task was not captured")
+	}
+	if !snapshot.HasReference("ref-1", 4) {
+		t.Fatal("reference query-apply task was not captured")
+	}
+	if snapshot.HasReference("ref-2", 0) {
+		t.Fatal("zero-generation reference task was captured")
+	}
+	if snapshot.HasStage("doc-3", types.DocumentStageMarkdown, 1) {
+		t.Fatal("unrelated task was captured")
+	}
+}
+
 func TestMatchesDocumentStageMatchesSourceQueryApplyResult(t *testing.T) {
 	const documentID = "39a2d54f-412a-4c6c-84e1-9a9ea5034c6d"
 	payload := []byte(`{"kind":"source","document_id":"` + documentID + `","stage":"source_lookup","generation":3}`)

@@ -45,6 +45,21 @@ class ParserLimitExceeded(Exception):
     """A PDF exceeded a configured page, crop, or response-size budget."""
 
 
+class RPCAbort(Exception):
+    """A status intended for the client, raised from inside the broad handler.
+
+    ``grpc.ServicerContext.abort`` raises a bare ``Exception``; calling it
+    inside Recognize's generic ``except Exception`` block would be caught and
+    converted into INTERNAL. Validation helpers raise this typed error instead
+    and Recognize forwards its status unchanged.
+    """
+
+    def __init__(self, code: grpc.StatusCode, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
 class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
     parser_name = "pymupdf4llm"
 
@@ -145,6 +160,8 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                     removed_characters,
                 )
             return result
+        except RPCAbort as exc:
+            context.abort(exc.code, exc.message)
         except grpc.RpcError:
             raise
         except ParserLimitExceeded as exc:
@@ -305,39 +322,39 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         if source_type == "file_path":
             source = Path(request.file_path).resolve()
             if not source.is_relative_to(self.upload_dir) or not source.is_file():
-                context.abort(grpc.StatusCode.PERMISSION_DENIED, "file_path is outside the parser upload directory")
-            self._assert_size(source.stat().st_size, context)
+                raise RPCAbort(grpc.StatusCode.PERMISSION_DENIED, "file_path is outside the parser upload directory")
+            self._assert_size(source.stat().st_size)
             return pymupdf.open(str(source))
 
         if source_type == "content":
-            self._assert_size(len(request.content), context)
+            self._assert_size(len(request.content))
             return pymupdf.open(stream=request.content, filetype="pdf")
 
         if source_type == "source_url":
             content = self._download_source(request.source_url, context)
             return pymupdf.open(stream=content, filetype="pdf")
 
-        context.abort(grpc.StatusCode.INVALID_ARGUMENT, "exactly one recognition source is required")
+        raise RPCAbort(grpc.StatusCode.INVALID_ARGUMENT, "exactly one recognition source is required")
 
     def _download_source(self, source_url: str, context) -> bytes:
         parsed = urlsplit(source_url)
         if parsed.scheme not in {"http", "https"}:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "source_url must use http or https")
+            raise RPCAbort(grpc.StatusCode.INVALID_ARGUMENT, "source_url must use http or https")
         timeout = context.time_remaining() or 60
         timeout = max(1, min(timeout, 60))
         try:
             with urllib.request.urlopen(source_url, timeout=timeout) as response:
                 content = response.read(self.max_file_size + 1)
         except Exception as exc:
-            context.abort(grpc.StatusCode.UNAVAILABLE, f"download source_url: {exc}")
-        self._assert_size(len(content), context)
+            raise RPCAbort(grpc.StatusCode.UNAVAILABLE, f"download source_url: {exc}") from exc
+        self._assert_size(len(content))
         return content
 
-    def _assert_size(self, size: int, context) -> None:
+    def _assert_size(self, size: int) -> None:
         if size <= 0:
-            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "source document is empty")
+            raise RPCAbort(grpc.StatusCode.INVALID_ARGUMENT, "source document is empty")
         if size > self.max_file_size:
-            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "source document exceeds parser size limit")
+            raise RPCAbort(grpc.StatusCode.RESOURCE_EXHAUSTED, "source document exceeds parser size limit")
 
 
 def extract_layout_lines_from_storage(

@@ -45,6 +45,9 @@ type SpanRecorder interface {
 // cannot use span observation as a control plane.
 type ProcessingViewQuery interface {
 	GetView(ctx context.Context, document types.Document) (types.DocumentProcessingView, error)
+	// GetViews returns the same projection for a bounded document batch in one
+	// span query. The result is aligned with documents.
+	GetViews(ctx context.Context, documents []types.Document) ([]types.DocumentProcessingView, error)
 }
 
 // SpanTracker is the single implementation object backing both narrow views.
@@ -70,6 +73,11 @@ type DocumentProcessingSpanRepository interface {
 	// ListCurrent returns at most limit latest rows for durable stage tuples
 	// belonging to a document.
 	ListCurrent(ctx context.Context, documentID uuid.UUID, limit int) ([]types.DocumentProcessingSpan, error)
+	// ListCurrentBatch returns current span rows for many documents in one
+	// query, grouped by document and capped per document.
+	ListCurrentBatch(
+		ctx context.Context, documentIDs []uuid.UUID, perDocumentLimit int,
+	) (map[uuid.UUID][]types.DocumentProcessingSpan, error)
 	// ListTimeline is the separate bounded history primitive. The default HTTP
 	// view does not call it, avoiding an accidental full-history response.
 	ListTimeline(ctx context.Context, documentID uuid.UUID, limit int) ([]types.DocumentProcessingSpan, error)

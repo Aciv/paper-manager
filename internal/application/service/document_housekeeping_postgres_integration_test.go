@@ -249,30 +249,60 @@ func TestRecoverStaleStagesLeavesCandidateOnProbeErrorPostgres(t *testing.T) {
 		return types.DocumentStageStatus(status)
 	}
 
-	inspector.stageErr = errors.New("redis timeout")
+	inspector.snapshotErr = errors.New("redis timeout")
 	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
 	if got := markdownStatus(); got != types.DocumentStageRunning {
-		t.Fatalf("markdown status after probe error = %q, want running", got)
+		t.Fatalf("markdown status after snapshot error = %q, want running", got)
 	}
 
-	inspector.stageErr = nil
-	inspector.stageQueued = true
+	inspector.snapshotErr = nil
+	inspector.queuedStage = types.QueuedStageKey(documentID.String(), types.DocumentStageMarkdown, 1)
 	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
 	if got := markdownStatus(); got != types.DocumentStageRunning {
 		t.Fatalf("markdown status with queued task = %q, want running", got)
 	}
 
-	inspector.stageQueued = false
+	inspector.queuedStage = ""
 	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
 	if got := markdownStatus(); got != types.DocumentStageFailed {
 		t.Fatalf("markdown status without queued task = %q, want failed", got)
 	}
 }
 
-// scriptedTaskInspector lets the housekeeping test drive probe outcomes.
+func TestRecoverStaleStagesUsesOneSnapshotForManyCandidatesPostgres(t *testing.T) {
+	db, cleanup := openServicePostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	staleAt := time.Now().UTC().Add(-2 * time.Hour)
+	if err := db.Exec(`INSERT INTO documents
+		(id, original_filename, content_type, size_bytes, storage_key, source_state, updated_at,
+		 markdown_status, markdown_generation, markdown_updated_at)
+		SELECT gen_random_uuid(), 'stale.pdf', 'application/pdf', 1,
+		       'stale/' || gen_random_uuid(), 'available', ?,
+		       'running', 1, ?
+		FROM generate_series(1, 250)`, staleAt, staleAt).Error; err != nil {
+		t.Fatalf("insert stale documents: %v", err)
+	}
+	inspector := &scriptedTaskInspector{}
+	housekeeping := NewDocumentHousekeepingService(db, config.Config{}, inspector, nil)
+	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
+	if inspector.snapshotCalls != 1 {
+		t.Fatalf("snapshot calls = %d, want one bounded scan", inspector.snapshotCalls)
+	}
+	var failed int64
+	if err := db.Raw(`SELECT COUNT(*) FROM documents WHERE markdown_status = 'failed'`).Scan(&failed).Error; err != nil {
+		t.Fatalf("count failed documents: %v", err)
+	}
+	if failed != 200 {
+		t.Fatalf("failed documents = %d, want the 200-candidate limit", failed)
+	}
+}
+
+// scriptedTaskInspector lets the housekeeping test drive snapshot outcomes.
 type scriptedTaskInspector struct {
-	stageQueued bool
-	stageErr    error
+	queuedStage   string
+	snapshotErr   error
+	snapshotCalls int
 }
 
 func (*scriptedTaskInspector) CancelTasksForStage(context.Context, string, types.DocumentStage, int64) (int, int, error) {
@@ -291,12 +321,24 @@ func (*scriptedTaskInspector) HasQueuedTaskTypeForDocument(context.Context, stri
 	return false, nil
 }
 
-func (i *scriptedTaskInspector) HasQueuedTaskForStage(context.Context, string, types.DocumentStage, int64) (bool, error) {
-	return i.stageQueued, i.stageErr
+func (*scriptedTaskInspector) HasQueuedTaskForStage(context.Context, string, types.DocumentStage, int64) (bool, error) {
+	return false, nil
 }
 
 func (*scriptedTaskInspector) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
 	return false, nil
+}
+
+func (i *scriptedTaskInspector) SnapshotQueuedWork(context.Context) (types.QueuedWorkSnapshot, error) {
+	i.snapshotCalls++
+	snapshot := types.NewQueuedWorkSnapshot()
+	if i.snapshotErr != nil {
+		return snapshot, i.snapshotErr
+	}
+	if i.queuedStage != "" {
+		snapshot.StageTasks[i.queuedStage] = struct{}{}
+	}
+	return snapshot, nil
 }
 
 func nullableFinished(status string, at time.Time) interface{} {
@@ -304,6 +346,34 @@ func nullableFinished(status string, at time.Time) interface{} {
 		return at
 	}
 	return nil
+}
+
+// ensureServiceTrgmExtension matches the repository test helper: pg_trgm must
+// live in public so dropping a per-test schema cannot remove the operator
+// class used by another concurrently running package's indexes.
+func ensureServiceTrgmExtension(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Connection(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_lock(?)", int64(2026101901)).Error; err != nil {
+			return err
+		}
+		defer func() { _ = tx.Exec("SELECT pg_advisory_unlock(?)", int64(2026101901)).Error }()
+		var schema string
+		if err := tx.Raw(`SELECT n.nspname FROM pg_extension e
+			JOIN pg_namespace n ON n.oid = e.extnamespace
+			WHERE e.extname = 'pg_trgm'`).Scan(&schema).Error; err != nil {
+			return err
+		}
+		if schema == "" {
+			return tx.Exec("CREATE EXTENSION pg_trgm SCHEMA public").Error
+		}
+		if schema != "public" {
+			return tx.Exec("ALTER EXTENSION pg_trgm SET SCHEMA public").Error
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ensure pg_trgm extension: %v", err)
+	}
 }
 
 func openServicePostgresTestDatabase(t *testing.T) (*gorm.DB, func()) {
@@ -316,6 +386,7 @@ func openServicePostgresTestDatabase(t *testing.T) (*gorm.DB, func()) {
 	if err != nil {
 		t.Fatalf("open PostgreSQL test database: %v", err)
 	}
+	ensureServiceTrgmExtension(t, admin)
 	adminSQL, err := admin.DB()
 	if err != nil {
 		t.Fatalf("get PostgreSQL admin sql.DB: %v", err)

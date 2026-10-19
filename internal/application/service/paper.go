@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -16,7 +17,12 @@ import (
 	"github.com/google/uuid"
 )
 
-const maxPaperRawReferenceBytes = 64 << 10
+const (
+	maxPaperRawReferenceBytes = 64 << 10
+	// localTitleSeedBatchSize bounds one batched title lookup so a very large
+	// bibliography cannot build an unbounded LATERAL query.
+	localTitleSeedBatchSize = 200
+)
 
 var (
 	// ErrInvalidPaperMetadata indicates a malformed bibliographic patch or
@@ -76,6 +82,12 @@ func (s *paperService) GetMetadata(
 	return &metadata, nil
 }
 
+func (s *paperService) GetMetadataBatch(
+	ctx context.Context, documentIDs []uuid.UUID,
+) (map[uuid.UUID]types.PaperMetadata, error) {
+	return s.metadata.GetByDocumentIDs(ctx, documentIDs)
+}
+
 func (s *paperService) UpdateMetadata(
 	ctx context.Context,
 	documentID string,
@@ -120,12 +132,30 @@ func (s *paperService) SearchMetadata(
 	if search.TagMode != types.PaperTagModeAll && search.TagMode != types.PaperTagModeAny {
 		return types.PaperMetadataPage{}, fmt.Errorf("invalid tag mode %q", search.TagMode)
 	}
+	if paperSearchTermIsTooShort(search.Title) {
+		return types.PaperMetadataPage{}, fmt.Errorf(
+			"%w: title search requires at least two characters", ErrInvalidPaperMetadata)
+	}
+	if paperSearchTermIsTooShort(search.Author) {
+		return types.PaperMetadataPage{}, fmt.Errorf(
+			"%w: author search requires at least two characters", ErrInvalidPaperMetadata)
+	}
 	tags, err := normalizePaperTags(search.Tags)
 	if err != nil {
 		return types.PaperMetadataPage{}, err
 	}
 	search.Tags = tags
 	return s.metadata.Search(ctx, search)
+}
+
+// paperSearchTermIsTooShort rejects a lone ASCII character such as "a". It
+// matches most rows, cannot use the trigram index effectively, and turns the
+// search into a sequential scan. A single CJK character is a meaningful
+// surname/title query and is allowed; PostgreSQL decides whether its trigram
+// is selective enough to index.
+func paperSearchTermIsTooShort(term string) bool {
+	runes := []rune(term)
+	return len(runes) == 1 && runes[0] < utf8.RuneSelf
 }
 
 func (s *paperService) AddCitation(
@@ -267,20 +297,37 @@ func (s *paperService) MergeExtractedCitations(
 		if err != nil {
 			return nil, err
 		}
-		// Python extraction has already supplied DOI/title. Match the local
-		// library immediately, before any provider or queued resolution.
-		if citation.CitedDocumentID == nil {
-			if documentID, found, matchErr := s.FindLocalReferenceMatch(ctx, citation.PaperReference, citingID); matchErr != nil {
-				return nil, matchErr
-			} else if found {
-				citation.CitedDocumentID = &documentID
-				citation.ResolutionStatus = types.DocumentStageSucceeded
-				citation.ResolutionErrorCode = nil
-				citation.ResolutionErrorMsg = nil
-				citation.ResolutionUpdatedAt = time.Now().UTC()
-			}
-		}
 		automatic = append(automatic, citation)
+	}
+
+	// Python extraction has already supplied DOI/title. Match the whole
+	// bibliography against the local library in two batched queries before any
+	// provider or queued resolution is considered.
+	pendingIndexes := make([]int, 0, len(automatic))
+	pendingReferences := make([]types.PaperReference, 0, len(automatic))
+	for index := range automatic {
+		if automatic[index].CitedDocumentID != nil {
+			continue
+		}
+		pendingIndexes = append(pendingIndexes, index)
+		pendingReferences = append(pendingReferences, automatic[index].PaperReference)
+	}
+	if len(pendingReferences) > 0 {
+		matches, matchErr := s.findLocalReferenceMatches(ctx, pendingReferences, citingID)
+		if matchErr != nil {
+			return nil, matchErr
+		}
+		for offset, index := range pendingIndexes {
+			if matches[offset] == uuid.Nil {
+				continue
+			}
+			documentID := matches[offset]
+			automatic[index].CitedDocumentID = &documentID
+			automatic[index].ResolutionStatus = types.DocumentStageSucceeded
+			automatic[index].ResolutionErrorCode = nil
+			automatic[index].ResolutionErrorMsg = nil
+			automatic[index].ResolutionUpdatedAt = time.Now().UTC()
+		}
 	}
 
 	merged, err := s.citations.MergeAutomaticCitations(ctx, citingID, automatic)
@@ -823,68 +870,131 @@ func (s *paperService) FindLocalReferenceMatch(
 	if reference.CitedDocumentID != nil {
 		return *reference.CitedDocumentID, true, nil
 	}
-	if excludeDocumentID == uuid.Nil {
-		excludeDocumentID = reference.CitingDocumentID
-	}
-	exclude := make([]uuid.UUID, 0, 1)
-	if excludeDocumentID != uuid.Nil {
-		exclude = append(exclude, excludeDocumentID)
-	}
-	if doi := normalizePaperDOI(reference.DOI); doi != "" {
-		page, err := s.documents.Search(ctx, types.DocumentSearch{
-			DOI: doi, SourceState: types.DocumentSourceAvailable,
-			ExcludeIDs: exclude, Page: 1, PageSize: 2,
-		})
-		if err != nil {
-			return uuid.Nil, false, err
-		}
-		for _, document := range page.Items {
-			if document.SourceState == types.DocumentSourceAvailable {
-				return document.ID, true, nil
-			}
-		}
-	}
-	titleKey := normalizedPaperTitle(reference.Title)
-	if titleKey == "" {
-		return uuid.Nil, false, nil
-	}
-	result, err := s.metadata.Search(ctx, types.PaperSearch{
-		Title: paperTitleSearchSeed(titleKey), Page: 1, PageSize: localPaperTitleSearchSize,
-	})
+	matches, err := s.findLocalReferenceMatches(ctx, []types.PaperReference{reference}, excludeDocumentID)
 	if err != nil {
 		return uuid.Nil, false, err
 	}
-	for _, metadata := range result.Items {
-		if metadata.DocumentID == excludeDocumentID ||
-			normalizedPaperTitle(metadata.Title) != titleKey {
-			continue
-		}
-		document, err := s.documents.Get(ctx, metadata.DocumentID)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
-		}
-		if err != nil {
-			return uuid.Nil, false, err
-		}
-		if document.SourceState != types.DocumentSourceAvailable {
-			continue
-		}
-		if len(reference.Authors) > 0 && len(metadata.Authors) > 0 &&
-			paperAuthorSimilarity(paperAuthorNames(reference.Authors), metadata.Authors) == 0 {
-			continue
-		}
-		if reference.PublishedAt != nil && metadata.PublishedAt != nil {
-			delta := reference.PublishedAt.Year() - metadata.PublishedAt.Year()
-			if delta < 0 {
-				delta = -delta
+	if len(matches) == 0 || matches[0] == uuid.Nil {
+		return uuid.Nil, false, nil
+	}
+	return matches[0], true, nil
+}
+
+// findLocalReferenceMatches resolves a whole bibliography in two batched
+// lookups: DOIs first, then title candidates for the remaining references.
+// The returned slice is aligned with references; uuid.Nil means no match.
+func (s *paperService) findLocalReferenceMatches(
+	ctx context.Context,
+	references []types.PaperReference,
+	excludeDocumentID uuid.UUID,
+) ([]uuid.UUID, error) {
+	matches := make([]uuid.UUID, len(references))
+	if excludeDocumentID == uuid.Nil {
+		for _, reference := range references {
+			if reference.CitingDocumentID != uuid.Nil {
+				excludeDocumentID = reference.CitingDocumentID
+				break
 			}
-			if delta > 1 {
+		}
+	}
+
+	pending := make([]int, 0, len(references))
+	doiSet := make(map[string]struct{}, len(references))
+	for index, reference := range references {
+		if reference.CitedDocumentID != nil {
+			matches[index] = *reference.CitedDocumentID
+			continue
+		}
+		pending = append(pending, index)
+		if doi := normalizePaperDOI(reference.DOI); doi != "" {
+			doiSet[doi] = struct{}{}
+		}
+	}
+	if len(doiSet) > 0 {
+		dois := make([]string, 0, len(doiSet))
+		for doi := range doiSet {
+			dois = append(dois, doi)
+		}
+		sort.Strings(dois)
+		byDOI, err := s.documents.FindAvailableByDOIs(ctx, dois, excludeDocumentID)
+		if err != nil {
+			return nil, err
+		}
+		remaining := make([]int, 0, len(pending))
+		for _, index := range pending {
+			doi := normalizePaperDOI(references[index].DOI)
+			if documentID, found := byDOI[doi]; found && doi != "" {
+				matches[index] = documentID
 				continue
 			}
+			remaining = append(remaining, index)
 		}
-		return document.ID, true, nil
+		pending = remaining
 	}
-	return uuid.Nil, false, nil
+
+	seedSet := make(map[string]struct{}, len(pending))
+	for _, index := range pending {
+		titleKey := normalizedPaperTitle(references[index].Title)
+		if titleKey == "" {
+			continue
+		}
+		if seed := paperTitleSearchSeed(titleKey); seed != "" {
+			seedSet[seed] = struct{}{}
+		}
+	}
+	if len(seedSet) == 0 {
+		return matches, nil
+	}
+	seeds := make([]string, 0, len(seedSet))
+	for seed := range seedSet {
+		seeds = append(seeds, seed)
+	}
+	sort.Strings(seeds)
+	candidates := make(map[string][]types.PaperMetadata, len(seeds))
+	for start := 0; start < len(seeds); start += localTitleSeedBatchSize {
+		end := start + localTitleSeedBatchSize
+		if end > len(seeds) {
+			end = len(seeds)
+		}
+		batch, err := s.metadata.SearchTitleSeeds(
+			ctx, seeds[start:end], excludeDocumentID, localPaperTitleSearchSize,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for seed, items := range batch {
+			candidates[seed] = append(candidates[seed], items...)
+		}
+	}
+	for _, index := range pending {
+		reference := references[index]
+		titleKey := normalizedPaperTitle(reference.Title)
+		if titleKey == "" {
+			continue
+		}
+		for _, metadata := range candidates[paperTitleSearchSeed(titleKey)] {
+			if metadata.DocumentID == excludeDocumentID ||
+				normalizedPaperTitle(metadata.Title) != titleKey {
+				continue
+			}
+			if len(reference.Authors) > 0 && len(metadata.Authors) > 0 &&
+				paperAuthorSimilarity(paperAuthorNames(reference.Authors), metadata.Authors) == 0 {
+				continue
+			}
+			if reference.PublishedAt != nil && metadata.PublishedAt != nil {
+				delta := reference.PublishedAt.Year() - metadata.PublishedAt.Year()
+				if delta < 0 {
+					delta = -delta
+				}
+				if delta > 1 {
+					continue
+				}
+			}
+			matches[index] = metadata.DocumentID
+			break
+		}
+	}
+	return matches, nil
 }
 
 func (s *paperService) QueueReferenceResolution(

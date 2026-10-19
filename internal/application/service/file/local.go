@@ -37,6 +37,14 @@ var (
 	ErrRemoteHTTPStatus    = errors.New("remote file server returned an unsuccessful status")
 )
 
+// SupportedContentType returns the canonical content type for an upload
+// filename's extension. Handlers call it before hashing large uploads so an
+// unsupported file is rejected without a full read.
+func SupportedContentType(filename string) (string, bool) {
+	contentType, ok := supportedTypes[strings.ToLower(filepath.Ext(filename))]
+	return contentType, ok
+}
+
 var supportedTypes = map[string]string{
 	".txt":      "text/plain",
 	".md":       "text/markdown",

@@ -299,8 +299,22 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 27 {
-		t.Fatalf("latest migration version = %d, want 27", got)
+	if got := migrations[len(migrations)-1].version; got != 28 {
+		t.Fatalf("latest migration version = %d, want 28", got)
+	}
+	for _, fragment := range []string{
+		"CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public",
+		"ALTER EXTENSION pg_trgm SET SCHEMA public",
+		"ADD COLUMN IF NOT EXISTS author_names TEXT NOT NULL DEFAULT ''",
+		"paper_metadata_sync_author_names",
+		"idx_paper_metadata_title_trgm",
+		"idx_paper_metadata_author_names_trgm",
+		"idx_paper_metadata_updated_at",
+		"gin_trgm_ops",
+	} {
+		if !strings.Contains(paperSearchIndexesUp, fragment) {
+			t.Fatalf("paper search migration does not include %q", fragment)
+		}
 	}
 	for _, fragment := range []string{
 		"download_attempt UUID",

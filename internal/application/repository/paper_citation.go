@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -127,29 +128,78 @@ func (r *paperCitationRepository) MergeAutomaticCitations(
 			Find(&existing).Error; err != nil {
 			return err
 		}
+		existingByKey := make(map[string]types.PaperCitation, len(existing))
 		manualKeys := make(map[string]struct{}, len(existing))
 		for _, citation := range existing {
+			existingByKey[citation.ReferenceKey] = citation
 			if citation.EffectiveOrigin() == types.PaperCitationOriginManual {
 				manualKeys[citation.ReferenceKey] = struct{}{}
 			}
 		}
-		if err := tx.Where("citing_document_id = ? AND origin = ?", citingDocumentID,
-			types.PaperCitationOriginExtraction).Delete(&types.PaperCitation{}).Error; err != nil {
-			return err
+		incomingKeys := make(map[string]struct{}, len(automatic))
+		for _, citation := range automatic {
+			incomingKeys[citation.ReferenceKey] = struct{}{}
 		}
-		toCreate := make([]types.PaperCitation, 0, len(automatic))
+
+		// Delete only extraction rows that disappeared from the bibliography.
+		// Manual rows are never removed by an automatic refresh.
+		staleIDs := make([]uuid.UUID, 0)
+		for _, citation := range existing {
+			if citation.EffectiveOrigin() != types.PaperCitationOriginExtraction {
+				continue
+			}
+			if _, retained := incomingKeys[citation.ReferenceKey]; retained {
+				continue
+			}
+			staleIDs = append(staleIDs, citation.ReferenceID)
+		}
+		if len(staleIDs) > 0 {
+			if err := tx.Where("id IN ?", staleIDs).Delete(&types.PaperCitation{}).Error; err != nil {
+				return err
+			}
+		}
+
+		toUpsert := make([]types.PaperCitation, 0, len(automatic))
 		for _, citation := range automatic {
 			if _, manual := manualKeys[citation.ReferenceKey]; manual {
 				continue
 			}
-			toCreate = append(toCreate, citation)
+			if previous, found := existingByKey[citation.ReferenceKey]; found &&
+				paperCitationsEquivalentForMerge(previous, citation) {
+				continue
+			}
+			toUpsert = append(toUpsert, citation)
 		}
-		if len(toCreate) > 0 {
-			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&toCreate).Error; err != nil {
+		if len(toUpsert) > 0 {
+			// Download state is never changed by extraction reconciliation.
+			// Leaving it out of the conflict update preserves a concurrently
+			// started reference download.
+			updates := clause.AssignmentColumns([]string{
+				"raw_reference", "doi", "title", "authors", "venue", "published_at",
+				"volume", "issue", "pages", "source_url", "metadata_source",
+				"resolution_status", "resolution_generation", "resolution_provider",
+				"resolution_error_code", "resolution_error_message", "resolution_updated_at",
+				"cited_document_id", "origin",
+			})
+			updates = append(updates, clause.Assignment{
+				Column: clause.Column{Name: "updated_at"},
+				Value:  gorm.Expr("CURRENT_TIMESTAMP"),
+			})
+			if err := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "citing_document_id"}, {Name: "reference_key"}},
+				DoUpdates: updates,
+				// A concurrent manual write must win over an extraction refresh.
+				Where: clause.Where{Exprs: []clause.Expression{
+					clause.Eq{
+						Column: clause.Column{Table: "paper_citations", Name: "origin"},
+						Value:  types.PaperCitationOriginExtraction,
+					},
+				}},
+			}).CreateInBatches(&toUpsert, insertBatchSize).Error; err != nil {
 				return err
 			}
 		}
-		items = make([]types.PaperCitation, 0, len(existing)+len(toCreate))
+		items = make([]types.PaperCitation, 0, len(existing)+len(toUpsert))
 		if err := tx.Where("citing_document_id = ?", citingDocumentID).
 			Order("created_at ASC, id").
 			Find(&items).Error; err != nil {
@@ -624,6 +674,17 @@ func normalizedPaperCitations(
 		citations = append(citations, citation)
 	}
 	return citations, nil
+}
+
+// paperCitationsEquivalentForMerge reports whether an automatic refresh would
+// write exactly the row already stored. Timestamps are excluded because they
+// are persistence annotations, not bibliography content.
+func paperCitationsEquivalentForMerge(existing, incoming types.PaperCitation) bool {
+	existing.CreatedAt = time.Time{}
+	existing.UpdatedAt = time.Time{}
+	incoming.CreatedAt = time.Time{}
+	incoming.UpdatedAt = time.Time{}
+	return reflect.DeepEqual(existing, incoming)
 }
 
 func normalizedAutomaticPaperCitations(

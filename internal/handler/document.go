@@ -2,13 +2,17 @@
 package handler
 
 import (
+	"context"
 	"database/sql"
 	"errors"
+	"io"
+	"io/fs"
 	"mime"
 	"net/http"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	appservice "paperMaster/internal/application/service"
@@ -31,8 +35,9 @@ const (
 )
 
 type DocumentHandler struct {
-	documents     interfaces.DocumentService
-	maxUploadSize int64
+	documents          interfaces.DocumentService
+	maxUploadSize      int64
+	batchImportTimeout time.Duration
 }
 
 type updateDocumentRequest struct {
@@ -92,7 +97,9 @@ func (h *DocumentHandler) ImportURLBatch(c *gin.Context) {
 		h.writeError(c, apperrors.NewBadRequestError("provide between 1 and 20 URLs"), nil)
 		return
 	}
-	result, err := h.documents.CreateDocumentsFromURLs(c.Request.Context(), request.URLs)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), h.batchImportTimeout)
+	defer cancel()
+	result, err := h.documents.CreateDocumentsFromURLs(ctx, request.URLs)
 	if err != nil {
 		h.writeError(c, apperrors.NewInternalServerError("import remote document batch"), err)
 		return
@@ -135,11 +142,19 @@ func NewDocumentHandler(cfg config.Config, documents interfaces.DocumentService)
 	if maxSize <= 0 {
 		maxSize = fileservice.DefaultMaxUploadSize
 	}
-	return &DocumentHandler{documents: documents, maxUploadSize: maxSize}
+	timeout := cfg.BatchImportTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	return &DocumentHandler{documents: documents, maxUploadSize: maxSize, batchImportTimeout: timeout}
 }
 
 // Upload accepts multipart/form-data with a required `file` field.
 func (h *DocumentHandler) Upload(c *gin.Context) {
+	if c.Request.ContentLength > h.maxUploadSize+1024*1024 {
+		h.writeError(c, apperrors.NewPayloadTooLargeError("file exceeds the configured upload limit"), nil)
+		return
+	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxUploadSize+1024*1024)
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
@@ -149,6 +164,10 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 			return
 		}
 		h.writeError(c, apperrors.NewBadRequestError("multipart field 'file' is required"), err)
+		return
+	}
+	if _, supported := fileservice.SupportedContentType(fileHeader.Filename); !supported {
+		h.writeError(c, apperrors.NewUnsupportedMediaTypeError("unsupported file type"), nil)
 		return
 	}
 	if fileHeader.Size > h.maxUploadSize {
@@ -180,7 +199,12 @@ func (h *DocumentHandler) UploadBatch(c *gin.Context) {
 		h.writeError(c, apperrors.NewUnsupportedMediaTypeError("batch upload must use multipart/form-data"), nil)
 		return
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, batchUploadRequestSize(h.maxUploadSize))
+	batchLimit := batchUploadRequestSize(h.maxUploadSize)
+	if c.Request.ContentLength > batchLimit {
+		h.writeError(c, apperrors.NewPayloadTooLargeError("batch upload exceeds the configured batch limit"), nil)
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, batchLimit)
 	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
@@ -208,6 +232,18 @@ func (h *DocumentHandler) UploadBatch(c *gin.Context) {
 	for _, doi := range dois {
 		if !validDocumentDOI(doi) {
 			h.writeError(c, apperrors.NewBadRequestError("doi must be at most 255 characters and contain no control characters"), nil)
+			return
+		}
+	}
+	// Reject an oversized or unsupported item before the service hashes any
+	// file in the batch. Remaining valid items keep the batch usable.
+	for _, file := range files {
+		if _, supported := fileservice.SupportedContentType(file.Filename); !supported {
+			h.writeError(c, apperrors.NewUnsupportedMediaTypeError("unsupported file type"), nil)
+			return
+		}
+		if file.Size > h.maxUploadSize {
+			h.writeError(c, apperrors.NewPayloadTooLargeError("file exceeds the configured upload limit"), nil)
 			return
 		}
 	}
@@ -375,16 +411,7 @@ func (h *DocumentHandler) Content(c *gin.Context) {
 		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
 		return
 	}
-	document, err := h.documents.GetDocumentByID(c.Request.Context(), documentID.String())
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)
-			return
-		}
-		h.writeError(c, apperrors.NewInternalServerError("load document metadata"), err)
-		return
-	}
-	reader, filename, err := h.documents.GetDocumentFile(c.Request.Context(), documentID.String())
+	document, reader, filename, err := h.documents.OpenDocumentFile(c.Request.Context(), documentID.String())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)
@@ -394,10 +421,12 @@ func (h *DocumentHandler) Content(c *gin.Context) {
 		return
 	}
 	defer reader.Close()
-	c.DataFromReader(http.StatusOK, document.SizeBytes, document.ContentType, reader, map[string]string{
-		"Content-Disposition":    mime.FormatMediaType("inline", map[string]string{"filename": filename}),
-		"X-Content-Type-Options": "nosniff",
-	})
+	modTime := streamModTime(reader, document.UpdatedAt)
+	etag := ""
+	if hash := strings.TrimSpace(document.FileSHA256); hash != "" {
+		etag = `"` + hash + `"`
+	}
+	serveStream(c, filename, document.ContentType, document.SizeBytes, modTime, etag, reader)
 }
 
 // ListBlocks returns source-map blocks for the requested PDF page. A missing
@@ -456,10 +485,45 @@ func (h *DocumentHandler) BlockImage(c *gin.Context) {
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	c.DataFromReader(http.StatusOK, -1, contentType, reader, map[string]string{
-		"Content-Disposition":    mime.FormatMediaType("inline", map[string]string{"filename": filename}),
-		"X-Content-Type-Options": "nosniff",
-	})
+	serveStream(c, filename, contentType, -1, streamModTime(reader, time.Time{}), "", reader)
+}
+
+// serveStream adds HTTP cache/range semantics. Local storage returns *os.File,
+// which is seekable; the fallback keeps other storage drivers working.
+func serveStream(
+	c *gin.Context, filename, contentType string, size int64,
+	modTime time.Time, etag string, reader io.ReadCloser,
+) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	c.Header("Content-Type", contentType)
+	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filename}))
+	c.Header("X-Content-Type-Options", "nosniff")
+	if etag != "" {
+		c.Header("ETag", etag)
+	}
+	if seeker, ok := reader.(io.ReadSeeker); ok {
+		http.ServeContent(c.Writer, c.Request, filename, modTime, seeker)
+		return
+	}
+	if c.Request.Method == http.MethodHead {
+		if size >= 0 {
+			c.Header("Content-Length", strconv.FormatInt(size, 10))
+		}
+		c.Status(http.StatusOK)
+		return
+	}
+	c.DataFromReader(http.StatusOK, size, contentType, reader, nil)
+}
+
+func streamModTime(reader io.ReadCloser, fallback time.Time) time.Time {
+	if statter, ok := reader.(interface{ Stat() (fs.FileInfo, error) }); ok {
+		if info, err := statter.Stat(); err == nil {
+			return info.ModTime()
+		}
+	}
+	return fallback
 }
 
 func (h *DocumentHandler) writeUploadError(c *gin.Context, err error) {

@@ -23,6 +23,21 @@ func (*documentQueueProbeStub) HasQueuedQueryApplyForReference(context.Context, 
 	return false, nil
 }
 
+func (s *documentQueueProbeStub) SnapshotQueuedWork(context.Context) (types.QueuedWorkSnapshot, error) {
+	snapshot := types.NewQueuedWorkSnapshot()
+	for _, err := range s.errs {
+		if err != nil {
+			return snapshot, err
+		}
+	}
+	for documentID, queued := range s.queued {
+		if queued {
+			snapshot.StageTasks[types.QueuedStageKey(documentID, types.DocumentStageMarkdown, 1)] = struct{}{}
+		}
+	}
+	return snapshot, nil
+}
+
 func (*documentQueueProbeStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
 	return 0, 0, nil
 }

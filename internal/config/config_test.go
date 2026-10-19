@@ -98,6 +98,12 @@ func TestLoadRuntimeLimits(t *testing.T) {
 	t.Setenv("HTTP_IDLE_TIMEOUT", "90s")
 	t.Setenv("HTTP_SHUTDOWN_TIMEOUT", "45s")
 	t.Setenv("HTTP_MAX_JSON_BYTES", "2048")
+	t.Setenv("HTTP_WRITE_RATE_PER_MINUTE", "120")
+	t.Setenv("HTTP_WRITE_RATE_BURST", "20")
+	t.Setenv("HTTP_UPLOAD_CONCURRENCY", "3")
+	t.Setenv("HTTP_BATCH_CONCURRENCY", "2")
+	t.Setenv("HTTP_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
+	t.Setenv("BATCH_IMPORT_TIMEOUT", "45s")
 	t.Setenv("ASYNQ_CONCURRENCY", "12")
 	t.Setenv("ASYNQ_SHUTDOWN_TIMEOUT", "20s")
 	t.Setenv("DB_MAX_OPEN_CONNS", "30")
@@ -113,6 +119,12 @@ func TestLoadRuntimeLimits(t *testing.T) {
 		cfg.HTTPIdleTimeout != 90*time.Second ||
 		cfg.HTTPShutdownTimeout != 45*time.Second ||
 		cfg.HTTPMaxJSONBytes != 2048 ||
+		cfg.HTTPWriteRatePerMinute != 120 ||
+		cfg.HTTPWriteRateBurst != 20 ||
+		cfg.HTTPUploadConcurrency != 3 ||
+		cfg.HTTPBatchConcurrency != 2 ||
+		len(cfg.HTTPTrustedProxies) != 2 ||
+		cfg.BatchImportTimeout != 45*time.Second ||
 		cfg.AsynqConcurrency != 12 ||
 		cfg.AsynqShutdownTimeout != 20*time.Second ||
 		cfg.DBMaxOpenConns != 30 ||

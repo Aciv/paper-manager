@@ -9,6 +9,101 @@ import (
 	"github.com/google/uuid"
 )
 
+func TestMergeAutomaticCitationsDiffsRowsPostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	documents := NewDocumentRepository(db)
+	repo := NewPaperCitationRepository(db)
+
+	citingID := uuid.New()
+	if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(
+		citingID, "citing.pdf", "merge/citing", "",
+	)); err != nil {
+		t.Fatalf("create citing document: %v", err)
+	}
+	referenceA := testResolvedCitation(citingID, "Reference A", uuid.Nil)
+	referenceB := testResolvedCitation(citingID, "Reference B", uuid.Nil)
+	first, err := repo.MergeAutomaticCitations(ctx, citingID, []types.PaperCitation{referenceA, referenceB})
+	if err != nil || len(first) != 2 {
+		t.Fatalf("first merge = %#v, err=%v", first, err)
+	}
+	byRaw := citationsByRawForTest(first)
+	idA := byRaw["Reference A"].ReferenceID
+
+	queued, applied, err := repo.QueueResolution(ctx, idA)
+	if err != nil || !applied {
+		t.Fatalf("queue reference A: applied=%v err=%v", applied, err)
+	}
+
+	referenceA.PaperReference = queued
+	referenceA.PaperReference.Title = "Reference A revised"
+	referenceC := testResolvedCitation(citingID, "Reference C", uuid.Nil)
+	second, err := repo.MergeAutomaticCitations(ctx, citingID, []types.PaperCitation{referenceA, referenceC})
+	if err != nil {
+		t.Fatalf("second merge: %v", err)
+	}
+	if len(second) != 2 {
+		t.Fatalf("second merge rows = %#v, want A and C", second)
+	}
+	byRaw = citationsByRawForTest(second)
+	if _, exists := byRaw["Reference B"]; exists {
+		t.Fatalf("removed reference B is still present: %#v", second)
+	}
+	gotA := byRaw["Reference A"]
+	if gotA.ReferenceID != idA {
+		t.Fatalf("reference A id = %s, want stable %s", gotA.ReferenceID, idA)
+	}
+	if gotA.Title != "Reference A revised" {
+		t.Fatalf("reference A title = %q, want updated title", gotA.Title)
+	}
+	if gotA.ResolutionStatus != types.DocumentStageQueued || gotA.ResolutionGeneration != queued.ResolutionGeneration {
+		t.Fatalf("reference A resolution = %s/%d, want preserved queued/%d",
+			gotA.ResolutionStatus, gotA.ResolutionGeneration, queued.ResolutionGeneration)
+	}
+	if _, exists := byRaw["Reference C"]; !exists {
+		t.Fatalf("new reference C missing: %#v", second)
+	}
+
+	manual, err := repo.AddCitation(ctx, types.PaperCitation{
+		PaperReference: types.PaperReference{
+			ReferenceID:      types.PaperReferenceIDForRaw(citingID, "Manual reference"),
+			CitingDocumentID: citingID,
+			RawReference:     "Manual reference", Title: "Manual title",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create manual citation: %v", err)
+	}
+	if _, err := repo.MergeAutomaticCitations(ctx, citingID, []types.PaperCitation{
+		testResolvedCitation(citingID, "Manual reference", uuid.Nil),
+	}); err != nil {
+		t.Fatalf("merge over manual citation: %v", err)
+	}
+	all, err := repo.ListByCitingDocumentID(ctx, citingID)
+	if err != nil {
+		t.Fatalf("reload citations: %v", err)
+	}
+	var stored types.PaperCitation
+	for _, candidate := range all {
+		if candidate.ReferenceID == manual.ReferenceID {
+			stored = candidate
+			break
+		}
+	}
+	if stored.Origin != types.PaperCitationOriginManual || stored.Title != "Manual title" {
+		t.Fatalf("manual citation was overwritten: %#v", stored)
+	}
+}
+
+func citationsByRawForTest(citations []types.PaperCitation) map[string]types.PaperCitation {
+	result := make(map[string]types.PaperCitation, len(citations))
+	for _, citation := range citations {
+		result[citation.RawReference] = citation
+	}
+	return result
+}
+
 func TestPaperCitationResolutionStateMachinePostgres(t *testing.T) {
 	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
