@@ -141,6 +141,8 @@ func ServerPaperMetadata(
 		router.PUT("/api/paper/:documentID/citations", citationHandler.Replace)
 		router.POST("/api/paper/:documentID/citations/resolve", citationHandler.Resolve)
 		router.DELETE("/api/paper/:documentID/citations/:referenceID", citationHandler.Remove)
+		router.PATCH("/api/references/:referenceID", citationHandler.UpdateReferenceSource)
+		router.DELETE("/api/references/:referenceID", citationHandler.DeleteReference)
 		router.POST("/api/references/:referenceID/resolve", citationHandler.ResolveReference)
 		router.POST("/api/references/:referenceID/rematch", citationHandler.RematchReference)
 		router.GET("/api/paper/:documentID/cited-by", citationHandler.ListCitedBy)

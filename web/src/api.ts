@@ -66,6 +66,21 @@ export type PaperReference = {
 // exposes the reference fields directly instead of nesting a second object.
 export type PaperCitation = PaperReference;
 
+// Partial manual edit of a reference row. Omitted fields stay unchanged; an
+// empty string (or empty authors list) clears the field. `publishedAt` accepts
+// YYYY-MM-DD or RFC3339 and an empty string clears it.
+export type PaperReferenceSourceUpdate = {
+  doi?: string;
+  title?: string;
+  authors?: PaperAuthor[];
+  venue?: string;
+  publishedAt?: string;
+  volume?: string;
+  issue?: string;
+  pages?: string;
+  sourceUrl?: string;
+};
+
 export type ProcessingSpanStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 export type ProcessingSpan = {
   id: string;
@@ -265,6 +280,23 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ resolvedDocumentId: resolvedDocumentID }),
+    },
+  ),
+  deletePaperReference: (referenceID: string): Promise<void> => requestFrom<void>(
+    referenceBaseUrl,
+    `/${encodeURIComponent(referenceID)}`,
+    { method: 'DELETE' },
+  ),
+  updatePaperReferenceSource: (
+    referenceID: string,
+    update: PaperReferenceSourceUpdate,
+  ): Promise<{ reference: PaperReference }> => requestFrom<{ reference: PaperReference }>(
+    referenceBaseUrl,
+    `/${encodeURIComponent(referenceID)}`,
+    {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(update),
     },
   ),
   rematchPaperReference: (referenceID: string): Promise<{ reference: PaperReference; linked: boolean }> => requestFrom<{ reference: PaperReference; linked: boolean }>(

@@ -1,0 +1,184 @@
+/* Shared reference-source editor. It is rendered inside either the dark
+   reading library or the light console, so every colour resolves from the
+   host's theme tokens first and falls back to the other surface. */
+.reference-editor-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(5 15 25 / 58%);
+}
+
+.reference-editor-dialog {
+  width: min(680px, 100%);
+  max-height: calc(100dvh - 48px);
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid var(--pl-border-2, var(--ui-border-2, #ccd5df));
+  border-radius: 12px;
+  background: var(--pl-surface, var(--ui-surface, #ffffff));
+  color: var(--pl-text, var(--ui-text, #10202c));
+  box-shadow: 0 24px 70px rgb(0 0 0 / 45%);
+  scrollbar-width: thin;
+}
+
+.reference-editor-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--pl-border, var(--ui-border, #dce3ea));
+}
+
+.reference-editor-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.reference-editor-dialog .eyebrow {
+  margin: 0 0 4px;
+  color: var(--pl-faint, var(--ui-faint, #708090));
+}
+
+.reference-editor-raw {
+  margin-top: 14px;
+  padding: 10px 12px;
+  max-height: 120px;
+  overflow: auto;
+  border: 1px solid var(--pl-border, var(--ui-border, #dce3ea));
+  border-radius: 8px;
+  background: var(--pl-surface-2, var(--ui-surface-2, #f3f7fa));
+}
+
+.reference-editor-raw h3 {
+  margin: 0 0 5px;
+  color: var(--pl-faint, var(--ui-faint, #708090));
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.reference-editor-raw p {
+  margin: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.reference-editor-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.reference-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.reference-editor-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.reference-editor-field.full {
+  grid-column: 1 / -1;
+}
+
+.reference-editor-field label {
+  color: var(--pl-faint, var(--ui-faint, #708090));
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.paper-library .reference-editor-dialog input,
+.document-console .reference-editor-dialog input,
+.paper-library .reference-editor-dialog textarea,
+.document-console .reference-editor-dialog textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--pl-border-2, var(--ui-border-2, #ccd5df));
+  border-radius: 6px;
+  background: var(--pl-surface-2, var(--ui-surface-2, #f3f7fa));
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.paper-library .reference-editor-dialog textarea,
+.document-console .reference-editor-dialog textarea {
+  min-height: 64px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+}
+
+.paper-library .reference-editor-dialog input:focus,
+.document-console .reference-editor-dialog input:focus,
+.paper-library .reference-editor-dialog textarea:focus,
+.document-console .reference-editor-dialog textarea:focus {
+  outline: 3px solid rgb(56 189 248 / 24%);
+  border-color: var(--pl-border-3, var(--ui-accent, #5bb4df));
+}
+
+.reference-editor-hint {
+  margin: 0;
+  color: var(--pl-faint, var(--ui-faint, #708090));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.reference-editor-error {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-danger, #f2c9c5);
+  border-radius: 7px;
+  background: var(--pl-danger-bg, var(--ui-danger-bg, #fef2f2));
+  color: var(--pl-danger, var(--ui-danger, #b42318));
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.reference-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.paper-library .reference-editor-dialog button,
+.document-console .reference-editor-dialog button {
+  padding: 7px 11px;
+  border: 1px solid var(--pl-border-2, var(--ui-border-2, #ccd5df));
+  border-radius: 6px;
+  background: var(--pl-surface-2, var(--ui-surface-2, #f3f7fa));
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.paper-library .reference-editor-dialog button:hover:not(:disabled),
+.document-console .reference-editor-dialog button:hover:not(:disabled) {
+  border-color: var(--pl-border-3, var(--ui-border-3, #8aa6bb));
+}
+
+.paper-library .reference-editor-dialog .primary,
+.document-console .reference-editor-dialog .primary {
+  border-color: var(--pl-border-3, var(--ui-accent, #2e323a));
+  background: var(--pl-surface-3, var(--ui-accent, #2e323a));
+  color: #fff;
+}
+
+@media (max-width: 640px) {
+  .reference-editor-backdrop { padding: 10px; }
+  .reference-editor-dialog { padding: 14px; }
+  .reference-editor-grid { grid-template-columns: 1fr; }
+}

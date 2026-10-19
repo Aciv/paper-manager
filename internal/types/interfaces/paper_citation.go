@@ -14,6 +14,14 @@ import (
 type PaperCitationRepository interface {
 	// GetReference returns one citation row by reference ID or sql.ErrNoRows.
 	GetReference(ctx context.Context, id uuid.UUID) (types.PaperReference, error)
+	// UpdateReferenceSource applies a validated manual source edit. It marks
+	// the row as manually owned; for an unresolved row it also fences any
+	// in-flight resolution and resets it to not_started.
+	UpdateReferenceSource(
+		ctx context.Context,
+		id uuid.UUID,
+		edit types.PaperReferenceSourceEdit,
+	) (types.PaperReference, error)
 	// AddCitation upserts one manual/add path row, returning the persisted row.
 	AddCitation(ctx context.Context, citation types.PaperCitation) (types.PaperCitation, error)
 	// ReplaceCitations atomically replaces all bibliography rows for one

@@ -2,7 +2,9 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"testing"
+	"time"
 
 	"paperMaster/internal/types"
 
@@ -153,6 +155,98 @@ func TestPaperCitationResolutionStateMachinePostgres(t *testing.T) {
 	}
 }
 
+func TestPaperCitationRepositoryUpdateReferenceSourcePostgres(t *testing.T) {
+	db, cleanup := openPostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	documents := NewDocumentRepository(db)
+	repo := NewPaperCitationRepository(db)
+
+	citingID, targetID := uuid.New(), uuid.New()
+	for _, id := range []uuid.UUID{citingID, targetID} {
+		if _, err := documents.Create(ctx, sourceDocumentForCanonicalTest(id, "source.pdf", "edit/"+id.String(), "")); err != nil {
+			t.Fatalf("create document: %v", err)
+		}
+	}
+	saved, err := repo.AddCitation(ctx, testResolvedCitation(citingID, "Editable reference", uuid.Nil))
+	if err != nil {
+		t.Fatalf("seed citation: %v", err)
+	}
+	queued, applied, err := repo.QueueResolution(ctx, saved.ReferenceID)
+	if err != nil || !applied {
+		t.Fatalf("queue = %#v applied=%v err=%v", queued, applied, err)
+	}
+	running, applied, err := repo.StartResolution(ctx, saved.ReferenceID, queued.ResolutionGeneration)
+	if err != nil || !applied {
+		t.Fatalf("start = %#v applied=%v err=%v", running, applied, err)
+	}
+	failed, applied, err := repo.FinishResolution(
+		ctx, saved.ReferenceID, running.ResolutionGeneration, types.DocumentStageFailed,
+		"crossref", "PROVIDER_ERROR", "provider failed", nil, nil,
+	)
+	if err != nil || !applied {
+		t.Fatalf("finish = %#v applied=%v err=%v", failed, applied, err)
+	}
+
+	doi := "10.1000/abc"
+	title := "Corrected title"
+	authors := []types.PaperAuthor{{Name: "Ada Lovelace", Affiliation: "Analytical Engine Lab"}}
+	venue := "NeurIPS"
+	sourceURL := "https://example.org/paper.pdf"
+	publishedAt := time.Date(2024, 3, 2, 0, 0, 0, 0, time.UTC)
+	updated, err := repo.UpdateReferenceSource(ctx, saved.ReferenceID, types.PaperReferenceSourceEdit{
+		DOI:            &doi,
+		Title:          &title,
+		Authors:        &authors,
+		Venue:          &venue,
+		PublishedAt:    &publishedAt,
+		PublishedAtSet: true,
+		SourceURL:      &sourceURL,
+	})
+	if err != nil {
+		t.Fatalf("UpdateReferenceSource() error = %v", err)
+	}
+	if updated.DOI != doi || updated.Title != title || updated.Venue != venue ||
+		updated.SourceURL != sourceURL || updated.PublishedAt == nil ||
+		!updated.PublishedAt.Equal(publishedAt) || len(updated.Authors) != 1 ||
+		updated.Authors[0].Name != "Ada Lovelace" {
+		t.Fatalf("updated reference = %#v", updated)
+	}
+	if updated.MetadataSource != types.PaperMetadataSourceManual ||
+		updated.ResolutionStatus != types.DocumentStageNotStarted ||
+		updated.ResolutionGeneration != failed.ResolutionGeneration+1 ||
+		updated.ResolutionProvider != "" ||
+		updated.ResolutionErrorCode != nil ||
+		updated.ResolutionErrorMsg != nil {
+		t.Fatalf("manual edit did not fence resolution: %#v", updated)
+	}
+	items, err := repo.ListByCitingDocumentID(ctx, citingID)
+	if err != nil {
+		t.Fatalf("load citation origin: %v", err)
+	}
+	if len(items) != 1 || items[0].EffectiveOrigin() != types.PaperCitationOriginManual {
+		t.Fatalf("manual edit did not claim the row: %#v", items)
+	}
+
+	linked, applied, err := repo.LinkResolvedDocument(ctx, saved.ReferenceID, targetID, false)
+	if err != nil || !applied {
+		t.Fatalf("link = %#v applied=%v err=%v", linked, applied, err)
+	}
+	linkedTitle := "Linked corrected title"
+	editedLinked, err := repo.UpdateReferenceSource(ctx, saved.ReferenceID, types.PaperReferenceSourceEdit{
+		Title: &linkedTitle,
+	})
+	if err != nil {
+		t.Fatalf("linked UpdateReferenceSource() error = %v", err)
+	}
+	if editedLinked.Title != linkedTitle ||
+		editedLinked.CitedDocumentID == nil || *editedLinked.CitedDocumentID != targetID ||
+		editedLinked.ResolutionStatus != linked.ResolutionStatus ||
+		editedLinked.ResolutionGeneration != linked.ResolutionGeneration {
+		t.Fatalf("linked edit changed resolution state: %#v", editedLinked)
+	}
+}
+
 func TestPaperCitationDownloadStatePostgres(t *testing.T) {
 	db, cleanup := openPostgresTestDatabase(t)
 	defer cleanup()
@@ -176,6 +270,13 @@ func TestPaperCitationDownloadStatePostgres(t *testing.T) {
 	if err != nil || !applied || queued.DownloadAttempt == nil || *queued.DownloadAttempt != first ||
 		queued.DownloadRequestedAt == nil || queued.DownloadErrorMessage != nil {
 		t.Fatalf("first queue = %#v, applied=%v, err=%v", queued, applied, err)
+	}
+	if _, applied, err := repo.QueueDownload(ctx, saved.ReferenceID, uuid.New()); !errors.Is(err, types.ErrReferenceDownloadInProgress) || applied {
+		t.Fatalf("duplicate queue applied=%v err=%v, want ErrReferenceDownloadInProgress", applied, err)
+	}
+	stillPending, err := repo.GetReference(ctx, saved.ReferenceID)
+	if err != nil || stillPending.DownloadAttempt == nil || *stillPending.DownloadAttempt != first {
+		t.Fatalf("duplicate queue replaced the attempt: %#v err=%v", stillPending, err)
 	}
 	stale := uuid.New()
 	if applied, err := repo.FailDownload(ctx, saved.ReferenceID, stale, "TASK_FAILED", "stale failure"); err != nil || applied {

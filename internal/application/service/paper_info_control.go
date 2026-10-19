@@ -91,49 +91,6 @@ func (s *paperInfoService) RetryCatalogResolution(
 	return err
 }
 
-// RetryReferenceResolution retries only the bibliography dispatcher for a
-// source document. The dispatcher reloads citations and submits reference jobs
-// to the in-process catalog dispatcher; it does not repeat extraction or
-// source-paper lookup.
-func (s *paperInfoService) RetryReferenceResolution(ctx context.Context, documentID string) error {
-	document, _, err := s.loadPaperStatusSource(ctx, documentID)
-	if err != nil {
-		return err
-	}
-	if document.SourceState == types.DocumentSourceDeleting || document.SourceState == types.DocumentSourceMerged {
-		return ErrPaperInfoDeleting
-	}
-	if document.SourceState != types.DocumentSourceAvailable {
-		return ErrPaperInfoCatalogUnavailable
-	}
-	stage, err := s.documents.GetStage(ctx, document.ID, types.DocumentStageReferenceLookup)
-	if err != nil {
-		return err
-	}
-	if stage.Status.Active() {
-		return ErrPaperInfoAttemptActive
-	}
-	_, err = s.documents.GetMarkdown(ctx, document.ID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ErrPaperInfoCatalogUnavailable
-	}
-	if err != nil {
-		return err
-	}
-	stage, applied, err := s.documents.QueueStageNewGeneration(ctx, document.ID, types.DocumentStageReferenceLookup)
-	if err != nil {
-		return err
-	}
-	if !applied {
-		return ErrPaperInfoAttemptActive
-	}
-	if err := s.enqueueReferenceStage(ctx, document.ID, "", stage.Generation); err != nil {
-		return err
-	}
-	logger.Info(ctx, "paper reference resolution retry queued", "document_id", document.ID)
-	return nil
-}
-
 func (s *paperInfoService) enqueueSourceLookupIfNeeded(ctx context.Context, documentID uuid.UUID, requestID string) error {
 	state, err := s.documents.GetStage(ctx, documentID, types.DocumentStageSourceLookup)
 	if err != nil {
@@ -149,23 +106,6 @@ func (s *paperInfoService) enqueueSourceLookupIfNeeded(ctx context.Context, docu
 		return nil
 	}
 	return s.enqueueSourceStage(ctx, documentID, requestID, state.Generation)
-}
-
-func (s *paperInfoService) enqueueReferenceLookupIfNeeded(ctx context.Context, documentID uuid.UUID, requestID string) error {
-	state, err := s.documents.GetStage(ctx, documentID, types.DocumentStageReferenceLookup)
-	if err != nil {
-		return err
-	}
-	if state.Status == types.DocumentStageNotStarted {
-		state, _, err = s.documents.QueueStageNewGeneration(ctx, documentID, types.DocumentStageReferenceLookup)
-		if err != nil {
-			return err
-		}
-	}
-	if state.Status != types.DocumentStageQueued {
-		return nil
-	}
-	return s.enqueueReferenceStage(ctx, documentID, requestID, state.Generation)
 }
 
 func (s *paperInfoService) enqueueMetadataStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
@@ -196,22 +136,6 @@ func (s *paperInfoService) enqueueSourceStage(ctx context.Context, documentID uu
 	if err != nil {
 		_, _, _ = s.documents.FinishStage(context.WithoutCancel(ctx), documentID,
 			types.DocumentStageSourceLookup, generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
-	}
-	return err
-}
-
-func (s *paperInfoService) enqueueReferenceStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
-	payload := types.PaperReferenceQueryEnqueuePayload{
-		RequestID: requestID, DocumentID: documentID.String(),
-		Stage: types.DocumentStageReferenceLookup, Generation: generation,
-	}
-	task, options, err := NewPaperReferenceQueryEnqueueTask(payload, s.cfg.PaperCatalogTaskTimeout, s.cfg.PaperCatalogTaskMaxRetry)
-	if err == nil {
-		err = enqueueDocumentStageTask(ctx, s.tasks, task, options, documentID.String())
-	}
-	if err != nil {
-		_, _, _ = s.documents.FinishStage(context.WithoutCancel(ctx), documentID,
-			types.DocumentStageReferenceLookup, generation, types.DocumentStageFailed, types.ProcessingErrorTaskFailed, "processing task could not be queued")
 	}
 	return err
 }

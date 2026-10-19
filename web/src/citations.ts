@@ -54,6 +54,27 @@ export function citationMatchesFilter(citation: PaperCitation, filter: CitationF
   return !citation.citedDocumentId && citation.resolutionStatus !== 'failed';
 }
 
+// Keep this window in sync with types.ReferenceDownloadInFlightWindow. A
+// download whose worker vanished without writing a terminal error must not
+// leave the button disabled forever.
+export const REFERENCE_DOWNLOAD_IN_FLIGHT_MS = 15 * 60 * 1000;
+
+export function citationDownloadInFlight(citation: PaperCitation, now = Date.now()) {
+  if (citation.citedDocumentId || !citation.downloadRequestedAt) return false;
+  if (citation.downloadErrorCode || citation.downloadErrorMessage) return false;
+  const requestedAt = Date.parse(citation.downloadRequestedAt);
+  if (!Number.isFinite(requestedAt)) return false;
+  return now - requestedAt < REFERENCE_DOWNLOAD_IN_FLIGHT_MS;
+}
+
+export function citationDownloadErrorMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  if (/already in progress/i.test(message)) {
+    return '该引用的 PDF 已有一个下载任务正在进行中。';
+  }
+  return message ? `引用 PDF 下载未提交：${message}` : '引用 PDF 下载未提交。';
+}
+
 export function citationFilterCounts(citations: PaperCitation[]) {
   return citations.reduce(
     (counts, citation) => {

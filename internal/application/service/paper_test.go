@@ -634,6 +634,56 @@ func (r *paperCitationRepoStub) GetReference(_ context.Context, id uuid.UUID) (t
 	return citation.PaperReference, nil
 }
 
+func (r *paperCitationRepoStub) UpdateReferenceSource(
+	_ context.Context, id uuid.UUID, edit types.PaperReferenceSourceEdit,
+) (types.PaperReference, error) {
+	citation, ok := r.items[id]
+	if !ok {
+		return types.PaperReference{}, sql.ErrNoRows
+	}
+	if edit.DOI != nil {
+		citation.DOI = *edit.DOI
+	}
+	if edit.Title != nil {
+		citation.Title = *edit.Title
+	}
+	if edit.Authors != nil {
+		citation.Authors = *edit.Authors
+		if citation.Authors == nil {
+			citation.Authors = []types.PaperAuthor{}
+		}
+	}
+	if edit.Venue != nil {
+		citation.Venue = *edit.Venue
+	}
+	if edit.PublishedAtSet {
+		citation.PublishedAt = edit.PublishedAt
+	}
+	if edit.Volume != nil {
+		citation.Volume = *edit.Volume
+	}
+	if edit.Issue != nil {
+		citation.Issue = *edit.Issue
+	}
+	if edit.Pages != nil {
+		citation.Pages = *edit.Pages
+	}
+	if edit.SourceURL != nil {
+		citation.SourceURL = *edit.SourceURL
+	}
+	citation.MetadataSource = types.PaperMetadataSourceManual
+	citation.Origin = types.PaperCitationOriginManual
+	if citation.CitedDocumentID == nil {
+		citation.ResolutionGeneration++
+		citation.ResolutionStatus = types.DocumentStageNotStarted
+		citation.ResolutionProvider = ""
+		citation.ResolutionErrorCode = nil
+		citation.ResolutionErrorMsg = nil
+	}
+	r.items[id] = citation
+	return citation.PaperReference, nil
+}
+
 func (r *paperCitationRepoStub) QueueResolution(_ context.Context, id uuid.UUID) (types.PaperReference, bool, error) {
 	citation, ok := r.items[id]
 	if !ok {
@@ -721,6 +771,11 @@ func (r *paperCitationRepoStub) QueueDownload(
 	}
 	if citation.CitedDocumentID != nil {
 		return citation.PaperReference, false, nil
+	}
+	failed := citation.DownloadErrorCode != nil || citation.DownloadErrorMessage != nil
+	if citation.DownloadRequestedAt != nil && !failed &&
+		time.Since(*citation.DownloadRequestedAt) < types.ReferenceDownloadInFlightWindow {
+		return citation.PaperReference, false, types.ErrReferenceDownloadInProgress
 	}
 	now := time.Now().UTC()
 	citation.DownloadAttempt = &attempt

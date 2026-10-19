@@ -124,6 +124,8 @@ func (h *DocumentHandler) DownloadReferencePDF(c *gin.Context) {
 			h.writeError(c, apperrors.NewBadRequestError("reference has no downloadable source"), err)
 		case errors.Is(err, appservice.ErrReferenceAlreadyResolved):
 			h.writeError(c, apperrors.NewConflictError("reference already has a source document"), err)
+		case errors.Is(err, types.ErrReferenceDownloadInProgress):
+			h.writeError(c, apperrors.NewConflictError("reference download is already in progress"), err)
 		case strings.Contains(err.Error(), "invalid reference id"):
 			h.writeError(c, apperrors.NewBadRequestError("invalid reference id"), err)
 		default:

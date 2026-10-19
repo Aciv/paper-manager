@@ -4,6 +4,8 @@ import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResu
 import {
   CITATION_STATUS_LABELS,
   citationBadge,
+  citationDownloadErrorMessage,
+  citationDownloadInFlight,
   citationFilterCounts,
   citationLabel,
   citationMatchesFilter,
@@ -11,6 +13,7 @@ import {
   type CitationFilter,
   type CitationGroup,
 } from './citations';
+import { ReferenceEditorDialog } from './ReferenceEditorDialog';
 import './PaperInfo.css';
 import '@fontsource-variable/manrope';
 import '@fontsource-variable/noto-sans-sc';
@@ -154,6 +157,7 @@ function App() {
   const [citationGroup, setCitationGroup] = useState<CitationGroup>('outgoing');
   const [citationFilter, setCitationFilter] = useState<CitationFilter>('all');
   const [citationActionBusy, setCitationActionBusy] = useState('');
+  const [editingCitation, setEditingCitation] = useState<PaperCitation>();
   // Titles/authors for the papers on the other side of a citation edge: the
   // cited document for outgoing rows, the citing document for incoming rows.
   const [citationContext, setCitationContext] = useState<Record<string, { document: Document; metadata?: PaperMetadata }>>({});
@@ -301,6 +305,7 @@ function App() {
     setCitationContext({});
     setCitationGroup('outgoing');
     setCitationFilter('all');
+    setEditingCitation(undefined);
     setCitationsLoading(Boolean(selected));
     processingPollDelay.current = 2500;
     if (!selected) {
@@ -346,6 +351,25 @@ function App() {
       if (citationContextRequest.current === contextRequestID) setCitationsLoading(false);
     });
   }, [selected?.id]);
+
+  // Reference PDF acquisition is asynchronous. Poll only while a request is
+  // pending so the card updates to 库内 or exposes the terminal failure.
+  useEffect(() => {
+    if (!selected?.id) return;
+    if (!citations.some((citation) => citationDownloadInFlight(citation))) return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void api.listPaperCitations(selected.id)
+        .then(({ items: refreshed }) => { if (active) setCitations(refreshed); })
+        .catch(() => {
+          // Keep the current list; the next tick retries while still in flight.
+        });
+    }, 8000);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [citations, selected?.id]);
 
   useEffect(() => {
     const hasActive = processing?.stageStates.some((stage) => stage.status === 'queued' || stage.status === 'running');
@@ -706,7 +730,7 @@ function App() {
         setCitations(items);
       }
     } catch (error) {
-      setMessage(error instanceof Error ? `引用 PDF 下载未提交：${error.message}` : '引用 PDF 下载未提交。');
+      setMessage(citationDownloadErrorMessage(error));
     } finally {
       setCitationActionBusy('');
     }
@@ -723,6 +747,21 @@ function App() {
       }
     } catch (error) {
       setMessage(error instanceof Error ? `重新匹配引用失败：${error.message}` : '重新匹配引用失败。');
+    } finally {
+      setCitationActionBusy('');
+    }
+  }
+
+  async function deleteCitation(citation: PaperCitation) {
+    const label = citation.title?.trim() || citationLabel(citation, 0);
+    if (!window.confirm(`删除这条引用？\n\n${label}\n\n不会删除任何已关联的论文文件。`)) return;
+    setCitationActionBusy(citation.referenceId);
+    try {
+      await api.deletePaperReference(citation.referenceId);
+      setCitations((current) => current.filter((item) => item.referenceId !== citation.referenceId));
+      setMessage('引用已删除。');
+    } catch (error) {
+      setMessage(error instanceof Error ? `删除引用失败：${error.message}` : '删除引用失败。');
     } finally {
       setCitationActionBusy('');
     }
@@ -1135,12 +1174,21 @@ function App() {
 						const linkedDocumentID = citation.citedDocumentId;
 						const linked = linkedDocumentID ? citationContext[linkedDocumentID] : undefined;
 						const linkedMetadata = linked?.metadata;
-						const title = linkedMetadata?.title?.trim() || citation.title?.trim() || citationLabel(citation, index);
-						const authors = linkedMetadata?.authors?.length ? linkedMetadata.authors : citation.authors;
-						const meta = citationMetaLine(authors, linkedMetadata?.venue || citation.venue, linkedMetadata?.publishedAt || citation.publishedAt);
-						const doi = linked?.document.doi || citation.doi;
+						const manual = citation.metadataSource === 'manual';
+						const title = (manual ? citation.title?.trim() : '') ||
+						  linkedMetadata?.title?.trim() || citation.title?.trim() || citationLabel(citation, index);
+						const authors = manual
+						  ? citation.authors
+						  : (linkedMetadata?.authors?.length ? linkedMetadata.authors : citation.authors);
+						const meta = citationMetaLine(
+						  authors,
+						  manual ? citation.venue : (linkedMetadata?.venue || citation.venue),
+						  manual ? citation.publishedAt : (linkedMetadata?.publishedAt || citation.publishedAt),
+						);
+						const doi = manual ? citation.doi : (citation.doi || linked?.document.doi);
 						const badge = citationBadge(citation);
 						const actionBusy = citationActionBusy === citation.referenceId;
+						const downloadInFlight = citationDownloadInFlight(citation);
 						return <li className="citation-card" key={`${citation.citingDocumentId}-${citation.referenceId}`}>
 						  <button className="citation-card-main" type="button"
 							onClick={() => openCitationSourceInfo(linkedDocumentID, citation.rawReference || '', citation)}>
@@ -1155,13 +1203,17 @@ function App() {
 							  {linkedDocumentID
 								? <button type="button" onClick={() => void openCitationDocument(linkedDocumentID)}>打开论文 →</button>
 								: <>
-								  <button type="button" disabled={actionBusy || !citation.sourceUrl}
-									title={citation.sourceUrl ? '提交该引用的 PDF 下载' : '该引用没有可用的来源链接'}
+								  <button type="button" disabled={actionBusy || downloadInFlight || !citation.sourceUrl}
+									title={downloadInFlight ? '该引用的 PDF 正在下载'
+									  : citation.sourceUrl ? '提交该引用的 PDF 下载' : '该引用没有可用的来源链接'}
 									onClick={() => void downloadReferencePDF(citation.referenceId)}>
-									{citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}
+									{downloadInFlight ? '下载中…' : citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}
 								  </button>
 								  <button type="button" disabled={actionBusy} onClick={() => void rematchReference(citation.referenceId)}>重新匹配</button>
 								</>}
+							  <button type="button" disabled={actionBusy} onClick={() => setEditingCitation(citation)}>编辑</button>
+							  <button className="citation-delete" type="button" disabled={actionBusy}
+								onClick={() => void deleteCitation(citation)}>删除</button>
 							</div>
 						  </div>
 						</li>;
@@ -1230,6 +1282,17 @@ function App() {
     <Suspense fallback={null}>
       {citationProgressOpen && <CitationProgressDialog open onClose={() => setCitationProgressOpen(false)} />}
     </Suspense>
+    {editingCitation && <ReferenceEditorDialog
+      reference={editingCitation}
+      onClose={() => setEditingCitation(undefined)}
+      onSaved={(updated) => {
+        setCitations((current) => current.map((item) => (
+          item.referenceId === updated.referenceId ? { ...item, ...updated } : item
+        )));
+        setEditingCitation(undefined);
+        setMessage('引用信息已更新。');
+      }}
+    />}
   </main>;
 }
 

@@ -53,6 +53,16 @@ type PaperService interface {
 	) ([]types.PaperCitation, error)
 	// RemoveCitation removes one outgoing edge by reference ID.
 	RemoveCitation(ctx context.Context, citingDocumentID, referenceID string) error
+	// DeleteReference removes one reference row by reference ID. It resolves
+	// the owning citing document internally; no document ID is required.
+	DeleteReference(ctx context.Context, referenceID string) error
+	// UpdateReferenceSource applies a manual edit to one reference's
+	// bibliographic fields. Manual ownership fences stale resolution results.
+	UpdateReferenceSource(
+		ctx context.Context,
+		referenceID string,
+		update types.PaperReferenceSourceUpdate,
+	) (*types.PaperReference, error)
 	// ListCitations returns references used by documentID.
 	ListCitations(ctx context.Context, documentID string) ([]types.PaperCitation, error)
 	// ListCitationsPage provides bounded bibliography traversal for background

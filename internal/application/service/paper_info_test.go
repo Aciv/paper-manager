@@ -475,6 +475,11 @@ func (s *paperInfoPaperServiceStub) BeginReferenceDownload(
 	if reference.CitedDocumentID != nil {
 		return &reference, ErrReferenceAlreadyResolved
 	}
+	failed := reference.DownloadErrorCode != nil || reference.DownloadErrorMessage != nil
+	if reference.DownloadRequestedAt != nil && !failed &&
+		time.Since(*reference.DownloadRequestedAt) < types.ReferenceDownloadInFlightWindow {
+		return &reference, types.ErrReferenceDownloadInProgress
+	}
 	now := time.Now().UTC()
 	reference.DownloadAttempt = &attempt
 	reference.DownloadRequestedAt = &now

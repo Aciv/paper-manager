@@ -265,6 +265,28 @@ func TestRequestReferencePDFDownloadQueuesOnlyExplicitTarget(t *testing.T) {
 	}
 }
 
+func TestRequestReferencePDFDownloadRejectsDuplicateInFlightRequest(t *testing.T) {
+	referenceID := uuid.New()
+	repo := newPaperDocumentRepoStub()
+	papers := newPaperInfoPaperServiceStub()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "Downloadable reference",
+		SourceURL:        "https://example.test/paper.pdf",
+		ResolutionStatus: types.DocumentStageNotStarted, ResolutionGeneration: 1,
+	}
+	tasks := &documentTaskEnqueuerStub{}
+	service := &documentService{repo: repo, papers: papers, taskEnqueuer: tasks}
+	if err := service.RequestReferencePDFDownload(context.Background(), referenceID.String()); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	if err := service.RequestReferencePDFDownload(context.Background(), referenceID.String()); !errors.Is(err, types.ErrReferenceDownloadInProgress) {
+		t.Fatalf("duplicate request error = %v, want ErrReferenceDownloadInProgress", err)
+	}
+	if len(tasks.tasks) != 1 {
+		t.Fatalf("queued tasks = %d, want one", len(tasks.tasks))
+	}
+}
+
 func TestImportRemoteDocumentRecordsTerminalDownloadFailure(t *testing.T) {
 	referenceID := uuid.New()
 	attempt := uuid.New()

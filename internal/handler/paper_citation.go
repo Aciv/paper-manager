@@ -131,6 +131,53 @@ func (h *PaperCitationHandler) ResolveReference(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"reference": reference})
 }
 
+// DeleteReference removes one bibliography row by reference ID. Unlike the
+// document-scoped Remove route, a client that only holds the citation row can
+// delete it directly.
+func (h *PaperCitationHandler) DeleteReference(c *gin.Context) {
+	referenceID := strings.TrimSpace(c.Param("referenceID"))
+	if _, err := uuid.Parse(referenceID); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid reference id"), err)
+		return
+	}
+	if err := h.papers.DeleteReference(c.Request.Context(), referenceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			h.writeError(c, apperrors.NewNotFoundError("reference not found"), err)
+			return
+		}
+		h.handleServiceError(c, err)
+		return
+	}
+	logger.Info(c.Request.Context(), "paper reference deleted", "reference_id", referenceID)
+	c.Status(http.StatusNoContent)
+}
+
+// UpdateReferenceSource applies a manual edit to one reference's bibliographic
+// fields. Resolution/download state and raw extraction text are not writable.
+func (h *PaperCitationHandler) UpdateReferenceSource(c *gin.Context) {
+	referenceID := strings.TrimSpace(c.Param("referenceID"))
+	if _, err := uuid.Parse(referenceID); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid reference id"), err)
+		return
+	}
+	var input types.PaperReferenceSourceUpdate
+	if err := c.ShouldBindJSON(&input); err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
+		return
+	}
+	reference, err := h.papers.UpdateReferenceSource(c.Request.Context(), referenceID, input)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			h.writeError(c, apperrors.NewNotFoundError("reference not found"), err)
+			return
+		}
+		h.handleServiceError(c, err)
+		return
+	}
+	logger.Info(c.Request.Context(), "paper reference source updated", "reference_id", referenceID)
+	c.JSON(http.StatusOK, gin.H{"reference": reference})
+}
+
 // RematchReference retries local DOI/title matching for one reference against
 // the current library. It never calls an external provider.
 func (h *PaperCitationHandler) RematchReference(c *gin.Context) {

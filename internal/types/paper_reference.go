@@ -13,6 +13,16 @@ import (
 // ErrInvalidPaperReference indicates malformed reference identity or state.
 var ErrInvalidPaperReference = errors.New("invalid paper reference")
 
+// ErrReferenceDownloadInProgress rejects a duplicate explicit download while
+// the previous request is still pending. The window is a safety valve for a
+// request whose worker vanished without recording a terminal failure.
+var ErrReferenceDownloadInProgress = errors.New("reference download already in progress")
+
+// ReferenceDownloadInFlightWindow bounds how long a recorded request without
+// a success link or terminal error is treated as in flight. Keep the frontend
+// helper in web/src/citations.ts in sync.
+const ReferenceDownloadInFlightWindow = 15 * time.Minute
+
 const (
 	// MaxPaperReferenceRawBytes bounds the representative raw reference text.
 	MaxPaperReferenceRawBytes = 64 << 10
@@ -20,6 +30,15 @@ const (
 	// keep durable error state bounded, matching document stage columns.
 	MaxPaperReferenceErrorCodeBytes    = 64
 	MaxPaperReferenceErrorMessageBytes = 512
+	// Manual source edits are user-entered text; bound every field so one PATCH
+	// cannot store an unbounded blob even though the JSON body is capped.
+	MaxPaperReferenceDOIBytes              = 255
+	MaxPaperReferenceTitleBytes            = 4096
+	MaxPaperReferenceAuthors               = 100
+	MaxPaperReferenceAuthorNameBytes       = 512
+	MaxPaperReferenceVenueBytes            = 1024
+	MaxPaperReferencePublicationFieldBytes = 128
+	MaxPaperReferenceSourceURLBytes        = 2048
 )
 
 // PaperReference is one bibliographic reference in a citing paper's
@@ -92,6 +111,45 @@ func (patch *PaperReferenceMetadataPatch) HasChanges() bool {
 		patch.Volume != nil || patch.Issue != nil || patch.Pages != nil ||
 		patch.SourceURL != nil || patch.Authors != nil || patch.PublishedAt != nil ||
 		patch.MetadataSource != nil)
+}
+
+// PaperReferenceSourceUpdate is a partial manual edit of one reference's
+// bibliographic fields. A nil field is unchanged; an empty string (or empty
+// authors list) explicitly clears it. RawReference and all resolution/download
+// state are intentionally not editable here.
+type PaperReferenceSourceUpdate struct {
+	DOI         *string        `json:"doi"`
+	Title       *string        `json:"title"`
+	Authors     *[]PaperAuthor `json:"authors"`
+	Venue       *string        `json:"venue"`
+	PublishedAt *string        `json:"publishedAt"` // YYYY-MM-DD or RFC3339; empty clears
+	Volume      *string        `json:"volume"`
+	Issue       *string        `json:"issue"`
+	Pages       *string        `json:"pages"`
+	SourceURL   *string        `json:"sourceUrl"`
+}
+
+// HasChanges reports whether the request edits at least one field.
+func (update PaperReferenceSourceUpdate) HasChanges() bool {
+	return update.DOI != nil || update.Title != nil || update.Authors != nil ||
+		update.Venue != nil || update.PublishedAt != nil || update.Volume != nil ||
+		update.Issue != nil || update.Pages != nil || update.SourceURL != nil
+}
+
+// PaperReferenceSourceEdit is the validated repository-facing form of a
+// manual source edit. PublishedAtSet separates "field omitted" from "clear the
+// date", which a nil *time.Time cannot express.
+type PaperReferenceSourceEdit struct {
+	DOI            *string
+	Title          *string
+	Authors        *[]PaperAuthor
+	Venue          *string
+	PublishedAt    *time.Time
+	PublishedAtSet bool
+	Volume         *string
+	Issue          *string
+	Pages          *string
+	SourceURL      *string
 }
 
 // PaperReferenceIDForRaw derives the stable identity of one reference inside

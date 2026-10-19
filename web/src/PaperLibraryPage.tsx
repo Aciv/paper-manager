@@ -4,6 +4,8 @@ import { api, Document, DocumentBase, PaperCitation, PaperMetadata, PaperReferen
 import {
   CITATION_STATUS_LABELS,
   citationBadge,
+  citationDownloadErrorMessage,
+  citationDownloadInFlight,
   citationFilterCounts,
   citationLabel,
   citationMatchesFilter,
@@ -12,6 +14,7 @@ import {
   type CitationGroup,
 } from './citations';
 import { LibrarySelect } from './LibrarySelect';
+import { ReferenceEditorDialog } from './ReferenceEditorDialog';
 import { isDocumentRead, localFileReadingKey, subscribeReadingState, transferReadingRecord } from './readingState';
 import './PaperLibraryPage.css';
 
@@ -183,6 +186,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [citationGroup, setCitationGroup] = useState<CitationGroup>('outgoing');
   const [citationFilter, setCitationFilter] = useState<CitationFilter>('all');
   const [citationActionBusy, setCitationActionBusy] = useState('');
+  const [editingCitation, setEditingCitation] = useState<PaperCitation>();
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
   const [citationPaperInfo, setCitationPaperInfo] = useState<PaperMetadata>();
   const [citationReference, setCitationReference] = useState<PaperReference>();
@@ -506,6 +510,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     setCitedBy([]);
     setCitationGroup('outgoing');
     setCitationFilter('all');
+    setEditingCitation(undefined);
     setCitationsLoading(true);
     setCitationPaperInfoOpen(false);
     void Promise.allSettled([
@@ -523,6 +528,26 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     });
     return () => { active = false; };
   }, [selected?.id, localMode]);
+
+  // A queued reference download completes asynchronously. While one is in
+  // flight, refresh the citation list so the card can flip to "库内" or show
+  // the terminal failure without the user reopening the paper.
+  useEffect(() => {
+    if (!selected?.id || localMode) return;
+    if (!citations.some((citation) => citationDownloadInFlight(citation))) return;
+    let active = true;
+    const timer = window.setTimeout(() => {
+      void api.listPaperCitations(selected.id)
+        .then(({ items: refreshed }) => { if (active) setCitations(refreshed); })
+        .catch(() => {
+          // Keep the current list; the next tick retries while still in flight.
+        });
+    }, 8000);
+    return () => {
+      active = false;
+      window.clearTimeout(timer);
+    };
+  }, [citations, selected?.id, localMode]);
 
   function openCitationPaperInfo(documentID: string | undefined, rawReference: string, reference?: PaperReference) {
     const requestID = citationInfoRequest.current + 1;
@@ -581,7 +606,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       setMessage('已提交该引用的 PDF 下载；完成后重新匹配或重新打开这篇论文即可看到结果。');
       await refreshCitations();
     } catch (error) {
-      setMessage(error instanceof Error ? `引用 PDF 下载未提交：${error.message}` : '引用 PDF 下载未提交。');
+      setMessage(citationDownloadErrorMessage(error));
     } finally {
       setCitationActionBusy('');
     }
@@ -595,6 +620,21 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       await refreshCitations();
     } catch (error) {
       setMessage(error instanceof Error ? `重新匹配引用失败：${error.message}` : '重新匹配引用失败。');
+    } finally {
+      setCitationActionBusy('');
+    }
+  }
+
+  async function deleteCitation(citation: PaperCitation) {
+    const label = citation.title?.trim() || citationLabel(citation, 0);
+    if (!window.confirm(`删除这条引用？\n\n${label}\n\n不会删除任何已关联的论文文件。`)) return;
+    setCitationActionBusy(citation.referenceId);
+    try {
+      await api.deletePaperReference(citation.referenceId);
+      setCitations((current) => current.filter((item) => item.referenceId !== citation.referenceId));
+      setMessage('引用已删除。');
+    } catch (error) {
+      setMessage(error instanceof Error ? `删除引用失败：${error.message}` : '删除引用失败。');
     } finally {
       setCitationActionBusy('');
     }
@@ -805,16 +845,21 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
                   const linkedDocumentID = citation.citedDocumentId;
                   const linkedMetadata = linkedDocumentID ? metadataByID[linkedDocumentID] : undefined;
                   const linkedDocument = linkedDocumentID ? documentsByID.get(linkedDocumentID) : undefined;
-                  const title = linkedMetadata?.title?.trim() || citation.title?.trim() || citationLabel(citation, index);
-                  const authors = linkedMetadata?.authors?.length ? linkedMetadata.authors : citation.authors;
+                  const manual = citation.metadataSource === 'manual';
+                  const title = (manual ? citation.title?.trim() : '') ||
+                    linkedMetadata?.title?.trim() || citation.title?.trim() || citationLabel(citation, index);
+                  const authors = manual
+                    ? citation.authors
+                    : (linkedMetadata?.authors?.length ? linkedMetadata.authors : citation.authors);
                   const meta = citationMetaLine(
                     authors,
-                    linkedMetadata?.venue || citation.venue,
-                    linkedMetadata?.publishedAt || citation.publishedAt,
+                    manual ? citation.venue : (linkedMetadata?.venue || citation.venue),
+                    manual ? citation.publishedAt : (linkedMetadata?.publishedAt || citation.publishedAt),
                   );
-                  const doi = linkedDocument?.doi || citation.doi;
+                  const doi = manual ? citation.doi : (citation.doi || linkedDocument?.doi);
                   const badge = citationBadge(citation);
                   const actionBusy = citationActionBusy === citation.referenceId;
+                  const downloadInFlight = citationDownloadInFlight(citation);
                   return <li className="library-citation-card" key={`${citation.citingDocumentId}-${citation.referenceId}`}>
                     <button className="library-citation-card-main" type="button"
                       onClick={() => openCitationPaperInfo(linkedDocumentID, citation.rawReference || '', citation)}>
@@ -829,13 +874,17 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
                         {linkedDocumentID
                           ? <button type="button" onClick={() => void openCitationDocument(linkedDocumentID)}>打开论文 →</button>
                           : <>
-                            <button type="button" disabled={actionBusy || !citation.sourceUrl}
-                              title={citation.sourceUrl ? '提交该引用的 PDF 下载' : '该引用没有可用的来源链接'}
+                            <button type="button" disabled={actionBusy || downloadInFlight || !citation.sourceUrl}
+                              title={downloadInFlight ? '该引用的 PDF 正在下载'
+                                : citation.sourceUrl ? '提交该引用的 PDF 下载' : '该引用没有可用的来源链接'}
                               onClick={() => void downloadCitationPDF(citation)}>
-                              {citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}
+                              {downloadInFlight ? '下载中…' : citation.downloadErrorMessage ? '重试下载' : '下载 PDF'}
                             </button>
                             <button type="button" disabled={actionBusy} onClick={() => void rematchCitation(citation)}>重新匹配</button>
                           </>}
+                        <button type="button" disabled={actionBusy} onClick={() => setEditingCitation(citation)}>编辑</button>
+                        <button className="citation-delete" type="button" disabled={actionBusy}
+                          onClick={() => void deleteCitation(citation)}>删除</button>
                       </div>
                     </div>
                   </li>;
@@ -931,5 +980,16 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
         </dl>}
       </section>
     </div>}
+    {editingCitation && <ReferenceEditorDialog
+      reference={editingCitation}
+      onClose={() => setEditingCitation(undefined)}
+      onSaved={(updated) => {
+        setCitations((current) => current.map((item) => (
+          item.referenceId === updated.referenceId ? { ...item, ...updated } : item
+        )));
+        setEditingCitation(undefined);
+        setMessage('引用信息已更新。');
+      }}
+    />}
   </main>;
 }

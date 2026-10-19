@@ -299,6 +299,8 @@
 .library-citation-badge.badge-failed { border-color: #5a2a2e; background: var(--pl-danger-bg); color: var(--pl-danger); }
 .library-citation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
 .paper-library .library-citation-actions button { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+.paper-library .library-citation-actions .citation-delete { color: var(--pl-danger); }
+.paper-library .library-citation-actions .citation-delete:hover:not(:disabled) { border-color: #7a3a3e; background: var(--pl-danger-bg); }
 
 /* Citation detail dialog */
 .citation-detail-backdrop { position: fixed; z-index: 30; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(0 0 0 / 62%); }
