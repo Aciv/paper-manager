@@ -676,7 +676,7 @@ func extractionCitationInputs(
 	}
 	inputs := make([]types.PaperCitationInput, 0, len(references))
 	seen := make(map[string]struct{}, len(references))
-	for _, rawReference := range references {
+	for bibliographyOrder, rawReference := range references {
 		rawReference = strings.TrimSpace(rawReference)
 		key := compactPaperText(rawReference)
 		if rawReference == "" || key == "" {
@@ -686,7 +686,8 @@ func extractionCitationInputs(
 			continue
 		}
 		seen[key] = struct{}{}
-		input := types.PaperCitationInput{RawReference: rawReference}
+		order := bibliographyOrder
+		input := types.PaperCitationInput{RawReference: rawReference, BibliographyOrder: &order}
 		if candidate, exists := candidateByReference[key]; exists {
 			candidate.RawReference = rawReference
 			input.Candidate = &candidate

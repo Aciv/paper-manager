@@ -109,7 +109,7 @@ func (r *paperCitationRepository) MergeAutomaticCitations(
 		existing := make([]types.PaperCitation, 0)
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 			Where("citing_document_id = ?", citingDocumentID).
-			Order("created_at ASC, id").
+			Order("bibliography_order ASC NULLS LAST, created_at ASC, id ASC").
 			Find(&existing).Error; err != nil {
 			return err
 		}
@@ -160,7 +160,7 @@ func (r *paperCitationRepository) MergeAutomaticCitations(
 			// Leaving it out of the conflict update preserves a concurrently
 			// started reference download.
 			updates := clause.AssignmentColumns([]string{
-				"raw_reference", "doi", "title", "authors", "venue", "published_at",
+				"raw_reference", "bibliography_order", "doi", "title", "authors", "venue", "published_at",
 				"volume", "issue", "pages", "source_url", "metadata_source",
 				"resolution_status", "resolution_generation", "resolution_provider",
 				"resolution_error_code", "resolution_error_message", "resolution_updated_at",
@@ -186,7 +186,7 @@ func (r *paperCitationRepository) MergeAutomaticCitations(
 		}
 		items = make([]types.PaperCitation, 0, len(existing)+len(toUpsert))
 		if err := tx.Where("citing_document_id = ?", citingDocumentID).
-			Order("created_at ASC, id").
+			Order("bibliography_order ASC NULLS LAST, created_at ASC, id ASC").
 			Find(&items).Error; err != nil {
 			return err
 		}
@@ -273,7 +273,7 @@ func (r *paperCitationRepository) ListByCitingDocumentID(
 	citations := make([]types.PaperCitation, 0)
 	err := r.db.WithContext(ctx).
 		Where("citing_document_id = ?", citingDocumentID).
-		Order("created_at DESC, id").
+		Order("bibliography_order ASC NULLS LAST, created_at ASC, id ASC").
 		Find(&citations).Error
 	if err != nil {
 		logger.Error(ctx, "list cited references failed",
@@ -301,7 +301,7 @@ func (r *paperCitationRepository) ListByCitingDocumentIDPage(
 	}
 	rows := make([]types.PaperCitation, 0, limit+1)
 	err := r.db.WithContext(ctx).Where("citing_document_id = ?", citingDocumentID).
-		Order("created_at DESC, id").Offset(offset).Limit(limit + 1).Find(&rows).Error
+		Order("bibliography_order ASC NULLS LAST, created_at ASC, id ASC").Offset(offset).Limit(limit + 1).Find(&rows).Error
 	if err != nil {
 		return types.PaperCitationPage{}, err
 	}

@@ -166,6 +166,9 @@ span.pdf-outline-toggle { cursor:default; }
 .citation-link-preview small,
 .citation-link-preview-status { color:#64748b; font-size:11px; }
 .citation-link-preview-error { color:#a51d2d; font-size:12px; }
+.citation-link-preview-matches { display:grid; gap:4px; max-height:150px; padding-top:6px; overflow:auto; border-top:1px solid #e2e8f0; color:#334155; }
+.citation-link-preview-matches b { color:#1e40af; font-size:11px; }
+.citation-link-preview-matches > span { display:-webkit-box; overflow:hidden; -webkit-box-orient:vertical; -webkit-line-clamp:2; line-clamp:2; font-size:11px; line-height:1.35; }
 
 /* Parser block geometry is an invisible hit map. Show the box only while the
    user is actively hovering or keyboard-focusing a Block in Block mode. */

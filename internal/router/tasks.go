@@ -126,6 +126,8 @@ func NewAsynqServer(cfg config.Config) *asynq.Server {
 
 	logger.Info(context.Background(), "asynq server configured",
 		"concurrency", cfg.AsynqConcurrency,
+		"document_recognition_concurrency", cfg.DocumentRecognitionConcurrency,
+		"document_extraction_concurrency", cfg.DocumentExtractionConcurrency,
 		"shutdown_timeout", cfg.AsynqShutdownTimeout.String(),
 		"redis_op_timeout_ms", readRedisOpTimeoutMs())
 
@@ -147,6 +149,22 @@ func NewAsynqServer(cfg config.Config) *asynq.Server {
 		},
 	)
 	return srv
+}
+
+// limitTaskConcurrency bounds expensive work before its handler can open
+// source files, load parsed content, or mark a durable stage as running.
+// Waiting consumes only an Asynq worker goroutine and respects cancellation.
+func limitTaskConcurrency(limit int, handler asynq.HandlerFunc) asynq.HandlerFunc {
+	slots := make(chan struct{}, limit)
+	return func(ctx context.Context, task *asynq.Task) error {
+		select {
+		case slots <- struct{}{}:
+			defer func() { <-slots }()
+			return handler(ctx, task)
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 }
 
 func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
@@ -179,13 +197,20 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 
 	// Register document processing handler
 	if params.DocumentService != nil {
-		mux.HandleFunc(types.TypeDocumentRecognize, params.DocumentService.RecognizeDocument)
+		mux.HandleFunc(types.TypeDocumentRecognize, limitTaskConcurrency(
+			params.Config.DocumentRecognitionConcurrency,
+			params.DocumentService.RecognizeDocument,
+		))
 		mux.HandleFunc(types.TypeDocumentRemoteImport, params.DocumentService.ImportRemoteDocument)
 	}
 	if params.PaperInfoService != nil {
-		mux.HandleFunc(types.TypePaperMetadataExtract, func(ctx context.Context, task *asynq.Task) error {
+		extractMetadata := func(ctx context.Context, task *asynq.Task) error {
 			return processPaperMetadataExtractTask(ctx, task, params.PaperInfoService)
-		})
+		}
+		mux.HandleFunc(types.TypePaperMetadataExtract, limitTaskConcurrency(
+			params.Config.DocumentExtractionConcurrency,
+			extractMetadata,
+		))
 		mux.HandleFunc(types.TypePaperSourceQueryEnqueue, func(ctx context.Context, task *asynq.Task) error {
 			return processPaperSourceQueryEnqueueTask(ctx, task, params.PaperInfoService)
 		})

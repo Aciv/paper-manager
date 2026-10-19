@@ -26,9 +26,15 @@ func TestMergeAutomaticCitationsDiffsRowsPostgres(t *testing.T) {
 	}
 	referenceA := testResolvedCitation(citingID, "Reference A", uuid.Nil)
 	referenceB := testResolvedCitation(citingID, "Reference B", uuid.Nil)
+	orderA, orderB := 1, 0
+	referenceA.BibliographyOrder = &orderA
+	referenceB.BibliographyOrder = &orderB
 	first, err := repo.MergeAutomaticCitations(ctx, citingID, []types.PaperCitation{referenceA, referenceB})
 	if err != nil || len(first) != 2 {
 		t.Fatalf("first merge = %#v, err=%v", first, err)
+	}
+	if first[0].RawReference != "Reference B" || first[1].RawReference != "Reference A" {
+		t.Fatalf("first merge order = %#v, want bibliography order B then A", first)
 	}
 	byRaw := citationsByRawForTest(first)
 	idA := byRaw["Reference A"].ReferenceID

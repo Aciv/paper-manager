@@ -51,6 +51,8 @@ const (
 	defaultHTTPBatchConcurrency                              = 2
 	defaultBatchImportTimeout                                = 2 * time.Minute
 	defaultAsynqConcurrency                                  = 32
+	defaultDocumentRecognitionConcurrency                    = 4
+	defaultDocumentExtractionConcurrency                     = 4
 	defaultAsynqShutdownTimeout                              = 30 * time.Second
 	defaultDBMaxOpenConns                                    = 48
 	defaultDBMaxIdleConns                                    = 24
@@ -106,6 +108,8 @@ type Config struct {
 	ProcessingSpanRetentionBatch   int
 	DocumentRecognitionDriver      string
 	AsynqConcurrency               int
+	DocumentRecognitionConcurrency int
+	DocumentExtractionConcurrency  int
 	AsynqShutdownTimeout           time.Duration
 	ParserGRPCAddress              string
 	ParserGRPCMaxMessageSize       int
@@ -338,6 +342,22 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	documentRecognitionConcurrency, err := positiveIntEnv(
+		"DOCUMENT_RECOGNITION_CONCURRENCY",
+		defaultDocumentRecognitionConcurrency,
+		512,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	documentExtractionConcurrency, err := positiveIntEnv(
+		"DOCUMENT_EXTRACTION_CONCURRENCY",
+		defaultDocumentExtractionConcurrency,
+		512,
+	)
+	if err != nil {
+		return Config{}, err
+	}
 	asynqShutdownTimeout, err := durationEnv("ASYNQ_SHUTDOWN_TIMEOUT", defaultAsynqShutdownTimeout)
 	if err != nil {
 		return Config{}, err
@@ -390,6 +410,8 @@ func Load() (Config, error) {
 		ProcessingSpanRetentionBatch:                spanRetentionBatch,
 		DocumentRecognitionDriver:                   strings.ToLower(env("DOCUMENT_RECOGNITION_DRIVER", "default")),
 		AsynqConcurrency:                            asynqConcurrency,
+		DocumentRecognitionConcurrency:              documentRecognitionConcurrency,
+		DocumentExtractionConcurrency:               documentExtractionConcurrency,
 		AsynqShutdownTimeout:                        asynqShutdownTimeout,
 		ParserGRPCAddress:                           env("PARSER_GRPC_ADDR", "127.0.0.1:50051"),
 		ParserGRPCMaxMessageSize:                    int(parserMessageSize),

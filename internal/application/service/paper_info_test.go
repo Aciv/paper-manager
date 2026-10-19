@@ -822,6 +822,19 @@ func TestPaperInfoExtractMetadataClearsOnlyAutomaticCitationsForDetectedEmptyBib
 	}
 }
 
+func TestExtractionCitationInputsPreserveBibliographyOrderAcrossSkippedRows(t *testing.T) {
+	inputs := extractionCitationInputs([]string{"First reference", "  ", "Second reference"}, nil)
+	if len(inputs) != 2 {
+		t.Fatalf("extractionCitationInputs() = %#v, want two inputs", inputs)
+	}
+	if inputs[0].BibliographyOrder == nil || *inputs[0].BibliographyOrder != 0 {
+		t.Fatalf("first bibliography order = %#v, want 0", inputs[0].BibliographyOrder)
+	}
+	if inputs[1].BibliographyOrder == nil || *inputs[1].BibliographyOrder != 2 {
+		t.Fatalf("second bibliography order = %#v, want original position 2", inputs[1].BibliographyOrder)
+	}
+}
+
 func TestExtractionMetadataUpdateOnlyIncludesUsableCandidates(t *testing.T) {
 	result := &types.PaperExtractionResult{
 		Title:    &types.PaperTextCandidate{Value: "  ", Confidence: 1},

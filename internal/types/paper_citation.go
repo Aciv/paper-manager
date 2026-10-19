@@ -46,6 +46,8 @@ type PaperCitation struct {
 type PaperCitationInput struct {
 	CitedDocumentID *uuid.UUID `json:"citedDocumentId,omitempty"`
 	RawReference    string     `json:"rawReference"`
+	// BibliographyOrder is internal extraction order, not a public write field.
+	BibliographyOrder *int `json:"-"`
 	// Candidate is internal extraction evidence for a reference row. It is not
 	// accepted from the public citation API.
 	Candidate *PaperReferenceCandidate `json:"-"`

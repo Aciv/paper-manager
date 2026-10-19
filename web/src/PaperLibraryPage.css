@@ -231,6 +231,8 @@
 .paper-library .citation-link-preview small,
 .paper-library .citation-link-preview-status { color: var(--pl-faint); }
 .paper-library .citation-link-preview-error { color: var(--pl-danger); }
+.paper-library .citation-link-preview-matches { border-top-color: var(--pl-border); color: var(--pl-dim); }
+.paper-library .citation-link-preview-matches b { color: #93c5fd; }
 .paper-library .pdf-block span { background: #2e323a; color: #fff; }
 /* Blocks stay invisible until hovered/keyboard-focused; the outline is dark so
    it reads clearly on the white page. */
@@ -286,8 +288,11 @@
 .paper-library .library-citation-filters button:hover:not(:disabled) { border-color: var(--pl-border-2); background: transparent; color: var(--pl-dim); }
 .paper-library .library-citation-filters button.active { border-color: var(--pl-border-3); background: var(--pl-surface-3); color: #fff; }
 .library-citation-filters button span { margin-left: 3px; font-variant-numeric: tabular-nums; opacity: .75; }
+.library-citation-candidate-filter { display:flex; align-items:center; justify-content:space-between; gap:8px; padding:6px 8px; border:1px solid rgb(96 165 250 / 55%); border-radius:7px; background:rgb(37 99 235 / 12%); color:#bfdbfe; font-size:11px; }
+.paper-library .library-citation-candidate-filter button { padding:2px 7px; border:1px solid rgb(96 165 250 / 55%); border-radius:999px; background:transparent; color:#bfdbfe; font-size:11px; }
 .library-citation-list { display: grid; flex: 1 1 auto; gap: 6px; align-content: start; min-height: 0; margin: 0; padding: 0; overflow: auto; list-style: none; }
 .library-citation-card { display: grid; gap: 6px; padding: 9px 10px; border: 1px solid var(--pl-border); border-radius: 9px; background: var(--pl-surface-2); }
+.library-citation-card.citation-target { border-color: rgb(96 165 250 / 85%); background: rgb(37 99 235 / 16%); box-shadow: 0 0 0 2px rgb(59 130 246 / 24%); }
 .paper-library .library-citation-card-main { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 2px 8px; width: 100%; padding: 0; border: 0; border-radius: 0; background: transparent; text-align: left; }
 .paper-library .library-citation-card-main:hover:not(:disabled) { border: 0; background: transparent; }
 .library-citation-index { grid-row: 1 / span 3; min-width: 16px; color: var(--pl-faint); font-size: 11px; font-weight: 700; line-height: 1.55; text-align: right; }

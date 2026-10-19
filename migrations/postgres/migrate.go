@@ -126,6 +126,12 @@ var paperSearchIndexesUp string
 //go:embed 000028_paper_search_indexes.down.sql
 var paperSearchIndexesDown string
 
+//go:embed 000029_bibliography_order.up.sql
+var bibliographyOrderUp string
+
+//go:embed 000029_bibliography_order.down.sql
+var bibliographyOrderDown string
+
 type migration struct {
 	version int64
 	up      string
@@ -161,6 +167,7 @@ var migrations = []migration{
 	{version: 26, up: citationReferenceRowsUp},
 	{version: 27, up: referenceDownloadStatusUp},
 	{version: 28, up: paperSearchIndexesUp},
+	{version: 29, up: bibliographyOrderUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

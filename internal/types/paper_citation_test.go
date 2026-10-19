@@ -53,6 +53,12 @@ func TestPaperCitationValidate(t *testing.T) {
 			citation.RawReference = ""
 			return citation
 		}(), wantErr: ErrInvalidPaperReference},
+		{name: "negative bibliography order", citation: func() PaperCitation {
+			citation := valid
+			order := -1
+			citation.BibliographyOrder = &order
+			return citation
+		}(), wantErr: ErrInvalidPaperReference},
 	}
 
 	for _, test := range tests {

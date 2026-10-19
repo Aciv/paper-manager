@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +17,88 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+func TestLimitTaskConcurrencyWaitsBeforeCallingHandler(t *testing.T) {
+	started := make(chan struct{}, 3)
+	release := make(chan struct{}, 3)
+	results := make(chan error, 3)
+	var running atomic.Int32
+	var maximum atomic.Int32
+
+	limited := limitTaskConcurrency(2, func(context.Context, *asynq.Task) error {
+		current := running.Add(1)
+		defer running.Add(-1)
+		for {
+			observed := maximum.Load()
+			if current <= observed || maximum.CompareAndSwap(observed, current) {
+				break
+			}
+		}
+		started <- struct{}{}
+		<-release
+		return nil
+	})
+
+	for range 3 {
+		go func() {
+			results <- limited(context.Background(), asynq.NewTask("test", nil))
+		}()
+	}
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for admitted task")
+		}
+	}
+	select {
+	case <-started:
+		t.Fatal("third task entered before a concurrency slot was released")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	release <- struct{}{}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("third task did not enter after a concurrency slot was released")
+	}
+	release <- struct{}{}
+	release <- struct{}{}
+	for range 3 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := maximum.Load(); got != 2 {
+		t.Fatalf("maximum concurrent handlers = %d, want 2", got)
+	}
+}
+
+func TestLimitTaskConcurrencyRespectsCancellationWhileWaiting(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	firstResult := make(chan error, 1)
+	limited := limitTaskConcurrency(1, func(context.Context, *asynq.Task) error {
+		close(started)
+		<-release
+		return nil
+	})
+	go func() {
+		firstResult <- limited(context.Background(), asynq.NewTask("test", nil))
+	}()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := limited(ctx, asynq.NewTask("test", nil)); !errors.Is(err, context.Canceled) {
+		t.Fatalf("waiting task error = %v, want context.Canceled", err)
+	}
+	close(release)
+	if err := <-firstResult; err != nil {
+		t.Fatal(err)
+	}
+}
 
 type paperInfoServiceStub struct {
 	resolvable       bool

@@ -61,6 +61,9 @@ type PaperReference struct {
 	SourceURL        string              `gorm:"column:source_url;type:text;not null;default:''" json:"sourceUrl,omitempty"`
 	MetadataSource   PaperMetadataSource `gorm:"column:metadata_source;type:text;not null;default:'unknown'" json:"metadataSource"`
 	RawReference     string              `gorm:"column:raw_reference;type:text;not null;default:''" json:"rawReference,omitempty"`
+	// BibliographyOrder is the zero-based position emitted by extraction. It is
+	// nil for manual rows and stays useful when neighboring entries were missed.
+	BibliographyOrder *int `gorm:"column:bibliography_order" json:"bibliographyOrder,omitempty"`
 
 	ResolutionStatus     DocumentStageStatus `gorm:"column:resolution_status;type:text;not null;default:not_started" json:"resolutionStatus"`
 	ResolutionGeneration int64               `gorm:"column:resolution_generation;not null;default:0" json:"resolutionGeneration"`
@@ -184,6 +187,9 @@ func (reference PaperReference) Validate() error {
 	}
 	if reference.ResolutionGeneration < 0 {
 		return fmt.Errorf("%w: resolution generation cannot be negative", ErrInvalidPaperReference)
+	}
+	if reference.BibliographyOrder != nil && *reference.BibliographyOrder < 0 {
+		return fmt.Errorf("%w: bibliography order cannot be negative", ErrInvalidPaperReference)
 	}
 	if reference.MetadataSource != "" && !reference.MetadataSource.IsValid() {
 		return fmt.Errorf("%w: invalid metadata source %q", ErrInvalidPaperReference, reference.MetadataSource)

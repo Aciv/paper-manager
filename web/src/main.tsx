@@ -476,8 +476,11 @@ function App() {
       setMessage(`正在批量上传 ${files.length} 个文件…`);
       try {
         const result = await api.uploadBatch(files);
-        await presentBatchResult(result, '文件批量上传');
+        const selectedUploadBases = bases.filter((base) => uploadBaseIDs.includes(base.id));
+        const baseNote = await attachBatchDocumentsToBases(result, selectedUploadBases);
+        await presentBatchResult(result, '文件批量上传', baseNote);
         setFiles([]);
+        setUploadBaseIDs([]);
         const input = window.document.getElementById('document-file') as HTMLInputElement | null;
         if (input) input.value = '';
       } catch (error) {
@@ -847,14 +850,14 @@ function App() {
   }
 
   // Shared by the file picker and drag-and-drop; a multi-file batch can't carry
-  // per-file metadata, so those fields reset.
+  // per-file metadata, so those fields reset. Base selection is batch-wide and
+  // remains available for every accepted or already-existing document.
   function applySelectedFiles(selectedFiles: File[]) {
     setFiles(selectedFiles);
     if (selectedFiles.length > 1) {
       setDoi('');
       setTitle('');
       setTags('');
-      setUploadBaseIDs([]);
     }
   }
 
@@ -878,7 +881,34 @@ function App() {
     }
   }
 
-  async function presentBatchResult(result: DocumentBatchResult, operation: string) {
+  async function attachBatchDocumentsToBases(result: DocumentBatchResult, selectedBases: DocumentBase[]): Promise<string> {
+    if (selectedBases.length === 0) return '';
+    const documents = new Map<string, Document>();
+    for (const item of result.items) {
+      if (item.document && (item.status === 'accepted' || item.status === 'duplicate')) {
+        documents.set(item.document.id, item.document);
+      }
+    }
+    if (documents.size === 0) return '；没有可加入 Base 的文档';
+
+    const assignments = [...documents.values()].flatMap(document => selectedBases.map(base => ({ document, base })));
+    const failures: string[] = [];
+    await Promise.all(assignments.map(async ({ document, base }) => {
+      try {
+        await api.addDocumentToBase(base.id, document.id);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : '未知错误';
+        failures.push(`${document.originalFilename} → ${base.name}（${reason}）`);
+      }
+    }));
+    const succeeded = assignments.length - failures.length;
+    if (failures.length === 0) {
+      return `；已将 ${documents.size} 个文档加入 ${selectedBases.length} 个 Base`;
+    }
+    return `；Base 归档成功 ${succeeded}/${assignments.length}，失败：${failures.join('；')}`;
+  }
+
+  async function presentBatchResult(result: DocumentBatchResult, operation: string, suffix = '') {
     setBatchResults(result.items);
     const accepted = result.items.filter((item) => item.status === 'accepted' && item.document);
     const firstAccepted = accepted[0];
@@ -895,7 +925,7 @@ function App() {
       { accepted: 0, duplicate: 0, rejected: 0, failed: 0 },
     );
     const stopped = result.stopped ? `；已安全停止：${result.error ?? '重复检测暂不可用'}` : '';
-    setMessage(`${operation}完成：受理 ${counts.accepted}，已存在 ${counts.duplicate}，拒绝 ${counts.rejected}，失败 ${counts.failed}${stopped}。`);
+    setMessage(`${operation}完成：受理 ${counts.accepted}，已存在 ${counts.duplicate}，拒绝 ${counts.rejected}，失败 ${counts.failed}${stopped}${suffix}。`);
   }
 
   function toggleUploadBase(baseID: string) {
@@ -970,12 +1000,12 @@ function App() {
               {bases.map((base) => {
                 const selected = uploadBaseIDs.includes(base.id);
                 return <button className={`base-chip${selected ? ' active' : ''}`} type="button" key={base.id}
-                  aria-pressed={selected} disabled={busy || files.length > 1} onClick={() => toggleUploadBase(base.id)}>{base.name}</button>;
+                  aria-pressed={selected} disabled={busy} onClick={() => toggleUploadBase(base.id)}>{base.name}</button>;
               })}
             </div>}
         </div>
         <button className="primary" type="submit" disabled={busy || files.length === 0}>{files.length > 1 ? `批量上传 ${files.length} 个文件` : '上传并创建记录'}</button>
-        <p className="hint" title="支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；单文件可设置 DOI、标题、标签和 Base。批量上传仅提交文件，完成后可逐项编辑元数据。">支持 PDF / Office / Markdown / TXT 等；单文件可补充 DOI、标题、标签。</p>
+        <p className="hint" title="支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；单文件可设置 DOI、标题和标签，所选 Base 会应用到本次上传的全部文档。">支持 PDF / Office / Markdown / TXT 等；所选 Base 会应用到全部上传文件。</p>
       </form>}
 
       {formMenu === 'url' && <form className="upload-form" onSubmit={submitRemoteImport}>

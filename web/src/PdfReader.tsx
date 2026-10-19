@@ -1,11 +1,12 @@
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { AnnotationMode, GlobalWorkerOptions, getDocument, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
+import { AnnotationMode, GlobalWorkerOptions, Util, getDocument, type PDFDocumentProxy, type PDFPageProxy } from 'pdfjs-dist';
 import { EventBus, FindState, PDFFindController, PDFLinkService, PDFViewer, ScrollMode, SpreadMode } from 'pdfjs-dist/web/pdf_viewer.mjs';
 import 'pdfjs-dist/web/pdf_viewer.css';
 
 import './PdfReader.css';
-import { api, Block, contentUrl, Document as PaperDocument, DocumentSelectionResult } from './api';
+import { api, Block, contentUrl, Document as PaperDocument, DocumentSelectionResult, type PaperCitation } from './api';
+import { matchCitationTargets } from './citationLinkMatcher';
 import { PDFLinkPreview, destinationPDFPoint, destinationPreviewRegion, mergeAdjacentPDFLinks, viewportRegion } from './pdfLinkPreview';
 import { LatestPDFSelection, NormalizedPDFRegion, SelectionGeneration, canvasCropForRegion, normalizedRegion, regionIsLargeEnough } from './pdfSelection';
 import { activeOutlineNode, annotateOutlinePages, type OutlineEntry } from './pdfOutline';
@@ -95,6 +96,72 @@ function groupLinks(links: PDFLinkPreview[]): Map<number, PDFLinkPreview[]> {
   return map;
 }
 
+type PositionedPDFText = { text: string; x: number; y: number };
+
+async function targetTextByLink(page: PDFPageProxy, links: PDFLinkPreview[]): Promise<Map<string, string>> {
+  const viewport = page.getViewport({ scale: 1 });
+  const content = await page.getTextContent();
+  const positioned: PositionedPDFText[] = [];
+  for (const item of content.items) {
+    if (!(item && typeof item === 'object' && 'str' in item && 'transform' in item)) continue;
+    if (typeof item.str !== 'string' || !Array.isArray(item.transform) || item.transform.length < 6) continue;
+    const transformed = Util.transform(viewport.transform, item.transform);
+    if (!Number.isFinite(transformed[4]) || !Number.isFinite(transformed[5]) || !item.str.trim()) continue;
+    positioned.push({ text: item.str.trim(), x: transformed[4], y: transformed[5] });
+  }
+
+  // Reference pages are often two-column. Cluster native destination x values
+  // into column starts; vertical boundaries from the other column must never
+  // truncate or contaminate this link's text window.
+  const sortedXs = [...new Set(links.map(link => link.target.x))].sort((left, right) => left - right);
+  const columns: Array<{ center: number; values: number[] }> = [];
+  for (const x of sortedXs) {
+    const current = columns.at(-1);
+    if (current && x - current.center <= viewport.width * 0.12) {
+      current.values.push(x);
+      current.center = current.values.reduce((sum, value) => sum + value, 0) / current.values.length;
+    } else {
+      columns.push({ center: x, values: [x] });
+    }
+  }
+  const columnIndexFor = (x: number) => {
+    let best = 0;
+    for (let index = 1; index < columns.length; index += 1) {
+      if (Math.abs(columns[index].center - x) < Math.abs(columns[best].center - x)) best = index;
+    }
+    return best;
+  };
+  const destinationYsByColumn = new Map<number, number[]>();
+  for (const link of links) {
+    const column = columnIndexFor(link.target.x);
+    const ys = destinationYsByColumn.get(column) ?? [];
+    if (!ys.includes(link.target.y)) ys.push(link.target.y);
+    destinationYsByColumn.set(column, ys);
+  }
+  for (const ys of destinationYsByColumn.values()) ys.sort((left, right) => left - right);
+  const result = new Map<string, string>();
+  for (const link of links) {
+    // Destinations normally point at the entry's first baseline. A bounded
+    // window collects enough title/author/identifier text for matching without
+    // reconstructing the whole bibliography or blocking the click path.
+    const column = columnIndexFor(link.target.x);
+    const columnYs = destinationYsByColumn.get(column) ?? [];
+    const yIndex = columnYs.indexOf(link.target.y);
+    const nextDestinationY = yIndex < 0 ? undefined : columnYs[yIndex + 1];
+    const columnStart = column === 0 ? 0 : columns[column].center - 12;
+    const columnEnd = column + 1 < columns.length ? columns[column + 1].center - 8 : viewport.width;
+    const top = Math.max(0, link.target.y - 18);
+    const defaultBottom = link.target.y + Math.min(180, viewport.height * 0.23);
+    const bottom = Math.min(viewport.height, defaultBottom,
+      nextDestinationY === undefined || nextDestinationY <= link.target.y + 2 ? defaultBottom : nextDestinationY - 2);
+    const nearby = positioned
+      .filter(item => item.x >= columnStart && item.x < columnEnd && item.y >= top && item.y <= bottom)
+      .sort((left, right) => Math.abs(left.y - right.y) <= 3 ? left.x - right.x : left.y - right.y);
+    result.set(link.id, nearby.map(item => item.text).join(' '));
+  }
+  return result;
+}
+
 // Link annotations become geometric hotspots; hovering one previews the
 // target region as original PDF pixels (no citation matching involved).
 export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Promise<PDFLinkPreview[]> {
@@ -166,7 +233,7 @@ export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Pro
 
 // One overlay layer per pdf.js page element. pdf.js owns the page DOM (and may
 // re-create it), so everything the app renders on a page goes through here.
-const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pageNumber, mode, links, onSelection, onMessage, onFollowLink, previewLink, areaSelection, strokes, annotationTool, onAnnotation }: {
+const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pageNumber, mode, links, citationMatches, onSelection, onMessage, onPreviewCitations, onFollowLink, previewLink, areaSelection, strokes, annotationTool, onAnnotation }: {
   // Absent for a PDF opened from disk: it has no parsed blocks, but text and
   // area selection still work — those are handled in the browser.
   documentId?: string;
@@ -174,8 +241,10 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
   pageNumber: number;
   mode: SelectionMode;
   links: PDFLinkPreview[];
+  citationMatches: Map<string, PaperCitation[]>;
   onSelection(selection: LatestPDFSelection): void;
   onMessage(message: string): void;
+  onPreviewCitations(referenceIds: string[]): void;
   onFollowLink(link: PDFLinkPreview): void;
   previewLink(link: PDFLinkPreview): Promise<string>;
   // The committed area draft for this page stays on screen so it can be
@@ -238,6 +307,8 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
   }, [documentId, selectionTarget, mode, onSelection, pageNumber]);
 
   function showLinkPreview(link: PDFLinkPreview) {
+    const matchedCitations = citationMatches.get(link.id) ?? [];
+    onPreviewCitations(matchedCitations.map(citation => citation.referenceId));
     const requestID = previewRequest.current + 1;
     previewRequest.current = requestID;
     setPreviewState({ linkID: link.id });
@@ -264,6 +335,7 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
         const region = link.sourceRegion;
         const alignRight = (region.x0 + region.x1) / 2 > 0.55;
         const active = previewState?.linkID === link.id;
+        const matchedCitations = citationMatches.get(link.id) ?? [];
         return <button key={link.id} className={`citation-link-hotspot${alignRight ? ' align-right' : ''}`} style={{
           left: `${region.x0 * 100}%`, top: `${region.y0 * 100}%`,
           width: `${(region.x1 - region.x0) * 100}%`, height: `${(region.y1 - region.y0) * 100}%`,
@@ -277,7 +349,13 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
             {!previewState?.url && !previewState?.error && <span className="citation-link-preview-status">正在生成预览…</span>}
             {previewState?.error && <span className="citation-link-preview-error">{previewState.error}</span>}
             {previewState?.url && <img src={previewState.url} alt={`PDF 第 ${link.target.pageNumber} 页链接目标附近原文`} />}
-            <small>点击跳转到原文位置</small>
+            {matchedCitations.length > 0 && <span className="citation-link-preview-matches">
+              <b>区域内匹配到 {matchedCitations.length} 条引用</b>
+              {matchedCitations.map(citation => <span key={citation.referenceId}>
+                {citation.rawReference?.trim() || citation.title?.trim() || '未命名引用'}
+              </span>)}
+            </span>}
+            <small>{matchedCitations.length > 0 ? '已在右侧定位引用 · 点击跳转到原文位置' : '点击跳转到原文位置'}</small>
           </span>}
         </button>;
       })}
@@ -421,12 +499,16 @@ function OutlineTree({ nodes, onNavigate, active }: { nodes: OutlineNode[]; onNa
   </ul>;
 }
 
-export function PdfReader({ document, file, onMessage, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
+export function PdfReader({ document, file, citations = [], onCitationLinks, onMessage, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
   document?: PaperDocument;
   // A PDF straight from the user's disk. It has no backend record, so anything
   // keyed by a document id (parsed blocks, metadata, citations, selection
   // processing) simply does not apply and its panels stay empty.
   file?: File | null;
+  // Stored-paper citations are already in the host page's browser memory.
+  // Native link matching never performs a hover-time or click-time API request.
+  citations?: PaperCitation[];
+  onCitationLinks?(referenceIds: string[]): void;
   onMessage(message: string): void;
   // `external` renders the outline through a portal into `outlineTarget` so a
   // host page can place it anywhere; `internal` keeps it beside the pages.
@@ -443,7 +525,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
   const pdfDocumentRef = useRef<PDFDocumentProxy | undefined>(undefined);
   const pdfLoadGeneration = useRef(0);
   const previewCache = useRef(new Map<string, string>());
-  const previewPageCache = useRef(new Map<number, Promise<HTMLCanvasElement>>());
+  const previewPageCache = useRef(new Map<string, Promise<HTMLCanvasElement>>());
   const generations = useRef(new SelectionGeneration());
   const processController = useRef<AbortController | undefined>(undefined);
 
@@ -457,6 +539,8 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
   const [outline, setOutline] = useState<OutlineNode[]>([]);
   const [slots, setSlots] = useState<Array<{ pageNumber: number; node: HTMLElement }>>([]);
   const [linksByPage, setLinksByPage] = useState<Map<number, PDFLinkPreview[]>>(new Map());
+  const [links, setLinks] = useState<PDFLinkPreview[]>([]);
+  const [citationMatchesByLink, setCitationMatchesByLink] = useState<Map<string, PaperCitation[]>>(new Map());
   const [linkCount, setLinkCount] = useState(0);
   // One remembered reading position (link/outline/page jump overwrite it), so
   // the floating back button always returns to where the jump started.
@@ -827,6 +911,11 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
   // Selecting another paper swaps the document inside that viewer; pdf.js drops
   // the previous pages (and re-fits the scale) itself.
   useEffect(() => {
+    // PdfReader stays mounted while the selected paper changes. Drop retained
+    // canvases/data URLs here, and also namespace keys by source below so an
+    // older asynchronous crop can never satisfy a request for the new paper.
+    previewCache.current.clear();
+    previewPageCache.current.clear();
     const viewer = viewerRef.current;
     if (!viewer) return;
     let disposed = false;
@@ -891,6 +980,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
         }).catch(() => { if (!disposed) setOutline([]); });
         void collectPDFLinkPreviews(pdfDocument).then(links => {
           if (disposed || pdfLoadGeneration.current !== generation) return;
+          setLinks(links);
           setLinksByPage(groupLinks(links));
           setLinkCount(links.length);
         }).catch(() => { /* annotations unavailable */ });
@@ -912,6 +1002,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       setSlots([]);
       setPageCount(0);
       setCurrentPage(1);
+      setLinks([]);
       setLinksByPage(new Map());
       setLinkCount(0);
       setOutline([]);
@@ -923,6 +1014,49 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       if (opened.task) void opened.task.destroy();
     };
   }, [sourceKey, localFile, documentId, readingKey, onMessage]);
+
+  // Target text extraction and citation scoring happen as soon as both the PDF
+  // links and the already-loaded citation list are available. Hover handling is
+  // therefore a single in-memory Map lookup plus the host's UI update.
+  useEffect(() => {
+    setCitationMatchesByLink(new Map());
+    const pdfDocument = pdfDocumentRef.current;
+    if (!pdfDocument || links.length === 0 || citations.length === 0 || !documentId) return;
+    let cancelled = false;
+    const linksByTargetPage = new Map<number, PDFLinkPreview[]>();
+    for (const link of links) {
+      const pageLinks = linksByTargetPage.get(link.target.pageNumber);
+      if (pageLinks) pageLinks.push(link);
+      else linksByTargetPage.set(link.target.pageNumber, [link]);
+    }
+    // Pages with several destinations are most likely bibliography pages, so
+    // make the common first hover ready before sparse outline/figure targets.
+    const targetPages = [...linksByTargetPage.entries()].sort((left, right) => right[1].length - left[1].length);
+    void (async () => {
+      const matches = new Map<string, PaperCitation[]>();
+      const citationsByID = new Map(citations.map(citation => [citation.referenceId, citation]));
+      for (const [pageNumber, pageLinks] of targetPages) {
+        if (cancelled) return;
+        try {
+          const page = await pdfDocument.getPage(pageNumber);
+          const targetTexts = await targetTextByLink(page, pageLinks);
+          for (const link of pageLinks) {
+            const matched = matchCitationTargets(targetTexts.get(link.id) ?? '', citations)
+              .map(match => citationsByID.get(match.referenceId))
+              .filter((citation): citation is PaperCitation => Boolean(citation));
+            if (matched.length > 0) matches.set(link.id, matched);
+          }
+          if (!cancelled) {
+            setCitationMatchesByLink(new Map(matches));
+          }
+        } catch {
+          // One malformed/textless target page falls back to the ordinary PDF
+          // jump and must not prevent other pages from being precomputed.
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [citations, documentId, links, sourceKey]);
 
   // Source switch: drop any selection draft from the previous file.
   useEffect(() => {
@@ -1026,7 +1160,8 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
   }, []);
 
   const renderedPreviewPage = useCallback((pageNumber: number): Promise<HTMLCanvasElement> => {
-    const cached = previewPageCache.current.get(pageNumber);
+    const cacheKey = `${sourceKey}:${pageNumber}`;
+    const cached = previewPageCache.current.get(cacheKey);
     if (cached) return cached;
     const pdfDocument = pdfDocumentRef.current;
     if (!pdfDocument) return Promise.reject(new Error('PDF 尚未加载完成。'));
@@ -1040,16 +1175,16 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       await page.render({ canvas, canvasContext: context, viewport }).promise;
       return canvas;
     }).catch(error => {
-      previewPageCache.current.delete(pageNumber);
+      previewPageCache.current.delete(cacheKey);
       throw error;
     });
-    previewPageCache.current.set(pageNumber, pending);
+    previewPageCache.current.set(cacheKey, pending);
     return pending;
-  }, []);
+  }, [sourceKey]);
 
   const previewLink = useCallback(async (link: PDFLinkPreview): Promise<string> => {
     const target = link.target;
-    const cacheKey = `${target.pageNumber}:${Math.round(target.x)}:${Math.round(target.y)}`;
+    const cacheKey = `${sourceKey}:${target.pageNumber}:${Math.round(target.x)}:${Math.round(target.y)}`;
     const cached = previewCache.current.get(cacheKey);
     if (cached) return cached;
     const source = await renderedPreviewPage(target.pageNumber);
@@ -1072,7 +1207,7 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     }
     previewCache.current.set(cacheKey, dataURL);
     return dataURL;
-  }, [renderedPreviewPage]);
+  }, [renderedPreviewPage, sourceKey]);
 
   // Every jump that leaves the reader's current spot remembers it first; the
   // back button below hands that one position back.
@@ -1095,6 +1230,10 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     rememberPosition();
     viewerRef.current?.scrollPageIntoView({ pageNumber: link.target.pageNumber });
   }, [rememberPosition]);
+
+  const previewCitations = useCallback((referenceIds: string[]) => {
+    onCitationLinks?.(referenceIds);
+  }, [onCitationLinks]);
 
   const navigateOutline = useCallback((dest: unknown) => {
     rememberPosition();
@@ -1598,7 +1737,8 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
     {outlineExternal && outlineTarget && !outlineCollapsed && createPortal(<div className="pdf-outline-content">{outlineTree}</div>, outlineTarget)}
     {slots.map(entry => createPortal(
       <PageOverlay documentId={documentId} selectionTarget={selectionTarget} pageNumber={entry.pageNumber} mode={mode}
-        links={linksByPage.get(entry.pageNumber) ?? []} onSelection={replaceSelection} onMessage={onMessage}
+        links={linksByPage.get(entry.pageNumber) ?? []} citationMatches={citationMatchesByLink} onSelection={replaceSelection} onMessage={onMessage}
+        onPreviewCitations={previewCitations}
         onFollowLink={followLink} previewLink={previewLink}
         areaSelection={!annotationDone && selection?.kind === 'area' && selection.pageNumber === entry.pageNumber ? selection.region : undefined}
         strokes={!annotationDone && selection?.kind === 'area' && selection.pageNumber === entry.pageNumber ? strokes : NO_STROKES}

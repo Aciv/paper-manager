@@ -47,6 +47,7 @@ export type PaperReference = {
   sourceUrl?: string;
   metadataSource: 'unknown' | 'extraction' | 'catalog' | 'manual';
   rawReference?: string;
+  bibliographyOrder?: number;
   resolutionStatus: DocumentStageStatus;
   resolutionGeneration: number;
   resolutionProvider?: string;

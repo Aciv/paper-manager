@@ -287,6 +287,7 @@ func (s *paperService) MergeExtractedCitations(
 		}
 		citation.Origin = types.PaperCitationOriginExtraction
 		citation.RawReference = rawReference
+		citation.BibliographyOrder = input.BibliographyOrder
 		if input.CitedDocumentID != nil {
 			if applyErr := s.applyCitationTarget(ctx, &citation, *input.CitedDocumentID); applyErr != nil {
 				return nil, applyErr

@@ -198,6 +198,21 @@ func TestDocumentBlockAssetMigrationKeepsStorageKeyPrivate(t *testing.T) {
 	}
 }
 
+func TestBibliographyOrderMigrationAddsNullableOrderedIndex(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS bibliography_order INTEGER",
+		"bibliography_order IS NULL OR bibliography_order >= 0",
+		"idx_paper_citations_bibliography_order",
+	} {
+		if !strings.Contains(bibliographyOrderUp, fragment) {
+			t.Fatalf("bibliography order migration does not include %q", fragment)
+		}
+	}
+	if !strings.Contains(bibliographyOrderDown, "DROP COLUMN IF EXISTS bibliography_order") {
+		t.Fatal("bibliography order rollback does not drop the column")
+	}
+}
+
 func TestPaperCitationsMigrationCreatesDirectionalCascadeRelation(t *testing.T) {
 	for _, fragment := range []string{
 		"CREATE TABLE IF NOT EXISTS paper_citations",
@@ -299,8 +314,8 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 28 {
-		t.Fatalf("latest migration version = %d, want 28", got)
+	if got := migrations[len(migrations)-1].version; got != 29 {
+		t.Fatalf("latest migration version = %d, want 29", got)
 	}
 	for _, fragment := range []string{
 		"CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public",

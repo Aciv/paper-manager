@@ -105,6 +105,8 @@ func TestLoadRuntimeLimits(t *testing.T) {
 	t.Setenv("HTTP_TRUSTED_PROXIES", "10.0.0.0/8, 192.168.0.0/16")
 	t.Setenv("BATCH_IMPORT_TIMEOUT", "45s")
 	t.Setenv("ASYNQ_CONCURRENCY", "12")
+	t.Setenv("DOCUMENT_RECOGNITION_CONCURRENCY", "4")
+	t.Setenv("DOCUMENT_EXTRACTION_CONCURRENCY", "3")
 	t.Setenv("ASYNQ_SHUTDOWN_TIMEOUT", "20s")
 	t.Setenv("DB_MAX_OPEN_CONNS", "30")
 	t.Setenv("DB_MAX_IDLE_CONNS", "15")
@@ -126,11 +128,42 @@ func TestLoadRuntimeLimits(t *testing.T) {
 		len(cfg.HTTPTrustedProxies) != 2 ||
 		cfg.BatchImportTimeout != 45*time.Second ||
 		cfg.AsynqConcurrency != 12 ||
+		cfg.DocumentRecognitionConcurrency != 4 ||
+		cfg.DocumentExtractionConcurrency != 3 ||
 		cfg.AsynqShutdownTimeout != 20*time.Second ||
 		cfg.DBMaxOpenConns != 30 ||
 		cfg.DBMaxIdleConns != 15 ||
 		cfg.DBStatementTimeout != 8*time.Second {
 		t.Fatalf("unexpected runtime limits: %#v", cfg)
+	}
+}
+
+func TestLoadDocumentTaskConcurrencyDefaults(t *testing.T) {
+	t.Setenv("DOCUMENT_RECOGNITION_CONCURRENCY", "")
+	t.Setenv("DOCUMENT_EXTRACTION_CONCURRENCY", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DocumentRecognitionConcurrency != 4 || cfg.DocumentExtractionConcurrency != 4 {
+		t.Fatalf(
+			"document task concurrency = recognition %d, extraction %d; want 4 and 4",
+			cfg.DocumentRecognitionConcurrency,
+			cfg.DocumentExtractionConcurrency,
+		)
+	}
+}
+
+func TestLoadRejectsInvalidDocumentTaskConcurrency(t *testing.T) {
+	t.Setenv("DOCUMENT_RECOGNITION_CONCURRENCY", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid document recognition concurrency error")
+	}
+
+	t.Setenv("DOCUMENT_RECOGNITION_CONCURRENCY", "4")
+	t.Setenv("DOCUMENT_EXTRACTION_CONCURRENCY", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid document extraction concurrency error")
 	}
 }
 

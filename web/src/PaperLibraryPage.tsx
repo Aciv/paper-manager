@@ -179,6 +179,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   // panel in half and left both lists nearly unreadable.
   const [citationGroup, setCitationGroup] = useState<CitationGroup>('outgoing');
   const [citationFilter, setCitationFilter] = useState<CitationFilter>('all');
+  const [activeCitationIDs, setActiveCitationIDs] = useState<string[]>([]);
   const [citationActionBusy, setCitationActionBusy] = useState('');
   const [editingCitation, setEditingCitation] = useState<PaperCitation>();
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
@@ -212,6 +213,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [importingLocal, setImportingLocal] = useState(false);
   const [importedLocal, setImportedLocal] = useState<Record<string, string>>({});
   const citationInfoRequest = useRef(0);
+  const citationCards = useRef(new Map<string, HTMLLIElement>());
   const loadGeneration = useRef(0);
   const resizeDrag = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(null);
   // Floating edge button for a collapsed column: appears only while the pointer
@@ -346,10 +348,31 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     [items],
   );
   const citationCounts = useMemo(() => citationFilterCounts(citations), [citations]);
-  const visibleCitations = useMemo(
-    () => citations.filter((citation) => citationMatchesFilter(citation, citationFilter)),
-    [citations, citationFilter],
-  );
+  const visibleCitations = useMemo(() => {
+    if (activeCitationIDs.length === 0) return citations.filter(citation => citationMatchesFilter(citation, citationFilter));
+    const citationsByID = new Map(citations.map(citation => [citation.referenceId, citation]));
+    return activeCitationIDs
+      .map(referenceId => citationsByID.get(referenceId))
+      .filter((citation): citation is PaperCitation => Boolean(citation));
+  }, [activeCitationIDs, citations, citationFilter]);
+
+  function revealCitations(referenceIds: string[]) {
+    setActiveCitationIDs(referenceIds);
+    if (referenceIds.length === 0) return;
+    setRightMenu('citations');
+    setCitationGroup('outgoing');
+    setCitationFilter('all');
+    // The first frame applies the tab/filter state; the second observes the
+    // mounted card. No extraction, search or network access occurs here.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
+      citationCards.current.get(referenceIds[0])?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }));
+  }
+
+  useEffect(() => {
+    setActiveCitationIDs([]);
+    citationCards.current.clear();
+  }, [selected?.id]);
 
   function resetFilters() {
     setAuthorFilter('');
@@ -822,11 +845,11 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
         {localMode ? <p className="hint">本地论文没有引用信息。</p> : <>
         <div className="library-citation-switch" role="tablist" aria-label="引用方向">
           <button className={citationGroup === 'outgoing' ? 'active' : ''} type="button" role="tab"
-            aria-selected={citationGroup === 'outgoing'} onClick={() => setCitationGroup('outgoing')}>
+            aria-selected={citationGroup === 'outgoing'} onClick={() => { setCitationGroup('outgoing'); setActiveCitationIDs([]); }}>
             本论文引用 <span className="library-count">{citations.length}</span>
           </button>
           <button className={citationGroup === 'incoming' ? 'active' : ''} type="button" role="tab"
-            aria-selected={citationGroup === 'incoming'} onClick={() => setCitationGroup('incoming')}>
+            aria-selected={citationGroup === 'incoming'} onClick={() => { setCitationGroup('incoming'); setActiveCitationIDs([]); }}>
             被引用 <span className="library-count">{citedBy.length}</span>
           </button>
         </div>
@@ -839,11 +862,15 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
               ['failed', '失败', citationCounts.failed],
             ] as Array<[CitationFilter, string, number]>).map(([key, label, count]) => (
               <button key={key} className={citationFilter === key ? 'active' : ''} type="button"
-                aria-pressed={citationFilter === key} onClick={() => setCitationFilter(key)}>
+                aria-pressed={citationFilter === key} onClick={() => { setCitationFilter(key); setActiveCitationIDs([]); }}>
                 {label} <span>{count}</span>
               </button>
             ))}
           </div>
+          {activeCitationIDs.length > 0 && <div className="library-citation-candidate-filter" role="status">
+            <span>索引候选引用：{activeCitationIDs.length} 条</span>
+            <button type="button" onClick={() => setActiveCitationIDs([])}>清除</button>
+          </div>}
           {citations.length === 0
             ? <p className="hint">没有已提取的参考文献。</p>
             : visibleCitations.length === 0
@@ -868,10 +895,13 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
                   const badge = citationBadge(citation);
                   const actionBusy = citationActionBusy === citation.referenceId;
                   const downloadInFlight = citationDownloadInFlight(citation);
-                  return <li className="library-citation-card" key={`${citation.citingDocumentId}-${citation.referenceId}`}>
+                  const displayOrder = citation.bibliographyOrder === undefined ? index + 1 : citation.bibliographyOrder + 1;
+                  return <li className={`library-citation-card${activeCitationIDs.includes(citation.referenceId) ? ' citation-target' : ''}`}
+                    ref={node => { if (node) citationCards.current.set(citation.referenceId, node); else citationCards.current.delete(citation.referenceId); }}
+                    key={`${citation.citingDocumentId}-${citation.referenceId}`}>
                     <button className="library-citation-card-main" type="button"
                       onClick={() => openCitationPaperInfo(linkedDocumentID, citation.rawReference || '', citation)}>
-                      <span className="library-citation-index">{index + 1}</span>
+                      <span className="library-citation-index">{displayOrder}</span>
                       <span className="library-citation-title">{title}</span>
                       {meta && <span className="library-citation-meta">{meta}</span>}
                       {doi && <span className="library-citation-doi">DOI {doi}</span>}
@@ -956,7 +986,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
           : !selected
             ? <div className="library-empty"><p>从左侧论文目录选择一篇论文开始阅读。</p></div>
             : selectedIsPDF
-              ? <PdfReader document={selected} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+              ? <PdfReader document={selected} citations={citations} onCitationLinks={revealCitations} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
               : <div className="library-empty"><p>该论文不是 PDF，无法在阅读库中预览。</p></div>}
       </Suspense>
       {message && <p className="library-message">{message}</p>}
