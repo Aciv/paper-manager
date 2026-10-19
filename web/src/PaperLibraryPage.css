@@ -236,8 +236,9 @@
    it reads clearly on the white page. */
 .paper-library .block-overlay.active .pdf-block:hover,
 .paper-library .block-overlay.active .pdf-block:focus-visible { border: 1px solid #0b1220; outline: 2px solid rgb(15 23 42 / 40%); background: rgb(15 23 42 / 12%); }
+.paper-library .citation-link-overlay.active .citation-link-hotspot { background: rgb(59 130 246 / 18%); box-shadow: inset 0 -2px rgb(96 165 250 / 72%); }
 .paper-library .citation-link-overlay .citation-link-hotspot:hover:not(:disabled),
-.paper-library .citation-link-overlay .citation-link-hotspot:focus-visible { outline-color: rgb(233 235 239 / 55%); background: rgb(233 235 239 / 12%); }
+.paper-library .citation-link-overlay .citation-link-hotspot:focus-visible { outline-color: rgb(147 197 253 / 78%); background: rgb(59 130 246 / 30%); box-shadow: inset 0 -2px rgb(147 197 253 / 92%); }
 .paper-library .area-selection-box { border-color: #c9ced6; background: rgb(255 255 255 / 14%); }
 
 /* PDF outline, rendered into this page's left column by PdfReader's portal. */

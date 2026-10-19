@@ -128,14 +128,20 @@ span.pdf-outline-toggle { cursor:default; }
   color:inherit;
   pointer-events:none;
   cursor:pointer;
+  transition:background-color .12s ease, box-shadow .12s ease, outline-color .12s ease;
 }
-.citation-link-overlay.active .citation-link-hotspot { pointer-events:auto; }
+.citation-link-overlay.active .citation-link-hotspot {
+  pointer-events:auto;
+  background:rgb(37 99 235 / 16%);
+  box-shadow:inset 0 -2px rgb(37 99 235 / 58%);
+}
 .citation-link-overlay .citation-link-hotspot:hover:not(:disabled),
 .citation-link-overlay .citation-link-hotspot:focus-visible {
   z-index:5;
   border:0;
   outline:2px solid rgb(37 99 235 / 62%);
-  background:rgb(37 99 235 / 14%);
+  background:rgb(37 99 235 / 26%);
+  box-shadow:inset 0 -2px rgb(29 78 216 / 82%);
 }
 .citation-link-preview {
   position:absolute;
