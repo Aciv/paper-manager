@@ -1397,11 +1397,15 @@ export function PdfReader({ document, file, onMessage, outlinePlacement = 'inter
       window.setTimeout(() => { railClickGuard.current = false; }, 0);
       const x = clampNumber(drag.lastX - drag.offsetX, 4, Math.max(4, drag.panelWidth - drag.width - 4));
       const y = clampNumber(drag.lastY - drag.offsetY, 4, Math.max(4, drag.panelHeight - drag.height - 4));
-      const centerX = x + drag.width / 2;
-      const centerY = y + drag.height / 2;
+      // Decide the orientation from where the pointer was released, not from
+      // the rail's centre. The vertical rail is ~290px tall, so on shorter
+      // viewports its centre can never enter the top/bottom band even when the
+      // pointer is dragged all the way to the edge.
+      const releaseX = clampNumber(drag.lastX, 0, drag.panelWidth);
+      const releaseY = clampNumber(drag.lastY, 0, drag.panelHeight);
       const band = Math.max(56, drag.panelHeight * 0.2);
-      const horizontal = centerY < band || centerY > drag.panelHeight - band;
-      const dockEnd = horizontal ? centerY > drag.panelHeight / 2 : centerX > drag.panelWidth / 2;
+      const horizontal = releaseY < band || releaseY > drag.panelHeight - band;
+      const dockEnd = horizontal ? releaseY > drag.panelHeight / 2 : releaseX > drag.panelWidth / 2;
       railSnapPending.current = true;
       setRailPlacement({ x, y, horizontal, dockEnd });
     };

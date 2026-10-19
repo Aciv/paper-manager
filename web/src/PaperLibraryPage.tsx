@@ -142,11 +142,11 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [rightWidth, setRightWidth] = useState(() => Math.max(200, Number(window.localStorage.getItem('library.rightWidth')) || 320));
   const [resizing, setResizing] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
-  // Phones: touch input has no hover, so the columns become overlay sheets and
-  // the PDF keeps the full width.
-  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 820px)').matches);
+  // Compact windows and tablets: the columns become overlay sheets so the PDF
+  // keeps the full width and height instead of collapsing in a stacked flow.
+  const [narrow, setNarrow] = useState(() => window.matchMedia('(max-width: 1080px)').matches);
   useEffect(() => {
-    const query = window.matchMedia('(max-width: 820px)');
+    const query = window.matchMedia('(max-width: 1080px)');
     const sync = () => setNarrow(query.matches);
     query.addEventListener('change', sync);
     return () => query.removeEventListener('change', sync);
@@ -232,13 +232,22 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   // share of the viewport, and never squeezing the reading area below a minimum.
   const MIN_READER_WIDTH = 360;
   const MIN_COLUMN_WIDTH = 180;
-  const columnCap = Math.max(MIN_COLUMN_WIDTH, Math.round(viewportWidth * 0.45));
+  // The citation panel stacks a direction switch, filters and a card footer
+  // with up to four actions. Below ~300px its labels and actions wrap into
+  // vertical columns, so keep that side wider while the catalog stays compact.
+  const MIN_RIGHT_COLUMN_WIDTH = 300;
+  const columnMin = (side: 'left' | 'right') => side === 'right' ? MIN_RIGHT_COLUMN_WIDTH : MIN_COLUMN_WIDTH;
+  const columnCap = Math.max(MIN_RIGHT_COLUMN_WIDTH, Math.round(viewportWidth * 0.45));
   const widthMax = (side: 'left' | 'right') => {
-    const other = side === 'left' ? (leftCollapsed ? 0 : rightWidth) : (rightCollapsed ? 0 : leftWidth);
-    return Math.max(MIN_COLUMN_WIDTH, Math.min(columnCap, viewportWidth - other - MIN_READER_WIDTH));
+    // The other side contributes at least its own floor, even when a stale
+    // stored width from before that floor existed is smaller.
+    const other = side === 'left'
+      ? (rightCollapsed ? 0 : Math.max(columnMin('right'), rightWidth))
+      : (leftCollapsed ? 0 : Math.max(columnMin('left'), leftWidth));
+    return Math.max(columnMin(side), Math.min(columnCap, viewportWidth - other - MIN_READER_WIDTH));
   };
-  const effectiveLeftWidth = Math.max(MIN_COLUMN_WIDTH, Math.min(leftWidth, widthMax('left')));
-  const effectiveRightWidth = Math.max(MIN_COLUMN_WIDTH, Math.min(rightWidth, widthMax('right')));
+  const effectiveLeftWidth = Math.max(columnMin('left'), Math.min(leftWidth, widthMax('left')));
+  const effectiveRightWidth = Math.max(columnMin('right'), Math.min(rightWidth, widthMax('right')));
 
   const activeBase = bases.find((base) => base.id === baseID);
   const selectedIsPDF = selected?.contentType === 'application/pdf';
@@ -401,7 +410,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     const max = widthMax(side);
     const onMove = (moveEvent: PointerEvent) => {
       const delta = drag.side === 'left' ? moveEvent.clientX - drag.startX : drag.startX - moveEvent.clientX;
-      const next = Math.round(Math.min(max, Math.max(MIN_COLUMN_WIDTH, drag.startWidth + delta)));
+      const next = Math.round(Math.min(max, Math.max(columnMin(drag.side), drag.startWidth + delta)));
       if (drag.side === 'left') {
         setLeftWidth(next);
         window.localStorage.setItem('library.leftWidth', String(next));

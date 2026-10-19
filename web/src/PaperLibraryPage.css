@@ -180,7 +180,9 @@
 /* Reset the legacy console divider/margins so the reading area starts flush. */
 .paper-library .pdf-viewer-panel { display: flex; flex-direction: column; gap: 10px; min-height: 0; margin: 0; padding-top: 0; border-top: 0; overflow: hidden; }
 .paper-library .pdf-mode-rail { border-color: var(--pl-border-2); background: rgb(34 35 39 / 94%); box-shadow: 0 12px 32px rgb(0 0 0 / 50%); }
-.paper-library .pdf-view-popover { border-color: var(--pl-border-2); background: rgb(34 35 39 / 96%); box-shadow: 0 12px 32px rgb(0 0 0 / 50%); }
+/* PdfReader.css is loaded lazily, after this file. Match the base rule's
+   specificity so the dark chrome wins regardless of stylesheet order. */
+.paper-library .pdf-viewer-panel .pdf-view-popover { border-color: var(--pl-border-2); background: rgb(34 35 39 / 96%); box-shadow: 0 12px 32px rgb(0 0 0 / 50%); }
 .paper-library .pdf-viewer-panel .pdf-view-popover button { color: var(--pl-dim); }
 .paper-library .pdf-viewer-panel .pdf-view-popover button:hover:not(:disabled) { border: 0; background: rgb(255 255 255 / 10%); color: var(--pl-text); }
 .paper-library .pdf-viewer-panel .pdf-view-popover button.active { border: 0; background: rgb(255 255 255 / 16%); color: #fff; }
@@ -274,7 +276,7 @@
    each row is a scannable card (title/authors/venue/DOI + state + actions)
    instead of a three-line slice of raw bibliography text. */
 .library-citation-switch { display: flex; gap: 3px; padding: 3px; border: 1px solid var(--pl-border); border-radius: 9px; background: var(--pl-surface-2); }
-.paper-library .library-citation-switch button { display: flex; flex: 1 1 50%; align-items: center; justify-content: center; gap: 6px; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--pl-dim); font-size: 12px; }
+.paper-library .library-citation-switch button { display: flex; flex: 1 1 50%; align-items: center; justify-content: center; gap: 6px; min-width: 0; overflow: hidden; padding: 5px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--pl-dim); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
 .paper-library .library-citation-switch button:hover:not(:disabled) { border: 0; background: rgb(255 255 255 / 5%); color: var(--pl-text); }
 .paper-library .library-citation-switch button.active { border: 0; background: var(--pl-surface-3); color: #fff; }
 .library-count { padding: 0 7px; border: 1px solid var(--pl-border); border-radius: 999px; background: var(--pl-surface-2); color: var(--pl-faint); font-size: 11px; font-weight: 600; }
@@ -297,8 +299,11 @@
 .library-citation-badge.badge-linked { border-color: rgb(110 231 168 / 26%); background: rgb(62 207 142 / 12%); color: #86efac; }
 .library-citation-badge.badge-pending { border-color: rgb(252 211 77 / 24%); background: rgb(245 158 11 / 12%); color: #fcd34d; }
 .library-citation-badge.badge-failed { border-color: #5a2a2e; background: var(--pl-danger-bg); color: var(--pl-danger); }
-.library-citation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
-.paper-library .library-citation-actions button { padding: 2px 8px; border-radius: 5px; font-size: 11px; font-weight: 600; }
+.library-citation-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 3px; }
+/* Keep the four row actions on one line at the panel's minimum width. Without
+   the compact padding they wrap into a second row, and a narrower column turns
+   each label into a vertical stack. */
+.paper-library .library-citation-actions button { padding: 2px 4px; border-radius: 5px; font-size: 11px; font-weight: 600; white-space: nowrap; }
 .paper-library .library-citation-actions .citation-delete { color: var(--pl-danger); }
 .paper-library .library-citation-actions .citation-delete:hover:not(:disabled) { border-color: #7a3a3e; background: var(--pl-danger-bg); }
 
@@ -323,23 +328,27 @@
   .paper-library.right-collapsed { grid-template-columns: clamp(200px, 17vw, 240px) minmax(0, 1fr) var(--pl-rail); }
 }
 
-/* Stacked layout: the three columns flow vertically; collapsed columns
-   become a slim horizontal bar. */
+/* Compact and split-screen widths: the side columns overlay the PDF instead of
+   taking grid space, so the reading area keeps the full width and a real
+   height. The 1080px threshold mirrors the `narrow` matchMedia query in
+   PaperLibraryPage.tsx. */
 @media (max-width: 1080px) {
   .paper-library,
   .paper-library.left-collapsed,
   .paper-library.right-collapsed,
-  .paper-library.left-collapsed.right-collapsed { grid-template-columns: minmax(0, 1fr) !important; height: auto; min-height: 100dvh; overflow: visible; }
+  .paper-library.left-collapsed.right-collapsed { grid-template-columns: minmax(0, 1fr) !important; height: 100dvh; overflow: hidden; }
+  .library-column { position: absolute; top: 0; bottom: 0; z-index: 60; width: min(86vw, 340px); height: 100%; overflow: hidden; border-radius: 0; box-shadow: 0 24px 60px rgb(0 0 0 / 62%); }
+  .library-column-left { left: 0; border-right: 1px solid var(--pl-border); border-bottom: 0; }
+  .library-column-right { right: 0; border-left: 1px solid var(--pl-border); border-top: 0; }
+  .library-column.collapsed { display: none; }
+  .library-backdrop { position: fixed; z-index: 55; inset: 0; background: rgb(0 0 0 / 48%); }
   .library-resizer { display: none; }
-  .library-column { height: auto; overflow: visible; border-right: 0; border-left: 0; }
-  .paper-library.left-collapsed .library-column-left,
-  .paper-library.right-collapsed .library-column-right { overflow: visible; border: 0; visibility: visible; }
-  .library-column-left { border-bottom: 1px solid var(--pl-border); }
-  .library-column-right { border-top: 1px solid var(--pl-border); }
-  .library-document-list { overflow: visible; }
-  .library-panel-citations ol { overflow: visible; }
-  .paper-library-main { height: auto; overflow: visible; }
-  .library-pagination { margin-top: 4px; }
+  .paper-library .library-peek { top: calc(96px + env(safe-area-inset-top, 0px)); }
+  .paper-library .library-peek-left { left: max(10px, env(safe-area-inset-left, 0px)); }
+  .paper-library .library-peek-right { left: auto; right: max(10px, env(safe-area-inset-right, 0px)); }
+  .paper-library-main { height: 100dvh; padding: calc(8px + env(safe-area-inset-top, 0px)) calc(8px + env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) calc(8px + env(safe-area-inset-left, 0px)); }
+  .paper-library .pdf-viewer-panel { height: 100%; }
+  .library-document-list > button { padding: 11px 10px; }
 }
 
 @media (max-width: 640px) {
@@ -383,23 +392,3 @@
 .paper-library .pdf-viewer-panel .pdf-back-button { border-color: var(--pl-border-2); background: rgb(34 35 39 / 92%); color: var(--pl-dim); }
 .paper-library .pdf-viewer-panel .pdf-back-button:hover:not(:disabled) { border-color: var(--pl-border-3); background: var(--pl-surface-2); color: #fff; }
 
-/* Phones: the side columns overlay the PDF instead of taking grid space, so the
-   reading area keeps the full width; sheets close via the backdrop. */
-@media (max-width: 820px) {
-  .paper-library,
-  .paper-library.left-collapsed,
-  .paper-library.right-collapsed,
-  .paper-library.left-collapsed.right-collapsed { grid-template-columns: minmax(0, 1fr) !important; height: 100dvh; overflow: hidden; }
-  .library-column { position: absolute; top: 0; bottom: 0; z-index: 60; width: min(86vw, 340px); height: 100%; overflow: hidden; border-radius: 0; box-shadow: 0 24px 60px rgb(0 0 0 / 62%); }
-  .library-column-left { left: 0; border-right: 1px solid var(--pl-border); border-bottom: 0; }
-  .library-column-right { right: 0; border-left: 1px solid var(--pl-border); border-top: 0; }
-  .library-column.collapsed { display: none; }
-  .library-backdrop { position: fixed; z-index: 55; inset: 0; background: rgb(0 0 0 / 48%); }
-  .library-resizer { display: none; }
-  .paper-library .library-peek { top: calc(96px + env(safe-area-inset-top, 0px)); }
-  .paper-library .library-peek-left { left: max(10px, env(safe-area-inset-left, 0px)); }
-  .paper-library .library-peek-right { left: auto; right: max(10px, env(safe-area-inset-right, 0px)); }
-  .paper-library-main { height: 100dvh; padding: calc(8px + env(safe-area-inset-top, 0px)) calc(8px + env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) calc(8px + env(safe-area-inset-left, 0px)); }
-  .paper-library .pdf-viewer-panel { height: 100%; }
-  .library-document-list > button { padding: 11px 10px; }
-}
