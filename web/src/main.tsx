@@ -1,5 +1,7 @@
+import './browserPolyfills.ts';
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
+import { ErrorBoundary } from './ErrorBoundary';
 import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, PaperReference, ProcessingSpan, ProcessingSpanStatus } from './api';
 import {
   CITATION_STATUS_LABELS,
@@ -1408,4 +1410,4 @@ function Root() {
   </Suspense>;
 }
 
-createRoot(document.getElementById('root')!).render(<Root />);
+createRoot(document.getElementById('root')!).render(<ErrorBoundary><Root /></ErrorBoundary>);

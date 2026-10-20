@@ -21,6 +21,24 @@ body { margin: 0; background: #7fd5fa; }
   font-size: 13px;
 }
 
+/* Last-resort readable fallback if a route component throws at runtime. */
+.app-error-boundary {
+  display: grid;
+  place-content: center;
+  gap: 10px;
+  min-height: 100vh;
+  min-height: 100dvh;
+  padding: 24px;
+  background: #1b1c1f;
+  color: #e9ebef;
+  text-align: center;
+}
+.app-error-boundary h1 { margin: 0; font-size: 18px; }
+.app-error-boundary p { margin: 0; max-width: 560px; color: #a8aeb8; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
+.app-error-boundary .app-error-boundary-hint { color: #7d838d; font-size: 12px; }
+.app-error-boundary button { justify-self: center; padding: 7px 14px; border: 1px solid #454950; border-radius: 7px; background: #2a2c31; color: #e9ebef; font: inherit; font-size: 13px; cursor: pointer; }
+.app-error-boundary button:hover { border-color: #5c6169; background: #34373d; }
+
 .document-console {
   position: relative;
   --ui-bg: #7fd5fa;          /* saturated anime-sky base */

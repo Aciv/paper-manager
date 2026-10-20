@@ -83,6 +83,25 @@ require_development_ports() {
   require_free_port "frontend" "${VITE_HOST:-127.0.0.1}:${VITE_PORT:-5173}"
 }
 
+print_service_urls() {
+  local label="$1"
+  local address="$2"
+  local host="${address%:*}"
+  local port="${address##*:}"
+  host="${host#[}"
+  host="${host%]}"
+  if [[ "$host" == "0.0.0.0" || "$host" == "::" || "$host" == "*" ]]; then
+    echo "  $label: http://127.0.0.1:$port"
+    local ip
+    ip="$(ip route get 1.1.1.1 2>/dev/null | awk '{for (i = 1; i <= NF; i++) if ($i == "src") { print $(i + 1); exit }}')"
+    if [[ -n "$ip" && "$ip" != "127.0.0.1" ]]; then
+      echo "         http://$ip:$port"
+    fi
+    return
+  fi
+  echo "  $label: http://$host:$port"
+}
+
 stop_components() {
   (( dev_shutting_down == 0 )) || return 0
   dev_shutting_down=1
@@ -134,9 +153,12 @@ run_all() {
 
   echo
   echo "Development stack is ready:"
-  echo "  Web: http://${VITE_HOST:-127.0.0.1}:${VITE_PORT:-5173}"
-  echo "  API: http://${HTTP_ADDR:-127.0.0.1:8080}"
+  print_service_urls "Web" "${VITE_HOST:-127.0.0.1}:${VITE_PORT:-5173}"
+  print_service_urls "API" "${HTTP_ADDR:-127.0.0.1:8080}"
   echo "  Logs: $dev_log_dir/{api,parser,web}.log"
+  if [[ "${VITE_HOST:-127.0.0.1}" == "0.0.0.0" ]]; then
+    echo "  Note: the dev UI is exposed to other devices; it has no authentication."
+  fi
   echo "Press Ctrl+C to stop the three source services."
 
   while :; do

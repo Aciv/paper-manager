@@ -77,6 +77,30 @@ make dev
 `make dev` 会在启动源码进程前检查这三个端口；若发现已有进程占用，会立刻退出，
 而不会额外启动 Asynq worker 后再等待 API 的监听重试。
 
+### 局域网访问（可选）
+
+Vite 默认只监听 `127.0.0.1`。要让同一局域网的其他设备打开开发页面：
+
+1. 在 `.env` 中设置 `VITE_HOST=0.0.0.0`（或执行 `VITE_HOST=0.0.0.0 make dev`），
+   然后重启 `make dev`。
+2. 在其他设备访问 `http://<本机局域网 IP>:5173`。
+
+Go API 不需要暴露到局域网：页面里的 `/api` 请求由 Vite 代理到本机
+`127.0.0.1:8080`。开发栈没有登录鉴权，`0.0.0.0` 会把论文、上传文件和所有操作
+暴露给能访问该端口的人。
+
+WSL2 默认 NAT 模式下，Linux 的 `172.x` 地址不能被局域网设备直接访问。可以在
+Windows 管理员 PowerShell 中把 Windows 的局域网 IP 转发到 WSL：
+
+```powershell
+wsl hostname -I   # 取得 WSL 的内网 IP
+netsh interface portproxy add v4tov4 listenaddress=<Windows 局域网 IP> listenport=5173 connectaddress=<WSL IP> connectport=5173
+New-NetFirewallRule -DisplayName "papersManager dev 5173" -Direction Inbound -Protocol TCP -LocalPort 5173 -Action Allow
+```
+
+然后访问 `http://<Windows 局域网 IP>:5173`。WSL 重启后 IP 可能变化，需要更新转发
+规则；Windows 11 的 mirrored networking 可直接共享主机网络，不需要 portproxy。
+
 如果需要让启动终端保持在后台，可在另一个终端查看最近日志并持续跟踪：
 
 ```bash
