@@ -1,4 +1,4 @@
-import { ChangeEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
+import { ChangeEvent, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, Document, DocumentBase, PaperCitation, PaperMetadata, PaperReference } from './api';
 import {
@@ -15,6 +15,10 @@ import {
 } from './citations';
 import { LibrarySelect } from './LibrarySelect';
 import { ReferenceEditorDialog } from './ReferenceEditorDialog';
+import { CitationExportDialog } from './CitationExportDialog';
+import { TranslationPanel } from './TranslationPanel';
+import type { DoiCitationTarget } from './doiCitation';
+import type { TranslationRequestSeed } from './translation';
 import { fetchAllDocumentPages } from './documentPagination';
 import { isDocumentRead, localFileReadingKey, subscribeReadingState, transferReadingRecord } from './readingState';
 import './PaperLibraryPage.css';
@@ -38,12 +42,23 @@ function localPath(file: File): string {
 }
 
 const LEFT_MENUS = ['catalog', 'base', 'outline'] as const;
-const RIGHT_MENUS = ['info', 'citations'] as const;
+const RIGHT_MENUS = ['info', 'citations', 'translation'] as const;
 type LeftMenu = typeof LEFT_MENUS[number];
 type RightMenu = typeof RIGHT_MENUS[number];
 
 const LEFT_MENU_LABELS: Record<LeftMenu, string> = { catalog: '论文目录', base: '类别', outline: 'PDF 目录' };
-const RIGHT_MENU_LABELS: Record<RightMenu, string> = { info: '论文信息', citations: '引用信息' };
+const RIGHT_MENU_LABELS: Record<RightMenu, string> = { info: '论文信息', citations: '引用信息', translation: '翻译' };
+
+type LibraryTranslationRequest = TranslationRequestSeed & {
+  requestId: string;
+  // false = seed the panel's source only; true = run translation immediately.
+  autoTranslate: boolean;
+};
+
+function newTranslationRequestId(): string {
+  return window.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
 
 type LibraryReadFilter = 'all' | 'read' | 'unread';
 type LibrarySort = 'added' | 'title' | 'year' | 'author';
@@ -182,6 +197,8 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [activeCitationIDs, setActiveCitationIDs] = useState<string[]>([]);
   const [citationActionBusy, setCitationActionBusy] = useState('');
   const [editingCitation, setEditingCitation] = useState<PaperCitation>();
+  const [exportCitation, setExportCitation] = useState<DoiCitationTarget>();
+  const [translationRequest, setTranslationRequest] = useState<LibraryTranslationRequest>();
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
   const [citationPaperInfo, setCitationPaperInfo] = useState<PaperMetadata>();
   const [citationReference, setCitationReference] = useState<PaperReference>();
@@ -223,6 +240,32 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [rightHandle, setRightHandle] = useState<{ x: number; y: number } | null>(null);
   // After a click the handle goes dark until the pointer leaves the edge band.
   const handleSuppressed = useRef({ left: false, right: false });
+
+  // A translation belongs to the paper it was requested from. Clear it when the
+  // reader switches sources so old text cannot be mistaken for the new paper.
+  useEffect(() => {
+    setTranslationRequest(undefined);
+  }, [selected?.id, localSelected]);
+
+  // Selecting text/Blocks only seeds the translation panel's editable source.
+  // Translation starts from the explicit 翻译 action (reader menu or panel).
+  const previewTranslationSource = useCallback((request: TranslationRequestSeed) => {
+    setTranslationRequest({
+      ...request,
+      requestId: newTranslationRequestId(),
+      autoTranslate: false,
+    });
+  }, []);
+
+  const requestTranslation = useCallback((request: TranslationRequestSeed) => {
+    setTranslationRequest({
+      ...request,
+      requestId: newTranslationRequestId(),
+      autoTranslate: true,
+    });
+    setRightMenu('translation');
+    setRightCollapsed(false);
+  }, []);
 
   // Column widths: the user's drag is honoured while there is room, capped to a
   // share of the viewport, and never squeezing the reading area below a minimum.
@@ -356,14 +399,16 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       .filter((citation): citation is PaperCitation => Boolean(citation));
   }, [activeCitationIDs, citations, citationFilter]);
 
-  function revealCitations(referenceIds: string[]) {
+  // Hovering a PDF citation hotspot filters the citation panel in place. It
+  // deliberately does not switch the right-column tab: the user may be reading
+  // 论文信息 or 翻译, and hover should never steal that panel.
+  function filterCitationsFromPDF(referenceIds: string[]) {
     setActiveCitationIDs(referenceIds);
     if (referenceIds.length === 0) return;
-    setRightMenu('citations');
     setCitationGroup('outgoing');
     setCitationFilter('all');
-    // The first frame applies the tab/filter state; the second observes the
-    // mounted card. No extraction, search or network access occurs here.
+    // Only scrolls when the citation panel is already mounted; hovering while
+    // another tab is active is a pure filter update.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => {
       citationCards.current.get(referenceIds[0])?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     }));
@@ -825,7 +870,13 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const rightColumnBody = <>
     <div className="library-resizer" role="separator" aria-orientation="vertical" title="拖动调整右栏宽度"
       onPointerDown={event => startResize('right', event)} />
-    <div className="library-menu-bar library-menu-bar-end">
+    <div className="library-menu-bar">
+      {!localMode && selected?.doi && <button className="library-export" type="button"
+        title="通过 doi.org 获取当前论文的引文格式"
+        onClick={() => setExportCitation({
+          doi: selected.doi ?? '',
+          title: documentTitle(selected, metadata),
+        })}>引文格式</button>}
       <button className="library-collapse" type="button" onClick={() => setRightCollapsed(true)} aria-expanded="true" aria-controls="library-right-column" title="收起右栏">»</button>
     </div>
     <nav className="library-menu" role="tablist" aria-label="右侧功能菜单">
@@ -833,13 +884,15 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     </nav>
     <div className="library-detail">
       {rightMenu === 'info' && <section className="library-panel library-panel-info" aria-label="论文信息">
-        {localMode ? <p className="hint">本地论文没有关联信息。</p> : selected ? <dl className="library-info-list">
-          <dt>标题</dt><dd>{documentTitle(selected, metadata)}</dd>
-          <dt>作者</dt><dd>{metadata ? formatAuthors(metadata.authors) : '加载中或未识别'}</dd>
-          <dt>DOI</dt><dd>{selected.doi || '未设置'}</dd>
-          <dt>来源</dt><dd>{metadata?.sourceName || '未设置'}{metadata?.sourceUrl && <> · <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">打开来源</a></>}</dd>
-          <dt>发表信息</dt><dd>{[metadata?.venue, metadata?.publishedAt?.slice(0, 10), metadata?.volume, metadata?.issue, metadata?.pages].filter(Boolean).join(' · ') || '未设置'}</dd>
-        </dl> : <p className="hint">选择论文后显示论文信息。</p>}
+        {localMode ? <p className="hint">本地论文没有关联信息。</p> : selected ? <>
+          <dl className="library-info-list">
+            <dt>标题</dt><dd>{documentTitle(selected, metadata)}</dd>
+            <dt>作者</dt><dd>{metadata ? formatAuthors(metadata.authors) : '加载中或未识别'}</dd>
+            <dt>DOI</dt><dd>{selected.doi || '未设置'}</dd>
+            <dt>来源</dt><dd>{metadata?.sourceName || '未设置'}{metadata?.sourceUrl && <> · <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">打开来源</a></>}</dd>
+            <dt>发表信息</dt><dd>{[metadata?.venue, metadata?.publishedAt?.slice(0, 10), metadata?.volume, metadata?.issue, metadata?.pages].filter(Boolean).join(' · ') || '未设置'}</dd>
+          </dl>
+        </> : <p className="hint">选择论文后显示论文信息。</p>}
       </section>}
       {rightMenu === 'citations' && <section className="library-panel library-panel-citations" aria-label="引用信息">
         {localMode ? <p className="hint">本地论文没有引用信息。</p> : <>
@@ -920,6 +973,9 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
                             </button>
                             <button type="button" disabled={actionBusy} onClick={() => void rematchCitation(citation)}>重新匹配</button>
                           </>}
+                        {doi && <button type="button" disabled={actionBusy}
+                          title="通过 doi.org 获取 BibTeX、RIS、CSL-JSON 或格式化引用"
+                          onClick={() => setExportCitation({ doi, title, rawReference: citation.rawReference })}>引文格式</button>}
                         <button type="button" disabled={actionBusy} onClick={() => setEditingCitation(citation)}>编辑</button>
                         <button className="citation-delete" type="button" disabled={actionBusy}
                           onClick={() => void deleteCitation(citation)}>删除</button>
@@ -955,6 +1011,11 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
           </ol>}
         </>}
       </section>}
+      {/* Kept mounted while another right-hand tab is active so switching to
+          论文信息/引用信息 does not discard the current translations. */}
+      <div className="library-panel-slot" hidden={rightMenu !== 'translation'}>
+        <TranslationPanel request={translationRequest} />
+      </div>
     </div>
   </>;
 
@@ -969,7 +1030,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     </button>}
     {(narrow ? rightCollapsed : rightCollapsed && !!rightHandle) && <button className={`library-peek${narrow ? ' library-peek-right' : ''}`} style={narrow ? undefined : { left: rightHandle?.x ?? 0, top: rightHandle?.y ?? 96 }} type="button"
       onClick={() => { handleSuppressed.current.right = true; setRightHandle(null); setRightCollapsed(false); }}
-      title="展开右栏（论文信息与引用）" aria-label="展开右栏">
+      title="展开右栏（论文信息、引用与翻译）" aria-label="展开右栏">
       <span aria-hidden="true">«</span>
     </button>}
 
@@ -981,12 +1042,12 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       <Suspense fallback={<div className="library-empty"><p>正在加载阅读器…</p></div>}>
         {localMode
           ? localSelected
-            ? <PdfReader file={localSelected} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+            ? <PdfReader file={localSelected} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
             : <div className="library-empty"><p>在左侧「本地论文」里打开一个文件夹，里面的 PDF 会列在那里。</p></div>
           : !selected
             ? <div className="library-empty"><p>从左侧论文目录选择一篇论文开始阅读。</p></div>
             : selectedIsPDF
-              ? <PdfReader document={selected} citations={citations} onCitationLinks={revealCitations} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+              ? <PdfReader document={selected} citations={citations} onCitationLinks={filterCitationsFromPDF} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
               : <div className="library-empty"><p>该论文不是 PDF，无法在阅读库中预览。</p></div>}
       </Suspense>
       {message && <p className="library-message">{message}</p>}
@@ -1029,5 +1090,6 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
         setMessage('引用信息已更新。');
       }}
     />}
+    {exportCitation && <CitationExportDialog target={exportCitation} onClose={() => setExportCitation(undefined)} />}
   </main>;
 }

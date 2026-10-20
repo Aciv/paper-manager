@@ -9,6 +9,7 @@ import { api, Block, contentUrl, Document as PaperDocument, DocumentSelectionRes
 import { matchCitationTargets } from './citationLinkMatcher';
 import { PDFLinkPreview, destinationPDFPoint, destinationPreviewRegion, mergeAdjacentPDFLinks, viewportRegion } from './pdfLinkPreview';
 import { LatestPDFSelection, NormalizedPDFRegion, SelectionGeneration, canvasCropForRegion, normalizedRegion, regionIsLargeEnough } from './pdfSelection';
+import { type SelectedPDFBlock, type TranslationRequestSeed } from './translation';
 import { activeOutlineNode, annotateOutlinePages, type OutlineEntry } from './pdfOutline';
 import { isDocumentRead, localFileReadingKey, readingRecord, saveReadingPage, setDocumentRead, subscribeReadingState } from './readingState';
 
@@ -17,9 +18,9 @@ GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', i
 type SelectionMode = 'text' | 'block' | 'area';
 
 const MODE_HINTS: Record<SelectionMode, string> = {
-  text: '拖动文本层形成文本草稿。',
-  block: '点击高亮区域形成 Block 草稿。',
-  area: '在单页内拖动形成区域草稿；此时不会截图或请求后端。',
+  text: '拖动文本层形成文本草稿；右键打开翻译与处理菜单。',
+  block: '点击高亮区域形成 Block 草稿；Shift/Ctrl+点击可多选翻译；右键打开菜单。',
+  area: '在单页内拖动形成区域草稿；右键打开处理菜单。',
 };
 
 // Freehand strokes and rectangles drawn over an area selection. Points are
@@ -233,7 +234,7 @@ export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Pro
 
 // One overlay layer per pdf.js page element. pdf.js owns the page DOM (and may
 // re-create it), so everything the app renders on a page goes through here.
-const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pageNumber, mode, links, citationMatches, onSelection, onMessage, onPreviewCitations, onFollowLink, previewLink, areaSelection, strokes, annotationTool, onAnnotation }: {
+const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pageNumber, mode, links, citationMatches, selectedBlockId, pickedBlockIds, onSelection, onBlockToggle, onBlockContextMenu, onMessage, onPreviewCitations, onFollowLink, previewLink, areaSelection, strokes, annotationTool, onAnnotation }: {
   // Absent for a PDF opened from disk: it has no parsed blocks, but text and
   // area selection still work — those are handled in the browser.
   documentId?: string;
@@ -242,7 +243,11 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
   mode: SelectionMode;
   links: PDFLinkPreview[];
   citationMatches: Map<string, PaperCitation[]>;
+  selectedBlockId?: string;
+  pickedBlockIds?: ReadonlySet<string>;
   onSelection(selection: LatestPDFSelection): void;
+  onBlockToggle?(block: SelectedPDFBlock): void;
+  onBlockContextMenu?(block: SelectedPDFBlock, clientX: number, clientY: number): void;
   onMessage(message: string): void;
   onPreviewCitations(referenceIds: string[]): void;
   onFollowLink(link: PDFLinkPreview): void;
@@ -283,7 +288,8 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
   useEffect(() => {
     const page = rootRef.current?.closest('.page');
     if (!page) return;
-    const onMouseUp = () => {
+    const onMouseUp = (event: Event) => {
+      if (event instanceof MouseEvent && event.button !== 0) return;
       if (mode !== 'text') return;
       const targetId = selectionTarget;
       const browserSelection = window.getSelection();
@@ -364,13 +370,33 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
       {blocks.map(block => {
         const location = block.location;
         if (!location || !location.pageWidth || !location.pageHeight || location.bboxX0 === undefined || location.bboxY0 === undefined || location.bboxX1 === undefined || location.bboxY1 === undefined) return null;
-        return <button key={block.id} className={`pdf-block pdf-block-${block.type}`} tabIndex={mode === 'block' ? 0 : -1} style={{
+        const picked = pickedBlockIds?.has(block.id) ?? false;
+        const selectedBlock = selectedBlockId === block.id;
+        const blockPick: SelectedPDFBlock = {
+          blockId: block.id,
+          blockType: block.type,
+          text: block.text,
+          pageNumber: location.pageNumber,
+        };
+        return <button key={block.id} className={`pdf-block pdf-block-${block.type}${selectedBlock ? ' selected' : ''}${picked ? ' picked' : ''}`} tabIndex={mode === 'block' ? 0 : -1} style={{
           left: `${(location.bboxX0 / location.pageWidth) * 100}%`, top: `${(location.bboxY0 / location.pageHeight) * 100}%`,
           width: `${((location.bboxX1 - location.bboxX0) / location.pageWidth) * 100}%`, height: `${((location.bboxY1 - location.bboxY0) / location.pageHeight) * 100}%`,
-        }} type="button" title={`${block.type}: ${block.text.slice(0, 240)}`} onClick={() => onSelection({
-          kind: 'block', documentId: selectionTarget, blockId: block.id, pageNumber: location.pageNumber,
-          blockType: block.type, previewText: block.text,
-        })}><span>{block.type}</span></button>;
+        }} type="button" title={`${block.type}: ${block.text.slice(0, 240)}`} onClick={(event) => {
+          if ((event.shiftKey || event.ctrlKey || event.metaKey) && onBlockToggle) {
+            event.preventDefault();
+            onBlockToggle(blockPick);
+            return;
+          }
+          onSelection({
+            kind: 'block', documentId: selectionTarget, blockId: block.id, pageNumber: location.pageNumber,
+            blockType: block.type, previewText: block.text,
+          });
+        }} onContextMenu={(event) => {
+          if (!onBlockContextMenu) return;
+          event.preventDefault();
+          event.stopPropagation();
+          onBlockContextMenu(blockPick, event.clientX, event.clientY);
+        }}><span>{block.type}</span></button>;
       })}
     </div>
     <div className={`area-selection-overlay ${mode === 'area' ? 'active' : ''}`} aria-hidden={mode !== 'area'}
@@ -499,7 +525,7 @@ function OutlineTree({ nodes, onNavigate, active }: { nodes: OutlineNode[]; onNa
   </ul>;
 }
 
-export function PdfReader({ document, file, citations = [], onCitationLinks, onMessage, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
+export function PdfReader({ document, file, citations = [], onCitationLinks, onTranslate, onTranslationSource, onMessage, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
   document?: PaperDocument;
   // A PDF straight from the user's disk. It has no backend record, so anything
   // keyed by a document id (parsed blocks, metadata, citations, selection
@@ -509,6 +535,12 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
   // Native link matching never performs a hover-time or click-time API request.
   citations?: PaperCitation[];
   onCitationLinks?(referenceIds: string[]): void;
+  // Translation is a frontend-only action; the reader forwards the exact text
+  // or blocks the user selected and never uploads the whole PDF.
+  onTranslate?(request: TranslationRequestSeed): void;
+  // Selection changes seed the panel's editable source without translating;
+  // only onTranslate (the reader's 翻译 action) starts a translation.
+  onTranslationSource?(request: TranslationRequestSeed): void;
   onMessage(message: string): void;
   // `external` renders the outline through a portal into `outlineTarget` so a
   // host page can place it anywhere; `internal` keeps it beside the pages.
@@ -532,6 +564,13 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
   const [mode, setMode] = useState<SelectionMode>('text');
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
   const [selection, setSelection] = useState<LatestPDFSelection>();
+  // Shift/Ctrl-clicked Blocks form a translation-only multi-selection; a plain
+  // click keeps the existing single-Block processing behavior.
+  const [pickedBlocks, setPickedBlocks] = useState<SelectedPDFBlock[]>([]);
+  const pickedBlocksRef = useRef<SelectedPDFBlock[]>([]);
+  const pickedBlockIds = useMemo(() => new Set(pickedBlocks.map((block) => block.blockId)), [pickedBlocks]);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number }>();
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   const [processing, setProcessing] = useState(false);
   const [result, setResult] = useState<DocumentSelectionResult>();
   const [pageCount, setPageCount] = useState(0);
@@ -645,8 +684,8 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
       const panel = panelRef.current;
       const inside = Boolean(panel && (readerActive.current || panel.contains(window.document.activeElement)));
       if (!inside) return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      const target = event.target;
+      if (target instanceof Element && target.closest('input, textarea, select, [contenteditable="true"]')) return;
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
         event.preventDefault();
@@ -1063,11 +1102,37 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
     generations.current.replace();
     processController.current?.abort();
     setSelection(undefined);
+    resetPickedBlocks();
+    setContextMenu(undefined);
     setResult(undefined);
     setProcessing(false);
     if (!documentId) setMode('text'); // block mode needs parsed blocks
     return () => { generations.current.replace(); processController.current?.abort(); };
   }, [sourceKey]);
+
+  // The selection action surface is a right-click menu. Close it on an outside
+  // press, Escape, scrolling or resizing so it can never float over new content.
+  useEffect(() => {
+    if (!contextMenu) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (contextMenuRef.current?.contains(event.target as Node)) return;
+      setContextMenu(undefined);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setContextMenu(undefined);
+    };
+    const close = () => setContextMenu(undefined);
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [contextMenu]);
 
   // Ctrl + wheel zoom: the gesture itself only applies a compositor transform
   // to the viewer element — no re-render, no layout, which is what makes it
@@ -1240,16 +1305,119 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
     linkServiceRef.current?.goToDestination(dest as never);
   }, [rememberPosition]);
 
+  function resetPickedBlocks() {
+    pickedBlocksRef.current = [];
+    setPickedBlocks([]);
+  }
+
+  const toggleBlockPick = useCallback((block: SelectedPDFBlock) => {
+    setContextMenu(undefined);
+    const current = pickedBlocksRef.current;
+    const next = current.some((item) => item.blockId === block.blockId)
+      ? current.filter((item) => item.blockId !== block.blockId)
+      : [...current, block];
+    pickedBlocksRef.current = next;
+    setPickedBlocks(next);
+    if (next.length > 0) onTranslationSource?.({ kind: 'blocks', blocks: next });
+  }, [onTranslationSource]);
+
+  async function copySelectedText() {
+    if (selection?.kind !== 'text') return;
+    try {
+      await navigator.clipboard.writeText(selection.text);
+      onMessage(`已复制所选文本（${selection.text.length} 字符）。`);
+    } catch {
+      onMessage('复制失败，请手动选择文本复制。');
+    }
+  }
+
+  function contextMenuPosition(clientX: number, clientY: number) {
+    const rect = panelRef.current?.getBoundingClientRect();
+    const menuWidth = 200;
+    const menuHeight = 220;
+    const left = rect ? Math.max(6, Math.min(clientX - rect.left, rect.width - menuWidth - 6)) : clientX;
+    const top = rect ? Math.max(6, Math.min(clientY - rect.top, rect.height - menuHeight - 6)) : clientY;
+    return { x: left, y: top };
+  }
+
+  function openSelectionContextMenu(event: ReactMouseEvent<HTMLDivElement>) {
+    if (!selection && pickedBlocks.length === 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setContextMenu(contextMenuPosition(event.clientX, event.clientY));
+  }
+
+  function runContextAction(action: () => void) {
+    setContextMenu(undefined);
+    action();
+  }
+
+  function translateSelection() {
+    if (!onTranslate) return;
+    if (pickedBlocks.length > 0) {
+      onTranslate({ kind: 'blocks', blocks: pickedBlocks });
+      return;
+    }
+    if (!selection) return;
+    if (selection.kind === 'text') {
+      onTranslate({ kind: 'text', text: selection.text, pageNumber: selection.pageNumber });
+    } else if (selection.kind === 'block') {
+      onTranslate({
+        kind: 'blocks',
+        blocks: [{
+          blockId: selection.blockId,
+          blockType: selection.blockType,
+          text: selection.previewText,
+          pageNumber: selection.pageNumber,
+        }],
+      });
+    }
+  }
+
   const replaceSelection = useCallback((next: LatestPDFSelection) => {
     processController.current?.abort();
     generations.current.replace();
     setStrokes(NO_STROKES);
     setAnnotationTool(null);
     setAnnotationDone(false);
+    resetPickedBlocks();
+    setContextMenu(undefined);
     setSelection(next);
     setResult(undefined);
     setProcessing(false);
-  }, []);
+    // Selecting is only source seeding; the panel must not translate until the
+    // user explicitly chooses 翻译 from the context menu or the panel.
+    if (next.kind === 'text') {
+      onTranslationSource?.({ kind: 'text', text: next.text, pageNumber: next.pageNumber });
+    } else if (next.kind === 'block') {
+      onTranslationSource?.({
+        kind: 'blocks',
+        blocks: [{
+          blockId: next.blockId,
+          blockType: next.blockType,
+          text: next.previewText,
+          pageNumber: next.pageNumber,
+        }],
+      });
+    }
+  }, [onTranslationSource]);
+
+  // Block mode also supports right-click as the primary selection gesture:
+  // right-clicking an unpicked Block selects it (clearing stale picks) and opens
+  // the action menu. Right-clicking a picked Block keeps the multi-selection.
+  function openBlockContextMenu(block: SelectedPDFBlock, clientX: number, clientY: number) {
+    if (!pickedBlocks.some((item) => item.blockId === block.blockId)) {
+      replaceSelection({
+        kind: 'block',
+        documentId: selectionTarget,
+        blockId: block.blockId,
+        pageNumber: block.pageNumber,
+        blockType: block.blockType,
+        previewText: block.text,
+      });
+    }
+    setContextMenu(contextMenuPosition(clientX, clientY));
+  }
 
   function clearSelection() {
     processController.current?.abort();
@@ -1257,6 +1425,8 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
     setStrokes(NO_STROKES);
     setAnnotationTool(null);
     setAnnotationDone(false);
+    resetPickedBlocks();
+    setContextMenu(undefined);
     setSelection(undefined);
     setResult(undefined);
     setProcessing(false);
@@ -1359,6 +1529,8 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
 
   function selectMode(next: SelectionMode) {
     if (mode === next) return;
+    if (next !== 'block') resetPickedBlocks();
+    setContextMenu(undefined);
     setMode(next);
     onMessage(MODE_HINTS[next]);
   }
@@ -1608,23 +1780,20 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
       {selection.kind === 'text' && <p>{selection.text}</p>}
       {selection.kind === 'block' && <p>{selection.previewText}</p>}
       {selection.kind === 'area' && <code>{JSON.stringify(selection.region)}</code>}
-      <div className="pdf-selection-actions"><button className="primary" type="button" disabled={processing} onClick={() => void processSelection()}>{processing ? '处理中…' : '处理当前选择'}</button><button type="button" disabled={processing} onClick={clearSelection}>清除</button></div>
+      <div className="pdf-selection-actions">
+        <button className="primary" type="button" disabled={processing} onClick={() => void processSelection()}>{processing ? '处理中…' : '处理当前选择'}</button>
+        {onTranslate && selection.kind !== 'area' && <button type="button" disabled={processing} onClick={translateSelection}>翻译</button>}
+        <button type="button" disabled={processing} onClick={clearSelection}>清除</button>
+      </div>
       {result && <p className="pdf-selection-result">已接收：{result.kind}{result.imageWidth ? ` · ${result.imageWidth}×${result.imageHeight}` : ''}</p>}
     </div>}
     <div className={`pdf-reader-frame${outlineExternal ? ' outline-external' : ''}${outlineCollapsed ? ' outline-collapsed' : ''}`}>
       {!outlineExternal && <aside className="outline"><h3>目录</h3>{outlineTree}<p className="hint">在阅读区上下滚动可连续阅读全部页面。</p></aside>}
       <div className="pdf-reader-body">
         {!modeRail && <div className="pdf-toolbar"><span>共 {pageCount || '…'} 页{linkCount > 0 ? ` · ${linkCount} 个可预览内部链接` : ''}</span><button type="button" aria-expanded={!outlineCollapsed} onClick={() => setOutlineCollapsed(collapsed => !collapsed)}>{outlineCollapsed ? '展开目录' : '收起目录'}</button></div>}
-        <div className="pdf-viewer-host"><div className="pdf-viewer-scroll" ref={scrollRef}><div className="pdfViewer" /></div></div>
+        <div className="pdf-viewer-host" onContextMenu={openSelectionContextMenu}><div className="pdf-viewer-scroll" ref={scrollRef}><div className="pdfViewer" /></div></div>
       </div>
     </div>
-    {modeRail && selection && <div className="pdf-selection-bar">
-      <span>{selectionSummary(selection)}</span>
-      <button className="primary" type="button" disabled={processing} onClick={() => void processSelection()}>
-        {processing ? '处理中…' : processable ? '处理当前选择' : selection.kind === 'text' ? '复制文本' : '保存截图'}
-      </button>
-      <button type="button" disabled={processing} onClick={clearSelection}>清除</button>
-    </div>}
     {modeRail && <div
       className={`pdf-mode-rail${(railPlacement?.horizontal ?? false) ? ' rail-horizontal' : ''}${(railPlacement?.dockEnd ?? true) ? ' rail-dock-end' : ''}${railDragging ? ' rail-dragging' : ''}${railCollapsed ? ' rail-collapsed' : ''}`}
       ref={railRef}
@@ -1639,13 +1808,13 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
         event.preventDefault();
         event.stopPropagation();
       }}>
-      <button className={mode === 'text' ? 'active' : ''} type="button" aria-pressed={mode === 'text'} title="选择文本" onClick={() => selectMode('text')}>
+      <button className={mode === 'text' ? 'active' : ''} type="button" aria-pressed={mode === 'text'} title="选择文本（选中后右键操作）" onClick={() => selectMode('text')}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4.4 4.1 10.8 20 13.1 13.6 19.5 11.3z" /></svg>
       </button>
-      <button className={mode === 'area' ? 'active' : ''} type="button" aria-pressed={mode === 'area'} title="框选页面" onClick={() => selectMode('area')}>
+      <button className={mode === 'area' ? 'active' : ''} type="button" aria-pressed={mode === 'area'} title="框选页面（选中后右键操作）" onClick={() => selectMode('area')}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8" /><path d="M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8" /><path d="M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16" /><path d="M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16" /></svg>
       </button>
-      {processable && <button className={mode === 'block' ? 'active' : ''} type="button" aria-pressed={mode === 'block'} title="选择解析 Block" onClick={() => selectMode('block')}>
+      {processable && <button className={mode === 'block' ? 'active' : ''} type="button" aria-pressed={mode === 'block'} title="选择解析 Block（Shift/Ctrl 多选，右键操作）" onClick={() => selectMode('block')}>
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><rect x="4.5" y="4.5" width="15" height="15" rx="2.5" /></svg>
       </button>}
       <button className={findOpen ? 'active' : ''} type="button" aria-pressed={findOpen} title="在 PDF 中查找（Ctrl+F）" onClick={() => (findOpen ? closeFind() : setFindOpen(true))}>
@@ -1737,7 +1906,10 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
     {outlineExternal && outlineTarget && !outlineCollapsed && createPortal(<div className="pdf-outline-content">{outlineTree}</div>, outlineTarget)}
     {slots.map(entry => createPortal(
       <PageOverlay documentId={documentId} selectionTarget={selectionTarget} pageNumber={entry.pageNumber} mode={mode}
-        links={linksByPage.get(entry.pageNumber) ?? []} citationMatches={citationMatchesByLink} onSelection={replaceSelection} onMessage={onMessage}
+        links={linksByPage.get(entry.pageNumber) ?? []} citationMatches={citationMatchesByLink}
+        selectedBlockId={selection?.kind === 'block' ? selection.blockId : undefined}
+        pickedBlockIds={pickedBlockIds} onSelection={replaceSelection} onBlockToggle={toggleBlockPick}
+        onBlockContextMenu={openBlockContextMenu} onMessage={onMessage}
         onPreviewCitations={previewCitations}
         onFollowLink={followLink} previewLink={previewLink}
         areaSelection={!annotationDone && selection?.kind === 'area' && selection.pageNumber === entry.pageNumber ? selection.region : undefined}
@@ -1747,5 +1919,31 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onM
       entry.node,
       entry.pageNumber,
     ))}
+    {contextMenu && <div ref={contextMenuRef} className="pdf-context-menu" role="menu" aria-label="选择操作"
+      style={{ left: contextMenu.x, top: contextMenu.y }} onContextMenu={(event) => event.preventDefault()}>
+      <p className="pdf-context-menu-title">
+        {pickedBlocks.length > 0
+          ? `已选 ${pickedBlocks.length} 个 Block`
+          : selection ? selectionSummary(selection) : ''}
+      </p>
+      {pickedBlocks.length > 0 ? <>
+        {onTranslate && <button type="button" role="menuitem" onClick={() => runContextAction(translateSelection)}>
+          翻译 {pickedBlocks.length} 段
+        </button>}
+        <button type="button" role="menuitem" onClick={() => runContextAction(() => resetPickedBlocks())}>清除多选</button>
+      </> : selection && <>
+        {onTranslate && selection.kind !== 'area' && <button type="button" role="menuitem" disabled={processing}
+          onClick={() => runContextAction(translateSelection)}>翻译</button>}
+        <button type="button" role="menuitem" disabled={processing}
+          onClick={() => runContextAction(() => void processSelection())}>
+          {processing ? '处理中…' : processable ? '处理当前选择' : selection.kind === 'text' ? '复制文本' : '保存截图'}
+        </button>
+        {processable && selection.kind === 'text' && <button type="button" role="menuitem" disabled={processing}
+          onClick={() => runContextAction(() => void copySelectedText())}>复制文本</button>}
+        <div className="pdf-context-menu-separator" role="separator" />
+        <button className="pdf-context-menu-danger" type="button" role="menuitem" disabled={processing}
+          onClick={() => runContextAction(clearSelection)}>清除选择</button>
+      </>}
+    </div>}
   </section>;
 }

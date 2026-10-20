@@ -1,0 +1,174 @@
+/* Shared citation-format dialog. It is rendered inside either the dark reading
+   library or the light console, so colours resolve from the host theme tokens
+   first and fall back to the other surface. */
+.citation-export-backdrop {
+  position: fixed;
+  z-index: 60;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgb(5 15 25 / 58%);
+}
+
+.citation-export-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(760px, 100%);
+  max-height: calc(100dvh - 48px);
+  min-height: 0;
+  padding: 20px;
+  border: 1px solid var(--pl-border-2, var(--ui-border-2, #ccd5df));
+  border-radius: 12px;
+  background: var(--pl-surface, var(--ui-surface, #ffffff));
+  color: var(--pl-text, var(--ui-text, #10202c));
+  box-shadow: 0 24px 70px rgb(0 0 0 / 45%);
+}
+
+.citation-export-dialog > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--pl-border, var(--ui-border, #dce3ea));
+}
+
+.citation-export-dialog h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+}
+
+.citation-export-dialog .eyebrow {
+  margin: 0 0 4px;
+  color: var(--pl-faint, var(--ui-faint, #708090));
+}
+
+.citation-export-subject {
+  display: -webkit-box;
+  margin: 14px 0 0;
+  overflow: hidden;
+  color: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+}
+
+.citation-export-doi {
+  margin: 3px 0 0;
+  color: var(--pl-faint, var(--ui-faint, #708090));
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  overflow-wrap: anywhere;
+}
+
+.citation-export-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.citation-export-toolbar label {
+  color: var(--pl-faint, var(--ui-faint, #708090));
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.citation-export-toolbar select {
+  flex: 1 1 280px;
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--pl-border-2, var(--ui-border-2, #ccd5df));
+  border-radius: 6px;
+  background: var(--pl-surface-2, var(--ui-surface-2, #f3f7fa));
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.citation-export-toolbar select:focus {
+  outline: 3px solid rgb(56 189 248 / 24%);
+  border-color: var(--pl-border-3, var(--ui-accent, #5bb4df));
+}
+
+.citation-export-content {
+  flex: 1 1 auto;
+  min-height: 140px;
+  max-height: min(52vh, 480px);
+  margin: 12px 0 0;
+  padding: 12px 14px;
+  overflow: auto;
+  border: 1px solid var(--pl-border, var(--ui-border, #dce3ea));
+  border-radius: 8px;
+  background: var(--pl-surface-2, var(--ui-surface-2, #f3f7fa));
+  color: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  tab-size: 2;
+  user-select: text;
+  white-space: pre-wrap;
+  scrollbar-width: thin;
+}
+
+.citation-export-loading,
+.citation-export-notice,
+.citation-export-hint {
+  margin: 12px 0 0;
+  color: var(--pl-faint, var(--ui-faint, #708090));
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.citation-export-notice {
+  color: var(--pl-text, var(--ui-text, #10202c));
+  font-size: 12px;
+}
+
+.citation-export-hint {
+  margin-top: 10px;
+}
+
+.citation-export-error {
+  margin: 12px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--ui-danger, #f2c9c5);
+  border-radius: 7px;
+  background: var(--pl-danger-bg, var(--ui-danger-bg, #fef2f2));
+  color: var(--pl-danger, var(--ui-danger, #b42318));
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.paper-library .citation-export-dialog button,
+.document-console .citation-export-dialog button {
+  padding: 7px 11px;
+  border: 1px solid var(--pl-border-2, var(--ui-border-2, #ccd5df));
+  border-radius: 6px;
+  background: var(--pl-surface-2, var(--ui-surface-2, #f3f7fa));
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.paper-library .citation-export-dialog button:hover:not(:disabled),
+.document-console .citation-export-dialog button:hover:not(:disabled) {
+  border-color: var(--pl-border-3, var(--ui-border-3, #8aa6bb));
+}
+
+@media (max-width: 640px) {
+  .citation-export-backdrop { padding: 10px; }
+  .citation-export-dialog { padding: 14px; }
+  .citation-export-toolbar select { flex-basis: 100%; }
+  .citation-export-content { max-height: 46vh; }
+}

@@ -14,6 +14,8 @@ import {
   type CitationGroup,
 } from './citations';
 import { ReferenceEditorDialog } from './ReferenceEditorDialog';
+import { CitationExportDialog } from './CitationExportDialog';
+import type { DoiCitationTarget } from './doiCitation';
 import './PaperInfo.css';
 import '@fontsource-variable/manrope';
 import '@fontsource-variable/noto-sans-sc';
@@ -181,6 +183,7 @@ function App() {
   const [citationFilter, setCitationFilter] = useState<CitationFilter>('all');
   const [citationActionBusy, setCitationActionBusy] = useState('');
   const [editingCitation, setEditingCitation] = useState<PaperCitation>();
+  const [exportCitation, setExportCitation] = useState<DoiCitationTarget>();
   // Titles/authors for the papers on the other side of a citation edge: the
   // cited document for outgoing rows, the citing document for incoming rows.
   const [citationContext, setCitationContext] = useState<Record<string, { document: Document; metadata?: PaperMetadata }>>({});
@@ -1163,6 +1166,12 @@ function App() {
               <dt>创建时间</dt><dd>{formatDate(selected.createdAt)}</dd>
               <dt>更新时间</dt><dd>{formatDate(selected.updatedAt)}</dd>
             </dl>
+            {selected.doi && <div className="detail-actions">
+              <button type="button" onClick={() => setExportCitation({
+                doi: selected.doi ?? '',
+                title: paperMetadata?.title || selected.originalFilename,
+              })}>引文格式</button>
+            </div>}
             <p className={documentStatus === 'failed' ? 'detail-error' : 'hint'}>{selectedDescription}</p>
             </>}
             {detailMenu === 'edit' && <form className="metadata-form" onSubmit={submitMetadataUpdate}>
@@ -1269,7 +1278,10 @@ function App() {
 								  </button>
 								  <button type="button" disabled={actionBusy} onClick={() => void rematchReference(citation.referenceId)}>重新匹配</button>
 								</>}
-							  <button type="button" disabled={actionBusy} onClick={() => setEditingCitation(citation)}>编辑</button>
+							  {doi && <button type="button" disabled={actionBusy}
+									title="通过 doi.org 获取 BibTeX、RIS、CSL-JSON 或格式化引用"
+									onClick={() => setExportCitation({ doi, title, rawReference: citation.rawReference })}>引文格式</button>}
+								  <button type="button" disabled={actionBusy} onClick={() => setEditingCitation(citation)}>编辑</button>
 							  <button className="citation-delete" type="button" disabled={actionBusy}
 								onClick={() => void deleteCitation(citation)}>删除</button>
 							</div>
@@ -1351,6 +1363,7 @@ function App() {
         setMessage('引用信息已更新。');
       }}
     />}
+    {exportCitation && <CitationExportDialog target={exportCitation} onClose={() => setExportCitation(undefined)} />}
   </main>;
 }
 

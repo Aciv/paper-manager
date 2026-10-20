@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "test:selection": "node --experimental-strip-types --test tests/pdfSelection.test.ts tests/pdfLinkPreview.test.ts tests/pdfOutline.test.ts tests/documentPagination.test.ts tests/citationLinkMatcher.test.ts"
+    "test:selection": "node --experimental-strip-types --test tests/pdfSelection.test.ts tests/pdfLinkPreview.test.ts tests/pdfOutline.test.ts tests/documentPagination.test.ts tests/citationLinkMatcher.test.ts",
+    "test:doi": "node --experimental-strip-types --test tests/doiCitation.test.ts",
+    "test:translation": "node --experimental-strip-types --test tests/translation.test.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",
