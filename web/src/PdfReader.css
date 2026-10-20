@@ -93,13 +93,6 @@ span.pdf-outline-toggle { cursor:default; }
 .pdf-mode-rail { --rail-popover-gap:17px; position:absolute; z-index:9; top:50%; right:12px; display:grid; gap:6px; padding:7px 6px; border:1px solid #dce3ed; border-radius:12px; background:rgb(255 255 255 / 96%); box-shadow:0 10px 28px rgb(23 32 51 / 22%); transform:translateY(-50%); cursor:grab; touch-action:none; user-select:none; }
 .pdf-mode-rail.rail-horizontal { grid-auto-flow:column; }
 .pdf-mode-rail.rail-dragging { cursor:grabbing; box-shadow:0 14px 34px rgb(23 32 51 / 34%); }
-/* The collapse toggle points at the docked edge (rotating with the rail's
-   orientation) and flips around once the rail is folded away. */
-.pdf-mode-rail .rail-collapse-toggle svg { transform:rotate(var(--rail-toggle-angle, 0deg)); transition:transform .15s ease; }
-.pdf-mode-rail.rail-horizontal.rail-dock-end { --rail-toggle-angle:90deg; }
-.pdf-mode-rail.rail-horizontal:not(.rail-dock-end) { --rail-toggle-angle:-90deg; }
-.pdf-mode-rail:not(.rail-horizontal):not(.rail-dock-end) { --rail-toggle-angle:180deg; }
-.pdf-mode-rail.rail-collapsed .rail-collapse-toggle svg { transform:rotate(calc(var(--rail-toggle-angle, 0deg) + 180deg)); }
 .pdf-mode-rail.rail-collapsed > :not(.rail-collapse-toggle) { display:none; }
 .pdf-mode-rail button { display:grid; place-items:center; width:34px; height:34px; padding:0; border:0; border-radius:8px; background:transparent; color:#475569; cursor:pointer; }
 .pdf-mode-rail button:hover:not(:disabled) { border-color:transparent; background:#eef2f7; }
@@ -115,6 +108,19 @@ span.pdf-outline-toggle { cursor:default; }
 .pdf-context-menu-separator { height:1px; margin:4px 3px; background:#e2e8f0; }
 .pdf-context-menu .pdf-context-menu-danger { color:#b42318; }
 .pdf-context-menu .pdf-context-menu-danger:hover:not(:disabled) { background:#fff1f0; }
+
+/* Compact translation result opened from the selection menu. It mirrors the
+   right translation panel, but stays next to the text/Block being read. */
+.pdf-translation-popover { position:absolute; z-index:21; display:grid; gap:7px; width:min(360px, calc(100% - 16px)); max-height:min(300px, calc(100% - 16px)); padding:10px 11px; border:1px solid #93b4ef; border-radius:8px; background:#fff; box-shadow:0 12px 34px rgb(15 23 42 / 28%); text-align:left; }
+.pdf-translation-popover-head { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.pdf-translation-popover-head strong { color:#1e3a5f; font-size:12px; }
+.pdf-viewer-panel .pdf-translation-popover button.pdf-translation-popover-close { display:flex; flex:0 0 auto; align-items:center; justify-content:center; width:20px; height:20px; padding:0; border:0; border-radius:5px; background:transparent; color:#64748b; line-height:0; cursor:pointer; }
+.pdf-viewer-panel .pdf-translation-popover button.pdf-translation-popover-close:hover { background:#eef2f7; color:#0f172a; }
+.pdf-viewer-panel .pdf-translation-popover button.pdf-translation-popover-close svg { display:block; width:13px; height:13px; }
+.pdf-translation-popover-body { max-height:200px; margin:0; overflow:auto; color:#172033; font-size:12.5px; line-height:1.55; white-space:pre-wrap; overflow-wrap:anywhere; }
+.pdf-translation-popover-status { margin:0; color:#64748b; font-size:12px; }
+.pdf-translation-popover-error { margin:0; color:#a51d2d; font-size:11.5px; }
+.pdf-translation-popover small { color:#64748b; font-size:11px; }
 
 /* Native PDF links are used only as geometric anchors. Their destinations are
    previewed as original-PDF pixels; no citation text or metadata matching is

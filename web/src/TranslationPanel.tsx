@@ -36,6 +36,16 @@ type TranslationRequest = TranslationRequestSeed & {
   autoTranslate: boolean;
 };
 
+// Lightweight summary for the reader's selection popover. The right panel
+// remains the editable surface; this mirrors its current result state.
+export type TranslationPreview = {
+  requestId: string;
+  status: 'waiting' | 'loading' | 'done' | 'error';
+  translation: string;
+  error?: string;
+  fallback?: boolean;
+};
+
 type TranslationLayout = 'bilingual' | 'target';
 const TRANSLATION_LAYOUT_STORAGE = 'papersManager.translation.layout.v1';
 
@@ -153,7 +163,10 @@ function TranslateIcon() {
 // Bing-style translator surface: a language bar, editable source panes and
 // matched translation panes. PDF selections seed the source, but the source is
 // always editable and a blank manual unit is available without a selection.
-export function TranslationPanel({ request }: { request?: TranslationRequest }) {
+export function TranslationPanel({ request, onTranslationResult }: {
+  request?: TranslationRequest;
+  onTranslationResult?(result: TranslationPreview): void;
+}) {
   const [settings, setSettings] = useState<TranslationSettings>(() => loadTranslationSettings());
   const [layout, setLayout] = useState<TranslationLayout>(() => loadTranslationLayout());
   const [configOpen, setConfigOpen] = useState(false);
@@ -372,6 +385,34 @@ export function TranslationPanel({ request }: { request?: TranslationRequest }) 
 
     return () => controller.abort();
   }, [translateNonce, settings.provider, settings.sourceLanguage, settings.targetLanguage, chromeAvailability]);
+
+  // Mirror the current result to the reader popover. Compare the unit sources
+  // against the request so a stale unit from the previous request cannot flash.
+  useEffect(() => {
+    if (!onTranslationResult || !request?.autoTranslate || !autoTranslateArmedRef.current) return;
+    const expected = itemsForRequest(request);
+    const sourceUnits = units.filter((unit) => unit.source.trim());
+    if (expected.length === 0 || sourceUnits.length !== expected.length
+      || expected.some((item, index) => item.text !== sourceUnits[index].source.trim())) {
+      return;
+    }
+    const loading = sourceUnits.some((unit) => unit.status === 'loading');
+    const pending = loading || sourceUnits.some((unit) => unit.status === 'waiting');
+    const errored = sourceUnits.find((unit) => unit.status === 'error');
+    const translation = sourceUnits
+      .filter((unit) => (unit.status === 'done' || unit.status === 'skipped') && unit.translation?.trim())
+      .map((unit) => sourceUnits.length > 1
+        ? `${unit.label}\n${unit.translation?.trim() ?? ''}`
+        : unit.translation?.trim() ?? '')
+      .join('\n\n');
+    onTranslationResult({
+      requestId: request.requestId,
+      status: pending ? (loading ? 'loading' : 'waiting') : errored ? 'error' : 'done',
+      translation,
+      error: errored?.error,
+      fallback: sourceUnits.some((unit) => unit.fallback),
+    });
+  }, [units, request, onTranslationResult]);
 
   function translateNow() {
     autoTranslateArmedRef.current = true;

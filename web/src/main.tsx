@@ -203,7 +203,7 @@ function App() {
   const [baseName, setBaseName] = useState('');
   const [baseDescription, setBaseDescription] = useState('');
   const [selectedBaseID, setSelectedBaseID] = useState('');
-  const [uploadBaseIDs, setUploadBaseIDs] = useState<string[]>([]);
+  const [formBaseIDs, setFormBaseIDs] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const [batchResults, setBatchResults] = useState<DocumentBatchItemResult[]>([]);
   const [busy, setBusy] = useState(false);
@@ -502,11 +502,11 @@ function App() {
       setMessage(`正在批量上传 ${files.length} 个文件…`);
       try {
         const result = await api.uploadBatch(files);
-        const selectedUploadBases = bases.filter((base) => uploadBaseIDs.includes(base.id));
+        const selectedUploadBases = bases.filter((base) => formBaseIDs.includes(base.id));
         const baseNote = await attachBatchDocumentsToBases(result, selectedUploadBases);
         await presentBatchResult(result, '文件批量上传', baseNote);
         setFiles([]);
-        setUploadBaseIDs([]);
+        setFormBaseIDs([]);
         const input = window.document.getElementById('document-file') as HTMLInputElement | null;
         if (input) input.value = '';
       } catch (error) {
@@ -525,33 +525,22 @@ function App() {
       if (title.trim() || parseTags(tags).length > 0) {
         ({ paperMetadata: uploadedPaper } = await api.updatePaperMetadata(uploadedDocument.id, { title: title.trim(), tags: parseTags(tags) }));
       }
-      const selectedUploadBases = bases.filter((base) => uploadBaseIDs.includes(base.id));
-      const baseAttachmentFailures: string[] = [];
-      for (const base of selectedUploadBases) {
-        try {
-          await api.addDocumentToBase(base.id, uploadedDocument.id);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : '未知错误';
-          baseAttachmentFailures.push(`${base.name}（${reason}）`);
-        }
-      }
+      const selectedUploadBases = bases.filter((base) => formBaseIDs.includes(base.id));
+      const baseAttachmentFailures = await attachDocumentToBases(uploadedDocument, selectedUploadBases);
       setSelected(uploadedDocument);
       setPaperMetadata(uploadedPaper);
       setFiles([]);
       setDoi('');
       setTitle('');
       setTags('');
-      setUploadBaseIDs([]);
+      setFormBaseIDs([]);
       const input = window.document.getElementById('document-file') as HTMLInputElement | null;
       if (input) input.value = '';
       await load({ page: 1 });
-      if (baseAttachmentFailures.length > 0) {
-        setMessage(`上传成功：${documentLabel(uploadedDocument, uploadedPaper)}；已加入 ${selectedUploadBases.length - baseAttachmentFailures.length}/${selectedUploadBases.length} 个 Base，失败：${baseAttachmentFailures.join('；')}。`);
-      } else if (selectedUploadBases.length > 0) {
-        setMessage(`上传成功：${documentLabel(uploadedDocument, uploadedPaper)}；已加入 ${selectedUploadBases.length} 个 Base。`);
-      } else {
-        setMessage(`上传成功：${documentLabel(uploadedDocument, uploadedPaper)}（${uploadedDocument.id}）。`);
-      }
+      const baseSummary = baseAttachmentSummary(selectedUploadBases, baseAttachmentFailures);
+      setMessage(baseSummary
+        ? `上传成功：${documentLabel(uploadedDocument, uploadedPaper)}${baseSummary}。`
+        : `上传成功：${documentLabel(uploadedDocument, uploadedPaper)}（${uploadedDocument.id}）。`);
     } catch (error) {
       setMessage(error instanceof Error ? `上传失败：${error.message}` : '上传失败。');
     } finally {
@@ -576,8 +565,11 @@ function App() {
       try {
         const payload: DocumentURLImport[] = remoteURLs.map((url) => ({ url }));
         const result = await api.importFromURLs(payload);
-        await presentBatchResult(result, 'URL 批量导入');
+        const selectedImportBases = bases.filter((base) => formBaseIDs.includes(base.id));
+        const baseNote = await attachBatchDocumentsToBases(result, selectedImportBases);
+        await presentBatchResult(result, 'URL 批量导入', baseNote);
         setRemoteURL('');
+        setFormBaseIDs([]);
       } catch (error) {
         setMessage(error instanceof Error ? `URL 批量导入失败：${error.message}` : 'URL 批量导入失败。');
       } finally {
@@ -592,12 +584,15 @@ function App() {
         doi: remoteDOI.trim() || undefined,
         filename: remoteFilename.trim() || undefined,
       });
+      const selectedImportBases = bases.filter((base) => formBaseIDs.includes(base.id));
+      const baseAttachmentFailures = await attachDocumentToBases(imported, selectedImportBases);
       setSelected(imported);
       setRemoteURL('');
       setRemoteDOI('');
       setRemoteFilename('');
+      setFormBaseIDs([]);
       watchQueuedProcessing(imported.id);
-      setMessage(`远程 PDF 已导入并提交处理：${imported.originalFilename}（${imported.id}）。`);
+      setMessage(`远程 PDF 已导入并提交处理：${imported.originalFilename}（${imported.id}）${baseAttachmentSummary(selectedImportBases, baseAttachmentFailures)}。`);
       await load({ page: 1 });
     } catch (error) {
       setMessage(error instanceof Error ? `远程导入失败：${error.message}` : '远程导入失败。');
@@ -907,6 +902,27 @@ function App() {
     }
   }
 
+  async function attachDocumentToBases(document: Document, selectedBases: DocumentBase[]): Promise<string[]> {
+    const failures: string[] = [];
+    for (const base of selectedBases) {
+      try {
+        await api.addDocumentToBase(base.id, document.id);
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : '未知错误';
+        failures.push(`${base.name}（${reason}）`);
+      }
+    }
+    return failures;
+  }
+
+  function baseAttachmentSummary(selectedBases: DocumentBase[], failures: string[]): string {
+    if (failures.length > 0) {
+      return `；已加入 ${selectedBases.length - failures.length}/${selectedBases.length} 个 Base，失败：${failures.join('；')}`;
+    }
+    if (selectedBases.length > 0) return `；已加入 ${selectedBases.length} 个 Base`;
+    return '';
+  }
+
   async function attachBatchDocumentsToBases(result: DocumentBatchResult, selectedBases: DocumentBase[]): Promise<string> {
     if (selectedBases.length === 0) return '';
     const documents = new Map<string, Document>();
@@ -954,10 +970,27 @@ function App() {
     setMessage(`${operation}完成：受理 ${counts.accepted}，已存在 ${counts.duplicate}，拒绝 ${counts.rejected}，失败 ${counts.failed}${stopped}${suffix}。`);
   }
 
-  function toggleUploadBase(baseID: string) {
-    setUploadBaseIDs((current) => current.includes(baseID)
+  function toggleFormBase(baseID: string) {
+    setFormBaseIDs((current) => current.includes(baseID)
       ? current.filter((id) => id !== baseID)
       : [...current, baseID]);
+  }
+
+  function renderBasePicker() {
+    return (
+      <div className="base-picker">
+        <span className="base-picker-label">加入 Document Base（可多选）</span>
+        {bases.length === 0
+          ? <p className="hint">暂无可选 Base；可先在 Base 菜单里创建。</p>
+          : <div className="base-chips">
+            {bases.map((base) => {
+              const selected = formBaseIDs.includes(base.id);
+              return <button className={`base-chip${selected ? ' active' : ''}`} type="button" key={base.id}
+                aria-pressed={selected} disabled={busy} onClick={() => toggleFormBase(base.id)}>{base.name}</button>;
+            })}
+          </div>}
+      </div>
+    );
   }
 
   // Reading happens in the library page, not inline: open it in a new tab and
@@ -1018,18 +1051,7 @@ function App() {
         <input id="document-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="未填写时使用原始文件名" disabled={busy || files.length > 1} />
         <label htmlFor="document-tags">学科标签（可选）</label>
         <input id="document-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="computer science, graphics" disabled={busy || files.length > 1} />
-        <div className="base-picker">
-          <span className="base-picker-label">加入 Document Base（可多选）</span>
-          {bases.length === 0
-            ? <p className="hint">暂无可选 Base；可先在 Base 菜单里创建。</p>
-            : <div className="base-chips">
-              {bases.map((base) => {
-                const selected = uploadBaseIDs.includes(base.id);
-                return <button className={`base-chip${selected ? ' active' : ''}`} type="button" key={base.id}
-                  aria-pressed={selected} disabled={busy} onClick={() => toggleUploadBase(base.id)}>{base.name}</button>;
-              })}
-            </div>}
-        </div>
+        {renderBasePicker()}
         <button className="primary" type="submit" disabled={busy || files.length === 0}>{files.length > 1 ? `批量上传 ${files.length} 个文件` : '上传并创建记录'}</button>
         <p className="hint" title="支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；单文件可设置 DOI、标题和标签，所选 Base 会应用到本次上传的全部文档。">支持 PDF / Office / Markdown / TXT 等；所选 Base 会应用到全部上传文件。</p>
       </form>}
@@ -1045,8 +1067,9 @@ function App() {
         <input id="remote-doi" value={remoteDOI} maxLength={255} onChange={(event) => setRemoteDOI(event.target.value)} placeholder="10.1000/example" disabled={busy || remoteURLs.length > 1} />
         <label htmlFor="remote-filename">保存文件名（可选）</label>
         <input id="remote-filename" value={remoteFilename} onChange={(event) => setRemoteFilename(event.target.value)} placeholder="paper.pdf" disabled={busy || remoteURLs.length > 1} />
+        {renderBasePicker()}
         <button className="primary" type="submit" disabled={busy || remoteURLs.length === 0}>{remoteURLs.length > 1 ? `批量导入 ${remoteURLs.length} 个 URL` : '验证、下载并处理'}</button>
-        <p className="hint" title="普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。多行 URL 会逐项受理，单项 DOI 和文件名仅适用于单行导入。">支持显式 PDF URL、arXiv 页面与 DOI URL（每行一个）。</p>
+        <p className="hint" title="普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。多行 URL 会逐项受理，单项 DOI 和文件名仅适用于单行导入；所选 Base 会应用到本次导入的全部文档。">支持显式 PDF URL、arXiv 页面与 DOI URL（每行一个）；所选 Base 会应用到全部导入文档。</p>
       </form>}
 
       {batchResults.length > 0 && <section className="batch-results" aria-live="polite">

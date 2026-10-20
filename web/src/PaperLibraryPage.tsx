@@ -16,7 +16,7 @@ import {
 import { LibrarySelect } from './LibrarySelect';
 import { ReferenceEditorDialog } from './ReferenceEditorDialog';
 import { CitationExportDialog } from './CitationExportDialog';
-import { TranslationPanel } from './TranslationPanel';
+import { TranslationPanel, type TranslationPreview } from './TranslationPanel';
 import type { DoiCitationTarget } from './doiCitation';
 import type { TranslationRequestSeed } from './translation/index.ts';
 import { fetchAllDocumentPages } from './documentPagination';
@@ -199,6 +199,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [editingCitation, setEditingCitation] = useState<PaperCitation>();
   const [exportCitation, setExportCitation] = useState<DoiCitationTarget>();
   const [translationRequest, setTranslationRequest] = useState<LibraryTranslationRequest>();
+  const [translationPreview, setTranslationPreview] = useState<TranslationPreview>();
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
   const [citationPaperInfo, setCitationPaperInfo] = useState<PaperMetadata>();
   const [citationReference, setCitationReference] = useState<PaperReference>();
@@ -245,11 +246,13 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   // reader switches sources so old text cannot be mistaken for the new paper.
   useEffect(() => {
     setTranslationRequest(undefined);
+    setTranslationPreview(undefined);
   }, [selected?.id, localSelected]);
 
   // Selecting text/Blocks only seeds the translation panel's editable source.
   // Translation starts from the explicit 翻译 action (reader menu or panel).
   const previewTranslationSource = useCallback((request: TranslationRequestSeed) => {
+    setTranslationPreview(undefined);
     setTranslationRequest({
       ...request,
       requestId: newTranslationRequestId(),
@@ -257,14 +260,16 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     });
   }, []);
 
+  // The reader's context-menu 翻译 action mirrors citation-hover filtering:
+  // it runs the translation in place and shows the result popover, without
+  // stealing the right-column tab or expanding a collapsed column.
   const requestTranslation = useCallback((request: TranslationRequestSeed) => {
+    setTranslationPreview(undefined);
     setTranslationRequest({
       ...request,
       requestId: newTranslationRequestId(),
       autoTranslate: true,
     });
-    setRightMenu('translation');
-    setRightCollapsed(false);
   }, []);
 
   // Column widths: the user's drag is honoured while there is room, capped to a
@@ -1014,7 +1019,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       {/* Kept mounted while another right-hand tab is active so switching to
           论文信息/引用信息 does not discard the current translations. */}
       <div className="library-panel-slot" hidden={rightMenu !== 'translation'}>
-        <TranslationPanel request={translationRequest} />
+        <TranslationPanel request={translationRequest} onTranslationResult={setTranslationPreview} />
       </div>
     </div>
   </>;
@@ -1042,12 +1047,12 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       <Suspense fallback={<div className="library-empty"><p>正在加载阅读器…</p></div>}>
         {localMode
           ? localSelected
-            ? <PdfReader file={localSelected} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+            ? <PdfReader file={localSelected} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} translationPreview={translationPreview} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
             : <div className="library-empty"><p>在左侧「本地论文」里打开一个文件夹，里面的 PDF 会列在那里。</p></div>
           : !selected
             ? <div className="library-empty"><p>从左侧论文目录选择一篇论文开始阅读。</p></div>
             : selectedIsPDF
-              ? <PdfReader document={selected} citations={citations} onCitationLinks={filterCitationsFromPDF} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+              ? <PdfReader document={selected} citations={citations} onCitationLinks={filterCitationsFromPDF} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} translationPreview={translationPreview} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
               : <div className="library-empty"><p>该论文不是 PDF，无法在阅读库中预览。</p></div>}
       </Suspense>
       {message && <p className="library-message">{message}</p>}
@@ -1056,6 +1061,11 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     <aside className={`library-column library-column-right${rightCollapsed ? ' collapsed' : ''}`} id="library-right-column">
       {rightCollapsed ? null : rightColumnBody}
     </aside>
+    {/* Keep the translation engine mounted while the right column is folded
+        away; the popover can then translate without expanding the column. */}
+    {rightCollapsed && <div hidden>
+      <TranslationPanel request={translationRequest} onTranslationResult={setTranslationPreview} />
+    </div>}
 
     {citationPaperInfoOpen && <div className="citation-detail-backdrop" role="presentation" onMouseDown={() => setCitationPaperInfoOpen(false)}>
       <section className="citation-detail-dialog" role="dialog" aria-modal="true" aria-labelledby="citation-detail-title" onMouseDown={(event) => event.stopPropagation()}>

@@ -10,6 +10,7 @@ import { matchCitationTargets } from './citationLinkMatcher';
 import { PDFLinkPreview, destinationPDFPoint, destinationPreviewRegion, mergeAdjacentPDFLinks, viewportRegion } from './pdfLinkPreview';
 import { LatestPDFSelection, NormalizedPDFRegion, SelectionGeneration, canvasCropForRegion, normalizedRegion, regionIsLargeEnough } from './pdfSelection';
 import { type SelectedPDFBlock, type TranslationRequestSeed } from './translation/index.ts';
+import type { TranslationPreview } from './TranslationPanel';
 import { activeOutlineNode, annotateOutlinePages, type OutlineEntry } from './pdfOutline';
 import { isDocumentRead, localFileReadingKey, readingRecord, saveReadingPage, setDocumentRead, subscribeReadingState } from './readingState';
 
@@ -525,7 +526,7 @@ function OutlineTree({ nodes, onNavigate, active }: { nodes: OutlineNode[]; onNa
   </ul>;
 }
 
-export function PdfReader({ document, file, citations = [], onCitationLinks, onTranslate, onTranslationSource, onMessage, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
+export function PdfReader({ document, file, citations = [], onCitationLinks, onTranslate, onTranslationSource, translationPreview, onMessage, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
   document?: PaperDocument;
   // A PDF straight from the user's disk. It has no backend record, so anything
   // keyed by a document id (parsed blocks, metadata, citations, selection
@@ -541,6 +542,9 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   // Selection changes seed the panel's editable source without translating;
   // only onTranslate (the reader's 翻译 action) starts a translation.
   onTranslationSource?(request: TranslationRequestSeed): void;
+  // Latest result mirrored from the translation panel. The reader only shows it
+  // when translation was started from its right-click menu.
+  translationPreview?: TranslationPreview;
   onMessage(message: string): void;
   // `external` renders the outline through a portal into `outlineTarget` so a
   // host page can place it anywhere; `internal` keeps it beside the pages.
@@ -570,6 +574,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   const pickedBlocksRef = useRef<SelectedPDFBlock[]>([]);
   const pickedBlockIds = useMemo(() => new Set(pickedBlocks.map((block) => block.blockId)), [pickedBlocks]);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number }>();
+  const [translationPopup, setTranslationPopup] = useState<{ x: number; y: number }>();
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const [processing, setProcessing] = useState(false);
   const [result, setResult] = useState<DocumentSelectionResult>();
@@ -700,6 +705,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
         if (pageJumpOpen) { setPageJumpOpen(false); return; }
         if (viewMenuOpen) { setViewMenuOpen(false); return; }
         if (typedPage) { clearTypedPage(); return; }
+        if (translationPopup) { setTranslationPopup(undefined); return; }
         if (selection) clearSelection();
         return;
       }
@@ -1104,6 +1110,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     setSelection(undefined);
     resetPickedBlocks();
     setContextMenu(undefined);
+    setTranslationPopup(undefined);
     setResult(undefined);
     setProcessing(false);
     if (!documentId) setMode('text'); // block mode needs parsed blocks
@@ -1133,6 +1140,33 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       window.removeEventListener('resize', close);
     };
   }, [contextMenu]);
+
+  // The compact translation result behaves like a page-anchored popover:
+  // dismiss it on an outside press, Escape, page scroll, or resize.
+  useEffect(() => {
+    if (!translationPopup) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.pdf-translation-popover')) return;
+      setTranslationPopup(undefined);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setTranslationPopup(undefined);
+    };
+    const close = (event: Event) => {
+      if (event.target instanceof Element && event.target.closest('.pdf-translation-popover')) return;
+      setTranslationPopup(undefined);
+    };
+    window.addEventListener('pointerdown', onPointerDown, true);
+    window.addEventListener('keydown', onKeyDown);
+    window.addEventListener('scroll', close, true);
+    window.addEventListener('resize', close);
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true);
+      window.removeEventListener('keydown', onKeyDown);
+      window.removeEventListener('scroll', close, true);
+      window.removeEventListener('resize', close);
+    };
+  }, [translationPopup]);
 
   // Ctrl + wheel zoom: the gesture itself only applies a compositor transform
   // to the viewer element — no re-render, no layout, which is what makes it
@@ -1344,6 +1378,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     if (!selection && pickedBlocks.length === 0) return;
     event.preventDefault();
     event.stopPropagation();
+    setTranslationPopup(undefined);
     setContextMenu(contextMenuPosition(event.clientX, event.clientY));
   }
 
@@ -1352,17 +1387,14 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     action();
   }
 
-  function translateSelection() {
-    if (!onTranslate) return;
-    if (pickedBlocks.length > 0) {
-      onTranslate({ kind: 'blocks', blocks: pickedBlocks });
-      return;
-    }
-    if (!selection) return;
+  function selectionTranslationRequest(): TranslationRequestSeed | undefined {
+    if (pickedBlocks.length > 0) return { kind: 'blocks', blocks: pickedBlocks };
+    if (!selection) return undefined;
     if (selection.kind === 'text') {
-      onTranslate({ kind: 'text', text: selection.text, pageNumber: selection.pageNumber });
-    } else if (selection.kind === 'block') {
-      onTranslate({
+      return { kind: 'text', text: selection.text, pageNumber: selection.pageNumber };
+    }
+    if (selection.kind === 'block') {
+      return {
         kind: 'blocks',
         blocks: [{
           blockId: selection.blockId,
@@ -1370,8 +1402,33 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
           text: selection.previewText,
           pageNumber: selection.pageNumber,
         }],
-      });
+      };
     }
+    return undefined;
+  }
+
+  function openTranslationPopup() {
+    const anchor = contextMenu ?? { x: 16, y: 16 };
+    const rect = panelRef.current?.getBoundingClientRect();
+    if (!rect) {
+      setTranslationPopup(anchor);
+      return;
+    }
+    // Keep the compact popover inside the reading surface.
+    setTranslationPopup({
+      x: Math.max(8, Math.min(anchor.x, Math.max(8, rect.width - 368))),
+      y: Math.max(8, Math.min(anchor.y, Math.max(8, rect.height - 248))),
+    });
+  }
+
+  function translateSelection(showPopup = false) {
+    if (!onTranslate) return;
+    const request = selectionTranslationRequest();
+    if (!request) return;
+    if (request.kind === 'text' && !request.text.trim()) return;
+    if (request.kind === 'blocks' && request.blocks.every((block) => !block.text.trim())) return;
+    if (showPopup) openTranslationPopup();
+    onTranslate(request);
   }
 
   const replaceSelection = useCallback((next: LatestPDFSelection) => {
@@ -1382,6 +1439,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     setAnnotationDone(false);
     resetPickedBlocks();
     setContextMenu(undefined);
+    setTranslationPopup(undefined);
     setSelection(next);
     setResult(undefined);
     setProcessing(false);
@@ -1406,6 +1464,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   // right-clicking an unpicked Block selects it (clearing stale picks) and opens
   // the action menu. Right-clicking a picked Block keeps the multi-selection.
   function openBlockContextMenu(block: SelectedPDFBlock, clientX: number, clientY: number) {
+    setTranslationPopup(undefined);
     if (!pickedBlocks.some((item) => item.blockId === block.blockId)) {
       replaceSelection({
         kind: 'block',
@@ -1427,6 +1486,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     setAnnotationDone(false);
     resetPickedBlocks();
     setContextMenu(undefined);
+    setTranslationPopup(undefined);
     setSelection(undefined);
     setResult(undefined);
     setProcessing(false);
@@ -1782,7 +1842,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       {selection.kind === 'area' && <code>{JSON.stringify(selection.region)}</code>}
       <div className="pdf-selection-actions">
         <button className="primary" type="button" disabled={processing} onClick={() => void processSelection()}>{processing ? '处理中…' : '处理当前选择'}</button>
-        {onTranslate && selection.kind !== 'area' && <button type="button" disabled={processing} onClick={translateSelection}>翻译</button>}
+        {onTranslate && selection.kind !== 'area' && <button type="button" disabled={processing} onClick={() => translateSelection()}>翻译</button>}
         <button type="button" disabled={processing} onClick={clearSelection}>清除</button>
       </div>
       {result && <p className="pdf-selection-result">已接收：{result.kind}{result.imageWidth ? ` · ${result.imageWidth}×${result.imageHeight}` : ''}</p>}
@@ -1870,12 +1930,20 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
           </button>
         </div>}
       </div>
-      {/* Folds the whole rail away, leaving this one icon to bring it back. */}
+      {/* Folds the whole rail away, leaving this one icon to bring it back.
+          Eye/eye-off keeps it distinct from the left/right column chevrons. */}
       <button className="rail-collapse-toggle" type="button" aria-expanded={!railCollapsed} title={railCollapsed ? '展开工具栏' : '收起工具栏'} onClick={toggleRailCollapsed}>
-        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-          <path d="M4.1 3.9 8.1 8l-4 4.1" />
-          <path d="M7.9 3.9 11.9 8l-4 4.1" />
-        </svg>
+        {railCollapsed
+          ? <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z" />
+            <circle cx="12" cy="12" r="3" />
+          </svg>
+          : <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+            <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+            <path d="m1 1 22 22" />
+            <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+          </svg>}
       </button>
     </div>}
     {returnPoint && <button className="pdf-back-button" type="button" title="返回到跳转前的位置" onClick={goBack}>
@@ -1927,13 +1995,13 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
           : selection ? selectionSummary(selection) : ''}
       </p>
       {pickedBlocks.length > 0 ? <>
-        {onTranslate && <button type="button" role="menuitem" onClick={() => runContextAction(translateSelection)}>
+        {onTranslate && <button type="button" role="menuitem" onClick={() => runContextAction(() => translateSelection(true))}>
           翻译 {pickedBlocks.length} 段
         </button>}
         <button type="button" role="menuitem" onClick={() => runContextAction(() => resetPickedBlocks())}>清除多选</button>
       </> : selection && <>
         {onTranslate && selection.kind !== 'area' && <button type="button" role="menuitem" disabled={processing}
-          onClick={() => runContextAction(translateSelection)}>翻译</button>}
+          onClick={() => runContextAction(() => translateSelection(true))}>翻译</button>}
         <button type="button" role="menuitem" disabled={processing}
           onClick={() => runContextAction(() => void processSelection())}>
           {processing ? '处理中…' : processable ? '处理当前选择' : selection.kind === 'text' ? '复制文本' : '保存截图'}
@@ -1944,6 +2012,33 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
         <button className="pdf-context-menu-danger" type="button" role="menuitem" disabled={processing}
           onClick={() => runContextAction(clearSelection)}>清除选择</button>
       </>}
+    </div>}
+    {translationPopup && <div className="pdf-translation-popover" role="dialog" aria-label="翻译结果"
+      style={{ left: translationPopup.x, top: translationPopup.y }}>
+      <div className="pdf-translation-popover-head">
+        <strong>翻译结果</strong>
+        <button className="pdf-translation-popover-close" type="button" title="关闭"
+          aria-label="关闭翻译结果" onClick={() => setTranslationPopup(undefined)}>
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+            <path d="m4.5 4.5 7 7" />
+            <path d="m11.5 4.5-7 7" />
+          </svg>
+        </button>
+      </div>
+      {translationPreview?.translation?.trim()
+        ? <p className="pdf-translation-popover-body" aria-live="polite">{translationPreview.translation}</p>
+        : <p className="pdf-translation-popover-status" aria-live="polite">
+          {translationPreview?.status === 'error'
+            ? translationPreview.error ?? '翻译失败。'
+            : translationPreview?.status === 'done'
+              ? '没有可显示的译文。'
+              : translationPreview?.status === 'waiting'
+                ? '正在等待翻译引擎…'
+                : '正在翻译…'}
+        </p>}
+      {translationPreview?.translation?.trim() && translationPreview.error
+        && <p className="pdf-translation-popover-error">{translationPreview.error}</p>}
+      {translationPreview?.fallback && <small>已自动选用备用翻译引擎。</small>}
     </div>}
   </section>;
 }
