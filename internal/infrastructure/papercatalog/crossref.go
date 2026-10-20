@@ -88,7 +88,6 @@ func (provider *crossrefProvider) Search(
 		values.Set("filter", "doi:"+query.DOI)
 	} else {
 		parts := []string{query.Title}
-		parts = append(parts, query.Authors...)
 		if query.PublishedYear > 0 {
 			parts = append(parts, strconv.Itoa(query.PublishedYear))
 		}

@@ -90,13 +90,9 @@ func (provider *openAlexProvider) Search(
 		values.Set("filter", "doi:https://doi.org/"+query.DOI)
 	} else {
 		values.Set("search", query.Title)
-		filters := make([]string, 0, 2)
+		filters := make([]string, 0, 1)
 		if query.PublishedYear > 0 {
 			filters = append(filters, "publication_year:"+strconv.Itoa(query.PublishedYear))
-		}
-		if len(query.Authors) > 0 {
-			author := strings.ReplaceAll(query.Authors[0], `"`, "")
-			filters = append(filters, `raw_author_name.search:"`+author+`"`)
 		}
 		if len(filters) > 0 {
 			values.Set("filter", strings.Join(filters, ","))

@@ -269,5 +269,45 @@ Abstract text.
         self.assertIsNotNone(result.title)
 
 
+class HybridConfidenceSelectionTest(unittest.TestCase):
+    class _Engine:
+        def __init__(self, output):
+            self.output = output
+
+        def extract(self, *_args):
+            return self.output
+
+        def reference_candidates(self, _references):
+            return ()
+
+    def test_high_confidence_crf_replaces_only_weak_rule_title(self) -> None:
+        rules = ExtractionOutput(
+            title=TextCandidate("Author block mistaken for title", 0.60),
+            authors=(TextCandidate("Software", 0.85),),
+            abstract=TextCandidate("Rule abstract", 0.85),
+        )
+        learned = ExtractionOutput(
+            title=TextCandidate("Correct CRF title", 0.94),
+            authors=(TextCandidate("Ada Lovelace", 0.93),),
+            abstract=TextCandidate("CRF abstract", 0.92),
+        )
+        engine = HybridPaperExtractionEngine(self._Engine(rules), self._Engine(learned))
+
+        result = engine.extract("ignored", (), (object(),))
+
+        self.assertEqual(result.title.value, "Correct CRF title")
+        self.assertEqual(tuple(author.value for author in result.authors), ("Software",))
+        self.assertEqual(result.abstract.value, "Rule abstract")
+
+    def test_structural_heading_beats_lower_confidence_crf_title(self) -> None:
+        rules = ExtractionOutput(title=TextCandidate("Explicit heading title", 1.0))
+        learned = ExtractionOutput(title=TextCandidate("Wrong CRF title", 0.99))
+        engine = HybridPaperExtractionEngine(self._Engine(rules), self._Engine(learned))
+
+        result = engine.extract("ignored", (), (object(),))
+
+        self.assertEqual(result.title.value, "Explicit heading title")
+
+
 if __name__ == "__main__":
     unittest.main()

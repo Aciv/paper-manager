@@ -83,7 +83,7 @@ An explainable abstract.
         result = DeterministicPaperExtractionEngine().extract(markdown, blocks)
 
         self.assertEqual(result.title.value, "Evidence Paper")
-        self.assertEqual(result.title.confidence, 0.95)
+        self.assertEqual(result.title.confidence, 1.0)
         self.assertEqual(result.title.evidence[0].block_ordinal, 3)
         self.assertEqual(tuple(author.value for author in result.authors), ("Ada Lovelace",))
         self.assertEqual(result.abstract.value, "An explainable abstract.")
@@ -102,6 +102,64 @@ An explainable abstract.
         self.assertIsNone(result.abstract)
         self.assertFalse(result.references_detected)
         self.assertEqual(result.references, ())
+
+    def test_prefers_first_page_leading_text_over_later_section_heading(self) -> None:
+        title = "- - SCREENCODER: ADVANCING VISUAL TO-CODE GEN - ERATION FOR FRONT-END AUTOMATION VIA MODU LAR MULTIMODAL AGENTS"
+        blocks = (
+            SourceBlock(ordinal=0, type="text", text=title, location=_location(0, len(title))),
+            SourceBlock(ordinal=1, type="text", text="Ada Lovelace", location=_location(len(title) + 1, len(title) + 13)),
+            SourceBlock(
+                ordinal=10,
+                type="section_header",
+                text="# 1 INTRODUCTION",
+                location=SourceLocation(
+                    page_number=2,
+                    page_width=612,
+                    page_height=792,
+                    bbox_x0=72,
+                    bbox_y0=72,
+                    bbox_x1=300,
+                    bbox_y1=110,
+                    markdown_codepoint_start=len(title) + 14,
+                    markdown_codepoint_end=len(title) + 30,
+                ),
+            ),
+        )
+
+        result = DeterministicPaperExtractionEngine().extract(title, blocks)
+
+        self.assertIsNotNone(result.title)
+        self.assertEqual(
+            result.title.value,
+            "SCREENCODER: ADVANCING VISUAL TO-CODE GENERATION FOR FRONT-END AUTOMATION VIA MODU LAR MULTIMODAL AGENTS",
+        )
+        self.assertEqual(result.title.evidence[0].block_ordinal, 0)
+        self.assertEqual(result.title.confidence, 0.60)
+
+    def test_prefers_obvious_title_heading_over_following_author_text(self) -> None:
+        cases = (
+            "DeclarUI: Bridging Design and Development with Automated Declarative UI Code Generation",
+            "MLLM-Based UI2Code Automation Guided by UI Layout Information",
+            "SCREENCODER: ADVANCING VISUAL TO-CODE GENERATION FOR FRONT-END AUTOMATION VIA MODULAR MULTIMODAL AGENTS",
+        )
+        for title in cases:
+            with self.subTest(title=title):
+                heading = f"# **{title}**"
+                blocks = (
+                    SourceBlock(ordinal=0, type="section_header", text=heading, location=_location(0, len(heading))),
+                    SourceBlock(
+                        ordinal=1,
+                        type="text",
+                        text="FAN WU, University; CUIYUN GAO, University",
+                        location=_location(len(heading) + 1, len(heading) + 48),
+                    ),
+                )
+
+                result = DeterministicPaperExtractionEngine().extract(heading, blocks)
+
+                self.assertEqual(result.title.value, title)
+                self.assertEqual(result.title.evidence[0].block_ordinal, 0)
+                self.assertEqual(result.title.confidence, 1.0)
 
     def test_uses_rule_selected_markdown_range_not_first_matching_text(self) -> None:
         markdown = """# **Repeated**

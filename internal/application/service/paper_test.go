@@ -56,8 +56,21 @@ func (r *paperDocumentRepoStub) MarkStageRetryQueued(_ context.Context, id uuid.
 	return r.transitionStage(id, stage, generation, []types.DocumentStageStatus{types.DocumentStageRunning}, types.DocumentStageQueued)
 }
 
-func (r *paperDocumentRepoStub) FinishStage(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64, status types.DocumentStageStatus, _, _ string) (types.DocumentStageState, bool, error) {
-	return r.transitionStage(id, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued, types.DocumentStageRunning}, status)
+func (r *paperDocumentRepoStub) FinishStage(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64, status types.DocumentStageStatus, errorCode, errorMessage string) (types.DocumentStageState, bool, error) {
+	state, applied, err := r.transitionStage(id, stage, generation, []types.DocumentStageStatus{types.DocumentStageQueued, types.DocumentStageRunning}, status)
+	if err != nil || !applied {
+		return state, applied, err
+	}
+	document := r.documents[id]
+	if errorCode != "" {
+		state.ErrorCode = &errorCode
+	}
+	if errorMessage != "" {
+		state.ErrorMessage = &errorMessage
+	}
+	setStubDocumentStage(&document, state)
+	r.documents[id] = document
+	return state, true, nil
 }
 
 func (r *paperDocumentRepoStub) CancelStage(_ context.Context, id uuid.UUID, stage types.DocumentStage, generation int64) (types.DocumentStageState, bool, error) {

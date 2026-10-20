@@ -53,7 +53,7 @@ func (s *paperInfoService) RetryExtraction(
 	if !applied {
 		return ErrPaperInfoAttemptActive
 	}
-	err = s.enqueueMetadataStage(ctx, document.ID, "", stage.Generation)
+	err = s.enqueueMetadataStage(ctx, document.ID, "", stage.Generation, true)
 	logger.Info(ctx, "paper metadata extraction retry queued", "document_id", document.ID)
 	return err
 }
@@ -108,10 +108,22 @@ func (s *paperInfoService) enqueueSourceLookupIfNeeded(ctx context.Context, docu
 	return s.enqueueSourceStage(ctx, documentID, requestID, state.Generation)
 }
 
-func (s *paperInfoService) enqueueMetadataStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64) error {
+func (s *paperInfoService) restartSourceLookup(ctx context.Context, documentID uuid.UUID, requestID string) error {
+	state, applied, err := s.documents.QueueStageNewGeneration(ctx, documentID, types.DocumentStageSourceLookup)
+	if err != nil {
+		return err
+	}
+	if !applied {
+		return fmt.Errorf("%w: source lookup stage is %s", ErrPaperInfoAttemptActive, state.Status)
+	}
+	return s.enqueueSourceStage(ctx, documentID, requestID, state.Generation)
+}
+
+func (s *paperInfoService) enqueueMetadataStage(ctx context.Context, documentID uuid.UUID, requestID string, generation int64, restartSourceLookup bool) error {
 	payload := types.PaperMetadataExtractPayload{
 		RequestID: requestID, DocumentID: documentID.String(),
 		Stage: types.DocumentStageMetadataExtraction, Generation: generation,
+		RestartSourceLookup: restartSourceLookup,
 	}
 	task, options, err := NewPaperMetadataExtractTask(payload, s.cfg.PaperExtractionTaskTimeout, s.cfg.PaperExtractionTaskMaxRetry)
 	if err == nil {

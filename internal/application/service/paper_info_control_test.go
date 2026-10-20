@@ -105,6 +105,7 @@ func TestPaperInfoControlRetries(t *testing.T) {
 		t.Fatal(err)
 	}
 	if extraction.Stage != types.DocumentStageMetadataExtraction || extraction.Generation != 1 ||
+		!extraction.RestartSourceLookup ||
 		catalog.DocumentID != documentID.String() ||
 		catalog.Stage != types.DocumentStageSourceLookup || catalog.Generation != 1 {
 		t.Fatalf("manual retries = extraction:%#v catalog:%#v", extraction, catalog)
@@ -119,7 +120,7 @@ func TestPaperInfoControlRetries(t *testing.T) {
 	if err := json.Unmarshal(queue.tasks[2].Payload(), &secondExtraction); err != nil {
 		t.Fatal(err)
 	}
-	if secondExtraction.Generation != 2 {
+	if secondExtraction.Generation != 2 || !secondExtraction.RestartSourceLookup {
 		t.Fatalf("second user retry generation = %d, want 2", secondExtraction.Generation)
 	}
 }

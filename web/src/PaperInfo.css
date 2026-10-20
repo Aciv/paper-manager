@@ -37,6 +37,7 @@
 .paper-stage-queued::before { background: #f59e0b; }
 .paper-stage-running::before { background: #03a9f4; }
 .paper-stage-succeeded::before { background: #12b76a; }
+.paper-stage-no-match::before { background: #f59e0b; }
 .paper-stage-failed::before, .paper-stage-cancelled::before { background: #ef4444; }
 
 /* Citation tab: one full-height direction list, with scannable reference

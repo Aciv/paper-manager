@@ -101,7 +101,11 @@ func (s *paperInfoService) paperSourceQueryApply(ctx context.Context, command ty
 		if err != nil {
 			return err
 		}
-		if s.sourceCandidateBetter(document, metadata, command.Query, *command.Candidate) {
+		if sourceCandidateMergeable(document, metadata, *command.Candidate) {
+			if _, err := s.mergeSourceCatalogCandidate(ctx, document, metadata, *command.Candidate); err != nil {
+				return err
+			}
+		} else if s.sourceCandidateBetter(document, metadata, command.Query, *command.Candidate) {
 			if _, err := s.applySourceCatalogCandidate(ctx, document, *command.Candidate); err != nil {
 				return err
 			}
@@ -116,7 +120,14 @@ func (s *paperInfoService) paperSourceQueryApply(ctx context.Context, command ty
 	}
 	status := types.DocumentStageSucceeded
 	code, message := "", ""
-	if command.Outcome == types.CatalogOutcomeFailed {
+	switch command.Outcome {
+	case types.CatalogOutcomeNoMatch:
+		// A completed lookup with no safe candidate is operationally successful,
+		// but retain its terminal outcome so the API/UI can distinguish it from
+		// a matched catalog result.
+		code = types.ProcessingErrorNoMatch
+		message = "no satisfactory catalog match was found"
+	case types.CatalogOutcomeFailed:
 		status = types.DocumentStageFailed
 		code = strings.TrimSpace(command.ErrorCode)
 		if code == "" {
@@ -145,19 +156,72 @@ func (s *paperInfoService) paperSourceQueryApply(ctx context.Context, command ty
 	return nil
 }
 
-// sourceCandidateBetter compares one provider candidate with the current
-// durable metadata using the same scoring function that ranks providers.
-// Equal scores skip the write, keeping duplicate task execution idempotent.
+// sourceCandidateMergeable identifies a second catalog record for the same
+// paper. Extraction metadata is deliberately excluded: the first trusted
+// catalog match must still be allowed to replace parser mistakes. Once a
+// catalog record exists, a highly similar candidate enriches only fields that
+// are still absent instead of competing as an all-or-nothing replacement.
+func sourceCandidateMergeable(
+	document types.Document,
+	metadata *types.PaperMetadata,
+	candidate types.PaperCatalogCandidate,
+) bool {
+	if metadata == nil || metadata.MetadataSource != types.PaperMetadataSourceCatalog {
+		return false
+	}
+	query := metadataLookupQuery(document, metadata)
+	queryDOI := normalizePaperDOI(query.DOI)
+	candidateDOI := normalizePaperDOI(candidate.DOI)
+	if queryDOI != "" && candidateDOI != "" && queryDOI == candidateDOI {
+		return true
+	}
+	queryArXivID := paperArXivID(query.DOI + " " + query.SourceURL)
+	candidateArXivID := paperArXivID(
+		candidate.DOI + " " + candidate.SourceURL + " " + candidate.ProviderID,
+	)
+	if queryArXivID != "" && candidateArXivID != "" && queryArXivID == candidateArXivID {
+		return true
+	}
+	titleScore := paperTextSimilarity(metadata.Title, candidate.Title)
+	if titleScore >= paperStrongTitleMatchScore {
+		return true
+	}
+	if titleScore < paperWeakTitleMatchScore || len(metadata.Authors) == 0 {
+		return false
+	}
+	authorScore := paperAuthorSimilarity(paperAuthorNames(metadata.Authors), candidate.Authors)
+	if authorScore < paperWeakTitleAuthorMatchScore {
+		return false
+	}
+	// Normalize the title/author weights so provider ranking cannot influence
+	// whether two already accepted records represent the same paper.
+	identityScore := (paperWeakTitleWeight*titleScore +
+		paperWeakTitleAuthorWeight*authorScore) /
+		(paperWeakTitleWeight + paperWeakTitleAuthorWeight)
+	return identityScore >= minPaperCatalogMatchScore
+}
+
+// sourceCandidateBetter treats a safely matched catalog record as stronger
+// than parser-extracted metadata. Manual metadata remains protected by field
+// ownership, while catalog-to-catalog updates still require a better score.
 func (s *paperInfoService) sourceCandidateBetter(
 	document types.Document, metadata *types.PaperMetadata,
 	query types.PaperLookupQuery, candidate types.PaperCatalogCandidate,
 ) bool {
+	if metadata != nil && metadata.MetadataSource == types.PaperMetadataSourceManual {
+		return false
+	}
 	candidateScore, exact := scorePaperCatalogCandidate(query, candidate)
 	if exact {
 		return true
 	}
 	if candidateScore < minPaperCatalogMatchScore {
 		return false
+	}
+	if metadata == nil ||
+		metadata.MetadataSource == types.PaperMetadataSourceUnknown ||
+		metadata.MetadataSource == types.PaperMetadataSourceExtraction {
+		return true
 	}
 	current := types.PaperCatalogCandidate{
 		Provider: "current", ProviderID: "current", DOI: document.DOI,

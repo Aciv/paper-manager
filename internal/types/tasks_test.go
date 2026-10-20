@@ -28,8 +28,11 @@ func TestStagePayloadCommandsRequireGenerationFence(t *testing.T) {
 
 func TestStagePayloadCommandsDecodeDocumentStageAndGeneration(t *testing.T) {
 	documentID := uuid.New()
-	metadata, err := (PaperMetadataExtractPayload{DocumentID: documentID.String(), Stage: DocumentStageMetadataExtraction, Generation: 3}).Command()
-	if err != nil || metadata.DocumentID != documentID || metadata.Generation != 3 {
+	metadata, err := (PaperMetadataExtractPayload{
+		DocumentID: documentID.String(), Stage: DocumentStageMetadataExtraction,
+		Generation: 3, RestartSourceLookup: true,
+	}).Command()
+	if err != nil || metadata.DocumentID != documentID || metadata.Generation != 3 || !metadata.RestartSourceLookup {
 		t.Fatalf("metadata Command()=%#v err=%v", metadata, err)
 	}
 	source, err := (PaperSourceQueryEnqueuePayload{DocumentID: documentID.String(), Stage: DocumentStageSourceLookup, Generation: 4}).Command()

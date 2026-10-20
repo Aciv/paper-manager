@@ -132,6 +132,7 @@ def main() -> None:
     )
     parser.add_argument("--rpc-max-seconds", type=float, default=DEFAULT_RPC_MAX_SECONDS)
     args = parser.parse_args()
+    args.upload_dir = _resolve_project_path(args.upload_dir)
     args.paper_crf_model_dir = _resolve_project_path(args.paper_crf_model_dir)
     if args.address.startswith(":"):
         args.address = f"127.0.0.1{args.address}"

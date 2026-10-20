@@ -7,6 +7,7 @@ engine can replace it without changing protobuf handling or server startup.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Protocol, Sequence
 
@@ -139,6 +140,7 @@ class _BlockPaperSections:
     """Paper sections assembled from ordered source blocks."""
 
     title: _BlockText | None = None
+    title_confidence: float = 0.0
     authors: tuple[_BlockText, ...] = ()
     abstract: _BlockText | None = None
     references_detected: bool = False
@@ -174,7 +176,7 @@ class DeterministicPaperExtractionEngine:
         block_sections = _extract_sections_from_blocks(blocks)
         if block_sections is not None:
             return ExtractionOutput(
-                title=_candidate_from_blocks(block_sections.title, 0.95),
+                title=_candidate_from_blocks(block_sections.title, block_sections.title_confidence),
                 authors=tuple(
                     candidate
                     for value in block_sections.authors
@@ -230,6 +232,7 @@ def _extract_sections_from_blocks(
         return _BlockPaperSections()
     title_block = ordered[title_index]
     title = _BlockText(_clean_block_text(title_block.text), (title_block,))
+    title_confidence = _title_block_confidence(title_block)
 
     authors: list[_BlockText] = []
     fallback_abstract_blocks: list[SourceBlock] = []
@@ -273,6 +276,7 @@ def _extract_sections_from_blocks(
             abstract = fallback
     return _BlockPaperSections(
         title=title,
+        title_confidence=title_confidence,
         authors=tuple(authors),
         abstract=abstract,
         references_detected=references_detected,
@@ -283,14 +287,66 @@ def _extract_sections_from_blocks(
 
 
 def _find_title_block(blocks: Sequence[SourceBlock]) -> int | None:
-    """Return the first title-typed block, then a Markdown-heading fallback."""
+    """Return an explicit title, a title-like heading, or a weak text fallback."""
     for index, block in enumerate(blocks):
         if block.type == "title":
             return index
     for index, block in enumerate(blocks):
-        if is_markdown_heading(block.text):
+        if _is_plausible_title_heading(block):
+            return index
+    for index, block in enumerate(blocks):
+        if _is_plausible_first_page_title(block):
             return index
     return None
+
+
+def _title_block_confidence(block: SourceBlock) -> float:
+    """Encode structural title evidence for hybrid arbitration with the CRF."""
+    if block.type == "title":
+        return 1.0
+    if _is_plausible_title_heading(block):
+        return 1.0
+    return 0.60
+
+
+def _is_plausible_title_heading(block: SourceBlock) -> bool:
+    """Accept a top-of-first-page heading while rejecting body section headings."""
+    if block.type != "section_header" and not is_markdown_heading(block.text):
+        return False
+    value = _clean_block_text(block.text)
+    if section_kind(value) is not None:
+        return False
+    if re.match(r"^(?:\d+(?:\.\d+)*|[IVX]+)[.)\-:]?\s+", value, re.IGNORECASE):
+        return False
+    if value.casefold() in {
+        "introduction", "related work", "background", "method", "methods",
+        "methodology", "experiments", "results", "discussion", "conclusion",
+        "conclusions", "acknowledgments", "acknowledgements",
+    }:
+        return False
+    location = block.location
+    if location is not None and (
+        location.page_number != 1
+        or location.page_height <= 0
+        or location.bbox_y0 / location.page_height > 0.35
+    ):
+        return False
+    return 5 <= len(value) <= 500 and bool(re.search(r"[A-Za-z]{2,}", value))
+
+
+def _is_plausible_first_page_title(block: SourceBlock) -> bool:
+    """Recognize a leading layout block when the parser omitted the title type."""
+    location = block.location
+    if block.type != "text" or location is None or location.page_number != 1:
+        return False
+    if location.page_height <= 0 or location.bbox_y0 / location.page_height > 0.25:
+        return False
+    value = _clean_block_text(block.text)
+    if not 15 <= len(value) <= 500 or is_markdown_heading(block.text):
+        return False
+    if section_kind(value) is not None or "@" in value:
+        return False
+    return len(re.findall(r"[A-Za-z]{2,}", value)) >= 3
 
 
 def _block_section_kind(block: SourceBlock) -> str | None:
@@ -312,7 +368,9 @@ def _clean_block_text(value: str) -> str:
         value = value.lstrip("#").strip()
     if value.startswith("**") and value.endswith("**"):
         value = value[2:-2]
-    return value.strip()
+    value = re.sub(r"^[\s\-–—•]+", "", value)
+    value = re.sub(r"(?<=\w)\s+-\s+(?=\w)", "", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _join_block_text(blocks: Sequence[SourceBlock]) -> _BlockText | None:

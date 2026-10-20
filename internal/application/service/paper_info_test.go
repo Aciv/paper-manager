@@ -755,6 +755,172 @@ func TestPaperInfoExtractMetadataQueuesIndependentDownstreamStages(t *testing.T)
 	}
 }
 
+func TestPaperInfoExtractionRetryStartsFreshSourceLookupGeneration(t *testing.T) {
+	documentID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: documentID, SourceState: types.DocumentSourceAvailable,
+		MetadataExtractionStatus: types.DocumentStageQueued, MetadataExtractionGeneration: 2,
+		SourceLookupStatus: types.DocumentStageSucceeded, SourceLookupGeneration: 1,
+	})
+	documents.markdowns[documentID] = types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/retry.md"}
+	papers := newPaperInfoPaperServiceStub()
+	queue := &paperInfoQueueStub{}
+	service := newPaperInfoServiceForTest(
+		config.Config{}, documents,
+		&paperInfoStorageStub{content: map[string][]byte{"markdown/retry.md": []byte("# Corrected Paper\n")}},
+		&paperInfoExtractorStub{extract: func(*types.PaperExtractionRequest) (*types.PaperExtractionResult, error) {
+			return &types.PaperExtractionResult{
+				Title:         &types.PaperTextCandidate{Value: "Corrected Paper", Confidence: 1},
+				ExtractorName: "test",
+			}, nil
+		}},
+		&paperInfoRegistryStub{}, papers, queue, nil, nil,
+	)
+
+	_, err := service.ExtractMetadata(context.Background(), types.PaperMetadataExtractCommand{
+		DocumentID: documentID, Stage: types.DocumentStageMetadataExtraction, Generation: 2,
+		RestartSourceLookup: true,
+	})
+	if err != nil {
+		t.Fatalf("ExtractMetadata() error = %v", err)
+	}
+	document := documents.documents[documentID]
+	if document.SourceLookupStatus != types.DocumentStageQueued || document.SourceLookupGeneration != 2 {
+		t.Fatalf("source lookup stage = %s generation=%d, want queued generation=2", document.SourceLookupStatus, document.SourceLookupGeneration)
+	}
+	if len(queue.tasks) != 1 || queue.tasks[0].Type() != types.TypePaperSourceQueryEnqueue {
+		t.Fatalf("queued tasks = %#v, want one source lookup", queue.tasks)
+	}
+	var source types.PaperSourceQueryEnqueuePayload
+	if err := json.Unmarshal(queue.tasks[0].Payload(), &source); err != nil {
+		t.Fatal(err)
+	}
+	if source.Generation != 2 {
+		t.Fatalf("source lookup payload generation = %d, want 2", source.Generation)
+	}
+}
+
+func TestSourceCatalogCandidateOverridesExtractionButNotStrongerSources(t *testing.T) {
+	service := &paperInfoService{}
+	query := types.PaperLookupQuery{
+		Title:   "EfficientUICoder: A Bidirectional Token Compression Framework",
+		Authors: []string{"Software", "Computing methodologies"},
+	}
+	candidate := types.PaperCatalogCandidate{
+		Provider: "arxiv", ProviderID: "2403.12345",
+		Title: query.Title, Authors: []types.PaperAuthor{{Name: "Ada Lovelace"}, {Name: "Grace Hopper"}},
+		ProviderScore: 1,
+	}
+	document := types.Document{ID: uuid.New()}
+
+	for _, source := range []types.PaperMetadataSource{
+		types.PaperMetadataSourceUnknown,
+		types.PaperMetadataSourceExtraction,
+	} {
+		metadata := &types.PaperMetadata{
+			Title: query.Title, Authors: []types.PaperAuthor{{Name: "Software"}, {Name: "Computing methodologies"}},
+			MetadataSource: source,
+		}
+		if !service.sourceCandidateBetter(document, metadata, query, candidate) {
+			t.Fatalf("catalog candidate should override %s metadata", source)
+		}
+	}
+
+	manual := &types.PaperMetadata{
+		Title: query.Title, Authors: []types.PaperAuthor{{Name: "Software"}, {Name: "Computing methodologies"}},
+		MetadataSource: types.PaperMetadataSourceManual,
+	}
+	if service.sourceCandidateBetter(document, manual, query, candidate) {
+		t.Fatal("catalog candidate must not outrank a stronger manual match")
+	}
+}
+
+func TestSourceCatalogCandidateMergeableUsesTitleAndAuthors(t *testing.T) {
+	document := types.Document{ID: uuid.New()}
+	metadata := &types.PaperMetadata{
+		Title: "ComUICoder: Component-based Reusable UI Code Generation for Complex Websites via Semantic Segmentation and Element-wise Feedback",
+		Authors: []types.PaperAuthor{
+			{Name: "Jingyu Xiao"},
+			{Name: "Michael R. Lyu"},
+		},
+		MetadataSource: types.PaperMetadataSourceCatalog,
+	}
+	candidate := types.PaperCatalogCandidate{
+		Provider: "crossref", ProviderID: "10.1145/example", DOI: "10.1145/example",
+		Title: "Component-based Reusable UI Code Generation for Complex Websites via Semantic Segmentation and Fine-grained Feedback",
+		Authors: []types.PaperAuthor{
+			{Name: "Jingyu Xiao"},
+			{Name: "Michael R. Lyu"},
+		},
+	}
+	if !sourceCandidateMergeable(document, metadata, candidate) {
+		t.Fatal("closely related catalog records should merge missing fields")
+	}
+
+	candidate.Authors = []types.PaperAuthor{{Name: "Unrelated Author"}}
+	if sourceCandidateMergeable(document, metadata, candidate) {
+		t.Fatal("weak title with unrelated authors must not merge")
+	}
+
+	metadata.MetadataSource = types.PaperMetadataSourceExtraction
+	candidate.Title = metadata.Title
+	if sourceCandidateMergeable(document, metadata, candidate) {
+		t.Fatal("extraction metadata should still be replaced by a trusted catalog record")
+	}
+}
+
+func TestPaperSourceQueryApplyMergesMissingCatalogFields(t *testing.T) {
+	documentID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: documentID, SourceState: types.DocumentSourceAvailable,
+		SourceLookupStatus: types.DocumentStageRunning, SourceLookupGeneration: 2,
+	})
+	papers := newPaperInfoPaperServiceStub()
+	papers.metadata[documentID.String()] = types.PaperMetadata{
+		DocumentID: documentID,
+		Title:      "ComUICoder: Component-based Reusable UI Code Generation for Complex Websites via Semantic Segmentation and Element-wise Feedback",
+		Abstract:   "Existing abstract",
+		Authors:    []types.PaperAuthor{{Name: "Jingyu Xiao"}, {Name: "Michael R. Lyu"}},
+		SourceName: "arXiv", SourceURL: "https://arxiv.org/abs/2602.19276v1",
+		MetadataSource: types.PaperMetadataSourceCatalog,
+	}
+	service := &paperInfoService{documents: documents, papers: papers}
+	candidate := types.PaperCatalogCandidate{
+		Provider: "crossref", ProviderID: "10.1145/3770855.3817689",
+		DOI:      "10.1145/3770855.3817689",
+		Title:    "Component-based Reusable UI Code Generation for Complex Websites via Semantic Segmentation and Fine-grained Feedback",
+		Abstract: "Replacement abstract",
+		Authors:  []types.PaperAuthor{{Name: "Jingyu Xiao"}, {Name: "Michael R. Lyu"}},
+		Venue:    "KDD '26", Pages: "5638-5649", ProviderScore: 1,
+	}
+	err := service.QueryApply(context.Background(), types.PaperQueryApplyCommand{
+		Kind: types.CatalogJobSource, DocumentID: documentID, Generation: 2,
+		Query: types.PaperLookupQuery{
+			Title:   papers.metadata[documentID.String()].Title,
+			Authors: []string{"Jingyu Xiao", "Michael R. Lyu"},
+		},
+		Candidate: &candidate,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := documents.documents[documentID].DOI; got != "10.1145/3770855.3817689" {
+		t.Fatalf("document DOI = %q", got)
+	}
+	if len(papers.updates) != 1 {
+		t.Fatalf("metadata updates = %d, want 1", len(papers.updates))
+	}
+	update := papers.updates[0].update
+	if update.Title != nil || update.Abstract != nil || update.Authors != nil ||
+		update.SourceName != nil || update.SourceURL != nil {
+		t.Fatalf("merge overwrote populated fields: %#v", update)
+	}
+	if update.Venue == nil || *update.Venue != "KDD '26" ||
+		update.Pages == nil || *update.Pages != "5638-5649" {
+		t.Fatalf("missing fields were not merged: %#v", update)
+	}
+}
+
 func TestPaperInfoExtractMetadataDoesNotClearExistingMetadataForEmptyResult(t *testing.T) {
 	documentID := uuid.New()
 	markdown := []byte("# Existing paper\n")
@@ -838,10 +1004,10 @@ func TestExtractionCitationInputsPreserveBibliographyOrderAcrossSkippedRows(t *t
 func TestExtractionMetadataUpdateOnlyIncludesUsableCandidates(t *testing.T) {
 	result := &types.PaperExtractionResult{
 		Title:    &types.PaperTextCandidate{Value: "  ", Confidence: 1},
-		Abstract: &types.PaperTextCandidate{Value: "Abstract body", Confidence: 1},
+		Abstract: &types.PaperTextCandidate{Value: "Abstract\x00 body", Confidence: 1},
 		Authors: []types.PaperTextCandidate{
 			{Value: "  ", Confidence: 1},
-			{Value: "Ada Lovelace", Confidence: 1},
+			{Value: "Ada\x00 Lovelace", Confidence: 1},
 		},
 	}
 	update := extractionMetadataUpdate(result)
@@ -856,6 +1022,23 @@ func TestExtractionMetadataUpdateOnlyIncludesUsableCandidates(t *testing.T) {
 	}
 	if update.MetadataSource == nil || *update.MetadataSource != types.PaperMetadataSourceExtraction {
 		t.Fatalf("metadata source = %#v, want extraction", update.MetadataSource)
+	}
+}
+
+func TestExtractionCitationInputsRemovePostgresNULBytes(t *testing.T) {
+	inputs := extractionCitationInputs(
+		[]string{"[1] A\x00 reference"},
+		[]types.PaperReferenceCandidate{{
+			RawReference: "[1] A\x00 reference",
+			Title:        "Paper\x00 title",
+			Authors:      []string{"Ada\x00 Lovelace"},
+		}},
+	)
+	if len(inputs) != 1 || inputs[0].RawReference != "[1] A reference" || inputs[0].Candidate == nil {
+		t.Fatalf("citation inputs = %#v", inputs)
+	}
+	if inputs[0].Candidate.Title != "Paper title" || len(inputs[0].Candidate.Authors) != 1 || inputs[0].Candidate.Authors[0] != "Ada Lovelace" {
+		t.Fatalf("citation candidate = %#v", inputs[0].Candidate)
 	}
 }
 
@@ -1334,6 +1517,58 @@ func TestScorePaperCatalogCandidateMakesTitleDominant(t *testing.T) {
 	if titleScore <= authorScore {
 		t.Fatalf("title match should dominate author-only match: title=%f, author=%f",
 			titleScore, authorScore)
+	}
+	if titleScore < minPaperCatalogMatchScore {
+		t.Fatalf("strong title with a wrong extracted author should still match: %f", titleScore)
+	}
+}
+
+func TestScorePaperCatalogCandidateRequiresAuthorsOnlyForWeakTitle(t *testing.T) {
+	query := types.PaperLookupQuery{
+		Title:   "Reliable Visual Document Understanding System",
+		Authors: []string{"Ada Lovelace"},
+	}
+	weakTitle := "Reliable Visual Document Understanding Toolkit"
+	withMatchingAuthor := types.PaperCatalogCandidate{
+		Title: weakTitle, Authors: []types.PaperAuthor{{Name: "Ada Lovelace"}},
+		ProviderScore: 1,
+	}
+	withWrongAuthor := withMatchingAuthor
+	withWrongAuthor.Authors = []types.PaperAuthor{{Name: "Grace Hopper"}}
+
+	matchingScore, _ := scorePaperCatalogCandidate(query, withMatchingAuthor)
+	wrongAuthorScore, _ := scorePaperCatalogCandidate(query, withWrongAuthor)
+	if matchingScore < minPaperCatalogMatchScore {
+		t.Fatalf("weak title with matching author score = %f, want at least %f",
+			matchingScore, minPaperCatalogMatchScore)
+	}
+	if wrongAuthorScore != 0 {
+		t.Fatalf("weak title with wrong author score = %f, want 0", wrongAuthorScore)
+	}
+}
+
+func TestPaperSourceQueryApplyPersistsNoMatchOutcome(t *testing.T) {
+	documentID := uuid.New()
+	documents := newPaperDocumentRepoStub(types.Document{
+		ID: documentID, SourceState: types.DocumentSourceAvailable,
+		SourceLookupStatus: types.DocumentStageRunning, SourceLookupGeneration: 2,
+	})
+	service := &paperInfoService{documents: documents}
+
+	err := service.QueryApply(context.Background(), types.PaperQueryApplyCommand{
+		Kind: types.CatalogJobSource, DocumentID: documentID, Generation: 2,
+		Final: true, Outcome: types.CatalogOutcomeNoMatch,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := documents.GetStage(context.Background(), documentID, types.DocumentStageSourceLookup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Status != types.DocumentStageSucceeded || state.ErrorCode == nil ||
+		*state.ErrorCode != types.ProcessingErrorNoMatch {
+		t.Fatalf("source lookup state = %#v, want succeeded NO_MATCH", state)
 	}
 }
 

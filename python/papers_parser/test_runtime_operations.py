@@ -27,6 +27,12 @@ class RuntimeEngineFallbackTest(unittest.TestCase):
             PROJECT_ROOT / "model_train" / "artifacts",
         )
 
+    def test_relative_upload_directory_is_resolved_from_repository_root(self) -> None:
+        self.assertEqual(
+            _resolve_project_path("./data/uploads"),
+            PROJECT_ROOT / "data" / "uploads",
+        )
+
     def test_hybrid_and_shadow_fall_back_to_rules_when_artifacts_are_missing(self) -> None:
         with TemporaryDirectory() as temporary:
             for mode in ("hybrid", "shadow"):

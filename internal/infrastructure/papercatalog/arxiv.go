@@ -23,6 +23,7 @@ const (
 	ArXivProvider       = string(types.PaperCatalogProviderArXiv)
 	arXivBaseURL        = "https://export.arxiv.org"
 	arXivRequestSpacing = 3 * time.Second
+	arXivDOIPrefix      = "10.48550/arXiv."
 )
 
 var arXivVersionPattern = regexp.MustCompile(`v[0-9]+$`)
@@ -102,11 +103,10 @@ func (provider *arXivProvider) Search(
 	} else if query.DOI != "" {
 		values.Set("search_query", `doi:"`+arXivQueryValue(query.DOI)+`"`)
 	} else {
-		search := `ti:"` + arXivQueryValue(query.Title) + `"`
-		if len(query.Authors) > 0 {
-			search += ` AND au:"` + arXivQueryValue(query.Authors[0]) + `"`
-		}
-		values.Set("search_query", search)
+		// Retrieval is title-first. Parser author output can be incomplete or
+		// collapse a whole byline into one value; author evidence is therefore
+		// applied only when scoring a weak title candidate after retrieval.
+		values.Set("search_query", `ti:"`+arXivQueryValue(query.Title)+`"`)
 	}
 	headers := make(http.Header)
 	headers.Set("Accept", "application/atom+xml")
@@ -200,10 +200,15 @@ func (entry arXivEntry) candidate(
 			break
 		}
 	}
+	providerID := arXivID(entry.ID)
+	doi := strings.TrimSpace(entry.DOI)
+	if doi == "" {
+		doi = arXivDOI(providerID)
+	}
 	return types.PaperCatalogCandidate{
 		Provider:      ArXivProvider,
-		ProviderID:    arXivID(entry.ID),
-		DOI:           entry.DOI,
+		ProviderID:    providerID,
+		DOI:           doi,
 		Title:         entry.Title,
 		Abstract:      entry.Summary,
 		Authors:       authors,
@@ -215,6 +220,14 @@ func (entry arXivEntry) candidate(
 		ProviderScore: score,
 		RetrievedAt:   retrievedAt,
 	}
+}
+
+func arXivDOI(identifier string) string {
+	identifier = arXivID(identifier)
+	if identifier == "" {
+		return ""
+	}
+	return arXivDOIPrefix + identifier
 }
 
 func arXivID(value string) string {

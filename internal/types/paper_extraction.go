@@ -43,12 +43,14 @@ func (status PaperExtractionStatus) IsValid() bool {
 }
 
 // PaperMetadataExtractCommand is the typed application command decoded from a
-// queue payload. It carries identifiers only; the service reloads source data.
+// queue payload. It carries identifiers and retry intent only; the service
+// reloads all source data.
 type PaperMetadataExtractCommand struct {
-	RequestID  string
-	DocumentID uuid.UUID
-	Stage      DocumentStage
-	Generation int64
+	RequestID           string
+	DocumentID          uuid.UUID
+	Stage               DocumentStage
+	Generation          int64
+	RestartSourceLookup bool
 }
 
 // Validate verifies identifiers and attempt information on the command.

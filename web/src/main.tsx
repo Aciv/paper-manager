@@ -106,6 +106,29 @@ function stageStateLabel(state: DocumentStageStatus) {
   return labels[state];
 }
 
+type ProcessingStageState = DocumentProcessingView['stageStates'][number];
+
+function stageOutcomeLabel(stage: ProcessingStageState, metadataSource?: PaperMetadata['metadataSource']) {
+  if (stage.stage !== 'source_lookup' || stage.status !== 'succeeded') return stageStateLabel(stage.status);
+  if (stage.errorCode === 'NO_MATCH') return '未匹配';
+  if (metadataSource === 'catalog') return '已匹配';
+  return '已完成';
+}
+
+function stageOutcomeDetail(stage: ProcessingStageState, metadataSource?: PaperMetadata['metadataSource']) {
+  if (stage.stage === 'source_lookup' && stage.status === 'succeeded') {
+    if (stage.errorCode === 'NO_MATCH') return `第 ${stage.generation} 代 · 未找到达到匹配阈值的目录记录`;
+    if (metadataSource === 'catalog') return `第 ${stage.generation} 代 · 已采用目录元数据`;
+  }
+  return stage.errorMessage || `第 ${stage.generation} 代`;
+}
+
+function stageOutcomeClass(stage: ProcessingStageState) {
+  return stage.stage === 'source_lookup' && stage.status === 'succeeded' && stage.errorCode === 'NO_MATCH'
+    ? 'no-match'
+    : stage.status;
+}
+
 function processingKindLabel(kind: string) {
   const labels: Record<string, string> = {
 	markdown: '文档解析为 Markdown',
@@ -1158,7 +1181,7 @@ function App() {
 			<section className="paper-info-panel">
 			  <div className="panel-heading"><h4>文档处理流程</h4><span>{processing?.sourceState ?? '尚未加载'}</span></div>
 			  <div className="paper-info-stages">
-				{stageStates.length ? stageStates.map((stage) => <div key={stage.stage}><strong>{processingKindLabel(stage.stage)}</strong><span className={`paper-stage paper-stage-${stage.status}`}>{stageStateLabel(stage.status)}</span><small>{stage.errorMessage || `第 ${stage.generation} 代`}</small></div>) : <p className="hint">尚未产生阶段状态。</p>}
+				{stageStates.length ? stageStates.map((stage) => <div key={stage.stage}><strong>{processingKindLabel(stage.stage)}</strong><span className={`paper-stage paper-stage-${stageOutcomeClass(stage)}`}>{stageOutcomeLabel(stage, paperMetadata?.metadataSource)}</span><small>{stageOutcomeDetail(stage, paperMetadata?.metadataSource)}</small></div>) : <p className="hint">尚未产生阶段状态。</p>}
 			  </div>
 			</section>
 				<section className="paper-info-panel">

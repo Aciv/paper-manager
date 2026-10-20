@@ -112,6 +112,10 @@ func TestOpenAlexSearchNormalizesResponse(t *testing.T) {
 		if !strings.Contains(query.Get("filter"), "publication_year:2024") {
 			t.Fatalf("filter = %q", query.Get("filter"))
 		}
+		if strings.Contains(query.Get("filter"), "Ada Lovelace") ||
+			strings.Contains(query.Get("filter"), "raw_author_name") {
+			t.Fatalf("author unexpectedly constrained OpenAlex query: %q", query.Get("filter"))
+		}
 		_, _ = io.WriteString(writer, `{"results":[{
 			"id":"https://openalex.org/W123",
 			"doi":"https://doi.org/10.1000/openalex",
@@ -173,6 +177,9 @@ func TestCrossrefSearchNormalizesResponse(t *testing.T) {
 		if !strings.Contains(query.Get("query.bibliographic"), "A Paper") {
 			t.Fatalf("query.bibliographic = %q", query.Get("query.bibliographic"))
 		}
+		if strings.Contains(query.Get("query.bibliographic"), "Ada Lovelace") {
+			t.Fatalf("author unexpectedly included in Crossref query: %q", query.Get("query.bibliographic"))
+		}
 		_, _ = io.WriteString(writer, `{"message":{"items":[{
 			"DOI":"10.1000/crossref",
 			"URL":"https://doi.org/10.1000/crossref",
@@ -230,7 +237,7 @@ func TestArXivSearchNormalizesAtomResponse(t *testing.T) {
 		if request.URL.Path != "/api/query" || query.Get("max_results") != "2" {
 			t.Fatalf("unexpected request: %s?%s", request.URL.Path, request.URL.RawQuery)
 		}
-		if got := query.Get("search_query"); got != `ti:"A Paper" AND au:"Ada Lovelace"` {
+		if got := query.Get("search_query"); got != `ti:"A Paper"` {
 			t.Fatalf("search_query = %q", got)
 		}
 		if got := request.Header.Get("Accept"); got != "application/atom+xml" {
@@ -317,6 +324,32 @@ func TestArXivSearchUsesExactIDForNativeURL(t *testing.T) {
 	}
 	if len(candidates) != 1 || candidates[0].ProviderID != "2401.01234" {
 		t.Fatalf("unexpected exact candidates: %#v", candidates)
+	}
+}
+
+func TestArXivCandidateDerivesDataCiteDOIWhenEntryHasNoDOI(t *testing.T) {
+	candidate := (arXivEntry{
+		ID:    "https://arxiv.org/abs/2512.19918v2",
+		Title: "Widget2Code",
+	}).candidate(1, time.Now())
+
+	if candidate.ProviderID != "2512.19918" {
+		t.Fatalf("provider id = %q", candidate.ProviderID)
+	}
+	if candidate.DOI != "10.48550/arXiv.2512.19918" {
+		t.Fatalf("derived DOI = %q", candidate.DOI)
+	}
+}
+
+func TestArXivCandidateKeepsExplicitJournalDOI(t *testing.T) {
+	candidate := (arXivEntry{
+		ID:    "https://arxiv.org/abs/2512.19918v2",
+		DOI:   "10.1145/example",
+		Title: "Widget2Code",
+	}).candidate(1, time.Now())
+
+	if candidate.DOI != "10.1145/example" {
+		t.Fatalf("explicit DOI = %q", candidate.DOI)
 	}
 }
 

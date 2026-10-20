@@ -22,10 +22,12 @@ import (
 
 const (
 	minPaperCatalogMatchScore             = 0.72
-	paperTitleMatchWeight                 = 0.70
-	paperAuthorMatchWeight                = 0.15
-	paperYearMatchWeight                  = 0.05
-	paperVenueMatchWeight                 = 0.05
+	paperStrongTitleMatchScore            = 0.85
+	paperWeakTitleMatchScore              = 0.60
+	paperWeakTitleAuthorMatchScore        = 0.60
+	paperStrongTitleWeight                = 0.95
+	paperWeakTitleWeight                  = 0.75
+	paperWeakTitleAuthorWeight            = 0.20
 	paperProviderScoreWeight              = 0.05
 	maxAutomaticPaperTags                 = 32
 	localPaperTitleSearchSize             = 50
@@ -266,7 +268,11 @@ func (s *paperInfoService) ExtractMetadata(
 		"metadata_applied", updatedMetadata.MetadataSource == types.PaperMetadataSourceExtraction,
 		"catalog_resolvable", catalogResolvable,
 		"extractor", result.ExtractorName)
-	if err := s.enqueueSourceLookupIfNeeded(ctx, command.DocumentID, command.RequestID); err != nil {
+	queueSourceLookup := s.enqueueSourceLookupIfNeeded
+	if command.RestartSourceLookup {
+		queueSourceLookup = s.restartSourceLookup
+	}
+	if err := queueSourceLookup(ctx, command.DocumentID, command.RequestID); err != nil {
 		logger.Warn(ctx, "queue source lookup after extraction failed", "document_id", command.DocumentID, "error", err)
 	}
 	if s.cfg.PaperReferenceAutoResolve {
@@ -364,6 +370,28 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 	document types.Document,
 	selected types.PaperCatalogCandidate,
 ) (bool, error) {
+	return s.applySourceCatalogCandidateUpdate(
+		ctx, document, selected, catalogMetadataUpdate(selected),
+	)
+}
+
+func (s *paperInfoService) mergeSourceCatalogCandidate(
+	ctx context.Context,
+	document types.Document,
+	current *types.PaperMetadata,
+	selected types.PaperCatalogCandidate,
+) (bool, error) {
+	return s.applySourceCatalogCandidateUpdate(
+		ctx, document, selected, missingCatalogMetadataUpdate(current, selected),
+	)
+}
+
+func (s *paperInfoService) applySourceCatalogCandidateUpdate(
+	ctx context.Context,
+	document types.Document,
+	selected types.PaperCatalogCandidate,
+	update types.PaperMetadataUpdate,
+) (bool, error) {
 	doi := normalizePaperDOI(selected.DOI)
 	if strings.TrimSpace(document.DOI) == "" && doi != "" {
 		kept, _, err := s.promoteNewestDuplicate(ctx, &document, doi)
@@ -374,24 +402,22 @@ func (s *paperInfoService) applySourceCatalogCandidate(
 			return false, nil
 		}
 	}
-	updated, err := s.papers.UpdateMetadata(
-		ctx,
-		document.ID.String(),
-		catalogMetadataUpdate(selected),
-	)
-	if err != nil {
-		logger.Error(ctx, "persist selected paper catalog metadata failed",
-			"provider", selected.Provider,
-			"provider_id", selected.ProviderID,
-			"error", err)
-		return false, fmt.Errorf("persist selected catalog metadata: %w", err)
-	}
-	if updated.MetadataSource != types.PaperMetadataSourceCatalog {
-		logger.Info(ctx, "paper catalog metadata skipped",
-			"provider", selected.Provider,
-			"provider_id", selected.ProviderID,
-			"current_source", updated.MetadataSource)
-		return false, nil
+	if update.HasDataChanges() {
+		updated, err := s.papers.UpdateMetadata(ctx, document.ID.String(), update)
+		if err != nil {
+			logger.Error(ctx, "persist selected paper catalog metadata failed",
+				"provider", selected.Provider,
+				"provider_id", selected.ProviderID,
+				"error", err)
+			return false, fmt.Errorf("persist selected catalog metadata: %w", err)
+		}
+		if updated.MetadataSource != types.PaperMetadataSourceCatalog {
+			logger.Info(ctx, "paper catalog metadata skipped",
+				"provider", selected.Provider,
+				"provider_id", selected.ProviderID,
+				"current_source", updated.MetadataSource)
+			return false, nil
+		}
 	}
 	if strings.TrimSpace(document.DOI) == "" && doi != "" {
 		applied, doiErr := s.documents.SetDOIIfEmpty(ctx, document.ID, doi)
@@ -665,6 +691,7 @@ func extractionCitationInputs(
 ) []types.PaperCitationInput {
 	candidateByReference := make(map[string]types.PaperReferenceCandidate, len(candidates))
 	for _, candidate := range candidates {
+		candidate = compactPaperReferenceCandidate(candidate)
 		key := compactPaperText(candidate.RawReference)
 		if key == "" {
 			continue
@@ -677,7 +704,7 @@ func extractionCitationInputs(
 	inputs := make([]types.PaperCitationInput, 0, len(references))
 	seen := make(map[string]struct{}, len(references))
 	for bibliographyOrder, rawReference := range references {
-		rawReference = strings.TrimSpace(rawReference)
+		rawReference = compactPaperText(rawReference)
 		key := compactPaperText(rawReference)
 		if rawReference == "" || key == "" {
 			continue
@@ -695,6 +722,24 @@ func extractionCitationInputs(
 		inputs = append(inputs, input)
 	}
 	return inputs
+}
+
+func compactPaperReferenceCandidate(candidate types.PaperReferenceCandidate) types.PaperReferenceCandidate {
+	candidate.RawReference = compactPaperText(candidate.RawReference)
+	candidate.Title = compactPaperText(candidate.Title)
+	candidate.Venue = compactPaperText(candidate.Venue)
+	candidate.DOI = compactPaperText(candidate.DOI)
+	candidate.ArXivID = compactPaperText(candidate.ArXivID)
+	candidate.Volume = compactPaperText(candidate.Volume)
+	candidate.Pages = compactPaperText(candidate.Pages)
+	authors := make([]string, 0, len(candidate.Authors))
+	for _, author := range candidate.Authors {
+		if author = compactPaperText(author); author != "" {
+			authors = append(authors, author)
+		}
+	}
+	candidate.Authors = authors
+	return candidate
 }
 
 func metadataLookupQuery(
@@ -741,41 +786,28 @@ func scorePaperCatalogCandidate(
 		return 1, true
 	}
 
-	weighted, weight := 0.0, 0.0
-	if strings.TrimSpace(query.Title) != "" {
-		weighted += paperTitleMatchWeight * paperTextSimilarity(query.Title, candidate.Title)
-		weight += paperTitleMatchWeight
-	}
-	if len(query.Authors) > 0 {
-		weighted += paperAuthorMatchWeight * paperAuthorSimilarity(query.Authors, candidate.Authors)
-		weight += paperAuthorMatchWeight
-	}
-	if query.PublishedYear > 0 {
-		yearScore := 0.0
-		if candidate.PublishedAt != nil {
-			difference := int(math.Abs(float64(
-				query.PublishedYear - candidate.PublishedAt.Year(),
-			)))
-			switch difference {
-			case 0:
-				yearScore = 1
-			case 1:
-				yearScore = 0.5
-			}
-		}
-		weighted += paperYearMatchWeight * yearScore
-		weight += paperYearMatchWeight
-	}
-	if strings.TrimSpace(query.Venue) != "" {
-		weighted += paperVenueMatchWeight * paperTextSimilarity(query.Venue, candidate.Venue)
-		weight += paperVenueMatchWeight
-	}
-	weighted += paperProviderScoreWeight * candidate.ProviderScore
-	weight += paperProviderScoreWeight
-	if weight == 0 {
+	if strings.TrimSpace(query.Title) == "" {
 		return 0, false
 	}
-	score := weighted / weight
+	titleScore := paperTextSimilarity(query.Title, candidate.Title)
+	providerScore := math.Max(0, math.Min(1, candidate.ProviderScore))
+	if titleScore >= paperStrongTitleMatchScore {
+		score := paperStrongTitleWeight*titleScore + paperProviderScoreWeight*providerScore
+		return math.Max(0, math.Min(1, score)), false
+	}
+	// Author evidence is a guard only for an imperfect title. A bad parser
+	// author must never veto a strong title, while a weak title must not match
+	// merely because a common author name happens to overlap.
+	if titleScore < paperWeakTitleMatchScore || len(query.Authors) == 0 {
+		return 0, false
+	}
+	authorScore := paperAuthorSimilarity(query.Authors, candidate.Authors)
+	if authorScore < paperWeakTitleAuthorMatchScore {
+		return 0, false
+	}
+	score := paperWeakTitleWeight*titleScore +
+		paperWeakTitleAuthorWeight*authorScore +
+		paperProviderScoreWeight*providerScore
 	return math.Max(0, math.Min(1, score)), false
 }
 
@@ -941,6 +973,56 @@ func catalogMetadataUpdate(
 	return update
 }
 
+func missingCatalogMetadataUpdate(
+	current *types.PaperMetadata,
+	candidate types.PaperCatalogCandidate,
+) types.PaperMetadataUpdate {
+	update := catalogMetadataUpdate(candidate)
+	if current == nil {
+		return update
+	}
+	if strings.TrimSpace(current.Title) != "" {
+		update.Title = nil
+	}
+	if strings.TrimSpace(current.Abstract) != "" {
+		update.Abstract = nil
+	}
+	if len(current.Authors) > 0 {
+		update.Authors = nil
+	}
+	if len(current.Tags) > 0 {
+		update.Tags = nil
+	}
+	if strings.TrimSpace(current.SourceName) != "" {
+		update.SourceName = nil
+	}
+	if strings.TrimSpace(current.SourceURL) != "" {
+		update.SourceURL = nil
+	}
+	if strings.TrimSpace(current.Venue) != "" {
+		update.Venue = nil
+	}
+	if current.PublishedAt != nil {
+		update.PublishedAt = nil
+	}
+	if strings.TrimSpace(current.Volume) != "" {
+		update.Volume = nil
+	}
+	if strings.TrimSpace(current.Issue) != "" {
+		update.Issue = nil
+	}
+	if strings.TrimSpace(current.Pages) != "" {
+		update.Pages = nil
+	}
+	if strings.TrimSpace(current.Language) != "" {
+		update.Language = nil
+	}
+	if !update.HasDataChanges() {
+		update.MetadataSource = nil
+	}
+	return update
+}
+
 func setCatalogMetadataText(destination **string, value string) {
 	if value = compactPaperText(value); value != "" {
 		*destination = &value
@@ -987,6 +1069,10 @@ func paperAuthorNames(authors []types.PaperAuthor) []string {
 }
 
 func compactPaperText(value string) string {
+	// PostgreSQL text/jsonb rejects U+0000 even though it is valid in Go and
+	// protobuf strings. PDF text extraction can preserve embedded NUL bytes,
+	// so remove them at the untrusted parser/catalog normalization boundary.
+	value = strings.ReplaceAll(value, "\x00", "")
 	return strings.Join(strings.Fields(value), " ")
 }
 

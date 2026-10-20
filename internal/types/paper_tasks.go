@@ -22,6 +22,9 @@ type PaperMetadataExtractPayload struct {
 	DocumentID string        `json:"document_id"`
 	Stage      DocumentStage `json:"stage,omitempty"`
 	Generation int64         `json:"generation,omitempty"`
+	// RestartSourceLookup asks a manual extraction retry to start a fresh
+	// catalog generation only after the new extraction has been persisted.
+	RestartSourceLookup bool `json:"restart_source_lookup,omitempty"`
 }
 
 // PaperReferenceQueryEnqueuePayload is the durable queue message that turns the
@@ -66,9 +69,11 @@ func (p PaperMetadataExtractPayload) Command() (PaperMetadataExtractCommand, err
 		return PaperMetadataExtractCommand{}, fmt.Errorf("%w: %w", ErrInvalidPaperInfoTaskPayload, err)
 	}
 	return PaperMetadataExtractCommand{
-		RequestID:  strings.TrimSpace(p.RequestID),
-		DocumentID: documentID,
-		Stage:      p.Stage, Generation: p.Generation,
+		RequestID:           strings.TrimSpace(p.RequestID),
+		DocumentID:          documentID,
+		Stage:               p.Stage,
+		Generation:          p.Generation,
+		RestartSourceLookup: p.RestartSourceLookup,
 	}, nil
 }
 

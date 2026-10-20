@@ -263,7 +263,7 @@ class HybridPaperExtractionEngine:
                 extractor_name=self.name + "-no-layout", extractor_version=self.version,
             )
         learned = self._crf.extract(markdown, blocks, layout_lines)
-        title = base.title or learned.title
+        title = _prefer_text_candidate(base.title, learned.title)
         authors = base.authors or learned.authors
         abstract = base.abstract or learned.abstract
         candidates = self._crf.reference_candidates(references)
@@ -275,6 +275,18 @@ class HybridPaperExtractionEngine:
             references=tuple(references), reference_candidates=candidates,
             extractor_name=self.name, extractor_version=self.version,
         )
+
+
+def _prefer_text_candidate(
+    rules: TextCandidate | None,
+    learned: TextCandidate | None,
+) -> TextCandidate | None:
+    """Choose one fact by calibrated confidence, keeping rules on a tie."""
+    if rules is None:
+        return learned
+    if learned is None:
+        return rules
+    return learned if learned.confidence > rules.confidence else rules
 
 
 class ShadowPaperExtractionEngine:

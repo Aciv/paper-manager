@@ -20,6 +20,7 @@ func queueStubDocumentStage(document *types.Document, stage types.DocumentStage)
 	state.Status = types.DocumentStageQueued
 	state.Generation++
 	state.UpdatedAt = time.Now().UTC()
+	state.ErrorCode, state.ErrorMessage = nil, nil
 	setStubDocumentStage(document, state)
 	return state, true, nil
 }
@@ -37,6 +38,7 @@ func transitionStubDocumentStage(document *types.Document, stage types.DocumentS
 		return state, false, nil
 	}
 	state.Status, state.UpdatedAt = to, time.Now().UTC()
+	state.ErrorCode, state.ErrorMessage = nil, nil
 	setStubDocumentStage(document, state)
 	return state, true, nil
 }
@@ -45,11 +47,15 @@ func setStubDocumentStage(document *types.Document, state types.DocumentStageSta
 	switch state.Stage {
 	case types.DocumentStageMarkdown:
 		document.MarkdownStatus, document.MarkdownGeneration, document.MarkdownUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.MarkdownErrorCode, document.MarkdownErrorMessage = state.ErrorCode, state.ErrorMessage
 	case types.DocumentStageMetadataExtraction:
 		document.MetadataExtractionStatus, document.MetadataExtractionGeneration, document.MetadataExtractionUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.MetadataExtractionErrorCode, document.MetadataExtractionErrorMessage = state.ErrorCode, state.ErrorMessage
 	case types.DocumentStageSourceLookup:
 		document.SourceLookupStatus, document.SourceLookupGeneration, document.SourceLookupUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.SourceLookupErrorCode, document.SourceLookupErrorMessage = state.ErrorCode, state.ErrorMessage
 	case types.DocumentStageReferenceLookup:
 		document.ReferenceLookupStatus, document.ReferenceLookupGeneration, document.ReferenceLookupUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.ReferenceLookupErrorCode, document.ReferenceLookupErrorMessage = state.ErrorCode, state.ErrorMessage
 	}
 }
