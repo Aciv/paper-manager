@@ -18,7 +18,7 @@ import { ReferenceEditorDialog } from './ReferenceEditorDialog';
 import { CitationExportDialog } from './CitationExportDialog';
 import { TranslationPanel } from './TranslationPanel';
 import type { DoiCitationTarget } from './doiCitation';
-import type { TranslationRequestSeed } from './translation';
+import type { TranslationRequestSeed } from './translation/index.ts';
 import { fetchAllDocumentPages } from './documentPagination';
 import { isDocumentRead, localFileReadingKey, subscribeReadingState, transferReadingRecord } from './readingState';
 import './PaperLibraryPage.css';

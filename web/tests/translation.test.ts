@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   TRANSLATION_PROVIDER_OPTIONS,
+  TRANSLATION_PROVIDER_REGISTRY,
   TRANSLATION_SOURCE_OPTIONS,
   TRANSLATION_TARGET_OPTIONS,
   TranslationCache,
@@ -15,13 +16,14 @@ import {
   mymemoryTranslationProvider,
   normalizeTextLineBreaks,
   protectTranslationSymbols,
+  providerHttpHeaders,
   resolveTargetLanguage,
   restoreTranslationSymbols,
   splitTextByCodePoints,
   splitTextByUtf8Bytes,
   stripMarkupForTranslation,
   translateText,
-} from '../src/translation.ts';
+} from '../src/translation/index.ts';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -43,6 +45,30 @@ test('exposes the provider contract and selectable providers', () => {
   assert.equal(typeof mymemoryTranslationProvider.translate, 'function');
   assert.equal(TRANSLATION_SOURCE_OPTIONS[0]?.label, '自动检测');
   assert.equal(TRANSLATION_TARGET_OPTIONS[0]?.label, '自动');
+  assert.equal(TRANSLATION_PROVIDER_REGISTRY.chrome.kind, 'script');
+  assert.equal(TRANSLATION_PROVIDER_REGISTRY.microsoft.kind, 'http');
+  assert.equal(TRANSLATION_PROVIDER_REGISTRY.mymemory.kind, 'http');
+  assert.equal(typeof TRANSLATION_PROVIDER_REGISTRY.microsoft.createProvider, 'function');
+});
+
+test('builds provider headers from JSON config and API key fields', () => {
+  assert.deepEqual(
+    providerHttpHeaders('microsoft', {
+      headers: '{"X-Test":"1"}',
+      apiKey: 'secret',
+      apiKeyHeader: 'X-API-Key',
+      apiKeyPrefix: 'Token',
+    }, { 'Content-Type': 'application/json' }),
+    {
+      'Content-Type': 'application/json',
+      'X-Test': '1',
+      'X-API-Key': 'Token secret',
+    },
+  );
+  assert.throws(
+    () => providerHttpHeaders('mymemory', { headers: '[]' }),
+    /请求头配置必须是合法的 JSON 对象/,
+  );
 });
 
 test('detects common source scripts and resolves automatic targets', () => {

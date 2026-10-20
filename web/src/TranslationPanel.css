@@ -112,6 +112,79 @@
   white-space: nowrap;
 }
 
+.paper-library .translation-config-toggle {
+  flex: 0 0 auto;
+  padding: 3px 7px;
+  border-color: var(--pl-border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--pl-faint);
+  font-size: 10.5px;
+}
+
+.paper-library .translation-config-toggle:hover,
+.paper-library .translation-config-toggle.active {
+  border-color: var(--pl-border-3);
+  background: var(--pl-surface-2);
+  color: var(--pl-text);
+}
+
+.translation-provider-config {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid var(--pl-border);
+  border-radius: 8px;
+  background: var(--pl-surface-2);
+}
+
+.translation-config-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  color: var(--pl-faint);
+  font-size: 10.5px;
+}
+
+.paper-library .translation-config-field input,
+.paper-library .translation-config-field textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--pl-border-2);
+  border-radius: 6px;
+  background: var(--pl-surface);
+  color: var(--pl-text);
+  font: inherit;
+  font-size: 11.5px;
+}
+
+.paper-library .translation-config-field textarea {
+  min-height: 72px;
+  resize: vertical;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  line-height: 1.5;
+}
+
+.paper-library .translation-config-field input:focus,
+.paper-library .translation-config-field textarea:focus {
+  border-color: var(--pl-border-3);
+  outline: 2px solid rgb(255 255 255 / 12%);
+}
+
+.translation-config-field small {
+  color: var(--pl-faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.translation-config-note {
+  margin: 0;
+  color: var(--pl-faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 /* Compact view menu: bilingual panes vs translation-only reading. */
 .translation-layout {
   display: flex;

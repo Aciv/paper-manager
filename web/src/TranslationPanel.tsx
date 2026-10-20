@@ -2,9 +2,12 @@ import { useEffect, useRef, useState, type ClipboardEvent as ReactClipboardEvent
 
 import { LibrarySelect } from './LibrarySelect';
 import {
+  AUTO_TRANSLATION_HINT,
+  AUTO_TRANSLATION_NOTE,
   TRANSLATION_LANGUAGE_OPTIONS,
   TRANSLATION_PROVIDER_LABELS,
   TRANSLATION_PROVIDER_OPTIONS,
+  TRANSLATION_PROVIDER_REGISTRY,
   TRANSLATION_SOURCE_OPTIONS,
   TRANSLATION_TARGET_OPTIONS,
   chromeTranslationAvailability,
@@ -20,11 +23,12 @@ import {
   translateText,
   type ChromeTranslationAvailability,
   type TranslationLanguage,
+  type TranslationProviderConfigMap,
   type TranslationProviderID,
   type TranslationProviderSetting,
   type TranslationRequestSeed,
   type TranslationSettings,
-} from './translation';
+} from './translation/index.ts';
 import './TranslationPanel.css';
 
 type TranslationRequest = TranslationRequestSeed & {
@@ -152,6 +156,7 @@ function TranslateIcon() {
 export function TranslationPanel({ request }: { request?: TranslationRequest }) {
   const [settings, setSettings] = useState<TranslationSettings>(() => loadTranslationSettings());
   const [layout, setLayout] = useState<TranslationLayout>(() => loadTranslationLayout());
+  const [configOpen, setConfigOpen] = useState(false);
   const [units, setUnits] = useState<TranslationUnit[]>(() => [manualUnit()]);
   const unitsRef = useRef<TranslationUnit[]>(units);
   const [notice, setNotice] = useState('');
@@ -170,6 +175,12 @@ export function TranslationPanel({ request }: { request?: TranslationRequest }) 
     ? (firstText ? detectSourceLanguage(firstText) : 'en')
     : settings.sourceLanguage;
   const chromeTarget = resolveTargetLanguage(firstText, settings.targetLanguage, settings.sourceLanguage);
+  const selectedDescriptor = settings.provider === 'auto'
+    ? undefined
+    : TRANSLATION_PROVIDER_REGISTRY[settings.provider];
+  const selectedConfig = selectedDescriptor
+    ? settings.providerConfigs[selectedDescriptor.id] ?? {}
+    : {};
 
   // Keep the latest units synchronously so a click/effect can read edits that
   // were committed in this same event loop turn.
@@ -196,6 +207,25 @@ export function TranslationPanel({ request }: { request?: TranslationRequest }) 
       // A disabled storage must not prevent switching the view.
     }
   }
+
+  function updateProviderConfig(key: string, value: string) {
+    if (!selectedDescriptor) return;
+    setSettings((current) => {
+      const providerConfigs: TranslationProviderConfigMap = { ...current.providerConfigs };
+      providerConfigs[selectedDescriptor.id] = {
+        ...(providerConfigs[selectedDescriptor.id] ?? {}),
+        [key]: value,
+      };
+      const next = { ...current, providerConfigs };
+      saveTranslationSettings(next);
+      return next;
+    });
+    setNotice('');
+  }
+
+  useEffect(() => {
+    setConfigOpen(false);
+  }, [settings.provider]);
 
   function swapLanguages() {
     const target = resolveTargetLanguage(firstText, settings.targetLanguage, settings.sourceLanguage);
@@ -311,6 +341,7 @@ export function TranslationPanel({ request }: { request?: TranslationRequest }) 
             sourceLanguage: settings.sourceLanguage,
             targetLanguage: settings.targetLanguage,
             provider: settings.provider,
+            providerConfigs: settings.providerConfigs,
             signal: controller.signal,
           });
           if (controller.signal.aborted) return;
@@ -439,20 +470,8 @@ export function TranslationPanel({ request }: { request?: TranslationRequest }) 
     && (chromeAvailability === 'downloadable' || chromeAvailability === 'downloading'
       || chromeAvailability === 'unavailable' || chromeAvailability === 'unsupported');
 
-  const engineNote = settings.provider === 'auto'
-    ? '自动选择引擎'
-    : settings.provider === 'microsoft'
-      ? '免密钥在线翻译'
-      : settings.provider === 'chrome'
-        ? '本地模型，不上传文本'
-        : '备用接口，额度有限';
-  const providerHint = settings.provider === 'auto'
-    ? '优先使用已就绪的 Chrome 本地模型；否则使用 Microsoft 在线翻译，失败时回退到 MyMemory。'
-    : settings.provider === 'microsoft'
-      ? '免密钥在线接口；选中文本会发送给 Microsoft，不需要登录或填写 API Key。'
-      : settings.provider === 'chrome'
-        ? '使用 Chrome 浏览器内置的本地翻译模型，文本不会上传；首次使用需要下载模型。'
-        : 'MyMemory 公共接口；单次最多 500 UTF-8 字节，匿名每日额度有限，只作为兜底。';
+  const engineNote = selectedDescriptor?.note ?? AUTO_TRANSLATION_NOTE;
+  const providerHint = selectedDescriptor?.hint ?? AUTO_TRANSLATION_HINT;
 
   return <section className={`library-panel library-panel-translation${layout === 'target' ? ' layout-target' : ''}`} aria-label="翻译">
     <div className="translation-language-bar">
@@ -480,6 +499,10 @@ export function TranslationPanel({ request }: { request?: TranslationRequest }) 
           onChange={(value) => updateSettings({ provider: value as TranslationProviderSetting })} />
       </div>
       <span className="translation-engine-note" title={providerHint}>{engineNote}</span>
+      {selectedDescriptor && selectedDescriptor.configFields.length > 0 && (
+        <button type="button" className={`translation-config-toggle${configOpen ? ' active' : ''}`}
+          aria-expanded={configOpen} onClick={() => setConfigOpen((open) => !open)}>配置</button>
+      )}
       <div className="translation-layout" title="切换原文/译文显示方式">
         <span>显示</span>
         <LibrarySelect value={layout} options={LAYOUT_SELECT_OPTIONS}
@@ -487,6 +510,29 @@ export function TranslationPanel({ request }: { request?: TranslationRequest }) 
           onChange={(value) => updateLayout(value as TranslationLayout)} />
       </div>
     </div>
+
+    {selectedDescriptor && configOpen && selectedDescriptor.configFields.length > 0 && (
+      <div className="translation-provider-config">
+        {selectedDescriptor.configFields.map((field) => {
+          const inputId = `translation-config-${selectedDescriptor.id}-${field.key}`;
+          const value = selectedConfig[field.key] ?? '';
+          return <label className="translation-config-field" key={field.key} htmlFor={inputId}>
+            <span>{field.label}{field.required ? ' *' : ''}</span>
+            {field.type === 'json'
+              ? <textarea id={inputId} value={value} placeholder={field.placeholder} spellCheck={false}
+                onChange={(event) => updateProviderConfig(field.key, event.target.value)} />
+              : <input id={inputId}
+                type={field.type === 'password' ? 'password' : field.type === 'url' ? 'url' : 'text'}
+                value={value} placeholder={field.placeholder} autoComplete="off" spellCheck={false}
+                onChange={(event) => updateProviderConfig(field.key, event.target.value)} />}
+            {field.description && <small>{field.description}</small>}
+          </label>;
+        })}
+        <p className="translation-config-note">
+          配置保存在本机 localStorage；API Key 只用于本地请求，不要提交到仓库。
+        </p>
+      </div>
+    )}
 
     {settings.provider === 'chrome' && <div className={`translation-chrome-status ${chromeAvailability}`}>
       {sourceUnits.length === 0

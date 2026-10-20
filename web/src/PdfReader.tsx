@@ -9,7 +9,7 @@ import { api, Block, contentUrl, Document as PaperDocument, DocumentSelectionRes
 import { matchCitationTargets } from './citationLinkMatcher';
 import { PDFLinkPreview, destinationPDFPoint, destinationPreviewRegion, mergeAdjacentPDFLinks, viewportRegion } from './pdfLinkPreview';
 import { LatestPDFSelection, NormalizedPDFRegion, SelectionGeneration, canvasCropForRegion, normalizedRegion, regionIsLargeEnough } from './pdfSelection';
-import { type SelectedPDFBlock, type TranslationRequestSeed } from './translation';
+import { type SelectedPDFBlock, type TranslationRequestSeed } from './translation/index.ts';
 import { activeOutlineNode, annotateOutlinePages, type OutlineEntry } from './pdfOutline';
 import { isDocumentRead, localFileReadingKey, readingRecord, saveReadingPage, setDocumentRead, subscribeReadingState } from './readingState';
 
