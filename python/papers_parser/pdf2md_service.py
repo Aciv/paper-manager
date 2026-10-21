@@ -179,7 +179,8 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         checkpoint: RpcCheckpoint = None,
     ):
         """
-        Return source-map blocks and 72-DPI PNG crops for visual blocks.
+        Return source-map blocks and configured-resolution PNG previews for
+        visual blocks.
 
         PyMuPDF4LLM's page_boxes positions refer to Python Unicode code-point
         offsets in the page Markdown. We join pages with two newlines, so the

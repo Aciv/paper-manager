@@ -63,10 +63,10 @@ DEFAULT_EXTRACTION_ENGINE = os.getenv("PAPER_EXTRACTION_ENGINE", "rules").strip(
 DEFAULT_CRF_MODEL_DIR = _resolve_project_path(
     os.getenv("PAPER_CRF_MODEL_DIR", "model_train/artifacts"),
 )
-# 72 DPI is intentionally the default for cropped page regions. 720 DPI uses
-# roughly 100x as many pixels as 72 DPI and is unsuitable for routine block
-# previews; deployments that need print-quality captures can override it.
-DEFAULT_IMAGE_DPI = int(os.getenv("DEFAULT_IMAGE_DPI", 72))
+# 144 DPI keeps routine block previews legible while remaining far below
+# print-resolution pixel counts. Deployments may override the default through
+# PARSER_IMAGE_DPI; DEFAULT_IMAGE_DPI remains a compatibility fallback.
+DEFAULT_IMAGE_DPI = int(os.getenv("DEFAULT_IMAGE_DPI", 144))
 DEFAULT_MAX_PAGES = int(os.getenv("PARSER_MAX_PAGES", 2000))
 DEFAULT_MAX_PAGE_EDGE_POINTS = float(os.getenv("PARSER_MAX_PAGE_EDGE_POINTS", 5000.0))
 DEFAULT_MAX_CROP_PIXELS = int(os.getenv("PARSER_MAX_CROP_PIXELS", 20_000_000))

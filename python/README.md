@@ -74,3 +74,26 @@ read-only Compose container that path is intentionally unavailable, so the
 parser automatically writes structured runtime messages to standard output;
 use `docker compose logs -f parser`. A log-path failure never interrupts an
 RPC. Local non-container runs retain the default `python/Logs/today.log`.
+
+## One-shot PDF region renderer foundation
+
+`papers_parser/render_pdf_region.py` is a framework-level CLI for a future Go
+caller. It imports only PyMuPDF and renders one page bbox to PNG on stdout; it
+does not start gRPC or import `pymupdf4llm`, ONNX, or the CRF runtime. The Go
+adapter owns storage-key containment, process concurrency/cancellation, output
+limits, PNG validation, and temporary-file cleanup.
+
+There is intentionally no application-service call, HTTP route, frontend
+action, dependency-injection binding, environment configuration, or Docker
+packaging yet. The eventual caller will also own authorization and persistence
+of any derived image through `FileStorage`.
+
+For an isolated local check from `python/`:
+
+```bash
+../.venv/bin/python -m papers_parser.render_pdf_region \
+  --source ../data/uploads/pdf/example.pdf \
+  --page-number 1 \
+  --bbox-x0 72 --bbox-y0 72 --bbox-x1 300 --bbox-y1 240 \
+  --dpi 216 --max-dpi 300 --max-pixels 8000000 > region.png
+```
