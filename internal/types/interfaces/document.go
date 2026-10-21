@@ -2,7 +2,6 @@ package interfaces
 
 import (
 	"context"
-	"io"
 	"mime/multipart"
 
 	"paperMaster/internal/types"
@@ -11,8 +10,10 @@ import (
 	"github.com/hibiken/asynq"
 )
 
-// DocumentStructureService reads the durable recognition manifest and builds
-// a disposable structure projection. Adapters must not infer outlines.
+// DocumentStructureService composes a disposable read model from the persisted
+// recognition outline and reading-note index. It never infers an outline, owns
+// note content, or resolves evidence; adapters must use this service rather
+// than interpreting those artifacts themselves.
 type DocumentStructureService interface {
 	GetDocumentReadingStructure(ctx context.Context, documentID string) (types.DocumentReadingStructure, error)
 }
@@ -130,16 +131,6 @@ type DocumentService interface {
 	RetryDocumentProcess(ctx context.Context, id string) (*types.Document, error)
 	// SearchDocument performs paginated ID and DOI searches.
 	SearchDocument(ctx context.Context, search types.DocumentSearch) (types.DocumentPage, error)
-	// OpenDocumentFile loads the document and opens its stored object in one
-	// lookup. The returned document carries size, content type, hash, and
-	// update time for conditional/range responses.
-	OpenDocumentFile(ctx context.Context, id string) (document *types.Document, reader io.ReadCloser, filename string, err error)
-	// GetDocumentBlocks returns selectable source-map blocks, optionally scoped
-	// to one one-based PDF page (zero returns every page).
-	GetDocumentBlocks(ctx context.Context, id string, pageNumber int) ([]types.Block, error)
-	// GetDocumentBlockImage opens a rendered image/table asset after verifying
-	// that blockID belongs to documentID.
-	GetDocumentBlockImage(ctx context.Context, documentID, blockID string) (reader io.ReadCloser, filename string, err error)
 	// DeleteDocument removes the stored object and metadata for one document.
 	DeleteDocument(ctx context.Context, id string) error
 	// DeleteDocumentList removes multiple documents sequentially.

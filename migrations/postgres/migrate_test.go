@@ -226,6 +226,26 @@ func TestDocumentOutlineMigrationAddsExplicitGenerationBoundManifest(t *testing.
 	}
 }
 
+func TestDocumentReadingNotesMigrationCreatesBoundedRevisionedNote(t *testing.T) {
+	for _, fragment := range []string{
+		"CREATE TABLE IF NOT EXISTS document_reading_notes",
+		"document_id UUID PRIMARY KEY REFERENCES documents(id) ON DELETE CASCADE",
+		"structure JSONB NOT NULL",
+		"revision BIGINT NOT NULL DEFAULT 1",
+		"size_bytes > 0 AND size_bytes <= 10485760",
+	} {
+		if !strings.Contains(documentReadingNotesUp, fragment) {
+			t.Fatalf("document reading notes migration does not include %q", fragment)
+		}
+	}
+	if strings.Contains(documentReadingNotesUp, "markdown TEXT") {
+		t.Fatal("document reading notes migration must store a file manifest, not Markdown text")
+	}
+	if strings.Contains(documentReadingNotesUp, "storage_key TEXT") {
+		t.Fatal("document reading notes root must not store one monolithic file key")
+	}
+}
+
 func TestPaperCitationsMigrationCreatesDirectionalCascadeRelation(t *testing.T) {
 	for _, fragment := range []string{
 		"CREATE TABLE IF NOT EXISTS paper_citations",
@@ -327,8 +347,8 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 30 {
-		t.Fatalf("latest migration version = %d, want 30", got)
+	if got := migrations[len(migrations)-1].version; got != 31 {
+		t.Fatalf("latest migration version = %d, want 31", got)
 	}
 	for _, fragment := range []string{
 		"CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public",

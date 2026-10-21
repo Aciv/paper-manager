@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	documentReadingStructureSchemaVersion = 2
+	documentReadingStructureSchemaVersion = 6
 	documentStructureCompileTimeout       = 30 * time.Second
 )
 
@@ -40,10 +40,7 @@ type documentStructureService struct {
 }
 
 func NewDocumentStructureService(cfg config.Config, repo interfaces.DocumentRepository) interfaces.DocumentStructureService {
-	cacheDir := strings.TrimSpace(cfg.DocumentStructureCacheDir)
-	if cacheDir == "" {
-		cacheDir = filepath.Join(os.TempDir(), "papers-manager", "document-structures")
-	}
+	cacheDir := documentStructureCacheDirectory(cfg)
 	service := &documentStructureService{
 		repo: repo, cacheDir: filepath.Clean(cacheDir),
 		maxEntries: cfg.DocumentStructureCacheEntries, maxBytes: cfg.DocumentStructureCacheMaxBytes,
@@ -56,6 +53,14 @@ func NewDocumentStructureService(cfg config.Config, repo interfaces.DocumentRepo
 	}
 	service.cleanupCache(context.Background())
 	return service
+}
+
+func documentStructureCacheDirectory(cfg config.Config) string {
+	cacheDir := strings.TrimSpace(cfg.DocumentStructureCacheDir)
+	if cacheDir == "" {
+		cacheDir = filepath.Join(os.TempDir(), "papers-manager", "document-structures")
+	}
+	return filepath.Clean(cacheDir)
 }
 
 func (s *documentStructureService) GetDocumentReadingStructure(ctx context.Context, rawID string) (types.DocumentReadingStructure, error) {

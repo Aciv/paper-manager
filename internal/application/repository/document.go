@@ -514,7 +514,7 @@ func (r *documentRepository) ReplaceOlderDocument(
 			Pluck("id", &familyIDs).Error; err != nil {
 			return err
 		}
-		var sourceKeys, markdownKeys, assetKeys []string
+		var sourceKeys, markdownKeys, assetKeys, noteKeys []string
 		if err := tx.Model(&types.Document{}).
 			Where("id IN ?", familyIDs).Pluck("storage_key", &sourceKeys).Error; err != nil {
 			return err
@@ -528,7 +528,18 @@ func (r *documentRepository) ReplaceOlderDocument(
 			Pluck("asset_key", &assetKeys).Error; err != nil {
 			return err
 		}
-		cleanup.StorageKeys = uniqueDocumentStorageKeys(sourceKeys, markdownKeys, assetKeys)
+		var familyNotes []types.DocumentReadingNote
+		if err := tx.Where("document_id IN ?", familyIDs).Find(&familyNotes).Error; err != nil {
+			return err
+		}
+		for index := range familyNotes {
+			if err := familyNotes[index].ParseDirectory(); err != nil {
+				return err
+			}
+			for _, section := range familyNotes[index].Directory.Sections {
+				noteKeys = append(noteKeys, section.StorageKey)
+			}
+		}
 
 		// A citation owned by the newest document that points at any removed
 		// family member would become a self-citation when it is repointed. It
@@ -561,6 +572,10 @@ func (r *documentRepository) ReplaceOlderDocument(
 			newestID, familyIDs).Error; err != nil {
 			return err
 		}
+		// Notes remain owned by the source document whose PDF they describe.
+		// Moving their files would violate notes/{document_id}/..., so deleting an
+		// older duplicate also deletes its note manifest and section files.
+		cleanup.StorageKeys = uniqueDocumentStorageKeys(sourceKeys, markdownKeys, assetKeys, noteKeys)
 		familyIDTexts := make([]string, 0, len(familyIDs))
 		for _, id := range familyIDs {
 			familyIDTexts = append(familyIDTexts, id.String())

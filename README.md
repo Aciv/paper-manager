@@ -158,9 +158,19 @@ Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，
 `./data/runtime/document-structures`（不属于 FileStorage）。可通过
 `DOCUMENT_STRUCTURE_CACHE_DIR`、`DOCUMENT_STRUCTURE_CACHE_ENTRIES` 和
 `DOCUMENT_STRUCTURE_CACHE_MAX_BYTES` 调整目录、条目数和单文件上限。
-缓存不是真值，删除后会从 PostgreSQL 中保存的 outline 和后续阅读笔记投影
-重建，不会重新打开 PDF。结构响应不复制完整 Blocks；PDF 阅读器继续通过
+缓存不是真值，删除后会从 PostgreSQL 中保存的 outline 重建，不会重新打开 PDF。
+结构响应不复制完整 Blocks；PDF 阅读器继续通过
 `GET /api/document/:id/blocks?page=N` 按页读取并用 ordinal 关联目录位置。
+每个文档的可修订阅读笔记不超过 10 MiB，按 H1-H3 拆成
+`notes/{document_id}/{section_id}.md`；数据库只记录章节目录、单调 revision 和时间戳，
+不保存正文。整份 Markdown 重导入期间读接口明确返回暂不可用，不会读到半完成状态；
+普通修改使用 Plan B 的 section 内 `insertText`/`deleteText` 原语和 section
+`addSection`/`deleteSection`，替换由 delete + insert 组合。写入与删除继续使用
+revision 乐观锁。笔记中的内部证据链接使用
+`papers-manager://self/evidence?v=1&page=2&rect=0.1,0.2,0.3,0.4`
+或 `papers-manager://document/{uuid}/evidence?...`，坐标是未旋转 PDF 页面中以
+左上角为原点的归一化区域，页面旋转由客户端显示时转换。证据链接是普通 Markdown
+内容，由前端、Agent 或 MCP 自行解析；Go 后端不识别、不索引也不解析它。
 
 远程 PDF 可通过 `POST /api/document/import-url` 导入，请求体为 `{"url":"https://arxiv.org/abs/2401.01234","doi":"可选","filename":"可选.pdf"}`。服务会区分论文落地页和实际 PDF URL，逐跳执行 SSRF 校验并流式写入；普通出版社落地页不会被猜测或抓取，当前内建转换仅支持 arXiv 和显式 `.pdf` URL。引用 PDF 通过 `POST /api/references/{referenceID}/download-pdf` 按单条引用显式获取。
 
@@ -183,6 +193,13 @@ Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，
 - `POST /api/document/import-url`：验证并流式导入显式 PDF、arXiv 页面或受支持的 DOI URL，然后提交正常文档处理流程。
 - `GET /api/document/{id}/content`：以内联方式流式返回原始文件，供 PDF 阅读器使用。
 - `GET /api/document/{id}/blocks?page=N`：读取某一 PDF 页的解析 Block；省略 `page` 返回全部 Block。
+- `GET /api/document/{id}/markdown`：以 `text/markdown` 返回当前识别生成的论文 Markdown（有大小上限），用于阅读或下游处理。
+- `GET|PUT|DELETE /api/document/{id}/reading-note`：`GET` 只返回 section 目录和 revision；`PUT` 按 `expectedRevision` 整体导入/替换 Markdown；`DELETE` 删除整份笔记。
+- `GET /api/document/{id}/reading-note/sections/{sectionId}`：只读取指定 section 的 Markdown；阅读目录不返回正文。
+- `GET /api/document/{id}/reading-note/export`：显式拼接全部分 section 并下载整篇 Markdown，这是唯一会加载全篇正文的读取路径。
+- `POST /api/document/{id}/reading-note/operations`：按 `expectedRevision` 原子执行操作序列：`insertText`、`deleteText`、`addSection`、`deleteSection`。文本操作使用 section ID 和 section 内 Unicode code point 偏移；`replace` 由 `deleteText` + `insertText` 组合，不单独设原语。文本操作不能改变 section 的 H1-H3 标题结构。
+- `GET /api/document/{id}/structure`：返回持久化论文目录的可重建紧凑结构，不包含完整 Blocks；阅读笔记 section 由 `/reading-note` 独立读取。
+- 笔记 Markdown 中的 `papers-manager://` 证据链接由前端、Agent 或 MCP 自行解析；Go 后端不索引、不持久化、也不解析笔记证据。
 - `PATCH /api/document/{id}`：仅更新 `originalFilename`、`doi`。旧的请求字段 `filename` 暂作为输入别名兼容。
 - `GET /api/paper/{documentID}`、`PATCH /api/paper/{documentID}`：获取或更新独立的论文书目信息；标签通过 `paperMetadata.tags` 数组维护。
 - `GET /api/paper/search`：支持 `title`、`author`（作者姓名模糊匹配）、重复的 `tag` 参数、`tagMode=all|any` 及 `page`；标签查询使用 PostgreSQL JSONB GIN 索引。

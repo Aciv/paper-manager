@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"os"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -36,12 +37,14 @@ type documentService struct {
 	papers        interfaces.PaperService
 	urlResolver   interfaces.PaperURLResolver
 	downloads     interfaces.RemoteDownloadLimiter
+	readingNotes  interfaces.NoteReadingRepository
 	// recognitionOutputDir is the trusted shared-volume root for directory
 	// recognizers. It is deliberately separate from upload storage: recognizer
 	// output is untrusted until ProcessDocument validates and copies it.
-	recognitionOutputDir     string
-	maxRecognitionOutputSize int64
-	maxUploadSize            int64
+	recognitionOutputDir      string
+	maxRecognitionOutputSize  int64
+	maxUploadSize             int64
+	documentStructureCacheDir string
 }
 
 // Upload conflict sentinels are aliases so handlers do not depend on storage
@@ -112,12 +115,14 @@ func NewDocumentServiceWithProcessingAndSpanRecorder(
 	papers interfaces.PaperService,
 	urlResolver interfaces.PaperURLResolver,
 	downloads interfaces.RemoteDownloadLimiter,
+	readingNotes interfaces.NoteReadingRepository,
 ) interfaces.DocumentService {
 	service := newDocumentServiceWithProcessing(cfg, repo, storage, taskInspector, taskEnqueuer, recognizer, paperInfo, spans).(*documentService)
 	service.processing = processing
 	service.papers = papers
 	service.urlResolver = urlResolver
 	service.downloads = downloads
+	service.readingNotes = readingNotes
 	return service
 }
 
@@ -134,6 +139,7 @@ func newDocumentServiceWithProcessing(
 		repo: repo, storage: storage, taskInspector: taskInspector, taskEnqueuer: taskEnqueuer,
 		recognizer: recognizer, paperInfo: paperInfo, spans: spans, recognitionOutputDir: cfg.RecognitionOutputDirectory,
 		maxRecognitionOutputSize: cfg.MaxUploadSize, maxUploadSize: maxUploadSize,
+		documentStructureCacheDir: documentStructureCacheDirectory(cfg),
 	}
 }
 
@@ -578,62 +584,6 @@ func (s *documentService) SearchDocument(ctx context.Context, search types.Docum
 	return s.repo.Search(ctx, search)
 }
 
-func (s *documentService) OpenDocumentFile(
-	ctx context.Context, id string,
-) (*types.Document, io.ReadCloser, string, error) {
-	doc, err := s.GetDocumentByID(ctx, id)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	if doc.SourceState != types.DocumentSourceAvailable {
-		return nil, nil, "", sql.ErrNoRows
-	}
-	rc, err := s.storage.Open(ctx, doc.StorageKey)
-	if err != nil {
-		logger.Error(ctx, "open document file failed", "document_id", doc.ID, "error", err)
-		return nil, nil, "", err
-	}
-	return doc, rc, doc.OriginalFilename, nil
-}
-
-func (s *documentService) GetDocumentBlocks(ctx context.Context, id string, pageNumber int) ([]types.Block, error) {
-	if pageNumber < 0 {
-		return nil, errors.New("page number must not be negative")
-	}
-	documentID, err := uuid.Parse(strings.TrimSpace(id))
-	if err != nil {
-		return nil, fmt.Errorf("invalid document id: %w", err)
-	}
-	if _, err := s.repo.Get(ctx, documentID); err != nil {
-		return nil, err
-	}
-	return s.repo.ListBlocks(ctx, documentID, pageNumber)
-}
-
-func (s *documentService) GetDocumentBlockImage(ctx context.Context, documentID, blockID string) (io.ReadCloser, string, error) {
-	documentUUID, err := uuid.Parse(strings.TrimSpace(documentID))
-	if err != nil {
-		return nil, "", fmt.Errorf("invalid document id: %w", err)
-	}
-	blockUUID, err := uuid.Parse(strings.TrimSpace(blockID))
-	if err != nil {
-		return nil, "", fmt.Errorf("invalid block id: %w", err)
-	}
-	block, err := s.repo.GetBlock(ctx, documentUUID, blockUUID)
-	if err != nil {
-		return nil, "", err
-	}
-	if block.AssetKey == "" {
-		return nil, "", sql.ErrNoRows
-	}
-	reader, err := s.storage.Open(ctx, block.AssetKey)
-	if err != nil {
-		logger.Error(ctx, "open document block image failed", "document_id", documentUUID, "block_id", blockUUID, "storage_key", block.AssetKey, "error", err)
-		return nil, "", err
-	}
-	return reader, filepath.Base(block.AssetKey), nil
-}
-
 func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 	doc, err := s.GetDocumentByID(ctx, id)
 	if err != nil {
@@ -669,8 +619,16 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 		s.restoreDocumentSourceStateAfterDeleteFailure(ctx, doc.ID, previousSourceState)
 		return err
 	}
+	var readingNote types.DocumentReadingNote
+	if s.readingNotes != nil {
+		readingNote, err = s.readingNotes.Get(ctx, doc.ID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			s.restoreDocumentSourceStateAfterDeleteFailure(ctx, doc.ID, previousSourceState)
+			return err
+		}
+	}
 
-	return s.deleteDocumentRelations(ctx, doc, &markdown, blocks, previousSourceState)
+	return s.deleteDocumentRelations(ctx, doc, &markdown, blocks, &readingNote, previousSourceState)
 }
 
 // deleteDocumentRelations performs the non-database portion of document
@@ -679,7 +637,7 @@ func (s *documentService) DeleteDocument(ctx context.Context, id string) error {
 // membership rows atomically.
 func (s *documentService) deleteDocumentRelations(
 	ctx context.Context, document *types.Document, markdown *types.DocumentMarkdown,
-	blocks []types.Block, previousSourceState types.DocumentSourceState,
+	blocks []types.Block, readingNote *types.DocumentReadingNote, previousSourceState types.DocumentSourceState,
 ) error {
 	if s.storage == nil {
 		return errors.New("file storage is not configured")
@@ -713,6 +671,18 @@ func (s *documentService) deleteDocumentRelations(
 		}
 		logger.Info(ctx, "document block image deleted", "document_id", document.ID, "block_id", block.ID, "storage_key", block.AssetKey)
 	}
+	if readingNote != nil {
+		for _, section := range readingNote.Directory.Sections {
+			if section.StorageKey == "" {
+				continue
+			}
+			if err := s.storage.Delete(ctx, section.StorageKey); err != nil {
+				s.recordIncompleteDocumentDeletion(ctx, document, "document files deleted; reading note deletion must be retried", err)
+				return err
+			}
+			logger.Info(ctx, "document reading note section deleted", "document_id", document.ID, "storage_key", section.StorageKey)
+		}
+	}
 
 	// Storage cleanup has succeeded and the row will remain deleting even if
 	// the final database delete fails. It is now safe to purge recognition,
@@ -724,6 +694,12 @@ func (s *documentService) deleteDocumentRelations(
 		return err
 	}
 	logger.Info(ctx, "document deleted", "document_id", document.ID)
+	if s.documentStructureCacheDir != "" {
+		cachePath := filepath.Join(s.documentStructureCacheDir, document.ID.String()+".json")
+		if removeErr := os.Remove(cachePath); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			logger.Warn(ctx, "remove deleted document structure cache failed", "document_id", document.ID, "error", removeErr)
+		}
+	}
 	return nil
 }
 

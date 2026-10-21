@@ -571,7 +571,7 @@ func TestNonAvailableDocumentHasNoSourceFile(t *testing.T) {
 			SourceState: types.DocumentSourceDeleting,
 		},
 	}
-	svc := NewDocumentService(repo, nil)
+	svc := NewDocumentReadingService(repo, nil, nil)
 
 	_, reader, _, err := svc.OpenDocumentFile(context.Background(), documentID.String())
 	if reader != nil {
@@ -869,6 +869,38 @@ func TestDeleteDocumentRemovesRenderedBlockImages(t *testing.T) {
 	}
 	if _, err := storage.Open(context.Background(), image.Key); err == nil {
 		t.Fatalf("rendered block image %q remains after document deletion", image.Key)
+	}
+}
+
+func TestDeleteDocumentRemovesReadingNoteFile(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := storage.SaveBytes(context.Background(), "paper.pdf", []byte("%PDF-1.7\nsource"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	documentID, sectionID := uuid.New(), uuid.New()
+	noteFile, err := storage.ReplaceText(context.Background(), "notes/"+documentID.String()+"/"+sectionID.String()+".md", "# Note", 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := &documentStatusRepoStub{document: types.Document{ID: documentID, StorageKey: source.Key, SourceState: types.DocumentSourceAvailable}}
+	note := types.DocumentReadingNote{DocumentID: documentID, SizeBytes: noteFile.Size, Revision: 1}
+	if err := note.SetDirectory(types.ReadingNoteDirectory{SchemaVersion: 1, Sections: []types.ReadingNoteSectionEntry{{
+		ID: sectionID, Order: 0, Level: 1, Title: "Note", StorageKey: noteFile.Key, ContentRevision: 1, SizeBytes: noteFile.Size,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	notes := &memoryReadingNoteRepository{notes: map[uuid.UUID]types.DocumentReadingNote{documentID: note}}
+	svc := NewDocumentServiceWithTaskInspector(repo, storage, nil).(*documentService)
+	svc.readingNotes = notes
+	if err := svc.DeleteDocument(context.Background(), documentID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.Open(context.Background(), noteFile.Key); err == nil {
+		t.Fatalf("reading note file %q remains after document deletion", noteFile.Key)
 	}
 }
 

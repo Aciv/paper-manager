@@ -2,6 +2,8 @@
 package container
 
 import (
+	"fmt"
+
 	"paperMaster/internal/application/repository"
 	appservice "paperMaster/internal/application/service"
 	fileservice "paperMaster/internal/application/service/file"
@@ -26,6 +28,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(config.Load))
 	must(dependencies.Provide(repository.NewDatabase))
 	must(dependencies.Provide(repository.NewDocumentRepository))
+	must(dependencies.Provide(repository.NewNoteReadingRepository))
 	must(dependencies.Provide(repository.NewPaperMetadataRepository))
 	must(dependencies.Provide(repository.NewPaperCitationRepository))
 	must(dependencies.Provide(repository.NewDocumentBaseRepository))
@@ -55,6 +58,15 @@ func Build() *dig.Container {
 	must(dependencies.Provide(paperurl.NewDownloadLimiter))
 	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessingAndSpanRecorder))
 	must(dependencies.Provide(appservice.NewDocumentStructureService))
+	must(dependencies.Provide(appservice.NewDocumentReadingService))
+	must(dependencies.Provide(func(storage interfaces.FileStorage) (interfaces.TextFileEditor, error) {
+		editor, ok := storage.(interfaces.TextFileEditor)
+		if !ok {
+			return nil, fmt.Errorf("file storage driver does not support text editing")
+		}
+		return editor, nil
+	}))
+	must(dependencies.Provide(appservice.NewNoteReadingService))
 	must(dependencies.Provide(appservice.NewDocumentSelectionProcessor))
 	must(dependencies.Provide(appservice.NewPaperService))
 	must(dependencies.Provide(appservice.NewPaperInfoServiceWithSpanRecorder))
@@ -64,7 +76,8 @@ func Build() *dig.Container {
 	must(dependencies.Provide(repository.NewTaskDeadLetterRepository))
 	must(dependencies.Provide(fileservice.NewStorage))
 	must(dependencies.Provide(handler.NewDocumentHandler))
-	must(dependencies.Provide(handler.NewDocumentStructureHandler))
+	must(dependencies.Provide(handler.NewDocumentReadingHandler))
+	must(dependencies.Provide(handler.NewNoteReadingHandler))
 	must(dependencies.Provide(handler.NewDocumentProcessHandlerWithProcessingViewQuery))
 	must(dependencies.Provide(handler.NewDocumentSelectionHandler))
 	must(dependencies.Provide(handler.NewPaperMetadataHandler))

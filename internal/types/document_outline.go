@@ -170,6 +170,10 @@ func finiteNonNegative(values ...float64) bool {
 	return true
 }
 
+// DocumentReadingStructure is the disposable read model for the persisted
+// source outline. Reading-note sections and evidence links are separate: notes
+// are read from their manifest/section files, and evidence links are interpreted
+// by their consumers.
 type DocumentReadingStructure struct {
 	SchemaVersion         int             `json:"schemaVersion"`
 	DocumentID            string          `json:"documentId"`

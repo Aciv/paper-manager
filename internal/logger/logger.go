@@ -126,8 +126,8 @@ func openLogFile(logPath string) (io.WriteCloser, error) {
 	}
 	return &lumberjack.Logger{
 		Filename:   logPath,
-		MaxSize:    50, // megabytes
-		MaxBackups: 3,
+		MaxSize:    1, // megabytes
+		MaxBackups: 100,
 		MaxAge:     28, // days
 		Compress:   true,
 	}, nil

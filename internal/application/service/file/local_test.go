@@ -1,6 +1,7 @@
 package file
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,6 +15,8 @@ import (
 
 	"paperMaster/internal/types/interfaces"
 	"paperMaster/internal/utils"
+
+	"github.com/google/uuid"
 )
 
 func TestLocalStorageSaveAndOpen(t *testing.T) {
@@ -47,6 +50,15 @@ func TestLocalStorageSaveAndOpen(t *testing.T) {
 	}
 	if got, want := string(content), `{"title":"paper"}`; got != want {
 		t.Fatalf("content = %q, want %q", got, want)
+	}
+	ranged, err := storage.OpenRange(context.Background(), stored.Key, 2, 5)
+	if err != nil {
+		t.Fatalf("open range: %v", err)
+	}
+	defer ranged.Close()
+	rangeContent, err := io.ReadAll(ranged)
+	if err != nil || string(rangeContent) != `title` {
+		t.Fatalf("range content = %q, error=%v", rangeContent, err)
 	}
 }
 
@@ -247,5 +259,41 @@ func TestLocalStoragePlacesCategorizedFilesUnderTypeDirectory(t *testing.T) {
 	}
 	if _, err := storage.Open(context.Background(), stored.Key); err != nil {
 		t.Fatalf("open categorized file: %v", err)
+	}
+}
+
+func TestLocalStorageReadTextRejectsInvalidUTF8(t *testing.T) {
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "notes/" + uuid.NewString() + "/" + uuid.NewString() + ".md"
+	if _, err := storage.replaceObject(context.Background(), key, "section.md", "text/plain",
+		bytes.NewReader([]byte{0xff}), 1024); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := storage.ReadText(context.Background(), key, 1024); err == nil {
+		t.Fatal("invalid UTF-8 text was accepted")
+	}
+}
+
+func TestLocalStorageReplaceTextPublishesAndAtomicallyReplacesObject(t *testing.T) {
+	storage, err := NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "notes/6a046cb1-a8b9-41b8-93e5-613e74493364/f6640d4e-f214-4293-b07b-e3048442b6f6.md"
+	for _, content := range []string{"# First\nold", "# First\nnew content"} {
+		stored, writeErr := storage.ReplaceText(context.Background(), key, content, 1024)
+		if writeErr != nil || stored.Key != key || stored.Size != int64(len(content)) {
+			t.Fatalf("stored=%#v error=%v", stored, writeErr)
+		}
+	}
+	content, err := storage.ReadText(context.Background(), key, 1024)
+	if err != nil || content != "# First\nnew content" {
+		t.Fatalf("content=%q error=%v", content, err)
+	}
+	if _, err := storage.ReplaceText(context.Background(), "../outside.md", "x", 1024); err == nil {
+		t.Fatal("path traversal key was accepted")
 	}
 }

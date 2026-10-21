@@ -43,26 +43,26 @@ func TestDocumentStructureRebuildsMissingCorruptAndStaleCache(t *testing.T) {
 		t.Fatalf("cache was not written: %v", err)
 	}
 	cached, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
-	if err != nil || cached.Fingerprint != first.Fingerprint || cached.SchemaVersion != 2 {
+	if err != nil || cached.Fingerprint != first.Fingerprint || cached.SchemaVersion != 6 {
 		t.Fatalf("cache hit = %#v, error=%v", cached, err)
 	}
 	if err := os.WriteFile(cachePath, []byte("broken"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rebuilt, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
-	if err != nil || rebuilt.Fingerprint != first.Fingerprint || rebuilt.SchemaVersion != 2 {
+	if err != nil || rebuilt.Fingerprint != first.Fingerprint || rebuilt.SchemaVersion != 6 {
 		t.Fatalf("corrupt cache rebuild = %#v, error=%v", rebuilt, err)
 	}
 	cacheData, err := os.ReadFile(cachePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	cacheData = bytes.Replace(cacheData, []byte(`"schemaVersion":2`), []byte(`"schemaVersion":1`), 1)
+	cacheData = bytes.Replace(cacheData, []byte(`"schemaVersion":6`), []byte(`"schemaVersion":5`), 1)
 	if err := os.WriteFile(cachePath, cacheData, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	upgraded, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
-	if err != nil || upgraded.SchemaVersion != 2 {
+	if err != nil || upgraded.SchemaVersion != 6 {
 		t.Fatalf("schema cache rebuild = %#v, error=%v", upgraded, err)
 	}
 	repository.markdown.RecognitionGeneration = 4
@@ -72,6 +72,13 @@ func TestDocumentStructureRebuildsMissingCorruptAndStaleCache(t *testing.T) {
 	}
 	if staleRebuilt.Fingerprint == first.Fingerprint || staleRebuilt.RecognitionGeneration != 4 {
 		t.Fatalf("stale cache was reused: %#v", staleRebuilt)
+	}
+	if err := os.Remove(cachePath); err != nil {
+		t.Fatal(err)
+	}
+	cacheLossRebuilt, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil || cacheLossRebuilt.Fingerprint != staleRebuilt.Fingerprint {
+		t.Fatalf("cache loss rebuild = %#v, error=%v", cacheLossRebuilt, err)
 	}
 }
 

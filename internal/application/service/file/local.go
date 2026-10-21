@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"paperMaster/internal/config"
 	"paperMaster/internal/logger"
@@ -434,6 +435,112 @@ func (s *LocalStorage) Open(ctx context.Context, key string) (io.ReadCloser, err
 	return file, nil
 }
 
+func (s *LocalStorage) OpenRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if offset < 0 || length < 0 {
+		return nil, fmt.Errorf("invalid stored file range")
+	}
+	path, err := s.pathForKey(key)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		logger.Error(ctx, "open stored file range failed", "storage_key", key, "error", err)
+		return nil, fmt.Errorf("open stored file range: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("stat stored file range: %w", err)
+	}
+	if offset > info.Size() || length > info.Size()-offset {
+		file.Close()
+		return nil, fmt.Errorf("stored file range exceeds object size")
+	}
+	return &sectionReadCloser{Reader: contextReader{ctx: ctx, reader: io.NewSectionReader(file, offset, length)}, closer: file}, nil
+}
+
+func (s *LocalStorage) ApplyTextEdits(content string, edits []interfaces.TextEdit) (string, error) {
+	return ApplyTextEdits(content, edits)
+}
+
+func (s *LocalStorage) ReadText(ctx context.Context, key string, maxBytes int64) (string, error) {
+	reader, err := s.Open(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	defer reader.Close()
+	if maxBytes <= 0 || maxBytes > s.maxSize {
+		maxBytes = s.maxSize
+	}
+	content, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return "", err
+	}
+	if int64(len(content)) > maxBytes {
+		return "", ErrFileTooLarge
+	}
+	if !utf8.Valid(content) {
+		return "", fmt.Errorf("text file is not UTF-8")
+	}
+	return string(content), nil
+}
+
+func (s *LocalStorage) ReplaceText(ctx context.Context, key, content string, maxBytes int64) (interfaces.StoredFile, error) {
+	return s.replaceObject(ctx, key, filepath.Base(key), "text/plain; charset=utf-8", strings.NewReader(content), maxBytes)
+}
+
+func (s *LocalStorage) replaceObject(ctx context.Context, key, filename, contentType string, content io.Reader, maxBytes int64) (interfaces.StoredFile, error) {
+	path, err := s.pathForKey(key)
+	if err != nil {
+		return interfaces.StoredFile{}, err
+	}
+	if safe, err := utils.SafeFileName(filename); err != nil || safe != filename || strings.TrimSpace(contentType) == "" {
+		return interfaces.StoredFile{}, fmt.Errorf("atomic storage metadata is invalid")
+	}
+	if maxBytes <= 0 || maxBytes > s.maxSize {
+		maxBytes = s.maxSize
+	}
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0o750); err != nil {
+		return interfaces.StoredFile{}, fmt.Errorf("create atomic storage directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(directory, ".atomic-*.tmp")
+	if err != nil {
+		return interfaces.StoredFile{}, fmt.Errorf("create atomic storage temporary file: %w", err)
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	hash := sha256.New()
+	size, copyErr := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(contextReader{ctx: ctx, reader: content}, maxBytes+1))
+	if syncErr := temporary.Sync(); copyErr == nil && syncErr != nil {
+		copyErr = syncErr
+	}
+	if closeErr := temporary.Close(); copyErr == nil && closeErr != nil {
+		copyErr = closeErr
+	}
+	if copyErr != nil {
+		return interfaces.StoredFile{}, fmt.Errorf("write atomic storage file: %w", copyErr)
+	}
+	if size == 0 {
+		return interfaces.StoredFile{}, ErrEmptyFile
+	}
+	if size > maxBytes {
+		return interfaces.StoredFile{}, ErrFileTooLarge
+	}
+	if err := os.Chmod(temporaryPath, 0o644); err != nil {
+		return interfaces.StoredFile{}, err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
+		return interfaces.StoredFile{}, fmt.Errorf("publish atomic storage file: %w", err)
+	}
+	return interfaces.StoredFile{Key: filepath.ToSlash(key), Filename: filename, ContentType: contentType,
+		Size: size, SHA256: fmt.Sprintf("%x", hash.Sum(nil))}, nil
+}
+
 func (s *LocalStorage) Delete(ctx context.Context, key string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -461,7 +568,7 @@ func (s *LocalStorage) pathForKey(key string) (string, error) {
 		return "", fmt.Errorf("invalid storage key")
 	}
 	parts := strings.Split(key, "/")
-	if len(parts) > 2 {
+	if len(parts) > 8 {
 		return "", fmt.Errorf("invalid storage key")
 	}
 	for _, part := range parts {
@@ -470,7 +577,7 @@ func (s *LocalStorage) pathForKey(key string) (string, error) {
 			return "", fmt.Errorf("invalid storage key")
 		}
 	}
-	if len(parts) == 2 && !isStorageCategory(interfaces.StorageCategory(parts[0])) {
+	if len(parts) >= 2 && !isStorageCategory(interfaces.StorageCategory(parts[0])) {
 		return "", fmt.Errorf("invalid storage key category")
 	}
 	return utils.SafePathUnderBase(s.baseDir, filepath.Join(s.baseDir, filepath.FromSlash(key)))
@@ -488,7 +595,7 @@ func (s *LocalStorage) directoryForCategory(category interfaces.StorageCategory)
 
 func isStorageCategory(category interfaces.StorageCategory) bool {
 	switch category {
-	case interfaces.StorageCategoryPDF, interfaces.StorageCategoryMarkdown, interfaces.StorageCategoryImage:
+	case interfaces.StorageCategoryPDF, interfaces.StorageCategoryMarkdown, interfaces.StorageCategoryNotes, interfaces.StorageCategoryImage:
 		return true
 	default:
 		return false
@@ -500,6 +607,13 @@ type contextReader struct {
 	reader io.Reader
 }
 
+type sectionReadCloser struct {
+	io.Reader
+	closer io.Closer
+}
+
+func (r *sectionReadCloser) Close() error { return r.closer.Close() }
+
 func (r contextReader) Read(buffer []byte) (int, error) {
 	if err := r.ctx.Err(); err != nil {
 		return 0, err
@@ -507,4 +621,6 @@ func (r contextReader) Read(buffer []byte) (int, error) {
 	return r.reader.Read(buffer)
 }
 
+var _ interfaces.FileStorage = (*LocalStorage)(nil)
+var _ interfaces.FileRangeStorage = (*LocalStorage)(nil)
 var _ interfaces.FileStorage = (*LocalStorage)(nil)

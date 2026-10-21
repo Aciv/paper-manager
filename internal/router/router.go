@@ -29,7 +29,8 @@ type RouterParams struct {
 	PaperInfoHandler         *handler.PaperInfoHandler
 	DocumentBaseHandler      *handler.DocumentBaseHandler
 	BibliographyHandler      *handler.BibliographyHandler
-	DocumentStructureHandler *handler.DocumentStructureHandler
+	DocumentReadingHandler   *handler.DocumentReadingHandler
+	NoteReadingHandler       *handler.NoteReadingHandler
 }
 
 // NewRouter 创建新的路由
@@ -67,9 +68,14 @@ func NewRouter(params RouterParams) *gin.Engine {
 	r.GET("/health", func(c *gin.Context) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
-	ServerFile(r, params.DocumentHandler)
-	if params.DocumentStructureHandler != nil {
-		r.GET("/api/document/:id/structure", params.DocumentStructureHandler.Get)
+	ServerFile(r, params.DocumentHandler, params.DocumentReadingHandler)
+	if params.NoteReadingHandler != nil {
+		r.GET("/api/document/:id/reading-note", params.NoteReadingHandler.Get)
+		r.GET("/api/document/:id/reading-note/sections/:sectionId", params.NoteReadingHandler.ReadSection)
+		r.POST("/api/document/:id/reading-note/operations", params.NoteReadingHandler.ApplyOperations)
+		r.PUT("/api/document/:id/reading-note", params.NoteReadingHandler.Put)
+		r.DELETE("/api/document/:id/reading-note", params.NoteReadingHandler.Delete)
+		r.GET("/api/document/:id/reading-note/export", params.NoteReadingHandler.Export)
 	}
 	ServerProcess(r, params.DocumentProcessHandler, params.DocumentSelectionHandler)
 	ServerPaperMetadata(r, params.PaperMetadataHandler, params.PaperCitationHandler, params.PaperInfoHandler)
@@ -91,24 +97,31 @@ func corsOrigins(value string) []string {
 	return origins
 }
 
-// ServerFile registers source-file and document-record endpoints.
-func ServerFile(router gin.IRoutes, documentHandler *handler.DocumentHandler) {
-	if documentHandler == nil {
-		return
+// ServerFile registers source-file lifecycle and document reading endpoints.
+func ServerFile(
+	router gin.IRoutes,
+	documentHandler *handler.DocumentHandler,
+	readingHandler *handler.DocumentReadingHandler,
+) {
+	if documentHandler != nil {
+		router.POST("/api/document/upload", documentHandler.Upload)
+		router.POST("/api/document/import-url", documentHandler.ImportURL)
+		router.POST("/api/document/batch-upload", documentHandler.UploadBatch)
+		router.POST("/api/document/batch-import-url", documentHandler.ImportURLBatch)
+		router.POST("/api/references/:referenceID/download-pdf", documentHandler.DownloadReferencePDF)
+		router.GET("/api/document/search", documentHandler.Search)
+		router.PATCH("/api/document/:id", documentHandler.UpdateDocument)
+		router.DELETE("/api/document/:id", documentHandler.DeleteFile)
 	}
-	router.POST("/api/document/upload", documentHandler.Upload)
-	router.POST("/api/document/import-url", documentHandler.ImportURL)
-	router.POST("/api/document/batch-upload", documentHandler.UploadBatch)
-	router.POST("/api/document/batch-import-url", documentHandler.ImportURLBatch)
-	router.POST("/api/references/:referenceID/download-pdf", documentHandler.DownloadReferencePDF)
-	router.GET("/api/document/search", documentHandler.Search)
-	// HEAD shares the range-aware streaming handlers so players can probe
-	// length/type without transferring the body.
-	router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/content", documentHandler.Content)
-	router.GET("/api/document/:id/blocks", documentHandler.ListBlocks)
-	router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/blocks/:blockID/image", documentHandler.BlockImage)
-	router.PATCH("/api/document/:id", documentHandler.UpdateDocument)
-	router.DELETE("/api/document/:id", documentHandler.DeleteFile)
+	if readingHandler != nil {
+		// HEAD shares the range-aware streaming handlers so players can probe
+		// length/type without transferring the body.
+		router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/content", readingHandler.Content)
+		router.GET("/api/document/:id/blocks", readingHandler.ListBlocks)
+		router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/blocks/:blockID/image", readingHandler.BlockImage)
+		router.GET("/api/document/:id/markdown", readingHandler.Markdown)
+		router.GET("/api/document/:id/structure", readingHandler.Structure)
+	}
 }
 
 // ServerProcess registers asynchronous document-processing controls.

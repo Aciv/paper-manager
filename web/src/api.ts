@@ -248,6 +248,47 @@ export type DocumentSelectionResult = {
   message: string;
 };
 
+export type DocumentReadingNote = {
+  documentId: string;
+  directory: ReadingNoteDirectory;
+  sizeBytes: number;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+};
+export type ReadingNoteSectionEntry = {
+  id: string;
+  parentId?: string;
+  order: number;
+  level: number;
+  title: string;
+  contentRevision: number;
+  sizeBytes: number;
+};
+export type ReadingNoteDirectory = { schemaVersion: number; sections: ReadingNoteSectionEntry[] };
+export type ReadingNoteSection = {
+  documentId: string;
+  revision: number;
+  section: ReadingNoteSectionEntry;
+  markdown: string;
+};
+// Text offsets and lengths are Unicode code-point positions inside one section,
+// relative to the content produced by earlier operations in the same sequence.
+// Replace is composed as deleteText followed by insertText.
+export type ReadingNoteOperation =
+  | { op: 'insertText'; sectionId: string; offset: number; text: string }
+  | { op: 'deleteText'; sectionId: string; offset: number; length: number }
+  | { op: 'addSection'; parentId?: string; afterId?: string; markdown: string }
+  | { op: 'deleteSection'; sectionId: string };
+export type ReadingNoteOperations = { expectedRevision: number; operations: ReadingNoteOperation[] };
+export type ReadingNoteEditResult = {
+  documentId: string;
+  revision: number;
+  directory: ReadingNoteDirectory;
+  changedSections: ReadingNoteSectionEntry[];
+  deletedSectionIds?: string[];
+};
+
 const baseUrl = (import.meta.env.VITE_API_URL ?? '/api/document').replace(/\/$/, '');
 const paperBaseUrl = baseUrl.endsWith('/document') ? `${baseUrl.slice(0, -'/document'.length)}/paper` : '/api/paper';
 const referenceBaseUrl = baseUrl.endsWith('/document') ? `${baseUrl.slice(0, -'/document'.length)}/references` : '/api/references';
@@ -275,6 +316,17 @@ async function requestFrom<T>(resourceBaseUrl: string, pathname: string, options
   // and a snippet of the body so the cause is visible.
   const detail = contentType.includes('application/json') ? '' : (await response.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 120);
   throw new Error(`HTTP ${response.status} ${response.statusText}${detail ? ` · ${detail}` : ''}`.trim());
+}
+
+async function requestText(pathname: string): Promise<string> {
+  const response = await fetch(`${baseUrl}${pathname}`);
+  if (response.ok) return response.text();
+  const contentType = response.headers.get('content-type') ?? '';
+  const body = contentType.includes('application/json')
+    ? await response.json().catch(() => null) as { error?: { message?: string } } | null
+    : null;
+  if (body?.error?.message) throw new Error(body.error.message);
+  throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
 }
 
 export const api = {
@@ -371,6 +423,23 @@ export const api = {
     const query = page ? `?page=${encodeURIComponent(String(page))}` : '';
     return request<{ items: Block[] }>(`/${encodeURIComponent(id)}/blocks${query}`);
   },
+  getDocumentMarkdown: (id: string): Promise<string> => requestText(`/${encodeURIComponent(id)}/markdown`),
+  getDocumentReadingNote: (id: string): Promise<DocumentReadingNote> => request<DocumentReadingNote>(`/${encodeURIComponent(id)}/reading-note`),
+  getDocumentReadingNoteSection: (id: string, sectionId: string): Promise<ReadingNoteSection> => request<ReadingNoteSection>(
+    `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}`,
+  ),
+  applyDocumentReadingNoteOperations: (id: string, requestBody: ReadingNoteOperations): Promise<ReadingNoteEditResult> => request<ReadingNoteEditResult>(
+    `/${encodeURIComponent(id)}/reading-note/operations`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
+  ),
+  putDocumentReadingNote: (id: string, markdown: string, expectedRevision: number): Promise<DocumentReadingNote> => request<DocumentReadingNote>(
+    `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
+    { method: 'PUT', headers: { 'Content-Type': 'text/markdown; charset=utf-8' }, body: markdown },
+  ),
+  deleteDocumentReadingNote: (id: string, expectedRevision: number): Promise<void> => request<void>(
+    `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
+    { method: 'DELETE' },
+  ),
   processDocumentSelection: (id: string, selection: DocumentSelectionProcess, signal?: AbortSignal): Promise<{ result: DocumentSelectionResult }> => {
     const body = new FormData();
     body.set('document_id', id);

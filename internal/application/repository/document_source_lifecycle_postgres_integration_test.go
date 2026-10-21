@@ -19,6 +19,7 @@ func TestDocumentNewestReplacementMovesRelationsPostgres(t *testing.T) {
 	ctx := context.Background()
 	documents := NewDocumentRepository(db)
 	citations := NewPaperCitationRepository(db)
+	notes := NewNoteReadingRepository(db)
 
 	olderID, newerID, sourceID, mergedChildID := uuid.New(), uuid.New(), uuid.New(), uuid.New()
 	older := sourceDocumentForCanonicalTest(olderID, "older.pdf", "replacement/older", "")
@@ -73,6 +74,10 @@ func TestDocumentNewestReplacementMovesRelationsPostgres(t *testing.T) {
 	}).Error; err != nil {
 		t.Fatalf("create base membership: %v", err)
 	}
+	createdNote, err := notes.Put(ctx, readingNoteManifest(olderID, "replacement"), 0)
+	if err != nil || createdNote.Revision != 1 {
+		t.Fatalf("create older reading note: note=%#v err=%v", createdNote, err)
+	}
 	incoming := testResolvedCitation(sourceID, "Incoming reference", olderID)
 	if err := db.Create(&incoming).Error; err != nil {
 		t.Fatalf("create incoming citation: %v", err)
@@ -97,6 +102,9 @@ func TestDocumentNewestReplacementMovesRelationsPostgres(t *testing.T) {
 	}
 	if _, err := documents.Get(ctx, mergedChildID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("merged child still exists, err=%v", err)
+	}
+	if _, err := notes.Get(ctx, newerID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("older reading note must not transfer across document paths, error=%v", err)
 	}
 	updatedNewer, err := documents.Get(ctx, newerID)
 	if err != nil {
@@ -133,6 +141,7 @@ func TestDocumentNewestReplacementMovesRelationsPostgres(t *testing.T) {
 	expectedKeys := map[string]bool{
 		"replacement/older": true, "replacement/child": true,
 		"replacement/older.md": true, "replacement/older.png": true,
+		createdNote.Directory.Sections[0].StorageKey: true,
 	}
 	for _, key := range cleanupKeys.StorageKeys {
 		if !expectedKeys[key] {

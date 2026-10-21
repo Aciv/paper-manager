@@ -5,11 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"io"
-	"io/fs"
-	"mime"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -402,130 +398,6 @@ func (h *DocumentHandler) Search(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, result)
-}
-
-// Content streams an original document for in-browser viewing. It is kept in
-// ServerFile with upload/delete because the service owns storage authorization
-// and never exposes provider paths to the browser.
-func (h *DocumentHandler) Content(c *gin.Context) {
-	documentID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
-		return
-	}
-	document, reader, filename, err := h.documents.OpenDocumentFile(c.Request.Context(), documentID.String())
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)
-			return
-		}
-		h.writeError(c, apperrors.NewInternalServerError("open document content"), err)
-		return
-	}
-	defer reader.Close()
-	modTime := streamModTime(reader, document.UpdatedAt)
-	etag := ""
-	if hash := strings.TrimSpace(document.FileSHA256); hash != "" {
-		etag = `"` + hash + `"`
-	}
-	serveStream(c, filename, document.ContentType, document.SizeBytes, modTime, etag, reader)
-}
-
-// ListBlocks returns source-map blocks for the requested PDF page. A missing
-// page query loads all blocks, which is useful to a Markdown-side navigator;
-// the PDF reader normally requests one page at a time.
-func (h *DocumentHandler) ListBlocks(c *gin.Context) {
-	documentID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
-		return
-	}
-	pageNumber := 0
-	if rawPage := strings.TrimSpace(c.Query("page")); rawPage != "" {
-		pageNumber, err = strconv.Atoi(rawPage)
-		if err != nil || pageNumber < 1 || pageNumber > 100000 {
-			h.writeError(c, apperrors.NewBadRequestError("page must be between 1 and 100000"), err)
-			return
-		}
-	}
-	blocks, err := h.documents.GetDocumentBlocks(c.Request.Context(), documentID.String(), pageNumber)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			h.writeError(c, apperrors.NewNotFoundError("document not found"), nil)
-			return
-		}
-		h.writeError(c, apperrors.NewInternalServerError("load document blocks"), err)
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"items": blocks})
-}
-
-// BlockImage streams one rendered image/table crop. The database holds a
-// private storage key, while blocks expose this protected endpoint as URL.
-func (h *DocumentHandler) BlockImage(c *gin.Context) {
-	documentID, err := uuid.Parse(c.Param("id"))
-	if err != nil {
-		h.writeError(c, apperrors.NewBadRequestError("invalid document id"), err)
-		return
-	}
-	blockID, err := uuid.Parse(c.Param("blockID"))
-	if err != nil {
-		h.writeError(c, apperrors.NewBadRequestError("invalid block id"), err)
-		return
-	}
-	reader, filename, err := h.documents.GetDocumentBlockImage(c.Request.Context(), documentID.String(), blockID.String())
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			h.writeError(c, apperrors.NewNotFoundError("document block image not found"), nil)
-			return
-		}
-		h.writeError(c, apperrors.NewInternalServerError("open document block image"), err)
-		return
-	}
-	defer reader.Close()
-	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(filename)))
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	serveStream(c, filename, contentType, -1, streamModTime(reader, time.Time{}), "", reader)
-}
-
-// serveStream adds HTTP cache/range semantics. Local storage returns *os.File,
-// which is seekable; the fallback keeps other storage drivers working.
-func serveStream(
-	c *gin.Context, filename, contentType string, size int64,
-	modTime time.Time, etag string, reader io.ReadCloser,
-) {
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
-	c.Header("Content-Type", contentType)
-	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": filename}))
-	c.Header("X-Content-Type-Options", "nosniff")
-	if etag != "" {
-		c.Header("ETag", etag)
-	}
-	if seeker, ok := reader.(io.ReadSeeker); ok {
-		http.ServeContent(c.Writer, c.Request, filename, modTime, seeker)
-		return
-	}
-	if c.Request.Method == http.MethodHead {
-		if size >= 0 {
-			c.Header("Content-Length", strconv.FormatInt(size, 10))
-		}
-		c.Status(http.StatusOK)
-		return
-	}
-	c.DataFromReader(http.StatusOK, size, contentType, reader, nil)
-}
-
-func streamModTime(reader io.ReadCloser, fallback time.Time) time.Time {
-	if statter, ok := reader.(interface{ Stat() (fs.FileInfo, error) }); ok {
-		if info, err := statter.Stat(); err == nil {
-			return info.ModTime()
-		}
-	}
-	return fallback
 }
 
 func (h *DocumentHandler) writeUploadError(c *gin.Context, err error) {

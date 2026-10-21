@@ -205,6 +205,10 @@ func newDocumentHandler(storage *fileservice.LocalStorage, repo *documentCreator
 	return handler.NewDocumentHandler(config.Config{MaxUploadSize: fileservice.DefaultMaxUploadSize}, service.NewDocumentService(repo, storage))
 }
 
+func newDocumentReadingHandler(storage *fileservice.LocalStorage, repo *documentCreatorStub) *handler.DocumentReadingHandler {
+	return handler.NewDocumentReadingHandler(service.NewDocumentReadingService(repo, storage, nil))
+}
+
 func TestUploadRouteStoresDocument(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
 	if err != nil {
@@ -214,7 +218,11 @@ func TestUploadRouteStoresDocument(t *testing.T) {
 	documentService := service.NewDocumentService(documents, storage)
 	documentHandler := handler.NewDocumentHandler(config.Config{MaxUploadSize: fileservice.DefaultMaxUploadSize}, documentService)
 	processHandler := handler.NewDocumentProcessHandler(documentService)
-	engine := router.NewRouter(router.RouterParams{DocumentHandler: documentHandler, DocumentProcessHandler: processHandler})
+	engine := router.NewRouter(router.RouterParams{
+		DocumentHandler:        documentHandler,
+		DocumentProcessHandler: processHandler,
+		DocumentReadingHandler: newDocumentReadingHandler(storage, documents),
+	})
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -429,7 +437,8 @@ func TestBlockImageRouteSupportsRangeAndHead(t *testing.T) {
 		}},
 	}
 	engine := router.NewRouter(router.RouterParams{
-		DocumentHandler: newDocumentHandler(storage, repo),
+		DocumentHandler:        newDocumentHandler(storage, repo),
+		DocumentReadingHandler: newDocumentReadingHandler(storage, repo),
 	})
 
 	path := "/api/document/" + documentID.String() + "/blocks/" + blockID.String() + "/image"

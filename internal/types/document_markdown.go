@@ -1,10 +1,15 @@
 package types
 
 import (
+	"errors"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+const MaxDocumentMarkdownBytes = 32 << 20
+
+var ErrDocumentMarkdownTooLarge = errors.New("document Markdown exceeds the read limit")
 
 // DocumentMarkdown records the durable Markdown source produced for a
 // document's current successful parse. The Markdown bytes themselves live in
@@ -30,3 +35,16 @@ type DocumentMarkdown struct {
 }
 
 func (DocumentMarkdown) TableName() string { return "document_markdowns" }
+
+// DocumentMarkdownContent is the explicit full-Markdown read result. The
+// manifest remains the durable metadata; Markdown bytes are loaded only when a
+// consumer requests the source document.
+type DocumentMarkdownContent struct {
+	DocumentID            uuid.UUID `json:"documentId"`
+	Filename              string    `json:"filename"`
+	ContentType           string    `json:"contentType"`
+	SizeBytes             int64     `json:"sizeBytes"`
+	PageCount             int       `json:"pageCount,omitempty"`
+	RecognitionGeneration int64     `json:"recognitionGeneration"`
+	Markdown              []byte    `json:"-"`
+}

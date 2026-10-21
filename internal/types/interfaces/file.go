@@ -2,6 +2,7 @@ package interfaces
 
 import (
 	"context"
+	"errors"
 	"io"
 )
 
@@ -17,13 +18,14 @@ type FileUpload struct {
 	Category StorageCategory
 }
 
-// StorageCategory separates source PDFs, generated Markdown, and rendered
-// block images without exposing filesystem paths to callers.
+// StorageCategory separates source PDFs, parser-generated Markdown, editable
+// reading notes, and rendered block images without exposing filesystem paths.
 type StorageCategory string
 
 const (
 	StorageCategoryPDF      StorageCategory = "pdf"
 	StorageCategoryMarkdown StorageCategory = "markdown"
+	StorageCategoryNotes    StorageCategory = "notes"
 	StorageCategoryImage    StorageCategory = "image"
 )
 
@@ -56,7 +58,7 @@ type SaveFromURLResult struct {
 }
 
 // FileStorage is implemented by local disk, object storage, or another durable
-// backend. Save must consume the input stream without loading the whole file in memory.
+// backend.
 type FileStorage interface {
 	CheckConnectivity(ctx context.Context) error
 	Save(ctx context.Context, upload FileUpload) (StoredFile, error)
@@ -65,4 +67,40 @@ type FileStorage interface {
 	Copy(ctx context.Context, source StoredFile) (StoredFile, error)
 	Open(ctx context.Context, key string) (io.ReadCloser, error)
 	Delete(ctx context.Context, key string) error
+}
+
+type TextEditKind string
+
+const (
+	TextEditInsert TextEditKind = "insert"
+	TextEditDelete TextEditKind = "delete"
+)
+
+// TextEdit is applied relative to the content produced by earlier edits in the
+// same sequence. Offset and Length are Unicode code-point positions.
+type TextEdit struct {
+	Kind   TextEditKind
+	Offset int
+	Length int
+	Text   string
+}
+
+var ErrInvalidTextEdit = errors.New("invalid text edit")
+
+// TextFileEditor is the file-layer primitive used by text-backed artifacts such
+// as reading-note sections. Local and future OSS/mirror implementations apply
+// the same edit semantics; a complete final content replacement must not expose
+// partial writes to concurrent readers.
+type TextFileEditor interface {
+	ApplyTextEdits(content string, edits []TextEdit) (string, error)
+	ReadText(ctx context.Context, key string, maxBytes int64) (string, error)
+	ReplaceText(ctx context.Context, key, content string, maxBytes int64) (StoredFile, error)
+	Delete(ctx context.Context, key string) error
+}
+
+// FileRangeStorage is an optional optimization for consumers that already
+// have validated byte ranges. Implementations should avoid reading bytes before
+// offset; callers fall back to FileStorage.Open when it is unavailable.
+type FileRangeStorage interface {
+	OpenRange(ctx context.Context, key string, offset, length int64) (io.ReadCloser, error)
 }
