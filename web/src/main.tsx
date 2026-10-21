@@ -17,6 +17,7 @@ import {
 } from './citations';
 import { ReferenceEditorDialog } from './ReferenceEditorDialog';
 import { CitationExportDialog } from './CitationExportDialog';
+import { BibliographyExportDialog } from './BibliographyExportDialog';
 import type { DoiCitationTarget } from './doiCitation';
 import './PaperInfo.css';
 import '@fontsource-variable/manrope';
@@ -186,6 +187,7 @@ function App() {
   const [citationActionBusy, setCitationActionBusy] = useState('');
   const [editingCitation, setEditingCitation] = useState<PaperCitation>();
   const [exportCitation, setExportCitation] = useState<DoiCitationTarget>();
+  const [exportBibliographyBase, setExportBibliographyBase] = useState<DocumentBase>();
   // Titles/authors for the papers on the other side of a citation edge: the
   // cited document for outgoing rows, the citing document for incoming rows.
   const [citationContext, setCitationContext] = useState<Record<string, { document: Document; metadata?: PaperMetadata }>>({});
@@ -1095,6 +1097,8 @@ function App() {
           {bases.length === 0 ? <option value="">尚未创建 Base</option> : bases.map((base) => <option value={base.id} key={base.id}>{base.name}</option>)}
         </select>
         <button type="button" onClick={() => void addSelectedToBase()} disabled={busy || !selected || !selectedBaseID}>将当前文档加入 Base</button>
+        <button type="button" onClick={() => setExportBibliographyBase(bases.find((base) => base.id === selectedBaseID))}
+          disabled={busy || !selectedBaseID}>生成参考文献</button>
       </form>}
       </>}
     </aside>
@@ -1389,6 +1393,7 @@ function App() {
       }}
     />}
     {exportCitation && <CitationExportDialog target={exportCitation} onClose={() => setExportCitation(undefined)} />}
+    {exportBibliographyBase && <BibliographyExportDialog documentBase={exportBibliographyBase} onClose={() => setExportBibliographyBase(undefined)} />}
   </main>;
 }
 

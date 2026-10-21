@@ -4,7 +4,22 @@ import (
 	"testing"
 
 	"paperMaster/internal/types"
+
+	"github.com/hibiken/asynq"
 )
+
+func TestTaskInspectorAdaptersShareOneAsynqInspector(t *testing.T) {
+	backend := &asynq.Inspector{}
+	shared := &SharedAsynqInspector{inspector: backend}
+	documentInspector, ok := NewTaskInspector(shared).(*asynqTaskInspector)
+	if !ok || documentInspector.inspector != backend {
+		t.Fatalf("document inspector did not reuse shared backend: %#v", documentInspector)
+	}
+	resultInspector, ok := NewTaskResultInspector(shared).(*SharedAsynqInspector)
+	if !ok || resultInspector != shared || resultInspector.inspector != backend {
+		t.Fatalf("result inspector did not reuse shared backend: %#v", resultInspector)
+	}
+}
 
 func TestMatchesDocumentUsesDocumentIDPayloadField(t *testing.T) {
 	const documentID = "39a2d54f-412a-4c6c-84e1-9a9ea5034c6d"

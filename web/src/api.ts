@@ -136,6 +136,43 @@ export type DocumentBase = {
   updatedAt: string;
 };
 
+export type BibliographyEntryReport = {
+  documentId: string;
+  title?: string;
+  kind: 'paper';
+  outcome: 'generated' | 'skipped' | 'failed';
+  source?: 'doi_original' | 'local_no_doi' | 'local_doi_failed';
+  citationKey?: string;
+  missingFields: string[];
+  warnings: string[];
+  doiErrorCode?: string;
+};
+
+export type BibliographySnapshot = {
+  baseId: string;
+  baseName: string;
+  kind: 'paper';
+  filename: string;
+  bibtex: string;
+  entries: BibliographyEntryReport[];
+  exportEntries?: Array<{
+    source: 'DOI' | 'auto';
+    kind: 'article';
+    bibtex: string;
+  }>;
+  generated: number;
+  skipped: number;
+  failed: number;
+};
+
+export type BibliographyTask = {
+  id: string;
+  baseId: string;
+  state: 'queued' | 'running' | 'succeeded' | 'failed';
+  snapshot?: BibliographySnapshot;
+  errorCode?: string;
+};
+
 export type DocumentPage = {
   items: Document[];
   page: number;
@@ -390,6 +427,14 @@ export const api = {
   }),
   addDocumentToBase: (baseID: string, documentID: string): Promise<void> => request<void>(`/bases/${encodeURIComponent(baseID)}/documents/${encodeURIComponent(documentID)}`, { method: 'PUT' }),
   removeDocumentFromBase: (baseID: string, documentID: string): Promise<void> => request<void>(`/bases/${encodeURIComponent(baseID)}/documents/${encodeURIComponent(documentID)}`, { method: 'DELETE' }),
+  generateBaseBibliography: (baseID: string, signal?: AbortSignal): Promise<{ task: BibliographyTask }> => request<{ task: BibliographyTask }>(
+    `/bases/${encodeURIComponent(baseID)}/bibliography`,
+    { method: 'POST', signal },
+  ),
+  getBaseBibliographyTask: (baseID: string, taskID: string, signal?: AbortSignal): Promise<{ task: BibliographyTask }> => request<{ task: BibliographyTask }>(
+    `/bases/${encodeURIComponent(baseID)}/bibliography/${encodeURIComponent(taskID)}`,
+    { signal },
+  ),
 };
 
 // Kept for PdfReader compatibility. The current Go API intentionally exposes

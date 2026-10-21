@@ -70,3 +70,10 @@ type TaskInspector interface {
 	// is false when the scan budget was exhausted.
 	SnapshotQueuedWork(ctx context.Context) (types.QueuedWorkSnapshot, error)
 }
+
+// TaskResultInspector performs an exact task lookup for workflows that return
+// a retained Asynq result. Domain services remain responsible for validating
+// task type, payload ownership, and translating backend errors.
+type TaskResultInspector interface {
+	GetTask(ctx context.Context, queue, taskID string) (types.TaskRecord, error)
+}

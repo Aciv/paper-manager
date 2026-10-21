@@ -44,6 +44,32 @@ func TestLoadPaperCatalogDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadBibliographyDefaults(t *testing.T) {
+	for _, key := range []string{
+		"BIBLIOGRAPHY_MAX_ENTRIES", "BIBLIOGRAPHY_DOI_CONCURRENCY", "BIBLIOGRAPHY_DOI_TIMEOUT",
+		"BIBLIOGRAPHY_TOTAL_TIMEOUT", "BIBLIOGRAPHY_DOI_MAX_BODY_BYTES", "BIBLIOGRAPHY_MAX_OUTPUT_BYTES",
+		"BIBLIOGRAPHY_MAX_RESPONSE_BYTES",
+		"BIBLIOGRAPHY_TASK_CONCURRENCY", "BIBLIOGRAPHY_TASK_TIMEOUT",
+		"BIBLIOGRAPHY_TASK_MAX_RETRY", "BIBLIOGRAPHY_RESULT_RETENTION",
+		"BIBLIOGRAPHY_DOI_CACHE_ENTRIES", "BIBLIOGRAPHY_DOI_CACHE_TTL",
+	} {
+		t.Setenv(key, "")
+	}
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BibliographyMaxEntries != 200 || cfg.BibliographyDOIConcurrency != 4 ||
+		cfg.BibliographyDOITimeout != 5*time.Second || cfg.BibliographyTotalTimeout != 30*time.Second ||
+		cfg.BibliographyDOIMaxBodyBytes != 256<<10 || cfg.BibliographyMaxOutputBytes != 8<<20 ||
+		cfg.BibliographyMaxResponseBytes != 12<<20 ||
+		cfg.BibliographyDOICacheEntries != 100 || cfg.BibliographyDOICacheTTL != 30*time.Minute ||
+		cfg.BibliographyTaskConcurrency != 2 || cfg.BibliographyTaskTimeout != 45*time.Second ||
+		cfg.BibliographyTaskMaxRetry != 2 || cfg.BibliographyResultRetention != 30*time.Minute {
+		t.Fatalf("unexpected bibliography defaults: %#v", cfg)
+	}
+}
+
 func TestLoadPaperCatalogConfiguration(t *testing.T) {
 	t.Setenv("PAPER_CATALOG_PROVIDERS", " OpenAlex, crossref,openalex ")
 	t.Setenv("PAPER_CATALOG_TIMEOUT", "2500ms")

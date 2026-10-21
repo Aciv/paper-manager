@@ -26,12 +26,13 @@ type AsynqTaskParams struct {
 	// dig 简化参数引用,感觉功能上可以看成python的**wargs
 	dig.In
 
-	Server           *asynq.Server
-	Config           config.Config
-	DocumentService  interfaces.DocumentService          `optional:"true"`
-	PaperInfoService interfaces.PaperInfoService         `optional:"true"`
-	TaskEnqueuer     interfaces.TaskEnqueuer             `optional:"true"`
-	DeadLetterRepo   interfaces.TaskDeadLetterRepository `optional:"true"`
+	Server              *asynq.Server
+	Config              config.Config
+	DocumentService     interfaces.DocumentService          `optional:"true"`
+	PaperInfoService    interfaces.PaperInfoService         `optional:"true"`
+	BibliographyService interfaces.BibliographyService      `optional:"true"`
+	TaskEnqueuer        interfaces.TaskEnqueuer             `optional:"true"`
+	DeadLetterRepo      interfaces.TaskDeadLetterRepository `optional:"true"`
 }
 
 const defaultRedisOpTimeoutMs = 500
@@ -128,6 +129,7 @@ func NewAsynqServer(cfg config.Config) *asynq.Server {
 		"concurrency", cfg.AsynqConcurrency,
 		"document_recognition_concurrency", cfg.DocumentRecognitionConcurrency,
 		"document_extraction_concurrency", cfg.DocumentExtractionConcurrency,
+		"bibliography_task_concurrency", cfg.BibliographyTaskConcurrency,
 		"shutdown_timeout", cfg.AsynqShutdownTimeout.String(),
 		"redis_op_timeout_ms", readRedisOpTimeoutMs())
 
@@ -220,6 +222,12 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 		mux.HandleFunc(types.TypePaperReferenceQueryEnqueue, func(ctx context.Context, task *asynq.Task) error {
 			return processPaperReferenceQueryEnqueueTask(ctx, task, params.PaperInfoService)
 		})
+	}
+	if params.BibliographyService != nil {
+		mux.HandleFunc(types.TypeBibliographyGenerate, limitTaskConcurrency(
+			params.Config.BibliographyTaskConcurrency,
+			params.BibliographyService.ProcessBaseBibliography,
+		))
 	}
 
 	go func() {

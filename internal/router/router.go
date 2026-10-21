@@ -28,6 +28,7 @@ type RouterParams struct {
 	PaperCitationHandler     *handler.PaperCitationHandler
 	PaperInfoHandler         *handler.PaperInfoHandler
 	DocumentBaseHandler      *handler.DocumentBaseHandler
+	BibliographyHandler      *handler.BibliographyHandler
 }
 
 // NewRouter 创建新的路由
@@ -68,7 +69,7 @@ func NewRouter(params RouterParams) *gin.Engine {
 	ServerFile(r, params.DocumentHandler)
 	ServerProcess(r, params.DocumentProcessHandler, params.DocumentSelectionHandler)
 	ServerPaperMetadata(r, params.PaperMetadataHandler, params.PaperCitationHandler, params.PaperInfoHandler)
-	ServerDocumentBase(r, params.DocumentBaseHandler)
+	ServerDocumentBase(r, params.DocumentBaseHandler, params.BibliographyHandler)
 
 	return r
 }
@@ -156,7 +157,7 @@ func ServerPaperMetadata(
 }
 
 // ServerDocumentBase registers collection and collection-membership API.
-func ServerDocumentBase(router gin.IRoutes, baseHandler *handler.DocumentBaseHandler) {
+func ServerDocumentBase(router gin.IRoutes, baseHandler *handler.DocumentBaseHandler, bibliographyHandler *handler.BibliographyHandler) {
 	if baseHandler == nil {
 		return
 	}
@@ -168,4 +169,8 @@ func ServerDocumentBase(router gin.IRoutes, baseHandler *handler.DocumentBaseHan
 	router.GET("/api/document/bases/:baseID/documents", baseHandler.ListDocuments)
 	router.PUT("/api/document/bases/:baseID/documents/:documentID", baseHandler.AddDocument)
 	router.DELETE("/api/document/bases/:baseID/documents/:documentID", baseHandler.RemoveDocument)
+	if bibliographyHandler != nil {
+		router.POST("/api/document/bases/:baseID/bibliography", bibliographyHandler.Generate)
+		router.GET("/api/document/bases/:baseID/bibliography/:taskID", bibliographyHandler.Status)
+	}
 }

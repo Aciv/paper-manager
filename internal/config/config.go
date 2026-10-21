@@ -57,6 +57,19 @@ const (
 	defaultDBMaxOpenConns                                    = 48
 	defaultDBMaxIdleConns                                    = 24
 	defaultDBStatementTimeout                                = 30 * time.Second
+	defaultBibliographyMaxEntries                            = 200
+	defaultBibliographyDOIConcurrency                        = 4
+	defaultBibliographyDOITimeout                            = 5 * time.Second
+	defaultBibliographyTotalTimeout                          = 30 * time.Second
+	defaultBibliographyDOIMaxBodyBytes                 int64 = 256 << 10
+	defaultBibliographyMaxOutputBytes                  int64 = 8 << 20
+	defaultBibliographyMaxResponseBytes                int64 = 12 << 20
+	defaultBibliographyDOICacheEntries                       = 100
+	defaultBibliographyDOICacheTTL                           = 30 * time.Minute
+	defaultBibliographyTaskConcurrency                       = 2
+	defaultBibliographyTaskTimeout                           = 45 * time.Second
+	defaultBibliographyTaskMaxRetry                          = 2
+	defaultBibliographyResultRetention                       = 30 * time.Minute
 )
 
 // Config contains the infrastructure options selected at process startup.
@@ -144,6 +157,19 @@ type Config struct {
 	RemotePDFDownloadConcurrency int
 	RemotePDFHostConcurrency     int
 	RemotePDFHostSpacing         time.Duration
+	BibliographyMaxEntries       int
+	BibliographyDOIConcurrency   int
+	BibliographyDOITimeout       time.Duration
+	BibliographyTotalTimeout     time.Duration
+	BibliographyDOIMaxBodyBytes  int64
+	BibliographyMaxOutputBytes   int64
+	BibliographyMaxResponseBytes int64
+	BibliographyDOICacheEntries  int
+	BibliographyDOICacheTTL      time.Duration
+	BibliographyTaskConcurrency  int
+	BibliographyTaskTimeout      time.Duration
+	BibliographyTaskMaxRetry     int
+	BibliographyResultRetention  time.Duration
 }
 
 func Load() (Config, error) {
@@ -377,6 +403,58 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	bibliographyMaxEntries, err := positiveIntEnv("BIBLIOGRAPHY_MAX_ENTRIES", defaultBibliographyMaxEntries, 5000)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyDOIConcurrency, err := positiveIntEnv("BIBLIOGRAPHY_DOI_CONCURRENCY", defaultBibliographyDOIConcurrency, 32)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyDOITimeout, err := durationEnv("BIBLIOGRAPHY_DOI_TIMEOUT", defaultBibliographyDOITimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyTotalTimeout, err := durationEnv("BIBLIOGRAPHY_TOTAL_TIMEOUT", defaultBibliographyTotalTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyDOIMaxBodyBytes, err := positiveInt64Env("BIBLIOGRAPHY_DOI_MAX_BODY_BYTES", defaultBibliographyDOIMaxBodyBytes, 8<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyMaxOutputBytes, err := positiveInt64Env("BIBLIOGRAPHY_MAX_OUTPUT_BYTES", defaultBibliographyMaxOutputBytes, 64<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyMaxResponseBytes, err := positiveInt64Env("BIBLIOGRAPHY_MAX_RESPONSE_BYTES", defaultBibliographyMaxResponseBytes, 128<<20)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyDOICacheEntries, err := positiveIntEnv("BIBLIOGRAPHY_DOI_CACHE_ENTRIES", defaultBibliographyDOICacheEntries, 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyDOICacheTTL, err := durationEnv("BIBLIOGRAPHY_DOI_CACHE_TTL", defaultBibliographyDOICacheTTL)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyTaskConcurrency, err := positiveIntEnv("BIBLIOGRAPHY_TASK_CONCURRENCY", defaultBibliographyTaskConcurrency, 16)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyTaskTimeout, err := durationEnv("BIBLIOGRAPHY_TASK_TIMEOUT", defaultBibliographyTaskTimeout)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyTaskMaxRetry, err := positiveIntEnv("BIBLIOGRAPHY_TASK_MAX_RETRY", defaultBibliographyTaskMaxRetry, 10)
+	if err != nil {
+		return Config{}, err
+	}
+	bibliographyResultRetention, err := durationEnv("BIBLIOGRAPHY_RESULT_RETENTION", defaultBibliographyResultRetention)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		HTTPAddress:                                 env("HTTP_ADDR", "127.0.0.1:8080"),
 		HTTPReadTimeout:                             httpReadTimeout,
@@ -439,6 +517,19 @@ func Load() (Config, error) {
 		RemotePDFDownloadConcurrency:                remotePDFDownloadConcurrency,
 		RemotePDFHostConcurrency:                    remotePDFHostConcurrency,
 		RemotePDFHostSpacing:                        remotePDFHostSpacing,
+		BibliographyMaxEntries:                      bibliographyMaxEntries,
+		BibliographyDOIConcurrency:                  bibliographyDOIConcurrency,
+		BibliographyDOITimeout:                      bibliographyDOITimeout,
+		BibliographyTotalTimeout:                    bibliographyTotalTimeout,
+		BibliographyDOIMaxBodyBytes:                 bibliographyDOIMaxBodyBytes,
+		BibliographyMaxOutputBytes:                  bibliographyMaxOutputBytes,
+		BibliographyMaxResponseBytes:                bibliographyMaxResponseBytes,
+		BibliographyDOICacheEntries:                 bibliographyDOICacheEntries,
+		BibliographyDOICacheTTL:                     bibliographyDOICacheTTL,
+		BibliographyTaskConcurrency:                 bibliographyTaskConcurrency,
+		BibliographyTaskTimeout:                     bibliographyTaskTimeout,
+		BibliographyTaskMaxRetry:                    bibliographyTaskMaxRetry,
+		BibliographyResultRetention:                 bibliographyResultRetention,
 	}, nil
 }
 

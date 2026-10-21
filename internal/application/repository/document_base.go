@@ -3,9 +3,11 @@ package repository
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
@@ -165,6 +167,103 @@ func (r *documentBaseRepository) ListDocuments(
 		logger.Error(ctx, "list document base members failed", "document_base_id", baseID, "error", err)
 	}
 	return result, err
+}
+
+func (r *documentBaseRepository) GetBibliographySnapshot(
+	ctx context.Context, baseID uuid.UUID, maxEntries int,
+) (types.BibliographySnapshotSource, error) {
+	if maxEntries <= 0 {
+		return types.BibliographySnapshotSource{}, errors.New("bibliography entry limit must be positive")
+	}
+	type bibliographyRow struct {
+		DocumentID     uuid.UUID
+		DOI            string
+		SourceState    types.DocumentSourceState
+		SortOrder      int
+		AddedAt        time.Time
+		Title          string
+		Abstract       string
+		AuthorsJSON    string
+		TagsJSON       string
+		SourceName     string
+		SourceURL      string
+		Venue          string
+		PublishedAt    *time.Time
+		Volume         string
+		Issue          string
+		Pages          string
+		Language       string
+		MetadataSource types.PaperMetadataSource
+	}
+
+	var snapshot types.BibliographySnapshotSource
+	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.First(&snapshot.Base, "id = ?", baseID).Error; err != nil {
+			return err
+		}
+		rows := make([]bibliographyRow, 0, maxEntries+1)
+		err := tx.Table("document_base_files AS membership").
+			Select(`documents.id AS document_id, documents.doi, documents.source_state,
+				membership.sort_order, membership.added_at,
+				COALESCE(metadata.title, '') AS title,
+				COALESCE(metadata.abstract, '') AS abstract,
+				COALESCE(metadata.authors, '[]'::jsonb)::text AS authors_json,
+				COALESCE(metadata.tags, '[]'::jsonb)::text AS tags_json,
+				COALESCE(metadata.source_name, '') AS source_name,
+				COALESCE(metadata.source_url, '') AS source_url,
+				COALESCE(metadata.venue, '') AS venue,
+				metadata.published_at,
+				COALESCE(metadata.volume, '') AS volume,
+				COALESCE(metadata.issue, '') AS issue,
+				COALESCE(metadata.pages, '') AS pages,
+				COALESCE(metadata.language, '') AS language,
+				COALESCE(metadata.metadata_source, 'unknown') AS metadata_source`).
+			Joins("JOIN documents ON documents.id = membership.document_id").
+			Joins("LEFT JOIN paper_metadata AS metadata ON metadata.document_id = documents.id").
+			Where("membership.document_base_id = ?", baseID).
+			Order("membership.sort_order ASC, membership.added_at ASC, documents.id ASC").
+			Limit(maxEntries + 1).
+			Scan(&rows).Error
+		if err != nil {
+			return err
+		}
+		if len(rows) > maxEntries {
+			return types.ErrBibliographyBaseTooLarge
+		}
+		snapshot.Entries = make([]types.BibliographySource, 0, len(rows))
+		for _, row := range rows {
+			authors := make([]types.PaperAuthor, 0)
+			if err := json.Unmarshal([]byte(row.AuthorsJSON), &authors); err != nil {
+				return fmt.Errorf("decode bibliography authors for document %s: %w", row.DocumentID, err)
+			}
+			tags := make([]string, 0)
+			if err := json.Unmarshal([]byte(row.TagsJSON), &tags); err != nil {
+				return fmt.Errorf("decode bibliography tags for document %s: %w", row.DocumentID, err)
+			}
+			snapshot.Entries = append(snapshot.Entries, types.BibliographySource{
+				DocumentID: row.DocumentID, DOI: row.DOI, SourceState: row.SourceState,
+				SortOrder: row.SortOrder, AddedAt: row.AddedAt,
+				Metadata: types.PaperMetadata{
+					DocumentID: row.DocumentID, Title: row.Title, Abstract: row.Abstract,
+					Authors: authors, Tags: tags, SourceName: row.SourceName,
+					SourceURL: row.SourceURL, Venue: row.Venue, PublishedAt: row.PublishedAt,
+					Volume: row.Volume, Issue: row.Issue, Pages: row.Pages,
+					Language: row.Language, MetadataSource: row.MetadataSource,
+				},
+			})
+		}
+		return nil
+	}, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return types.BibliographySnapshotSource{}, sql.ErrNoRows
+	}
+	if err != nil {
+		if !errors.Is(err, types.ErrBibliographyBaseTooLarge) {
+			logger.Error(ctx, "load bibliography base snapshot failed", "document_base_id", baseID, "error", err)
+		}
+		return types.BibliographySnapshotSource{}, err
+	}
+	return snapshot, nil
 }
 
 func isDuplicateBaseNameError(err error) bool {

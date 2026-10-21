@@ -8,6 +8,7 @@ import (
 	"paperMaster/internal/config"
 	"paperMaster/internal/handler"
 	"paperMaster/internal/infrastructure/docrecognition"
+	"paperMaster/internal/infrastructure/doicitation"
 	"paperMaster/internal/infrastructure/papercatalog"
 	"paperMaster/internal/infrastructure/paperextraction"
 	"paperMaster/internal/infrastructure/paperurl"
@@ -28,6 +29,10 @@ func Build() *dig.Container {
 	must(dependencies.Provide(repository.NewPaperMetadataRepository))
 	must(dependencies.Provide(repository.NewPaperCitationRepository))
 	must(dependencies.Provide(repository.NewDocumentBaseRepository))
+	must(dependencies.Provide(func(repository interfaces.DocumentBaseRepository) interfaces.BibliographySnapshotRepository {
+		return repository
+	}))
+	must(dependencies.Provide(doicitation.NewClient))
 	must(dependencies.Provide(repository.NewDocumentProcessingSpanRepository))
 	must(dependencies.Provide(appservice.NewSpanTracker))
 	must(dependencies.Provide(appservice.NewSpanRecorder))
@@ -35,7 +40,9 @@ func Build() *dig.Container {
 	must(dependencies.Provide(router.NewAsyncqClient))
 	must(dependencies.Provide(router.NewTaskEnqueuer))
 	must(dependencies.Provide(router.NewAsynqServer))
+	must(dependencies.Provide(router.NewSharedAsynqInspector))
 	must(dependencies.Provide(router.NewTaskInspector))
+	must(dependencies.Provide(router.NewTaskResultInspector))
 	must(dependencies.Provide(docrecognition.NewRecognizer))
 	must(dependencies.Provide(paperextraction.NewExtractor))
 	must(dependencies.Provide(limit.NewEngine))
@@ -51,6 +58,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(appservice.NewPaperService))
 	must(dependencies.Provide(appservice.NewPaperInfoServiceWithSpanRecorder))
 	must(dependencies.Provide(appservice.NewDocumentBaseService))
+	must(dependencies.Provide(appservice.NewBibliographyServiceWithTaskSystem))
 	must(dependencies.Provide(appservice.NewDocumentHousekeepingService))
 	must(dependencies.Provide(repository.NewTaskDeadLetterRepository))
 	must(dependencies.Provide(fileservice.NewStorage))
@@ -61,6 +69,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(handler.NewPaperCitationHandler))
 	must(dependencies.Provide(handler.NewPaperInfoHandler))
 	must(dependencies.Provide(handler.NewDocumentBaseHandler))
+	must(dependencies.Provide(handler.NewBibliographyHandler))
 	must(dependencies.Provide(router.NewRouter))
 	return dependencies
 }

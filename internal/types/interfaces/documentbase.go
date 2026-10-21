@@ -11,6 +11,7 @@ import (
 // DocumentBaseRepository defines persistence operations for collections and
 // their source-document memberships.
 type DocumentBaseRepository interface {
+	BibliographySnapshotRepository
 	// CreateBase inserts a named document base.
 	CreateBase(ctx context.Context, base types.DocumentBase) (types.DocumentBase, error)
 	// GetBase retrieves one base by UUID.

@@ -15,10 +15,25 @@ import (
 	"github.com/hibiken/asynq"
 )
 
-// NewAsynqInspector constructs an *asynq.Inspector pointed at the same
-// Redis used by the asynq client. Only registered in asynq mode.
+// NewAsynqInspector constructs an *asynq.Inspector pointed at the same Redis
+// used by the Asynq client. Runtime DI owns it through SharedAsynqInspector;
+// integration tests may construct one directly.
 func NewAsynqInspector() *asynq.Inspector {
 	return asynq.NewInspector(getAsynqRedisClientOpt())
+}
+
+// SharedAsynqInspector owns the single configured inspector used by queue
+// control and exact retained-result lookups. A nil backend represents lite
+// mode without Redis.
+type SharedAsynqInspector struct {
+	inspector *asynq.Inspector
+}
+
+func NewSharedAsynqInspector() *SharedAsynqInspector {
+	if strings.TrimSpace(os.Getenv("REDIS_ADDR")) == "" {
+		return &SharedAsynqInspector{}
+	}
+	return &SharedAsynqInspector{inspector: NewAsynqInspector()}
 }
 
 // asynqTaskInspector implements interfaces.TaskInspector backed by an
@@ -44,11 +59,40 @@ func NewAsynqTaskInspector(inspector *asynq.Inspector) interfaces.TaskInspector 
 // NewTaskInspector selects the Redis-backed inspector when asynchronous work
 // is configured. Lite deployments have no Redis queue and use a no-op
 // implementation, so document housekeeping falls back to stale-row checks.
-func NewTaskInspector() interfaces.TaskInspector {
-	if strings.TrimSpace(os.Getenv("REDIS_ADDR")) == "" {
+func NewTaskInspector(shared *SharedAsynqInspector) interfaces.TaskInspector {
+	if shared == nil || shared.inspector == nil {
 		return noopTaskInspector{}
 	}
-	return NewAsynqTaskInspector(NewAsynqInspector())
+	return NewAsynqTaskInspector(shared.inspector)
+}
+
+func NewTaskResultInspector(shared *SharedAsynqInspector) interfaces.TaskResultInspector {
+	if shared == nil {
+		return &SharedAsynqInspector{}
+	}
+	return shared
+}
+
+func (shared *SharedAsynqInspector) GetTask(
+	ctx context.Context, queue, taskID string,
+) (types.TaskRecord, error) {
+	if err := ctx.Err(); err != nil {
+		return types.TaskRecord{}, err
+	}
+	if shared == nil || shared.inspector == nil {
+		return types.TaskRecord{}, types.ErrTaskInspectorUnavailable
+	}
+	info, err := shared.inspector.GetTaskInfo(queue, taskID)
+	if errors.Is(err, asynq.ErrTaskNotFound) || errors.Is(err, asynq.ErrQueueNotFound) {
+		return types.TaskRecord{}, types.ErrTaskNotFound
+	}
+	if err != nil {
+		return types.TaskRecord{}, err
+	}
+	return types.TaskRecord{
+		ID: info.ID, Type: info.Type, State: info.State.String(),
+		Payload: info.Payload, Result: info.Result,
+	}, nil
 }
 
 // DocumentIDProbe is the minimal payload shape we need to filter

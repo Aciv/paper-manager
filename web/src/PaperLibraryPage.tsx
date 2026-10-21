@@ -16,6 +16,7 @@ import {
 import { LibrarySelect } from './LibrarySelect';
 import { ReferenceEditorDialog } from './ReferenceEditorDialog';
 import { CitationExportDialog } from './CitationExportDialog';
+import { BibliographyExportDialog } from './BibliographyExportDialog';
 import { TranslationPanel, type TranslationPreview } from './TranslationPanel';
 import type { DoiCitationTarget } from './doiCitation';
 import type { TranslationRequestSeed } from './translation/index.ts';
@@ -198,6 +199,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [citationActionBusy, setCitationActionBusy] = useState('');
   const [editingCitation, setEditingCitation] = useState<PaperCitation>();
   const [exportCitation, setExportCitation] = useState<DoiCitationTarget>();
+  const [exportBibliographyBase, setExportBibliographyBase] = useState<DocumentBase>();
   const [translationRequest, setTranslationRequest] = useState<LibraryTranslationRequest>();
   const [translationPreview, setTranslationPreview] = useState<TranslationPreview>();
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
@@ -861,6 +863,8 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
               <dt>创建时间</dt><dd>{activeBase.createdAt ? activeBase.createdAt.slice(0, 10) : '未知'}</dd>
               <dt>篇数</dt><dd>{items.length}</dd>
             </dl>}
+            {activeBase && !localMode && <button className="primary library-bibliography-export" type="button"
+              onClick={() => setExportBibliographyBase(activeBase)}>生成参考文献</button>}
           </div>
         </div>
       </section>}
@@ -1101,5 +1105,6 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       }}
     />}
     {exportCitation && <CitationExportDialog target={exportCitation} onClose={() => setExportCitation(undefined)} />}
+    {exportBibliographyBase && <BibliographyExportDialog documentBase={exportBibliographyBase} onClose={() => setExportBibliographyBase(undefined)} />}
   </main>;
 }

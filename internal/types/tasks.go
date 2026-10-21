@@ -1,5 +1,12 @@
 package types
 
+import "errors"
+
+var (
+	ErrTaskNotFound             = errors.New("task not found")
+	ErrTaskInspectorUnavailable = errors.New("task inspector unavailable")
+)
+
 // Asynq queue names. MUST stay in sync with the Queues weight map in
 // router.NewAsynqServer — a task enqueued to a queue that the server does not
 // list will never be consumed.
@@ -33,6 +40,7 @@ const (
 	// corresponding source stage or reference resolution.
 	TypePaperQueryApply      = "paper:query_apply"
 	TypeDocumentRemoteImport = "document:remote_import"
+	TypeBibliographyGenerate = "bibliography:generate"
 	//TypeKnowledgePostProcess = "knowledge:postprocess"
 	//TypeManualProcess        = "knowledge:manual"
 	//TypeKnowledgeListDelete  = "knowledge:list_delete"
@@ -47,4 +55,12 @@ type DocumentProcessPayload struct {
 	// Stage and Generation are the durable execution fence.
 	Stage      DocumentStage `json:"stage,omitempty"`
 	Generation int64         `json:"generation,omitempty"`
+}
+
+type TaskRecord struct {
+	ID      string
+	Type    string
+	State   string
+	Payload []byte
+	Result  []byte
 }

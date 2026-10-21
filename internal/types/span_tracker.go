@@ -66,6 +66,7 @@ const (
 	ProcessingSpanDownloadPDF            ProcessingSpanKind = "download_pdf"
 	ProcessingSpanDeduplicateDocument    ProcessingSpanKind = "deduplicate_document"
 	ProcessingSpanEnqueueDocumentProcess ProcessingSpanKind = "enqueue_document_process"
+	ProcessingSpanBibliographyExport     ProcessingSpanKind = "bibliography_export"
 )
 
 // ProcessingSpanScope identifies the ownership level of a processing span.
@@ -90,6 +91,7 @@ const (
 	ProcessingSpanScopeProvider             ProcessingSpanScope = "provider"
 	ProcessingSpanScopeReferenceDownloadRun ProcessingSpanScope = "reference_download_run"
 	ProcessingSpanScopeRemoteDocument       ProcessingSpanScope = "remote_document"
+	ProcessingSpanScopeBibliographyExport   ProcessingSpanScope = "bibliography_export"
 )
 
 // ProcessingSpanScopeID is the durable, encoded identifier within a span

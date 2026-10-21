@@ -172,6 +172,7 @@
 .library-base-info { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 6px 10px; margin: 0; font-size: 12.5px; }
 .library-base-info dt { color: var(--pl-faint); font-weight: 700; }
 .library-base-info dd { margin: 0; overflow-wrap: anywhere; line-height: 1.5; }
+.paper-library .library-bibliography-export { width: 100%; margin-top: 4px; }
 
 /* Center column: full-height PDF with a slim status line at the bottom. */
 .paper-library-main { display: grid; grid-template-rows: minmax(0, 1fr) auto; gap: 6px; min-width: 0; height: 100%; padding: 8px; overflow: hidden; background: var(--pl-bg); }

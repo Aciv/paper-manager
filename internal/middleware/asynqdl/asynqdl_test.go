@@ -130,6 +130,31 @@ func TestMiddleware_FailureWithoutAsynqCtx_RecordsRow(t *testing.T) {
 	}
 }
 
+func TestMiddleware_BibliographyFailureUsesDocumentBaseScope(t *testing.T) {
+	repo := &fakeRepo{}
+	payload, err := json.Marshal(types.BibliographyTaskPayload{
+		DocumentBaseID: "a8edfee1-5fc9-4b9e-917d-2c44787007bd",
+		RunID:          "0475dfea-1360-433e-993a-233518a45e1f",
+		Attempt:        1,
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	_ = runMiddleware(repo, types.TypeBibliographyGenerate, payload,
+		fmt.Errorf("invalid bibliography payload: %w", asynq.SkipRetry))
+	row := repo.captureRow(0)
+	if row == nil {
+		t.Fatal("expected bibliography failure to create a dead-letter row")
+	}
+	if row.TaskType != types.TypeBibliographyGenerate {
+		t.Fatalf("task_type: got %q, want %q", row.TaskType, types.TypeBibliographyGenerate)
+	}
+	if row.Scope != types.TaskScopeDocumentBase || row.ScopeID != "a8edfee1-5fc9-4b9e-917d-2c44787007bd" {
+		t.Fatalf("scope tuple: got (%q, %q)", row.Scope, row.ScopeID)
+	}
+}
+
 func TestMiddleware_SkipRetryIsFinalAttempt(t *testing.T) {
 	repo := &fakeRepo{}
 	err := runMiddleware(repo, "document:process", []byte(`{"document_id":"doc-1"}`),
