@@ -24,6 +24,7 @@ from logger import get_logger
 from papers_parser.markdown_cleaner import clean_markdown_page
 from papers_parser.paper_extractor import LayoutLine, SourceBlock
 from papers_parser.rpc_control import RpcCheckpoint, check_rpc
+from papers_parser.source_outline import select_source_outline
 
 
 
@@ -132,7 +133,27 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
             blocks = self._extract_blocks(
                 pdf, pages, raw_page_text, cleaned_pages, checkpoint,
             )
-            self._check_response_budget(markdown, blocks)
+            try:
+                outline = select_source_outline(pdf, markdown.decode("utf-8"), blocks, checkpoint)
+            except Exception:
+                LOG.warning("source outline selection failed document=%s", request.document_id, exc_info=True)
+                outline = document_parser_pb2.RecognitionOutline(
+                    schema_version=1,
+                    source="none",
+                    diagnostics=["outline_selection_failed"],
+                )
+            try:
+                self._check_response_budget(markdown, blocks, outline)
+            except ParserLimitExceeded:
+                # An otherwise valid recognition must not be lost solely
+                # because source hierarchy consumed the remaining envelope.
+                self._check_response_budget(markdown, blocks)
+                outline = document_parser_pb2.RecognitionOutline(
+                    schema_version=1,
+                    source="none",
+                    diagnostics=["outline_response_budget_dropped"],
+                )
+                self._check_response_budget(markdown, blocks, outline)
             result = document_parser_pb2.RecognitionResult(
                 markdown=markdown,
                 markdown_filename=f"{stem}.md",
@@ -142,6 +163,7 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
                 parser_name=self.parser_name,
                 parser_version=getattr(pymupdf4llm, "__version__", ""),
                 blocks=blocks,
+                outline=outline,
             )
             LOG.info(
                 "recognized document=%s pages=%d blocks=%d markdown_bytes=%d",
@@ -303,12 +325,14 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
             ):
                 raise ParserLimitExceeded("document page exceeds parser size limit")
 
-    def _check_response_budget(self, markdown: bytes, blocks) -> None:
+    def _check_response_budget(self, markdown: bytes, blocks, outline=None) -> None:
         """Estimate the assembled gRPC response before paying to serialize it."""
         response_bytes = len(markdown)
         for block in blocks:
             response_bytes += len(block.text.encode("utf-8"))
             response_bytes += len(block.image_data)
+        if outline is not None:
+            response_bytes += outline.ByteSize()
         if response_bytes > self.max_response_bytes:
             raise ParserLimitExceeded("recognition response exceeds parser size limit")
 

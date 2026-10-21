@@ -169,6 +169,22 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 	if err != nil {
 		return fmt.Errorf("read recognizer Markdown output: %w", err)
 	}
+	// Non-PDF/in-process recognizers and rolling upgrades may not implement
+	// source hierarchy. Persist an explicit current-generation absence rather
+	// than confusing it with a legacy database row. The builtin PDF adapter
+	// validates its protobuf boundary strictly before reaching this point.
+	if result.Outline.SchemaVersion == 0 && result.Outline.Source == "" {
+		result.Outline = types.DocumentOutline{SchemaVersion: types.DocumentOutlineSchemaVersion,
+			Source: types.DocumentOutlineNone, Sections: []types.DocumentOutlineSection{},
+			Diagnostics: []string{"recognizer_outline_unavailable"}}
+	}
+	if err := types.ValidateRecognitionOutline(result.Outline, string(markdownBytes), result.Blocks, metadata.PageCount); err != nil {
+		return fmt.Errorf("validate recognizer outline: %w", err)
+	}
+	outlineJSON, err := result.Outline.JSON()
+	if err != nil {
+		return fmt.Errorf("encode recognizer outline: %w", err)
+	}
 
 	previous, err := s.repo.GetMarkdown(ctx, document.ID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -203,7 +219,9 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 		// serialized by GORM as an invalid database JSON value, whereas an empty
 		// object faithfully represents that this parser result has no extra
 		// metadata yet.
-		Metadata: types.JSON(`{}`),
+		Metadata:              types.JSON(`{}`),
+		DocumentOutline:       outlineJSON,
+		RecognitionGeneration: payload.Generation,
 	}
 
 	if err := s.repo.ReplaceParsedOutput(ctx, markdown, blocks, payload.Generation); err != nil {

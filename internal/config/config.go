@@ -151,25 +151,28 @@ type Config struct {
 	PaperReferenceCatalogPerDocumentConcurrency int
 	// PaperReferenceAutoResolve enables external provider lookups immediately
 	// after extraction. Local DOI/title matching always runs regardless.
-	PaperReferenceAutoResolve    bool
-	RemotePDFDownloadTimeout     time.Duration
-	RemotePDFMaxRedirects        int
-	RemotePDFDownloadConcurrency int
-	RemotePDFHostConcurrency     int
-	RemotePDFHostSpacing         time.Duration
-	BibliographyMaxEntries       int
-	BibliographyDOIConcurrency   int
-	BibliographyDOITimeout       time.Duration
-	BibliographyTotalTimeout     time.Duration
-	BibliographyDOIMaxBodyBytes  int64
-	BibliographyMaxOutputBytes   int64
-	BibliographyMaxResponseBytes int64
-	BibliographyDOICacheEntries  int
-	BibliographyDOICacheTTL      time.Duration
-	BibliographyTaskConcurrency  int
-	BibliographyTaskTimeout      time.Duration
-	BibliographyTaskMaxRetry     int
-	BibliographyResultRetention  time.Duration
+	PaperReferenceAutoResolve      bool
+	RemotePDFDownloadTimeout       time.Duration
+	RemotePDFMaxRedirects          int
+	RemotePDFDownloadConcurrency   int
+	RemotePDFHostConcurrency       int
+	RemotePDFHostSpacing           time.Duration
+	BibliographyMaxEntries         int
+	BibliographyDOIConcurrency     int
+	BibliographyDOITimeout         time.Duration
+	BibliographyTotalTimeout       time.Duration
+	BibliographyDOIMaxBodyBytes    int64
+	BibliographyMaxOutputBytes     int64
+	BibliographyMaxResponseBytes   int64
+	BibliographyDOICacheEntries    int
+	BibliographyDOICacheTTL        time.Duration
+	BibliographyTaskConcurrency    int
+	BibliographyTaskTimeout        time.Duration
+	BibliographyTaskMaxRetry       int
+	BibliographyResultRetention    time.Duration
+	DocumentStructureCacheDir      string
+	DocumentStructureCacheEntries  int
+	DocumentStructureCacheMaxBytes int64
 }
 
 func Load() (Config, error) {
@@ -455,6 +458,14 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	structureCacheEntries, err := positiveIntEnv("DOCUMENT_STRUCTURE_CACHE_ENTRIES", 1000, 10000)
+	if err != nil {
+		return Config{}, err
+	}
+	structureCacheMaxBytes, err := positiveInt64Env("DOCUMENT_STRUCTURE_CACHE_MAX_BYTES", 16<<20, 128<<20)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		HTTPAddress:                                 env("HTTP_ADDR", "127.0.0.1:8080"),
 		HTTPReadTimeout:                             httpReadTimeout,
@@ -530,6 +541,9 @@ func Load() (Config, error) {
 		BibliographyTaskTimeout:                     bibliographyTaskTimeout,
 		BibliographyTaskMaxRetry:                    bibliographyTaskMaxRetry,
 		BibliographyResultRetention:                 bibliographyResultRetention,
+		DocumentStructureCacheDir:                   env("DOCUMENT_STRUCTURE_CACHE_DIR", filepath.Join("data", "runtime", "document-structures")),
+		DocumentStructureCacheEntries:               structureCacheEntries,
+		DocumentStructureCacheMaxBytes:              structureCacheMaxBytes,
 	}, nil
 }
 

@@ -239,6 +239,7 @@ func (r *documentRepository) ReplaceParsedOutput(
 	if markdown.DocumentID == uuid.Nil {
 		return errors.New("markdown document id is required")
 	}
+	markdown.RecognitionGeneration = markdownGeneration
 	err := r.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		query := tx.Model(&types.Document{}).Where("id = ? AND source_state = ?", markdown.DocumentID, types.DocumentSourceAvailable)
 		updates := map[string]interface{}{
@@ -265,7 +266,7 @@ func (r *documentRepository) ReplaceParsedOutput(
 		}
 		if err := tx.Clauses(clause.OnConflict{
 			Columns:   []clause.Column{{Name: "document_id"}},
-			DoUpdates: clause.AssignmentColumns([]string{"storage_key", "filename", "content_type", "size_bytes", "parser_name", "parser_version", "input_mode", "language", "page_count", "metadata", "updated_at"}),
+			DoUpdates: clause.AssignmentColumns([]string{"storage_key", "filename", "content_type", "size_bytes", "parser_name", "parser_version", "input_mode", "language", "page_count", "metadata", "document_outline", "recognition_generation", "updated_at"}),
 		}).Create(&markdown).Error; err != nil {
 			return err
 		}

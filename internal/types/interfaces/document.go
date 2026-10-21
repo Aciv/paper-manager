@@ -11,6 +11,12 @@ import (
 	"github.com/hibiken/asynq"
 )
 
+// DocumentStructureService reads the durable recognition manifest and builds
+// a disposable structure projection. Adapters must not infer outlines.
+type DocumentStructureService interface {
+	GetDocumentReadingStructure(ctx context.Context, documentID string) (types.DocumentReadingStructure, error)
+}
+
 // DocumentRepository defines persistence operations for documents.
 type DocumentRepository interface {
 	// Create inserts one source-document record and returns it.

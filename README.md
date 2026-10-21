@@ -154,6 +154,14 @@ Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，
 
 服务通过 DI 容器按环境变量选择基础设施：`DB_DRIVER=postgres`（默认）、`DATABASE_URL`、`FILE_STORAGE_DRIVER=local`（默认）、`UPLOAD_DIR`，以及可选的 `FILE_MAX_UPLOAD_SIZE`（字节数）。数据库启动时会执行嵌入式的版本化 PostgreSQL 迁移，SQL 文件位于 `migrations/postgres/`；生产环境若由外部迁移流程管理，可设置 `AUTO_MIGRATE=false`。当前只实现 PostgreSQL 与本地文件存储；选择其他驱动会在启动时返回明确错误。
 
+文档结构读取使用可删除的运行时 JSON 缓存；默认位于
+`./data/runtime/document-structures`（不属于 FileStorage）。可通过
+`DOCUMENT_STRUCTURE_CACHE_DIR`、`DOCUMENT_STRUCTURE_CACHE_ENTRIES` 和
+`DOCUMENT_STRUCTURE_CACHE_MAX_BYTES` 调整目录、条目数和单文件上限。
+缓存不是真值，删除后会从 PostgreSQL 中保存的 outline 和后续阅读笔记投影
+重建，不会重新打开 PDF。结构响应不复制完整 Blocks；PDF 阅读器继续通过
+`GET /api/document/:id/blocks?page=N` 按页读取并用 ordinal 关联目录位置。
+
 远程 PDF 可通过 `POST /api/document/import-url` 导入，请求体为 `{"url":"https://arxiv.org/abs/2401.01234","doi":"可选","filename":"可选.pdf"}`。服务会区分论文落地页和实际 PDF URL，逐跳执行 SSRF 校验并流式写入；普通出版社落地页不会被猜测或抓取，当前内建转换仅支持 arXiv 和显式 `.pdf` URL。引用 PDF 通过 `POST /api/references/{referenceID}/download-pdf` 按单条引用显式获取。
 
 生产限流、重试、队列、状态排查和端到端测试方式见

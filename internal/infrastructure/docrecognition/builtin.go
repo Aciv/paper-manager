@@ -135,11 +135,46 @@ func (r *BuiltinRecognizer) Read(ctx context.Context, request *types.Recognition
 			ParserName:       response.ParserName,
 			ParserVersion:    response.ParserVersion,
 		},
-		Blocks: mapBuiltinBlocks(response.GetBlocks()),
+		Blocks:  mapBuiltinBlocks(response.GetBlocks()),
+		Outline: mapBuiltinOutline(response.GetOutline()),
+	}
+	if err := types.ValidateRecognitionOutline(result.Outline, string(result.Markdown), result.Blocks, result.Metadata.PageCount); err != nil {
+		return nil, fmt.Errorf("builtin parser returned invalid outline: %w", err)
 	}
 	logger.Info(ctx, "builtin document recognition completed", "document_id", request.DocumentID,
 		"parser", response.ParserName, "size_bytes", response.SizeBytes, "page_count", response.PageCount)
 	return result, nil
+}
+
+func mapBuiltinOutline(outline *papersv1.RecognitionOutline) types.DocumentOutline {
+	if outline == nil {
+		// The outline field is additive. During a rolling deployment an older
+		// parser can omit it; publish an explicit current-generation absence
+		// while continuing to reject malformed non-empty projections.
+		return types.DocumentOutline{SchemaVersion: types.DocumentOutlineSchemaVersion,
+			Source: types.DocumentOutlineNone, Sections: []types.DocumentOutlineSection{},
+			Diagnostics: []string{"parser_outline_unavailable"}}
+	}
+	result := types.DocumentOutline{
+		SchemaVersion: int(outline.GetSchemaVersion()),
+		Source:        types.DocumentOutlineSource(outline.GetSource()),
+		Sections:      make([]types.DocumentOutlineSection, 0, len(outline.GetSections())),
+		Diagnostics:   append([]string(nil), outline.GetDiagnostics()...),
+	}
+	for _, section := range outline.GetSections() {
+		if section == nil {
+			continue
+		}
+		result.Sections = append(result.Sections, types.DocumentOutlineSection{
+			Ordinal: int(section.GetOrdinal()), Title: section.GetTitle(), Level: int(section.GetLevel()),
+			ParentOrdinal: int(section.GetParentOrdinal()), StartPage: int(section.GetStartPage()),
+			StartX: section.GetStartX(), StartY: section.GetStartY(), EndPage: int(section.GetEndPage()),
+			EndX: section.GetEndX(), EndY: section.GetEndY(),
+			StartBlockOrdinal: int(section.GetStartBlockOrdinal()), EndBlockOrdinal: int(section.GetEndBlockOrdinal()),
+			MarkdownCodepointStart: int(section.GetMarkdownCodepointStart()), MarkdownCodepointEnd: int(section.GetMarkdownCodepointEnd()),
+		})
+	}
+	return result
 }
 
 func mapBuiltinBlocks(blocks []*papersv1.RecognitionBlock) []types.RecognitionBlock {

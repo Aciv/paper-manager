@@ -55,6 +55,12 @@ func TestReplaceParsedOutputPersistsLargeBlockBatchPostgres(t *testing.T) {
 	if markdown.StorageKey != "large/current.md" {
 		t.Fatalf("markdown storage key = %q, want large/current.md", markdown.StorageKey)
 	}
+	if markdown.RecognitionGeneration != generation {
+		t.Fatalf("recognition generation = %d, want %d", markdown.RecognitionGeneration, generation)
+	}
+	if outline, parseErr := types.ParseDocumentOutline(markdown.DocumentOutline); parseErr != nil || outline.Source != types.DocumentOutlineNone {
+		t.Fatalf("persisted outline = %#v, error=%v", outline, parseErr)
+	}
 	stage, err := documents.GetStage(ctx, documentID, types.DocumentStageMarkdown)
 	if err != nil {
 		t.Fatalf("GetStage: %v", err)
@@ -114,6 +120,9 @@ func TestReplaceParsedOutputRollsBackPartialBlockBatchPostgres(t *testing.T) {
 	if markdown.StorageKey != "large/initial.md" {
 		t.Fatalf("markdown storage key after rollback = %q, want large/initial.md", markdown.StorageKey)
 	}
+	if markdown.RecognitionGeneration != initialGeneration {
+		t.Fatalf("recognition generation after rollback = %d, want %d", markdown.RecognitionGeneration, initialGeneration)
+	}
 	stage, err := documents.GetStage(ctx, documentID, types.DocumentStageMarkdown)
 	if err != nil {
 		t.Fatalf("GetStage after rollback: %v", err)
@@ -150,9 +159,12 @@ func startMarkdownStagePostgres(
 }
 
 func parsedMarkdownForTest(documentID uuid.UUID, storageKey string, pageCount int) types.DocumentMarkdown {
+	outline, _ := (types.DocumentOutline{SchemaVersion: types.DocumentOutlineSchemaVersion,
+		Source: types.DocumentOutlineNone, Sections: []types.DocumentOutlineSection{}}).JSON()
 	return types.DocumentMarkdown{
 		DocumentID: documentID, StorageKey: storageKey, Filename: "document.md",
 		ContentType: "text/markdown", SizeBytes: 1, PageCount: pageCount, Metadata: types.JSON(`{}`),
+		DocumentOutline: outline,
 	}
 }
 

@@ -3,6 +3,7 @@ package docrecognition
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	papersv1 "paperMaster/gen/papers/v1"
@@ -62,6 +63,9 @@ func TestBuiltinRecognizerMapsByteRequestAndResponse(t *testing.T) {
 			BboxX1: 240, BboxY1: 280, MarkdownCodepointStart: 14, MarkdownCodepointEnd: 14,
 			ImageData: []byte("png"), ImageContentType: "image/png",
 		}},
+		Outline: &papersv1.RecognitionOutline{
+			SchemaVersion: 1, Source: "none", Diagnostics: []string{"outline_unavailable"},
+		},
 	}}
 	recognizer := NewBuiltinRecognizerWithClient(client)
 	content := []byte("%PDF-1.7")
@@ -85,5 +89,38 @@ func TestBuiltinRecognizerMapsByteRequestAndResponse(t *testing.T) {
 	}
 	if len(result.Blocks) != 2 || result.Blocks[0].Location.PageNumber == nil || *result.Blocks[0].Location.PageNumber != 1 || string(result.Blocks[1].ImageData) != "png" {
 		t.Fatalf("unexpected recognition blocks: %+v", result.Blocks)
+	}
+}
+
+func TestBuiltinRecognizerRejectsInvalidOutlineProjection(t *testing.T) {
+	markdown := []byte("# Paper\n")
+	recognizer := NewBuiltinRecognizerWithClient(&builtinParserClientStub{result: &papersv1.RecognitionResult{
+		Markdown: markdown, SizeBytes: int64(len(markdown)), ContentType: "text/markdown", PageCount: 1,
+		Outline: &papersv1.RecognitionOutline{SchemaVersion: 1, Source: "pdf_outline",
+			Sections: []*papersv1.RecognitionOutlineSection{{Ordinal: 0, Title: "Paper", Level: 2, ParentOrdinal: 0,
+				StartPage: 1, EndPage: 1, StartBlockOrdinal: -1, EndBlockOrdinal: -1,
+				MarkdownCodepointStart: -1, MarkdownCodepointEnd: -1}}},
+	}})
+	content := []byte("%PDF")
+	_, err := recognizer.Read(context.Background(), &types.RecognitionRequest{DocumentID: uuid.New(), OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: int64(len(content)), InputMode: types.RecognitionInputBytes, Content: content})
+	if err == nil || !strings.Contains(err.Error(), "invalid outline") {
+		t.Fatalf("Read() error = %v, want invalid outline", err)
+	}
+}
+
+func TestBuiltinRecognizerAcceptsOlderParserWithoutOutlineAsExplicitNone(t *testing.T) {
+	markdown := []byte("paper")
+	recognizer := NewBuiltinRecognizerWithClient(&builtinParserClientStub{result: &papersv1.RecognitionResult{
+		Markdown: markdown, SizeBytes: int64(len(markdown)), ContentType: "text/markdown", PageCount: 1,
+	}})
+	content := []byte("%PDF")
+	result, err := recognizer.Read(context.Background(), &types.RecognitionRequest{DocumentID: uuid.New(), OriginalFilename: "paper.pdf",
+		ContentType: "application/pdf", SizeBytes: int64(len(content)), InputMode: types.RecognitionInputBytes, Content: content})
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	if result.Outline.Source != types.DocumentOutlineNone || len(result.Outline.Diagnostics) != 1 {
+		t.Fatalf("outline = %#v", result.Outline)
 	}
 }

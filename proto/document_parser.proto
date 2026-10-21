@@ -36,7 +36,37 @@ message RecognitionResult {
   string parser_name = 8;
   string parser_version = 9;
   repeated RecognitionBlock blocks = 10;
+  RecognitionOutline outline = 11;
   reserved 15;
+}
+
+// RecognitionOutline is the bounded source hierarchy selected during the
+// same parser generation as markdown and blocks. Integer ranges are half-open;
+// -1 means unavailable for an unmapped item. parent_ordinal uses -1 for roots.
+message RecognitionOutline {
+  int32 schema_version = 1;
+  string source = 2;
+  repeated RecognitionOutlineSection sections = 3;
+  repeated string diagnostics = 4;
+}
+
+message RecognitionOutlineSection {
+  reserved 15;
+  reserved "mapping_quality";
+  int32 ordinal = 1;
+  string title = 2;
+  int32 level = 3;
+  int32 parent_ordinal = 4;
+  int32 start_page = 5;
+  double start_x = 6;
+  double start_y = 7;
+  int32 end_page = 8;
+  double end_x = 9;
+  double end_y = 10;
+  int32 start_block_ordinal = 11;
+  int32 end_block_ordinal = 12;
+  int32 markdown_codepoint_start = 13;
+  int32 markdown_codepoint_end = 14;
 }
 
 // A block maps a semantic Markdown fragment to one rectangular PDF region.

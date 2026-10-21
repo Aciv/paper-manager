@@ -29,6 +29,7 @@ type RouterParams struct {
 	PaperInfoHandler         *handler.PaperInfoHandler
 	DocumentBaseHandler      *handler.DocumentBaseHandler
 	BibliographyHandler      *handler.BibliographyHandler
+	DocumentStructureHandler *handler.DocumentStructureHandler
 }
 
 // NewRouter 创建新的路由
@@ -67,6 +68,9 @@ func NewRouter(params RouterParams) *gin.Engine {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 	ServerFile(r, params.DocumentHandler)
+	if params.DocumentStructureHandler != nil {
+		r.GET("/api/document/:id/structure", params.DocumentStructureHandler.Get)
+	}
 	ServerProcess(r, params.DocumentProcessHandler, params.DocumentSelectionHandler)
 	ServerPaperMetadata(r, params.PaperMetadataHandler, params.PaperCitationHandler, params.PaperInfoHandler)
 	ServerDocumentBase(r, params.DocumentBaseHandler, params.BibliographyHandler)

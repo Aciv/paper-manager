@@ -213,6 +213,19 @@ func TestBibliographyOrderMigrationAddsNullableOrderedIndex(t *testing.T) {
 	}
 }
 
+func TestDocumentOutlineMigrationAddsExplicitGenerationBoundManifest(t *testing.T) {
+	for _, fragment := range []string{
+		"ADD COLUMN IF NOT EXISTS document_outline JSONB",
+		"legacy_missing_outline",
+		"ADD COLUMN IF NOT EXISTS recognition_generation BIGINT",
+		"jsonb_typeof(document_outline) = 'object'",
+	} {
+		if !strings.Contains(documentOutlineUp, fragment) {
+			t.Fatalf("document outline migration does not include %q", fragment)
+		}
+	}
+}
+
 func TestPaperCitationsMigrationCreatesDirectionalCascadeRelation(t *testing.T) {
 	for _, fragment := range []string{
 		"CREATE TABLE IF NOT EXISTS paper_citations",
@@ -314,8 +327,8 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 29 {
-		t.Fatalf("latest migration version = %d, want 29", got)
+	if got := migrations[len(migrations)-1].version; got != 30 {
+		t.Fatalf("latest migration version = %d, want 30", got)
 	}
 	for _, fragment := range []string{
 		"CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public",

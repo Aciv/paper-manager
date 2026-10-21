@@ -46,6 +46,7 @@ func TestDocumentNewestReplacementMovesRelationsPostgres(t *testing.T) {
 	if err := db.Create(&types.DocumentMarkdown{
 		DocumentID: olderID, StorageKey: "replacement/older.md", Filename: "older.md",
 		ContentType: "text/markdown", SizeBytes: 1, Metadata: types.JSON(`{}`),
+		DocumentOutline: types.JSON(`{"schemaVersion":0,"source":"unavailable","sections":[]}`),
 	}).Error; err != nil {
 		t.Fatalf("create older markdown: %v", err)
 	}

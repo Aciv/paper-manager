@@ -54,6 +54,12 @@ func (r *DefaultRecognizer) Read(ctx context.Context, request *types.Recognition
 			SizeBytes:        int64(len(markdown)),
 			ParserName:       DriverDefault,
 		},
+		Outline: types.DocumentOutline{
+			SchemaVersion: types.DocumentOutlineSchemaVersion,
+			Source:        types.DocumentOutlineNone,
+			Sections:      []types.DocumentOutlineSection{},
+			Diagnostics:   []string{"outline_not_supported_for_content_type"},
+		},
 	}
 	logger.Info(ctx, "default document recognition completed", "document_id", request.DocumentID, "size_bytes", result.Metadata.SizeBytes)
 	return result, nil

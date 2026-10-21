@@ -147,4 +147,7 @@ type RecognitionResult struct {
 	// sent in task payloads and is converted to persisted Blocks by the
 	// document service.
 	Blocks []RecognitionBlock `json:"blocks,omitempty"`
+	// Outline is selected and mapped by the parser from the same PDF/Markdown
+	// generation. The application validates it before durable publication.
+	Outline DocumentOutline `json:"outline"`
 }

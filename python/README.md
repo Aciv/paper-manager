@@ -4,7 +4,10 @@ This worker exposes two independent gRPC services:
 
 - `DocumentParser.Recognize` accepts PDFs, invokes
   `pymupdf4llm.to_markdown(..., page_chunks=True)`, and returns Markdown plus
-  selectable page-layout blocks.
+  selectable page-layout blocks and one bounded source outline. Embedded PDF
+  bookmarks win when at least one destination is usable; otherwise headings
+  are derived from that call's final cleaned Markdown. Outline schema version
+  1 uses parser block ordinals and Unicode code-point ranges.
 - `PaperMetadataExtractor.Extract` accepts one bounded Markdown revision and a
   compact source map, then returns deterministic title, author, abstract, raw
   reference, confidence, and evidence candidates. It performs no catalog
@@ -32,7 +35,9 @@ PATH=/root/go/bin:$PATH .venv/bin/python -m grpc_tools.protoc \
 ```
 
 Paper extraction accepts at most 32 MiB of valid UTF-8 Markdown, 50,000 source
-blocks. `DocumentParser.Recognize` emits Markdown plus semantic Blocks only.
+blocks. `DocumentParser.Recognize` emits Markdown, semantic Blocks, and the
+selected outline in one generation. Outline failures are non-fatal and return
+an explicit `none` source with bounded diagnostics.
 For `hybrid` and `crf`, the extraction RPC receives the Go-created relative PDF
 storage key and lazily rebuilds bounded, temporary PDF-line facts from the
 original PDF inside the configured shared upload directory. The Python parser

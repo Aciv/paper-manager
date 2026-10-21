@@ -772,6 +772,10 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	if repo.markdown.StorageKey == "" || len(repo.blocks) != 1 {
 		t.Fatalf("persisted output = markdown=%+v blocks=%+v", repo.markdown, repo.blocks)
 	}
+	outline, err := types.ParseDocumentOutline(repo.markdown.DocumentOutline)
+	if err != nil || outline.Source != types.DocumentOutlineNone || repo.markdown.RecognitionGeneration != 1 {
+		t.Fatalf("persisted outline=%#v generation=%d error=%v", outline, repo.markdown.RecognitionGeneration, err)
+	}
 	block := repo.blocks[0]
 	if block.DocumentID != documentID || block.Location == nil || block.Location.PageNumber == nil || *block.Location.PageNumber != 1 {
 		t.Fatalf("persisted block = %+v", block)

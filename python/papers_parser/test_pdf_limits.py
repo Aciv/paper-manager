@@ -132,6 +132,36 @@ class PdfLimitTest(unittest.TestCase):
         self.assertIn(b"Memory parser text", result.markdown)
         self.assertEqual(result.page_count, 1)
 
+    def test_recognize_rejects_unreadable_pdf(self) -> None:
+        request = document_parser_pb2.RecognitionRequest(
+            document_id=str(uuid.uuid4()),
+            filename="broken.pdf",
+            content_type="application/pdf",
+            content=b"%PDF-1.7\nnot a readable document",
+        )
+        with self.assertRaisesRegex(RuntimeError, "StatusCode.INTERNAL"):
+            self._parser().Recognize(request, _RecordingContext())
+
+    def test_recognize_rejects_encrypted_pdf_without_password(self) -> None:
+        path = self.upload_dir / "encrypted.pdf"
+        document = pymupdf.open()
+        document.new_page().insert_text((72, 72), "secret")
+        document.save(
+            str(path),
+            encryption=pymupdf.PDF_ENCRYPT_AES_256,
+            owner_pw="owner-password",
+            user_pw="user-password",
+        )
+        document.close()
+        request = document_parser_pb2.RecognitionRequest(
+            document_id=str(uuid.uuid4()),
+            filename="encrypted.pdf",
+            content_type="application/pdf",
+            content=path.read_bytes(),
+        )
+        with self.assertRaisesRegex(RuntimeError, "StatusCode.INTERNAL"):
+            self._parser().Recognize(request, _RecordingContext())
+
     def test_recognize_file_path_still_works(self) -> None:
         path = self.upload_dir / "path-mode.pdf"
         path.write_bytes(self._text_pdf("Path parser text"))
@@ -144,6 +174,27 @@ class PdfLimitTest(unittest.TestCase):
         )
         result = parser.Recognize(request, _RecordingContext())
         self.assertIn(b"Path parser text", result.markdown)
+
+    def test_recognize_returns_native_outline_with_same_generation(self) -> None:
+        document = pymupdf.open()
+        first = document.new_page()
+        first.insert_text((72, 72), "Introduction")
+        second = document.new_page()
+        second.insert_text((72, 72), "Results")
+        document.set_toc([[1, "Introduction", 1], [1, "Results", 2]])
+        content = document.tobytes()
+        document.close()
+        request = document_parser_pb2.RecognitionRequest(
+            document_id=str(uuid.uuid4()),
+            filename="outlined.pdf",
+            content_type="application/pdf",
+            content=content,
+        )
+        result = self._parser().Recognize(request, _RecordingContext())
+        self.assertEqual(result.outline.schema_version, 1)
+        self.assertEqual(result.outline.source, "pdf_outline")
+        self.assertEqual([section.title for section in result.outline.sections], ["Introduction", "Results"])
+        self.assertGreaterEqual(len(result.blocks), 2)
 
 
 class _RecordingContext:
