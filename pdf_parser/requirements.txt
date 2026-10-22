@@ -1,4 +1,6 @@
 grpcio>=1.82.1,<2
 grpcio-tools>=1.82.1,<2
-pymupdf4llm>=0.0.27
+# Keep the tested PyMuPDF stack: pymupdf4llm 2.0 no longer installs pymupdf.
+pymupdf==1.28.0
+pymupdf4llm==1.28.0
 python-crfsuite>=0.9.11,<0.10

@@ -393,6 +393,26 @@ async function requestText(pathname: string): Promise<string> {
   throw new APIError(response.status, await responseErrorMessage(response, contentType));
 }
 
+// A blank note is persisted without sections. Older manifests may serialize
+// that as null, so normalize manifest-shaped responses at the API boundary.
+function normalizeReadingNoteDirectory(
+  directory: ReadingNoteDirectory | null | undefined,
+): ReadingNoteDirectory {
+  const sections = directory?.sections;
+  return {
+    schemaVersion: directory?.schemaVersion ?? 1,
+    sections: Array.isArray(sections) ? sections : [],
+  };
+}
+
+function normalizeDocumentReadingNote(note: DocumentReadingNote): DocumentReadingNote {
+  return { ...note, directory: normalizeReadingNoteDirectory(note.directory) };
+}
+
+function normalizeReadingNoteEditResult(result: ReadingNoteEditResult): ReadingNoteEditResult {
+  return { ...result, directory: normalizeReadingNoteDirectory(result.directory) };
+}
+
 export const api = {
   searchDocuments: (search: DocumentSearch): Promise<DocumentPage> => {
     const query = new URLSearchParams();
@@ -491,42 +511,50 @@ export const api = {
   getDocumentStructure: (id: string): Promise<DocumentReadingStructure> => request<DocumentReadingStructure>(
     `/${encodeURIComponent(id)}/structure`,
   ),
-  getDocumentReadingNote: (id: string): Promise<DocumentReadingNote> => request<DocumentReadingNote>(`/${encodeURIComponent(id)}/reading-note`),
+  getDocumentReadingNote: async (id: string): Promise<DocumentReadingNote> => normalizeDocumentReadingNote(
+    await request<DocumentReadingNote>(`/${encodeURIComponent(id)}/reading-note`),
+  ),
   getDocumentReadingNoteSection: (id: string, sectionId: string): Promise<ReadingNoteSection> => request<ReadingNoteSection>(
     `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}`,
   ),
   getDocumentReadingNoteSectionContent: (id: string, sectionId: string): Promise<string> => requestText(
     `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}/content`,
   ),
-  uploadDocumentReadingNoteFile: (id: string, file: File, expectedRevision: number): Promise<DocumentReadingNote> => {
+  uploadDocumentReadingNoteFile: async (id: string, file: File, expectedRevision: number): Promise<DocumentReadingNote> => {
     const body = new FormData();
     body.set('file', file);
-    return request<DocumentReadingNote>(
+    return normalizeDocumentReadingNote(await request<DocumentReadingNote>(
       `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
       { method: 'PUT', body },
-    );
+    ));
   },
-  uploadDocumentReadingNoteSectionFile: (
+  uploadDocumentReadingNoteSectionFile: async (
     id: string, sectionId: string, file: File, expectedRevision: number,
   ): Promise<ReadingNoteEditResult> => {
     const body = new FormData();
     body.set('file', file);
-    return request<ReadingNoteEditResult>(
+    return normalizeReadingNoteEditResult(await request<ReadingNoteEditResult>(
       `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
       { method: 'PUT', body },
-    );
+    ));
   },
-  applyDocumentReadingNoteOperations: (id: string, requestBody: ReadingNoteOperations): Promise<ReadingNoteEditResult> => request<ReadingNoteEditResult>(
-    `/${encodeURIComponent(id)}/reading-note/operations`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
+  applyDocumentReadingNoteOperations: async (id: string, requestBody: ReadingNoteOperations): Promise<ReadingNoteEditResult> => normalizeReadingNoteEditResult(
+    await request<ReadingNoteEditResult>(
+      `/${encodeURIComponent(id)}/reading-note/operations`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
+    ),
   ),
-  applyDocumentReadingNoteEdits: (id: string, requestBody: ReadingNoteEdits): Promise<ReadingNoteEditResult> => request<ReadingNoteEditResult>(
-    `/${encodeURIComponent(id)}/reading-note/edits`,
-    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
+  applyDocumentReadingNoteEdits: async (id: string, requestBody: ReadingNoteEdits): Promise<ReadingNoteEditResult> => normalizeReadingNoteEditResult(
+    await request<ReadingNoteEditResult>(
+      `/${encodeURIComponent(id)}/reading-note/edits`,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
+    ),
   ),
-  putDocumentReadingNote: (id: string, markdown: string, expectedRevision: number): Promise<DocumentReadingNote> => request<DocumentReadingNote>(
-    `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
-    { method: 'PUT', headers: { 'Content-Type': 'text/markdown; charset=utf-8' }, body: markdown },
+  putDocumentReadingNote: async (id: string, markdown: string, expectedRevision: number): Promise<DocumentReadingNote> => normalizeDocumentReadingNote(
+    await request<DocumentReadingNote>(
+      `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
+      { method: 'PUT', headers: { 'Content-Type': 'text/markdown; charset=utf-8' }, body: markdown },
+    ),
   ),
   deleteDocumentReadingNote: (id: string, expectedRevision: number): Promise<void> => request<void>(
     `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,

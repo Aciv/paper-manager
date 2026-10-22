@@ -151,9 +151,9 @@ services:
       DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-24}
       DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:-30s}
       CORS_ORIGIN: http://localhost:5173
-      # Disabled by default. For host-side Agents, set MCP_ADDR to
-      # 0.0.0.0:8090, a token, and publish 127.0.0.1:8090:8090 (see
-      # docs/mcp/agent-installation.md).
+      # Docker publishes MCP on loopback below. The container listener must
+      # bind 0.0.0.0 for the forwarding to work, and a non-loopback bind
+      # requires MCP_TOKEN (see docs/mcp/agent-installation.md).
       MCP_ENABLED: ${MCP_ENABLED:-false}
       MCP_ADDR: ${MCP_ADDR:-127.0.0.1:8090}
       MCP_TOKEN: ${MCP_TOKEN:-}
@@ -211,6 +211,7 @@ services:
         condition: service_completed_successfully
     ports:
       - "${API_HOST_PORT:-8080}:8080"
+      - "127.0.0.1:${MCP_HOST_PORT:-8090}:8090"
     # HTTP drain + Asynq drain can each take up to 30s.
     stop_grace_period: 70s
 

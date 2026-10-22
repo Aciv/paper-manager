@@ -66,6 +66,19 @@ class SourceOutlineTest(unittest.TestCase):
         self.assertEqual(result.sections[0].markdown_codepoint_start, 0)
         self.assertIn("pdf_outline_wholly_unusable", result.diagnostics)
 
+    def test_markdown_fallback_removes_emphasis_wrappers_from_titles(self):
+        markdown = (
+            "# **Introduction**\n"
+            "## **1.1** **Method**\n"
+            "## **C. Statistics** **Bench**\n"
+        )
+        result = select_source_outline(FakePDF([]), markdown, [])
+        self.assertEqual(result.source, "markdown_headings")
+        self.assertEqual(
+            [item.title for item in result.sections],
+            ["Introduction", "1.1 Method", "C. Statistics Bench"],
+        )
+
     def test_missing_everything_returns_nonfatal_none(self):
         result = select_source_outline(FakePDF([]), "plain text", [])
         self.assertEqual(result.source, "none")

@@ -255,8 +255,12 @@ func TestNoteReadingEmptyNoteCanBeCreatedAndStarted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.Revision != 1 || len(created.Directory.Sections) != 0 || created.SizeBytes != 0 {
+	if created.Revision != 1 || created.Directory.Sections == nil || len(created.Directory.Sections) != 0 || created.SizeBytes != 0 {
 		t.Fatalf("created empty note = %#v", created)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil || manifest.Directory.Sections == nil || len(manifest.Directory.Sections) != 0 {
+		t.Fatalf("empty manifest = %#v, error=%v", manifest, err)
 	}
 	exported, err := service.Export(context.Background(), id.String())
 	if err != nil || exported.Markdown != "" {

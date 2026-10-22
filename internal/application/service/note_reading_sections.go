@@ -56,7 +56,9 @@ func publicSection(section types.ReadingNoteSectionEntry) types.ReadingNoteSecti
 }
 
 func publicDirectory(directory types.ReadingNoteDirectory) types.ReadingNoteDirectory {
-	directory.Sections = append([]types.ReadingNoteSectionEntry(nil), directory.Sections...)
+	sections := make([]types.ReadingNoteSectionEntry, len(directory.Sections))
+	copy(sections, directory.Sections)
+	directory.Sections = sections
 	for index := range directory.Sections {
 		directory.Sections[index] = publicSection(directory.Sections[index])
 	}

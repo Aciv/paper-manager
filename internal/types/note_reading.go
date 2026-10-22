@@ -93,8 +93,9 @@ func (n *DocumentReadingNote) SetDirectory(directory ReadingNoteDirectory) error
 	if err := validateReadingNoteStorageKeys(n.DocumentID, directory); err != nil {
 		return err
 	}
+	directory.Sections = cloneReadingNoteSections(directory.Sections)
 	persisted := directory
-	persisted.Sections = append([]ReadingNoteSectionEntry(nil), directory.Sections...)
+	persisted.Sections = cloneReadingNoteSections(directory.Sections)
 	for index := range persisted.Sections {
 		persisted.Sections[index].StoredKey = persisted.Sections[index].StorageKey
 	}
@@ -111,6 +112,7 @@ func (n *DocumentReadingNote) ParseDirectory() error {
 	if err := json.Unmarshal(n.Structure, &n.Directory); err != nil {
 		return fmt.Errorf("%w: invalid persisted directory", ErrInvalidReadingNote)
 	}
+	n.Directory.Sections = cloneReadingNoteSections(n.Directory.Sections)
 	for index := range n.Directory.Sections {
 		n.Directory.Sections[index].StorageKey = n.Directory.Sections[index].StoredKey
 		n.Directory.Sections[index].StoredKey = ""
@@ -119,6 +121,14 @@ func (n *DocumentReadingNote) ParseDirectory() error {
 		return err
 	}
 	return validateReadingNoteStorageKeys(n.DocumentID, n.Directory)
+}
+
+// cloneReadingNoteSections always returns a non-nil slice. An empty directory
+// must serialize as [] rather than null so clients can iterate it directly.
+func cloneReadingNoteSections(sections []ReadingNoteSectionEntry) []ReadingNoteSectionEntry {
+	cloned := make([]ReadingNoteSectionEntry, len(sections))
+	copy(cloned, sections)
+	return cloned
 }
 
 func validateReadingNoteStorageKeys(documentID uuid.UUID, directory ReadingNoteDirectory) error {

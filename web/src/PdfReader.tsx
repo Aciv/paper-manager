@@ -149,6 +149,36 @@ function outlineSourceLabel(source?: DocumentOutlineSource): string {
   }
 }
 
+// The API keeps low-level diagnostic codes for agents/debugging. The reader
+// shows only actionable explanations and hides normal fallback details.
+function outlineDiagnosticMessage(code: string): string | undefined {
+  switch (code) {
+    case 'pdf_outline_missing':
+    case 'outline_non_monotonic_mapping_dropped':
+    case 'legacy_missing_outline':
+      return undefined;
+    case 'recognize_document_to_create_outline':
+      return '文档尚未完成识别，暂时无法生成目录。';
+    case 'pdf_outline_item_limit':
+    case 'markdown_outline_item_limit':
+      return '目录项过多，列表已截断。';
+    case 'pdf_outline_depth_clamped':
+      return '目录层级过深，显示层级已压缩。';
+    case 'outline_response_budget_dropped':
+    case 'outline_selection_failed':
+      return '目录生成不完整，部分内容已省略。';
+    case 'pdf_outline_read_failed':
+    case 'pdf_outline_invalid_item':
+    case 'pdf_outline_invalid_destination':
+    case 'pdf_outline_wholly_unusable':
+    case 'markdown_headings_missing':
+    case 'outline_unavailable':
+      return '未找到完整目录。';
+    default:
+      return undefined;
+  }
+}
+
 type PositionedPDFText = { text: string; x: number; y: number };
 
 async function targetTextByLink(page: PDFPageProxy, links: PDFLinkPreview[]): Promise<Map<string, string>> {
@@ -1955,10 +1985,11 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   const outlineSource = sourceOutline.length > 0
     ? sourceStructure?.outline.source
     : nativeOutline.length > 0 ? 'pdf_outline' : sourceStructure?.outline.source;
-  const outlineDiagnostics = [
-    ...(sourceStructure?.diagnostics ?? []),
-    ...(sourceStructure?.outline.diagnostics ?? []),
-  ];
+  const outlineDiagnostics = Array.from(new Set(
+    [...(sourceStructure?.diagnostics ?? []), ...(sourceStructure?.outline.diagnostics ?? [])]
+      .map(outlineDiagnosticMessage)
+      .filter((message): message is string => Boolean(message)),
+  ));
   const activeOutline = useMemo(() => activeOutlineNode(outline, currentPage), [outline, currentPage]);
   const outlineTree = useMemo(() => <>
     {outlineSource && <p className="pdf-outline-source">目录来源：{outlineSourceLabel(outlineSource)}</p>}

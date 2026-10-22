@@ -2,6 +2,7 @@ package types
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -20,6 +21,26 @@ func TestValidateReadingNoteMarkdownBoundsUTF8AndBytes(t *testing.T) {
 	tooLarge := make([]byte, MaxDocumentReadingNoteBytes+1)
 	if err := ValidateReadingNoteMarkdown(string(tooLarge)); !errors.Is(err, ErrInvalidReadingNote) {
 		t.Fatalf("oversize error = %v", err)
+	}
+}
+
+func TestEmptyReadingNoteDirectorySerializesSectionsAsArray(t *testing.T) {
+	note := DocumentReadingNote{DocumentID: uuid.New()}
+	if err := note.SetDirectory(ReadingNoteDirectory{SchemaVersion: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if note.Directory.Sections == nil {
+		t.Fatal("in-memory directory has nil sections")
+	}
+	if !strings.Contains(string(note.Structure), `"sections":[]`) {
+		t.Fatalf("persisted directory = %s", note.Structure)
+	}
+	persisted := DocumentReadingNote{DocumentID: note.DocumentID, Structure: note.Structure}
+	if err := persisted.ParseDirectory(); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.Directory.Sections == nil {
+		t.Fatal("parsed directory has nil sections")
 	}
 }
 

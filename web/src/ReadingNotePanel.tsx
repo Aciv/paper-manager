@@ -255,6 +255,33 @@ export function ReadingNotePanel({
     return () => { active = false; };
   }, [documentId]);
 
+  // Save with Ctrl/Cmd+S from the note editor or the whole-note dialog. The
+  // browser's own Save Page dialog is suppressed only when the note panel has
+  // an actionable save target.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey || event.shiftKey || event.repeat ||
+        event.key.toLowerCase() !== 's') {
+        return;
+      }
+      if (!noteRef.current && !editorOpen) return;
+      if (!editorOpen && viewMode !== 'edit') return;
+      event.preventDefault();
+      if (saving) return;
+      if (editorOpen) {
+        void commitWholeNote();
+        return;
+      }
+      if (noteRef.current?.directory.sections.length === 0) {
+        if (blankDraft.trim()) void saveBlankNote();
+        return;
+      }
+      void saveActive();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [blankDraft, commitWholeNote, editorOpen, saveActive, saveBlankNote, saving, viewMode]);
+
   // Load only the active section body. Draft state always mirrors the saved
   // body after a section switch; unsaved changes are saved before switching.
   useEffect(() => {
@@ -477,7 +504,7 @@ export function ReadingNotePanel({
         setSavedMarkdown(nextMarkdown);
         setDraft(splitSectionBody(nextMarkdown, level).body);
       }
-      setStatus(`已保存 revision ${result.revision}。`);
+      setStatus('已保存。');
       return true;
     } catch (error) {
       await handleEditError(error, sectionId);
@@ -657,7 +684,7 @@ export function ReadingNotePanel({
       setEditorOpen(false);
       setPendingEvidence(undefined);
       setViewMode(editorMode === 'create' ? 'edit' : 'read');
-      setStatus(noteRef.current ? `已导入并替换为 revision ${next.revision}。` : `阅读笔记已创建（revision ${next.revision}）。`);
+      setStatus(noteRef.current ? '已导入并替换整篇笔记。' : '阅读笔记已创建。');
     } catch (error) {
       await handleEditError(error);
     } finally {
@@ -723,8 +750,8 @@ export function ReadingNotePanel({
       setBlankDraft('');
       setViewMode('edit');
       setStatus(next.directory.sections.length > 0
-        ? `已保存 revision ${next.revision}，并拆分为 ${next.directory.sections.length} 个 section。`
-        : `空白笔记已保存 revision ${next.revision}。`);
+        ? `已保存，并拆分为 ${next.directory.sections.length} 个 section。`
+        : '空白笔记已保存。');
     } catch (error) {
       await handleEditError(error);
     } finally {
@@ -749,7 +776,7 @@ export function ReadingNotePanel({
       setActiveSectionId(next.directory.sections[0]?.id);
       setBlankDraft('');
       setViewMode('read');
-      setStatus(`已上传整篇 Markdown（revision ${next.revision}，${next.directory.sections.length} 个 section）。`);
+      setStatus(`已上传整篇 Markdown（${next.directory.sections.length} 个 section）。`);
     } catch (error) {
       await handleEditError(error);
     } finally {
@@ -782,7 +809,7 @@ export function ReadingNotePanel({
       }));
       setSavedMarkdown(markdown);
       setDraft(splitSectionBody(markdown, target.level).body);
-      setStatus(`已替换 section「${sectionLabel(target)}」（revision ${result.revision}）。`);
+      setStatus(`已替换 section「${sectionLabel(target)}」。`);
     } catch (error) {
       if (uploaded) {
         setStatus(error instanceof Error ? `已上传，但读取最新 section 失败：${error.message}` : '已上传，但读取最新 section 失败。');
@@ -909,12 +936,11 @@ export function ReadingNotePanel({
     <div className="reading-note-toolbar">
       <div className="reading-note-title">
         <strong>阅读注释</strong>
-        {note && <span className="reading-note-revision">r{note.revision}</span>}
       </div>
       <div className="reading-note-toolbar-actions" role="group" aria-label="整篇笔记操作">
         {note && <button type="button" disabled={saving} title="上传整篇 Markdown 并替换当前笔记"
           onClick={() => noteFileInput.current?.click()}>上传 .md</button>}
-        {note && <button type="button" disabled={saving} title="编辑并按 revision 替换整篇笔记"
+        {note && <button type="button" disabled={saving} title="编辑并替换整篇笔记"
           onClick={() => void openEditor('import')}>导入</button>}
         {note && <button type="button" disabled={saving} title="下载整篇 Markdown" onClick={() => void exportNote()}>导出</button>}
         {note && <button className="reading-note-danger" type="button" disabled={saving} title="删除整份阅读笔记"
@@ -960,7 +986,7 @@ export function ReadingNotePanel({
         <div className="reading-note-blank-head">
           <div className="reading-note-section-meta">
             <strong>空白笔记</strong>
-            <span>r{note.revision} · 尚未拆分 section</span>
+            <span>尚未拆分 section</span>
           </div>
           {headActions}
         </div>
@@ -1111,7 +1137,7 @@ export function ReadingNotePanel({
       </header>
       <p className="hint">{editorMode === 'create'
         ? 'Markdown 会按 H1-H3 拆成 section；之后只编辑单个 section。'
-        : `当前 revision ${note?.revision ?? 0}。导入会用整篇 Markdown 替换所有 section，旧 section 文件会被清理。`}</p>
+        : '导入会用整篇 Markdown 替换所有 section，旧 section 文件会被清理。'}</p>
       <textarea value={editorMarkdown} onChange={(event) => setEditorMarkdown(event.target.value)} readOnly={saving} spellCheck={false} />
       <footer>
         <button className="primary" type="button" disabled={saving || !editorMarkdown.trim()} onClick={() => void commitWholeNote()}>{saving ? '提交中…' : editorMode === 'create' ? '创建' : '导入并替换'}</button>

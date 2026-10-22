@@ -10,6 +10,9 @@ COPY pdf_parser/requirements.txt ./requirements.txt
 RUN HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="${HTTPS_PROXY:-$HTTP_PROXY}" NO_PROXY="$NO_PROXY" \
     http_proxy="$HTTP_PROXY" https_proxy="${HTTPS_PROXY:-$HTTP_PROXY}" no_proxy="$NO_PROXY" \
     pip install --no-cache-dir -r requirements.txt
+# Fail the image build if the worker runtime is missing; a healthy gRPC server
+# alone does not prove that recognize/render workers can start.
+RUN python -c "import pymupdf, pymupdf4llm"
 COPY proto /app/proto
 COPY pdf_parser /app/pdf_parser
 # Runtime imports the exact pure feature functions used during training, but

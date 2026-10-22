@@ -71,6 +71,14 @@ test('picks the deepest entry at or before the current page', () => {
   assert.equal(activeOutlineNode([{ title: 'only', dest: null }], 3), undefined);
 });
 
+test('strips Markdown emphasis wrappers from persisted outline titles', () => {
+  const outline = outlineFromSections([
+    { title: '**1 Introduction**', parentOrdinal: -1, startPage: 1 },
+    { title: '**C. Statistics** **Bench**', parentOrdinal: -1, startPage: 3 },
+  ]);
+  assert.deepEqual(outline.map((node) => node.title), ['1 Introduction', 'C. Statistics Bench']);
+});
+
 test('rebuilds the persisted parent-ordinal outline and keeps page-based navigation', () => {
   const outline = outlineFromSections([
     { title: '1 Introduction', parentOrdinal: -1, startPage: 1 },

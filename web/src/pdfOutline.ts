@@ -18,9 +18,22 @@ export type OutlineSectionInput = {
   startPage: number;
 };
 
+// Convert the small inline-Markdown subset that can survive in heading text
+// into the plain labels expected by the outline. The backend already does this
+// for new recognitions; this also repairs persisted outlines created before it.
+function plainOutlineTitle(value: string): string {
+  let text = value.trim();
+  let previous = '';
+  while (text && text !== previous) {
+    previous = text;
+    text = text.replace(/(\*\*|~~)(.+?)\1/g, '$2').trim();
+  }
+  return text;
+}
+
 export function outlineFromSections(sections: readonly OutlineSectionInput[]): OutlineEntry[] {
   const nodes = sections.map((section) => ({
-    title: section.title,
+    title: plainOutlineTitle(section.title),
     dest: undefined,
     page: section.startPage > 0 ? section.startPage : undefined,
     items: [] as OutlineEntry[],

@@ -18,6 +18,7 @@ MAX_OUTLINE_DIAGNOSTICS = 32
 _ATX_HEADING = re.compile(r"^(#{1,6})[ \t]+(.+?)[ \t]*#*[ \t]*$")
 _SETEXT_HEADING = re.compile(r"^[ \t]*(=+|-+)[ \t]*$")
 _FENCE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})")
+_MARKDOWN_EMPHASIS = re.compile(r"(\*\*|~~)(.+?)\1")
 
 
 @dataclass
@@ -163,7 +164,7 @@ def _markdown_candidates(markdown: str, blocks, diagnostics: list[str], checkpoi
             heading_title = line.strip()
             index += 1
         if heading_level:
-            title = _title(heading_title)
+            title = _markdown_heading_title(heading_title)
             if title:
                 while stack and stack[-1] >= heading_level:
                     stack.pop()
@@ -276,6 +277,15 @@ def _block_for_markdown_offset(blocks, starts, offset: int):
     if containing:
         return containing[0]
     return min(candidates, key=lambda block: (abs(block.markdown_codepoint_start - offset), block.ordinal))
+
+
+def _markdown_heading_title(value) -> str:
+    text = str(value or "").strip()
+    previous = None
+    while text and text != previous:
+        previous = text
+        text = _MARKDOWN_EMPHASIS.sub(r"\2", text).strip()
+    return _title(text)
 
 
 def _title(value) -> str:
