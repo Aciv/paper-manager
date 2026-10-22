@@ -1472,6 +1472,42 @@ func TestScorePaperCatalogCandidateUsesBibliographicSignals(t *testing.T) {
 	}
 }
 
+func TestScorePaperCatalogCandidateRejectsConflictingDOIExactArxiv(t *testing.T) {
+	query := types.PaperLookupQuery{
+		DOI:       "10.48550/arxiv.1810.04805",
+		SourceURL: "https://arxiv.org/pdf/1810.04805",
+		Title:     "BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding",
+	}
+	// This mirrors an OpenAlex merged record: its landing page is arXiv
+	// 1810.04805, but its DOI, title and authors belong to another work.
+	conflicting := types.PaperCatalogCandidate{
+		DOI:       "10.4230/lipics.cosit.2022.18",
+		SourceURL: "http://arxiv.org/abs/1810.04805",
+		Title:     "AI-Assisted Pipeline for Dynamic Generation of Trustworthy Health Supplement Content at Scale",
+		Authors:   []types.PaperAuthor{{Name: "Kefallinos, Dionysios"}},
+		Provider:  "openalex", ProviderID: "W2896457183", ProviderScore: 1,
+	}
+	score, exact := scorePaperCatalogCandidate(query, conflicting)
+	if exact {
+		t.Fatal("conflicting candidate DOI must not produce an exact arXiv match")
+	}
+	if score >= minPaperCatalogMatchScore {
+		t.Fatalf("conflicting candidate score = %f, want below threshold %f", score, minPaperCatalogMatchScore)
+	}
+
+	correct := types.PaperCatalogCandidate{
+		DOI:       "10.48550/arxiv.1810.04805",
+		SourceURL: "https://arxiv.org/abs/1810.04805",
+		Title:     query.Title,
+		Authors:   []types.PaperAuthor{{Name: "Devlin, Jacob"}},
+		Provider:  "arxiv", ProviderID: "1810.04805", ProviderScore: 1,
+	}
+	correctScore, correctExact := scorePaperCatalogCandidate(query, correct)
+	if !correctExact || correctScore != 1 {
+		t.Fatalf("correct arXiv candidate = score %f exact %v, want 1 true", correctScore, correctExact)
+	}
+}
+
 func TestScorePaperCatalogCandidateDoesNotPenalizeDifferentDOI(t *testing.T) {
 	query := types.PaperLookupQuery{
 		DOI:   "10.1000/query-record",

@@ -22,6 +22,7 @@ import {
   insertEvidenceIntoBody,
   splitSectionBody,
 } from './noteEdits';
+import { parseNoteSectionMeta } from './noteSectionMeta.ts';
 import { renderReadingNoteMarkdown } from './readingNotePreview';
 
 export type NoteInsertionRequest = { id: string; seed: EvidenceSeed };
@@ -48,6 +49,18 @@ type Props = {
 };
 
 const DEFAULT_NOTE = '# 总结\n\n# 问题\n';
+
+// Reading-view text zoom. The preview's base font size is set from this value;
+// headings and code use em so the whole section scales with it.
+const NOTE_ZOOM_MIN = 0.75;
+const NOTE_ZOOM_MAX = 2.5;
+const NOTE_ZOOM_STEP = 0.1;
+const NOTE_PREVIEW_BASE_PX = 15;
+const NOTE_ZOOM_STORAGE_KEY = 'library.noteZoom';
+
+function clampNoteZoom(value: number): number {
+  return Math.round(Math.min(NOTE_ZOOM_MAX, Math.max(NOTE_ZOOM_MIN, value)) * 100) / 100;
+}
 
 function lineCount(markdown: string): number {
   if (!markdown) return 0;
@@ -133,6 +146,15 @@ export function ReadingNotePanel({
       return 'directory';
     }
   });
+  const [previewZoom, setPreviewZoom] = useState(() => {
+    try {
+      const stored = Number(window.localStorage.getItem(NOTE_ZOOM_STORAGE_KEY));
+      return stored >= NOTE_ZOOM_MIN && stored <= NOTE_ZOOM_MAX ? clampNoteZoom(stored) : 1;
+    } catch {
+      return 1;
+    }
+  });
+  const previewWheelCleanup = useRef<(() => void) | undefined>(undefined);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const noteFileInput = useRef<HTMLInputElement>(null);
@@ -152,6 +174,14 @@ export function ReadingNotePanel({
     () => parseEvidenceMarkdown(activeCache?.markdown ?? ''),
     [activeCache?.markdown],
   );
+  // The description lives in the section Markdown. The directory stays a
+  // plain title list; only the active section header shows its description.
+  // Use the live draft so editing the marker updates the header before saving.
+  const activeSectionMeta = useMemo(() => {
+    if (!activeEntry || !activeCache) return parseNoteSectionMeta('');
+    const prefix = splitSectionBody(activeCache.markdown, activeEntry.level).prefix;
+    return parseNoteSectionMeta(prefix + draft);
+  }, [activeEntry, activeCache, draft]);
   // Insertions only move forward: a child goes after the parent's existing
   // children, and the next sibling goes after the current section's subtree.
   // Preamble (level 0) cannot be a parent; its "next" action appends a new H1.
@@ -285,6 +315,42 @@ export function ReadingNotePanel({
     onEvidenceTargetsChange(targets);
     return () => onEvidenceTargetsChange([]);
   }, [activeSectionId, sections, onEvidenceTargetsChange]);
+
+  // Remember the reading scale per device. The inline font size below is the
+  // only thing that changes, so the note reflows instead of being stretched.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(NOTE_ZOOM_STORAGE_KEY, String(previewZoom));
+    } catch {
+      // A blocked localStorage only loses the remembered zoom.
+    }
+  }, [previewZoom]);
+
+  const adjustPreviewZoom = useCallback((direction: number) => {
+    setPreviewZoom((current) => clampNoteZoom(current + direction * NOTE_ZOOM_STEP));
+  }, []);
+  const resetPreviewZoom = useCallback(() => setPreviewZoom(1), []);
+
+  // Ctrl + wheel is bound natively with passive: false so the browser's page
+  // zoom does not fire while the pointer is over the Markdown preview. The ref
+  // callback re-binds when the preview swaps between the blank and section
+  // views.
+  const attachPreviewZoom = useCallback((element: HTMLDivElement | null) => {
+    previewWheelCleanup.current?.();
+    previewWheelCleanup.current = undefined;
+    if (!element) return;
+    const onWheel = (event: WheelEvent) => {
+      if (!event.ctrlKey || event.deltaY === 0) return;
+      event.preventDefault();
+      adjustPreviewZoom(event.deltaY < 0 ? 1 : -1);
+    };
+    element.addEventListener('wheel', onWheel, { passive: false });
+    previewWheelCleanup.current = () => element.removeEventListener('wheel', onWheel);
+  }, [adjustPreviewZoom]);
+  useEffect(() => () => {
+    previewWheelCleanup.current?.();
+    previewWheelCleanup.current = undefined;
+  }, []);
 
   const reloadActiveSection = useCallback(async (sectionId?: string) => {
     if (!documentId) return;
@@ -818,6 +884,14 @@ export function ReadingNotePanel({
       title="编辑 Markdown"
       onClick={() => setViewMode('edit')}>编辑{dirty && <span className="reading-note-dirty" title="有未保存修改">●</span>}</button>
   </div>;
+  const previewStyle = { fontSize: `${NOTE_PREVIEW_BASE_PX * previewZoom}px` };
+  const zoomControl = viewMode === 'read'
+    ? <button type="button" className="reading-note-zoom"
+      title="Ctrl + 滚轮调整阅读字号；点击恢复 100%"
+      aria-label={`阅读字号 ${Math.round(previewZoom * 100)}%，点击恢复 100%`}
+      onClick={resetPreviewZoom}>{Math.round(previewZoom * 100)}%</button>
+    : null;
+  const headActions = <div className="reading-note-head-actions">{zoomControl}{viewTabs}</div>;
 
   return <section className="library-panel library-panel-notes" aria-label="阅读注释">
     <input ref={noteFileInput} type="file" accept=".md,text/markdown,text/plain" hidden
@@ -888,11 +962,13 @@ export function ReadingNotePanel({
             <strong>空白笔记</strong>
             <span>r{note.revision} · 尚未拆分 section</span>
           </div>
-          {viewTabs}
+          {headActions}
         </div>
         {viewMode === 'read'
           ? blankDraft.trim()
             ? <div className="reading-note-preview" role="document" aria-label="空白笔记阅读视图"
+              ref={attachPreviewZoom}
+              style={previewStyle}
               onClick={handlePreviewClick}
               dangerouslySetInnerHTML={{ __html: renderReadingNoteMarkdown(blankDraft) }} />
             : <div className="reading-note-preview-empty">空白笔记还没有内容。切换到「编辑」开始写 Markdown。</div>
@@ -976,9 +1052,9 @@ export function ReadingNotePanel({
             {activeEntry && <div className="reading-note-section-head">
               <div className="reading-note-section-meta">
                 <strong>{editorHeading}</strong>
-                <span>{activeEntry.level === 0 ? '前言' : `H${activeEntry.level}`}{activeCache ? ` · ${activeCache.lineCount} 行` : ''}{dirty ? ' · 未保存' : ''}</span>
+                {activeSectionMeta.meta.description && <span className="reading-note-section-description">{activeSectionMeta.meta.description}</span>}
               </div>
-              {viewTabs}
+              {headActions}
             </div>}
             {viewMode === 'edit' && activeEntry && <div className="reading-note-section-actions" role="group" aria-label="新增 section">
               <button type="button" disabled={saving || !canAddChild}
@@ -1017,6 +1093,8 @@ export function ReadingNotePanel({
                   </div>
                 </> : draft.trim()
                   ? <div className="reading-note-preview" role="document" aria-label={`${editorHeading} 阅读视图`}
+                    ref={attachPreviewZoom}
+                    style={previewStyle}
                     onClick={handlePreviewClick}
                     dangerouslySetInnerHTML={{ __html: renderReadingNoteMarkdown(draft) }} />
                   : <div className="reading-note-preview-empty">这个 section 还没有正文。切换到「编辑」开始写。</div>}

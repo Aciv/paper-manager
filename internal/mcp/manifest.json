@@ -1,0 +1,712 @@
+{
+  "schemaVersion": 1,
+  "server": {
+    "name": "papers-manager",
+    "version": "0.1.0",
+    "transports": [
+      "streamable-http"
+    ],
+    "defaultAccess": "loopback",
+    "auth": "bearer-token-required-before-non-loopback",
+    "principles": [
+      "Humans and Agents use the same resources and revision rules.",
+      "No Agent identity, profile, or preference table is stored.",
+      "Tools return section IDs and content, never private storage keys or paths.",
+      "Evidence links and section descriptions are consumer-owned Markdown."
+    ],
+    "toolNamePrefix": "papers_manager_"
+  },
+  "tools": [
+    {
+      "name": "papers_manager_library_search",
+      "title": "Search the paper library",
+      "description": "Search documents by title, filename, author, DOI, tags, or document ID. Returns bounded document and paper metadata; does not read paper contents.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "Title, filename, author, or document ID fragment."
+          },
+          "doi": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_get",
+      "title": "Read one document",
+      "description": "Read one document, its paper metadata, source state, and compact processing summary. Missing paper metadata is allowed.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_import_url",
+      "title": "Import a paper URL",
+      "description": "Import one HTTP(S) paper URL and start normal processing. Returns quickly with a document ID and initial processing state; use processing_status for bounded polling.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "doi": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "papers_manager_library_update_metadata",
+      "title": "Update document metadata",
+      "description": "Correct only explicitly requested document or paper metadata fields. Omitted fields are unchanged.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "original_filename": {
+            "type": "string"
+          },
+          "doi": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "authors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "abstract": {
+            "type": "string"
+          },
+          "venue": {
+            "type": "string"
+          },
+          "tags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_delete",
+      "title": "Delete one document",
+      "description": "Delete one document after explicit user confirmation. The caller must pass confirm=true; dependent notes, citations, and Base memberships are affected.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "confirm": {
+            "type": "boolean",
+            "const": true
+          }
+        },
+        "required": [
+          "document_id",
+          "confirm"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_list_bases",
+      "title": "List Bases",
+      "description": "List bounded paper Bases.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_get_base",
+      "title": "Read one Base",
+      "description": "Read one Base and, optionally, a bounded page of its member documents.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "include_documents": {
+            "type": "boolean",
+            "default": false
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10
+          }
+        },
+        "required": [
+          "base_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_add_to_base",
+      "title": "Add a document to a Base",
+      "description": "Add one existing document to a Base. This changes membership only and never copies or deletes the document.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "base_id",
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_remove_from_base",
+      "title": "Remove a document from a Base",
+      "description": "Remove one document's Base membership. This never deletes the document.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "base_id",
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_processing_status",
+      "title": "Read document processing status",
+      "description": "Read the single processing projection for one document: stage states, active or terminal spans, safe errors, and reference progress.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_document_structure",
+      "title": "Read the source outline",
+      "description": "Read the persisted source outline, recognition generation, section page/bbox/block/Markdown hints, and diagnostics. Never infers an outline.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_document_read_markdown",
+      "title": "Read parsed Markdown",
+      "description": "Read bounded parsed Markdown with page count and recognition generation. Responses above the MCP limit fail with PAYLOAD_TOO_LARGE.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_document_read_section",
+      "title": "Read one source section",
+      "description": "Read one section from the persisted source outline by ordinal. The adapter uses the outline's Markdown range and page/Block hints; it never infers a new outline. If the section has only page/Block mapping, return those hints and a diagnostic.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "ordinal": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Source outline section ordinal."
+          }
+        },
+        "required": [
+          "document_id",
+          "ordinal"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_document_read_blocks",
+      "title": "Read page-scoped Blocks",
+      "description": "Read Blocks for exact evidence. Prefer one page; omit page_number only when a bounded all-page response is necessary.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "page_number": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_reading_note_outline",
+      "title": "Read the reading-note outline",
+      "description": "Read the revisioned note directory and consumer-derived section descriptions. The adapter reads bounded section Markdown and parses section-meta; the backend does not expose descriptions.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "include_descriptions": {
+            "type": "boolean",
+            "default": true
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_reading_note_read_section",
+      "title": "Read one note section",
+      "description": "Read one section body including its heading, section-meta block, line count, and current note revision. Large sections fail with PAYLOAD_TOO_LARGE.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "section_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id",
+          "section_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_reading_note_create",
+      "title": "Create a reading note",
+      "description": "Create an absent reading note only. expected_revision must be 0; existing notes return REVISION_CONFLICT.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "markdown": {
+            "type": "string"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "const": 0
+          }
+        },
+        "required": [
+          "document_id",
+          "markdown",
+          "expected_revision"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_reading_note_apply_edits",
+      "title": "Apply note edits",
+      "description": "Apply the existing revision-fenced semantic edit contract atomically. A stale expected_revision returns REVISION_CONFLICT; never auto-refresh and retry the same content.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "edits": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 128,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "op": {
+                  "type": "string",
+                  "enum": [
+                    "replaceText",
+                    "replaceRange",
+                    "insertAt",
+                    "appendText",
+                    "replaceSection",
+                    "addSection",
+                    "deleteSection"
+                  ]
+                },
+                "section_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "parent_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "after_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "old_text": {
+                  "type": "string"
+                },
+                "new_text": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                },
+                "start": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "line": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "line"
+                  ]
+                },
+                "end": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "line": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "line"
+                  ]
+                },
+                "position": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "line": {
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "column": {
+                      "type": "integer",
+                      "minimum": 1
+                    }
+                  },
+                  "required": [
+                    "line"
+                  ]
+                },
+                "line_start": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "line_end": {
+                  "type": "integer",
+                  "minimum": 1
+                }
+              },
+              "required": [
+                "op"
+              ]
+            }
+          }
+        },
+        "required": [
+          "document_id",
+          "expected_revision",
+          "edits"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_evidence_validate",
+      "title": "Validate an evidence link",
+      "description": "Parse and validate one papers-manager evidence link against the current document. The adapter is a consumer parser; the core note service remains evidence-agnostic.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "href": {
+            "type": "string",
+            "pattern": "^papers-manager://"
+          }
+        },
+        "required": [
+          "document_id",
+          "href"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    }
+  ]
+}

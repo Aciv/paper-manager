@@ -10,7 +10,7 @@
     "test:doi": "node --experimental-strip-types --test tests/doiCitation.test.ts",
     "test:bibliography": "node --experimental-strip-types --test tests/bibliographyExport.test.ts",
     "test:translation": "node --experimental-strip-types --test tests/translation.test.ts",
-    "test:reading-note": "node --experimental-strip-types --test tests/evidenceLinks.test.ts tests/noteEdits.test.ts tests/readingNotePreview.test.ts"
+    "test:reading-note": "node --experimental-strip-types --test tests/evidenceLinks.test.ts tests/noteEdits.test.ts tests/noteSectionMeta.test.ts tests/readingNotePreview.test.ts"
   },
   "dependencies": {
     "@fontsource-variable/manrope": "^5.3.0",

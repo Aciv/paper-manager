@@ -191,7 +191,7 @@ revision 乐观锁。笔记中的内部证据链接使用
 - 文档识别通过 `DocumentRecognizer` 端口接入：`default` 在 Go 本地转换 TXT、Markdown、JSON 与 CSV，`builtin` 调用 `proto/document_parser.proto` 的 Python gRPC `DocumentParser.Recognize`。识别任务由 Asynq 执行；Python 返回 Markdown 与页级 source-map Blocks，Go 负责文件存储、数据库事务和状态更新。
 - 解析结果写入 `document_blocks`。每个块包含 `type`、文本、页面尺寸、PyMuPDF 坐标与 Markdown Unicode code-point 区间；网页可据此将块高亮回原 PDF。图片和表格需要独立资产 URL，因此在资产导出实现前不会被持久化为 `image` / `table` Block。
 - 阅读端使用 PDF.js（通过 `react-pdf`）渲染 PDF、复制文本，并可切换到解析 Block 选择模式。
-- 阅读库左侧「PDF 目录」读取持久化 source outline（`GET /api/document/{id}/structure`），并标注来源是 PDF 原生目录还是 Markdown 标题回退；右侧「阅读注释」只读取 section 目录，按需加载单个 section，通过 revision 乐观锁的 Plan B `/reading-note/operations` 编辑，整篇创建/导入使用 `PUT`，导出使用 `/reading-note/export`。注释面板分为「阅读」和「编辑」两个视图：阅读视图用前端安全渲染的 Markdown 预览展示当前 section，证据链接可直接定位 PDF；编辑视图才显示 textarea、新增/删除 section 和保存操作。目录和当前 section 的证据列表共用面板内部的同一个侧边栏：可在「目录」和「证据」之间切换，侧边栏可折叠为窄轨，并记住开关状态和上次选择的栏目。开始状态把「创建笔记」「空白开始」「上传 .md」排列为带说明的统一操作项。支持创建空白笔记、上传整篇 `.md`、上传单个 section `.md`；新增 section 只有两个向后插入动作：`增加子节`（加入当前 section 的子节末尾，H3 禁用）和 `插入下一节`（在当前 section 子树之后插入同级 section）；删除后目录顺序自动补齐。409 冲突会重新加载最新 revision，导入期间的 503 会明确提示。
+- 阅读库左侧「PDF 目录」读取持久化 source outline（`GET /api/document/{id}/structure`），并标注来源是 PDF 原生目录还是 Markdown 标题回退；右侧「阅读注释」只读取 section 目录，按需加载单个 section，通过 revision 乐观锁的 Plan B `/reading-note/operations` 编辑，整篇创建/导入使用 `PUT`，导出使用 `/reading-note/export`。注释面板分为「阅读」和「编辑」两个视图：阅读视图用前端安全渲染的 Markdown 预览展示当前 section，证据链接可直接定位 PDF；编辑视图才显示 textarea、新增/删除 section 和保存操作。目录和当前 section 的证据列表共用面板内部的同一个侧边栏：可在「目录」和「证据」之间切换，侧边栏可折叠为窄轨，并记住开关状态和上次选择的栏目。开始状态把「创建笔记」「空白开始」「上传 .md」排列为带说明的统一操作项。支持创建空白笔记、上传整篇 `.md`、上传单个 section `.md`；新增 section 只有两个向后插入动作：`增加子节`（加入当前 section 的子节末尾，H3 禁用）和 `插入下一节`（在当前 section 子树之后插入同级 section）；删除后目录顺序自动补齐。409 冲突会重新加载最新 revision，导入期间的 503 会明确提示。section Markdown 可在标题后带可选的 `<!-- papers-manager:section-meta v=1 ... -->` 描述块；Go 后端把它当作普通正文保存，前端 `noteSectionMeta.ts` 解析并在目录/标题及预览中呈现，阅读预览会剥离该块。人类与 Agent 共用的读写契约见 [`docs/reading-note-agent-contract.md`](docs/reading-note-agent-contract.md)。
 - 阅读器中的「插入证据」取代原来的空处理动作：文本、Block 或框选只把一条 `papers-manager://` 证据链接插入当前 section，不复制原文；证据链接由前端 `evidenceLinks.ts` 构造和解析，后端不解析。只有当前选中的 section 的证据区域会叠加显示在可见 PDF 页面上，切换 section 后旧 section 的叠加立即清除；点击链接或「定位」按 page/rectangle 跳转，block hint 失效时降级到矩形。
 
 ## API
@@ -211,6 +211,7 @@ revision 乐观锁。笔记中的内部证据链接使用
 - `POST /api/document/{id}/reading-note/edits`：面向 Agent/自动化的语义编辑层，按 `expectedRevision` 快照原子执行 `replaceText`、`replaceRange`、`insertAt`、`appendText`、`replaceSection`、`addSection`、`deleteSection`。位置是 section 内 1-based 行号和 1-based Unicode code-point 列边界，范围为 end-exclusive；省略开始列表示行首、省略结束列表示行尾。所有内容统一放在 `content`：普通编辑是插入/替换文本，`replaceSection`/`addSection` 要求内容是包含一个 H1-H3 标题的完整 section Markdown。`replaceText` 默认要求唯一匹配，可用 `lineStart`/`lineEnd` 缩小窗口；同一 section 的文本范围不能重叠或共享起点。结构编辑先于文本编辑应用，`replaceSection` 必须是该 section 的唯一编辑。服务端把语义编辑转换为 `insertText`/`deleteText` 原语后再提交同一个 revision。内联语义编辑字段上限为 256 KiB、请求文本总预算 1 MiB；更大内容使用 raw `PUT .../sections/{sectionId}` 或整篇文件上传。
 - `GET /api/document/{id}/structure`：返回持久化论文目录的可重建紧凑结构，不包含完整 Blocks；阅读笔记 section 由 `/reading-note` 独立读取。
 - 笔记 Markdown 中的 `papers-manager://` 证据链接由前端、Agent 或 MCP 自行解析；Go 后端不索引、不持久化、也不解析笔记证据。
+- section Markdown 可在标题行后包含 `<!-- papers-manager:section-meta v=1 ... -->` 描述块。该块由前端/Agent/MCP 解析，后端仅作为正文保存；格式、读写流程和派生目录约定见 [`docs/reading-note-agent-contract.md`](docs/reading-note-agent-contract.md)。
 - `PATCH /api/document/{id}`：仅更新 `originalFilename`、`doi`。旧的请求字段 `filename` 暂作为输入别名兼容。
 - `GET /api/paper/{documentID}`、`PATCH /api/paper/{documentID}`：获取或更新独立的论文书目信息；标签通过 `paperMetadata.tags` 数组维护。
 - `GET /api/paper/search`：支持 `title`、`author`（作者姓名模糊匹配）、重复的 `tag` 参数、`tagMode=all|any` 及 `page`；标签查询使用 PostgreSQL JSONB GIN 索引。
@@ -221,6 +222,12 @@ revision 乐观锁。笔记中的内部证据链接使用
 - `DELETE /api/document/{id}`：删除文档元数据及其已存储的原始文件。
 - `POST /api/document/bases`、`GET /api/document/bases`、`GET|PATCH|DELETE /api/document/bases/{baseID}`：管理文档 Base。
 - `PUT|DELETE /api/document/bases/{baseID}/documents/{documentID}`：加入或移除 Base 成员；`GET /api/document/bases/{baseID}/documents?page=1` 分页列出成员。
+
+### Agent skills 与 MCP 规范
+
+`agent-skills/` 定义两个 Agent skill：`papers-manager-library` 负责入库、元数据、Base、处理状态和删除；`papers-manager-reading` 负责 L0-L4 分层阅读、section 笔记生成、section description、证据放置和 Base 总结工作流。Base 总结在 Phase 3B 前不单独成 skill。
+
+MCP 是主要的 Agent 执行边界：`docs/mcp/papers-manager-tools.md` 描述传输、鉴权、错误、边界和工具行为，`docs/mcp/papers-manager-tools.json` 是 19 个工具的机器可读清单。所有工具名使用 `papers_manager_` 前缀；Host 可以再包一层命名空间。Skill 只承载策略和渐进披露引用，scripts 不作为第二套后端客户端。两个 Skill 都带运行前置检查：MCP 工具缺失或未配置时明确报告并停止写操作，不用 `curl`/scripts 兜底。实现位于 `internal/mcp`：设置 `MCP_ENABLED=true` 后 API 在同一进程的 loopback `MCP_ADDR` 启动 MCP，共享同一 DI service/note gate；非 loopback 必须配置 `MCP_TOKEN` 并以 Bearer 发送。传输仅支持 MCP Streamable HTTP（`/mcp`），不提供原生 stdio；仅支持 stdio 的 Host 需使用客户端桥接。Claude Code、Codex、OpenCode、DeepSeek Harness 的 MCP 与 Skill 安装见 [`docs/mcp/agent-installation.md`](docs/mcp/agent-installation.md)。公式来源采用 Block 或 PDF page/rectangle 证据链接：笔记说明公式含义并跳回原文高亮，不从当前 PDF 文本层猜测或重写 LaTeX；内联公式排版暂缓。阅读笔记的 brief/standard/deep 模板、质量清单和当前阅读视图支持的 Markdown 子集见 `agent-skills/papers-manager-reading/references/notes-standard.md`。Skill 源包在 `agent-skills/`，安装方式见安装指南，正式打包/安装器尚未实现；后端不保存 Agent 身份或偏好。
 
 Python worker 位于 [`python/`](python/README.md)。启动它和 Redis 后，PDF 上传会经 Asynq 与 gRPC 异步解析：`pymupdf4llm` 生成按页 Markdown 和布局块，Go API 将其写入 PostgreSQL 并将文档状态更新为 `ready`。
 

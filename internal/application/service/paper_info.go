@@ -779,7 +779,13 @@ func scorePaperCatalogCandidate(
 	candidateArXivID := paperArXivID(
 		candidate.DOI + " " + candidate.SourceURL + " " + candidate.ProviderID,
 	)
-	exactArXiv := queryArXivID != "" &&
+	// An arXiv landing URL can be attached to a provider record with a
+	// conflicting DOI (OpenAlex has produced such merged records). Do not let
+	// URL-only arXiv evidence override an explicit DOI conflict; fall back to
+	// title/author similarity instead.
+	doiConflict := queryDOI != "" && candidateDOI != "" && queryDOI != candidateDOI
+	exactArXiv := !doiConflict &&
+		queryArXivID != "" &&
 		candidateArXivID != "" &&
 		queryArXivID == candidateArXivID
 	if exactDOI || exactArXiv {

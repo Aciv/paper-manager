@@ -13,9 +13,12 @@ func TestLegacyTaskTypesIncludesRetiredCatalogNames(t *testing.T) {
 		}
 	}
 	for _, taskType := range []string{
+		"document:recognize",
+		"paper:metadata_extract",
 		"paper:source_query_enqueue",
 		"paper:reference_query_enqueue",
 		"paper:query_apply",
+		"document:remote_import",
 	} {
 		if _, exists := legacyTaskTypes[taskType]; exists {
 			t.Fatalf("active task type %q must not be purged", taskType)

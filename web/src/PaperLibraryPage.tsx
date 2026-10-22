@@ -245,6 +245,9 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const citationCards = useRef(new Map<string, HTMLLIElement>());
   const loadGeneration = useRef(0);
   const resizeDrag = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(null);
+  // Widen at most once per visit to the notes tab, so a later manual drag or
+  // window resize never snaps the column back.
+  const notesAutoWidened = useRef(false);
   // Floating edge button for a collapsed column: appears only while the pointer
   // is near that edge, pinned at the position of the first approach; clicking it
   // expands the column. Collapsing itself uses the menu-bar button.
@@ -310,6 +313,9 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   // with up to four actions. Below ~300px its labels and actions wrap into
   // vertical columns, so keep that side wider while the catalog stays compact.
   const MIN_RIGHT_COLUMN_WIDTH = 300;
+  // Reading notes are a text surface, not a metadata list: the section
+  // sidebar plus the Markdown column need more room than citation cards.
+  const NOTES_MIN_COLUMN_WIDTH = 560;
   const columnMin = (side: 'left' | 'right') => side === 'right' ? MIN_RIGHT_COLUMN_WIDTH : MIN_COLUMN_WIDTH;
   const columnCap = Math.max(MIN_RIGHT_COLUMN_WIDTH, Math.round(viewportWidth * 0.45));
   const widthMax = (side: 'left' | 'right') => {
@@ -322,6 +328,18 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   };
   const effectiveLeftWidth = Math.max(columnMin('left'), Math.min(leftWidth, widthMax('left')));
   const effectiveRightWidth = Math.max(columnMin('right'), Math.min(rightWidth, widthMax('right')));
+
+  // Opening 阅读注释 widens a too-narrow column once; the user can still drag
+  // it back, and that manual choice is not overridden while the tab stays open.
+  useEffect(() => {
+    if (rightMenu !== 'notes' || rightCollapsed) {
+      notesAutoWidened.current = false;
+      return;
+    }
+    if (notesAutoWidened.current) return;
+    notesAutoWidened.current = true;
+    setRightWidth((current) => Math.max(current, Math.min(NOTES_MIN_COLUMN_WIDTH, widthMax('right'))));
+  }, [rightMenu, rightCollapsed, viewportWidth, leftCollapsed, leftWidth]);
 
   const activeBase = bases.find((base) => base.id === baseID);
   const selectedIsPDF = selected?.contentType === 'application/pdf';

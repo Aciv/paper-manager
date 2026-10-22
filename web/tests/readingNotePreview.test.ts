@@ -53,6 +53,21 @@ test('renders safe external links and refuses script URLs', () => {
   assert.match(html, /bad/);
 });
 
+test('hides the section metadata marker from the reading view', () => {
+  const html = renderReadingNoteMarkdown([
+    '# 方法',
+    '',
+    '<!-- papers-manager:section-meta v=1',
+    '{"description":"不应出现在阅读视图里的描述"}',
+    '-->',
+    '',
+    '正文。',
+  ].join('\n'));
+  assert.equal(html.includes('papers-manager:section-meta'), false);
+  assert.equal(html.includes('不应出现在阅读视图里的描述'), false);
+  assert.match(html, /<h1>方法<\/h1><p>正文。<\/p>/);
+});
+
 test('marks evidence links as panel navigation buttons', () => {
   const href = 'papers-manager://self/evidence?v=1&page=3&rect=0.1,0.2,0.3,0.4';
   const html = renderReadingNoteMarkdown(`第 3 页：[${href}](${href})`);

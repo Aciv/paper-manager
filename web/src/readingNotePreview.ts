@@ -2,6 +2,7 @@
 // The renderer emits a small allowlist of HTML elements; every piece of note
 // text is escaped, so raw HTML in a note can never become markup. Evidence
 // links stay buttons instead of anchors so the panel can navigate the PDF.
+import { stripNoteSectionMeta } from './noteSectionMeta.ts';
 
 const HTML_ESCAPES: Record<string, string> = {
   '&': '&amp;',
@@ -229,5 +230,6 @@ function renderBlocks(lines: string[], depth = 0): string {
 }
 
 export function renderReadingNoteMarkdown(markdown: string): string {
-  return renderBlocks(markdown.replace(/\r\n?/g, '\n').split('\n'));
+  const body = stripNoteSectionMeta(markdown).replace(/\r\n?/g, '\n');
+  return renderBlocks(body.split('\n'));
 }

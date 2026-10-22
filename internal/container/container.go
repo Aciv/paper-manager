@@ -15,6 +15,7 @@ import (
 	"paperMaster/internal/infrastructure/paperextraction"
 	"paperMaster/internal/infrastructure/paperurl"
 	"paperMaster/internal/limit"
+	mcpadapter "paperMaster/internal/mcp"
 	"paperMaster/internal/router"
 	"paperMaster/internal/types/interfaces"
 
@@ -73,6 +74,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(appservice.NewDocumentBaseService))
 	must(dependencies.Provide(appservice.NewBibliographyServiceWithTaskSystem))
 	must(dependencies.Provide(appservice.NewDocumentHousekeepingService))
+	must(dependencies.Provide(mcpadapter.NewToolServer))
 	must(dependencies.Provide(repository.NewTaskDeadLetterRepository))
 	must(dependencies.Provide(fileservice.NewStorage))
 	must(dependencies.Provide(handler.NewDocumentHandler))

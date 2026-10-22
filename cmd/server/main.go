@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,6 +22,7 @@ import (
 	"paperMaster/internal/container"
 	"paperMaster/internal/limit"
 	"paperMaster/internal/logger"
+	mcpadapter "paperMaster/internal/mcp"
 	"paperMaster/internal/router"
 	"paperMaster/internal/types/interfaces"
 
@@ -73,6 +75,7 @@ func main() {
 		sharedLimiter *limit.Engine,
 		recognizer interfaces.DocumentRecognizer,
 		extractor interfaces.PaperMetadataExtractor,
+		toolServer *mcpadapter.ToolServer,
 	) error {
 		// Defer order is intentional (LIFO). The HTTP layer drains first
 		// (below), then housekeeping stops, workers finish, the in-process
@@ -118,6 +121,36 @@ func main() {
 			return fmt.Errorf("start listener: %w", err)
 		}
 
+		var mcpHTTP *http.Server
+		var mcpServeErr chan error
+		if cfg.MCPEnabled {
+			mcpHandler, err := toolServer.Handler()
+			if err != nil {
+				return fmt.Errorf("prepare MCP adapter: %w", err)
+			}
+			mcpListener, err := net.Listen("tcp", cfg.MCPAddress)
+			if err != nil {
+				return fmt.Errorf("start MCP listener: %w", err)
+			}
+			mcpHTTP = &http.Server{
+				Handler:           mcpHandler,
+				ReadHeaderTimeout: 5 * time.Second,
+				ReadTimeout:       cfg.HTTPReadTimeout,
+				WriteTimeout:      cfg.HTTPWriteTimeout,
+				IdleTimeout:       cfg.HTTPIdleTimeout,
+			}
+			mcpServeErr = make(chan error, 1)
+			go func() { mcpServeErr <- mcpHTTP.Serve(mcpListener) }()
+			defer func() {
+				shutdownCtx, cancel := context.WithTimeout(context.Background(), cfg.HTTPShutdownTimeout)
+				defer cancel()
+				if err := mcpHTTP.Shutdown(shutdownCtx); err != nil {
+					logger.Warn(context.Background(), "MCP shutdown failed", "error", err)
+				}
+			}()
+			logger.Info(context.Background(), "MCP server is running", "address", cfg.MCPAddress)
+		}
+
 		signals := make(chan os.Signal, 2)
 		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
 		defer signal.Stop(signals)
@@ -130,6 +163,10 @@ func main() {
 		case err := <-serveErr:
 			if err != nil && err != http.ErrServerClosed {
 				return fmt.Errorf("serve API: %w", err)
+			}
+		case err := <-mcpServeErr:
+			if err != nil && err != http.ErrServerClosed {
+				return fmt.Errorf("serve MCP: %w", err)
 			}
 		case received := <-signals:
 			logger.Info(context.Background(), "received shutdown signal", "signal", received)

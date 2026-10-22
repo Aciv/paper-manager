@@ -17,7 +17,6 @@ import (
 
 var legacyTaskTypes = map[string]struct{}{
 	"document:process":         {},
-	"document:remote_import":   {},
 	"paper:metadata-extract":   {},
 	"paper:reference-dispatch": {},
 	"paper:catalog-resolve":    {},
@@ -32,7 +31,8 @@ var queues = []string{
 	types.QueueCritical,
 	types.QueueDefault,
 	types.QueueLow,
-	"download", // retired remote-reference queue; no runtime producer uses it.
+	// The download lane is active; scan it for retired hyphenated task types.
+	types.QueueDownload,
 }
 
 const pageSize = 100

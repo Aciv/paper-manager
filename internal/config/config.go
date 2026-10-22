@@ -49,6 +49,8 @@ const (
 	defaultHTTPWriteRateBurst                                = 60
 	defaultHTTPUploadConcurrency                             = 4
 	defaultHTTPBatchConcurrency                              = 2
+	defaultMCPMaxRequestBytes                          int64 = 8 << 20
+	defaultMCPAddress                                        = "127.0.0.1:8090"
 	defaultBatchImportTimeout                                = 2 * time.Minute
 	defaultAsynqConcurrency                                  = 32
 	defaultDocumentRecognitionConcurrency                    = 4
@@ -90,6 +92,12 @@ type Config struct {
 	HTTPWriteRateBurst     int
 	HTTPUploadConcurrency  int
 	HTTPBatchConcurrency   int
+	// MCPEnabled starts the loopback MCP adapter in the API process. The
+	// adapter shares application services and note gates with HTTP.
+	MCPEnabled         bool
+	MCPAddress         string
+	MCPToken           string
+	MCPMaxRequestBytes int64
 	// HTTPTrustedProxies lists proxy CIDRs whose X-Forwarded-For is trusted.
 	// Empty means ClientIP uses RemoteAddr (no proxy spoofing).
 	HTTPTrustedProxies []string
@@ -357,6 +365,11 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mcpEnabled := strings.EqualFold(strings.TrimSpace(env("MCP_ENABLED", "false")), "true")
+	mcpMaxRequestBytes, err := positiveInt64Env("MCP_MAX_REQUEST_BYTES", defaultMCPMaxRequestBytes, 64<<20)
+	if err != nil {
+		return Config{}, err
+	}
 	batchImportTimeout, err := durationEnv("BATCH_IMPORT_TIMEOUT", defaultBatchImportTimeout)
 	if err != nil {
 		return Config{}, err
@@ -477,6 +490,10 @@ func Load() (Config, error) {
 		HTTPWriteRateBurst:                          httpWriteRateBurst,
 		HTTPUploadConcurrency:                       httpUploadConcurrency,
 		HTTPBatchConcurrency:                        httpBatchConcurrency,
+		MCPEnabled:                                  mcpEnabled,
+		MCPAddress:                                  env("MCP_ADDR", defaultMCPAddress),
+		MCPToken:                                    env("MCP_TOKEN", ""),
+		MCPMaxRequestBytes:                          mcpMaxRequestBytes,
 		HTTPTrustedProxies:                          httpTrustedProxies,
 		BatchImportTimeout:                          batchImportTimeout,
 		DatabaseDriver:                              strings.ToLower(env("DB_DRIVER", "postgres")),
