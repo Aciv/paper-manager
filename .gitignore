@@ -15,7 +15,7 @@ reports
 
 # Runtime files
 Logs/
-data/uploads/
+data/
 
 # Local model corpora and trained artifacts
 model_train
