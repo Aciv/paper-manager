@@ -9,7 +9,7 @@ tmp_dir = "tmp/air"
   bin = "./tmp/air/papers-manager"
   delay = 750
   include_ext = ["go"]
-  exclude_dir = [".git", "data", "Logs", "model_train", "python", "tmp", "web"]
+  exclude_dir = [".git", "data", "Logs", "model_train", "pdf_parser", "tmp", "web"]
   exclude_regex = ["_test\\.go$"]
   stop_on_error = true
 

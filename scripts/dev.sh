@@ -51,7 +51,7 @@ require_all_dependencies() {
   done
   if [[ ! -x "$repo_root/.venv/bin/python" ]]; then
     echo "Python virtual environment is missing." >&2
-    echo "Run: python3 -m venv .venv && .venv/bin/pip install -r python/requirements.txt" >&2
+    echo "Run: python3 -m venv .venv && .venv/bin/pip install -r pdf_parser/requirements.txt" >&2
     missing=1
   fi
   if [[ ! -x "$repo_root/web/node_modules/.bin/vite" ]]; then
@@ -229,12 +229,12 @@ case "$command_name" in
   parser)
     if [[ ! -x .venv/bin/python ]]; then
       echo "Python virtual environment is missing." >&2
-      echo "Run: python3 -m venv .venv && .venv/bin/pip install -r python/requirements.txt" >&2
+      echo "Run: python3 -m venv .venv && .venv/bin/pip install -r pdf_parser/requirements.txt" >&2
       exit 1
     fi
     load_dotenv
     export PYTHONUNBUFFERED=1
-    cd python
+    cd pdf_parser
     exec ../.venv/bin/python -m papers_parser.server
     ;;
   frontend)

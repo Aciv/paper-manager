@@ -15,7 +15,7 @@ from pathlib import Path
 from uuid import uuid4
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(ROOT / "python"), str(ROOT)]
+sys.path[:0] = [str(ROOT / "pdf_parser"), str(ROOT)]
 
 import document_parser_pb2  # noqa: E402
 from papers_parser.crf_engine import (  # noqa: E402

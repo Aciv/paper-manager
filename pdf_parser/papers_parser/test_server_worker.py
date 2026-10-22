@@ -140,9 +140,9 @@ class WorkerPoolTest(unittest.TestCase):
 
 class ServerImportTest(unittest.TestCase):
     def test_server_import_does_not_load_heavy_parser_dependencies(self) -> None:
-        python_dir = Path(__file__).resolve().parents[1]
+        parser_dir = Path(__file__).resolve().parents[1]
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(python_dir) + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(parser_dir) + os.pathsep + env.get("PYTHONPATH", "")
         script = (
             "import sys; import papers_parser.server; "
             "heavy=[name for name in ('pymupdf','pymupdf4llm','pymupdf_layout','onnxruntime','pycrfsuite','numpy') if name in sys.modules]; "
@@ -150,7 +150,7 @@ class ServerImportTest(unittest.TestCase):
         )
         completed = subprocess.run(
             [sys.executable, "-c", script],
-            cwd=python_dir,
+            cwd=parser_dir,
             env=env,
             capture_output=True,
             text=True,
@@ -161,9 +161,9 @@ class ServerImportTest(unittest.TestCase):
         self.assertEqual(completed.stdout.strip(), "", completed.stdout)
 
     def test_extract_worker_dependency_import_does_not_load_recognition_stack(self) -> None:
-        python_dir = Path(__file__).resolve().parents[1]
+        parser_dir = Path(__file__).resolve().parents[1]
         env = os.environ.copy()
-        env["PYTHONPATH"] = str(python_dir) + os.pathsep + env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(parser_dir) + os.pathsep + env.get("PYTHONPATH", "")
         script = (
             "import sys, pathlib; "
             "from papers_parser.engine_factory import build_extraction_engine; "
@@ -173,7 +173,7 @@ class ServerImportTest(unittest.TestCase):
         )
         completed = subprocess.run(
             [sys.executable, "-c", script],
-            cwd=python_dir,
+            cwd=parser_dir,
             env=env,
             capture_output=True,
             text=True,

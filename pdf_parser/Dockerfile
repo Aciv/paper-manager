@@ -2,16 +2,16 @@ FROM python:3.12-slim
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
-WORKDIR /app/python
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app:/app/python
-COPY python/requirements.txt ./requirements.txt
+WORKDIR /app/pdf_parser
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHONPATH=/app:/app/pdf_parser
+COPY pdf_parser/requirements.txt ./requirements.txt
 # Do not persist a developer proxy into the parser runtime. Build arguments
 # override Docker Desktop's potentially stale lowercase proxy configuration.
 RUN HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="${HTTPS_PROXY:-$HTTP_PROXY}" NO_PROXY="$NO_PROXY" \
     http_proxy="$HTTP_PROXY" https_proxy="${HTTPS_PROXY:-$HTTP_PROXY}" no_proxy="$NO_PROXY" \
     pip install --no-cache-dir -r requirements.txt
 COPY proto /app/proto
-COPY python /app/python
+COPY pdf_parser /app/pdf_parser
 # Runtime imports the exact pure feature functions used during training, but
 # artifacts are mounted read-only by Compose rather than baked into the image.
 COPY model_train/paper_crf /app/model_train/paper_crf

@@ -203,7 +203,7 @@ read-only Compose container that path is intentionally unavailable, so the
 parser and workers write structured runtime messages to standard output; the
 server prefixes captured worker output and `docker compose logs -f parser`
 shows both. A log-path failure never interrupts an RPC. Local non-container
-runs retain the default `python/Logs/today.log`.
+runs retain the default `pdf_parser/Logs/today.log`.
 
 ## PyMuPDF page renderer
 
@@ -217,7 +217,7 @@ the render deadline/concurrency limits, PNG validation, and optional caching.
 The parser server owns the render worker pool; the Go API never runs Python.
 The same renderer is still usable as a standalone CLI for diagnostics.
 
-For an isolated local check from `python/`:
+For an isolated local check from `pdf_parser/`:
 
 ```bash
 ../.venv/bin/python -m papers_parser.render_pdf_region \
