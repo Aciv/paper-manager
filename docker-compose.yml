@@ -85,6 +85,14 @@ services:
       # The worker process uses 2x this value as its idle timeout.
       PARSER_WORKER_IDLE_SECONDS: ${PARSER_WORKER_IDLE_SECONDS:-120}
       PARSER_RENDER_WORKER_IDLE_SECONDS: ${PARSER_RENDER_WORKER_IDLE_SECONDS:-120}
+      # Large responses fragment glibc per-thread arenas; trim them back to the
+      # OS after work goes idle, and cap the number of arenas.
+      PARSER_MEMORY_TRIM_SECONDS: ${PARSER_MEMORY_TRIM_SECONDS:-60}
+      MALLOC_ARENA_MAX: ${PARSER_MALLOC_ARENA_MAX:-2}
+      # Keep large protobuf payloads out of long-lived thread arenas and return
+      # them to the OS as soon as the response is released.
+      MALLOC_MMAP_THRESHOLD_: ${PARSER_MALLOC_MMAP_THRESHOLD:-131072}
+      MALLOC_TRIM_THRESHOLD_: ${PARSER_MALLOC_TRIM_THRESHOLD:-131072}
       # Keep the ONNX layout engine (per-page blocks/boxes/crops). The thread
       # cap below is what keeps 4 workers from each starting a full-core pool
       # and blowing up memory; do not disable layout just for memory unless

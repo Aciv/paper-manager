@@ -7,10 +7,13 @@ processes started on demand, so an idle parser keeps a small resident set.
 from __future__ import annotations
 
 import argparse
+import ctypes
+import gc
 import logging
 import os
 import signal
 import threading
+import time
 from concurrent import futures
 from pathlib import Path
 
@@ -75,6 +78,7 @@ DEFAULT_MAX_CONCURRENT_RPCS = int(os.getenv("PARSER_MAX_CONCURRENT_RPCS", 8))
 DEFAULT_SHUTDOWN_GRACE_SECONDS = float(os.getenv("PARSER_SHUTDOWN_GRACE_SECONDS", 30))
 DEFAULT_RPC_MAX_SECONDS = float(os.getenv("PARSER_RPC_MAX_SECONDS", 900))
 DEFAULT_EXECUTION_MODE = os.getenv("PARSER_EXECUTION_MODE", "worker").strip().lower()
+DEFAULT_MEMORY_TRIM_SECONDS = float(os.getenv("PARSER_MEMORY_TRIM_SECONDS", 60))
 
 DEFAULT_RECOGNIZE_WORKER_MAX = int(
     os.getenv("PARSER_RECOGNIZE_WORKER_MAX", min(4, max(DEFAULT_MAX_CONCURRENT_RPCS, 1)))
@@ -442,6 +446,39 @@ def _add_inprocess_services(server, args) -> None:
     )
 
 
+def _start_memory_trim(interval_seconds: float) -> None:
+    """Return freed allocator arenas to the OS after large responses.
+
+    The front end only forwards encoded protobuf payloads, but multi-megabyte
+    recognition responses fragment per-thread glibc arenas. Python frees the
+    objects, yet the arenas stay resident. A periodic GC plus malloc_trim keeps
+    the idle resident set close to the worker-exit baseline instead of the
+    batch high-water mark. No-op when glibc malloc_trim is unavailable.
+    """
+    if interval_seconds <= 0:
+        LOG.info("parser memory trim disabled")
+        return
+    try:
+        malloc_trim = ctypes.CDLL(None).malloc_trim
+    except (AttributeError, OSError):
+        LOG.info("parser memory trim unavailable (glibc malloc_trim not found)")
+        return
+
+    def trim_loop() -> None:
+        while True:
+            time.sleep(interval_seconds)
+            try:
+                gc.collect()
+                malloc_trim(0)
+            except Exception:
+                LOG.debug("parser memory trim failed", exc_info=True)
+
+    threading.Thread(
+        target=trim_loop, name="parser-memory-trim", daemon=True
+    ).start()
+    LOG.info("parser memory trim enabled interval_seconds=%s", interval_seconds)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--address", default=os.getenv("PARSER_GRPC_ADDR", "[::]:50051"))
@@ -518,6 +555,12 @@ def main() -> None:
         default=DEFAULT_SHUTDOWN_GRACE_SECONDS,
     )
     parser.add_argument("--rpc-max-seconds", type=float, default=DEFAULT_RPC_MAX_SECONDS)
+    parser.add_argument(
+        "--memory-trim-seconds",
+        type=float,
+        default=DEFAULT_MEMORY_TRIM_SECONDS,
+        help="0 disables the periodic gc/malloc_trim idle-memory sweep",
+    )
     args = parser.parse_args()
     args.upload_dir = _resolve_project_path(args.upload_dir)
     args.paper_crf_model_dir = _resolve_project_path(args.paper_crf_model_dir)
@@ -576,7 +619,10 @@ def main() -> None:
         raise ValueError("PARSER_RENDER_MAX_OUTPUT_BYTES must be between 1 and 33554432")
     if args.shutdown_grace_seconds < 0 or args.rpc_max_seconds <= 0:
         raise ValueError("PARSER_SHUTDOWN_GRACE_SECONDS must be non-negative and PARSER_RPC_MAX_SECONDS positive")
+    if args.memory_trim_seconds < 0:
+        raise ValueError("PARSER_MEMORY_TRIM_SECONDS must be non-negative")
 
+    _start_memory_trim(args.memory_trim_seconds)
     server = _create_server(args)
     if args.execution_mode == "inprocess":
         _add_inprocess_services(server, args)
