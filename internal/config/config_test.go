@@ -207,3 +207,35 @@ func TestLoadRejectsInvalidJSONBodyLimit(t *testing.T) {
 		t.Fatal("expected invalid JSON body limit error")
 	}
 }
+
+func TestLoadMCPMediaAndLocalImportDefaults(t *testing.T) {
+	t.Setenv("MCP_MAX_IMAGE_BYTES", "")
+	t.Setenv("MCP_LOCAL_IMPORT_ROOT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPMaxImageBytes != 12<<20 {
+		t.Fatalf("MCP max image bytes = %d, want %d", cfg.MCPMaxImageBytes, 12<<20)
+	}
+	if cfg.MCPLocalImportRoot != "" {
+		t.Fatalf("MCP local import root = %q, want empty", cfg.MCPLocalImportRoot)
+	}
+}
+
+func TestLoadMCPConfiguration(t *testing.T) {
+	t.Setenv("MCP_MAX_IMAGE_BYTES", "2048")
+	t.Setenv("MCP_LOCAL_IMPORT_ROOT", "/tmp/import-root")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.MCPMaxImageBytes != 2048 || cfg.MCPLocalImportRoot != "/tmp/import-root" {
+		t.Fatalf("MCP config = %#v", cfg)
+	}
+
+	t.Setenv("MCP_MAX_IMAGE_BYTES", "0")
+	if _, err := Load(); err == nil {
+		t.Fatal("expected invalid MCP image limit error")
+	}
+}

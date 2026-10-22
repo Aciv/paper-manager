@@ -56,7 +56,8 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "group": "library"
     },
     {
       "name": "papers_manager_library_get",
@@ -80,7 +81,8 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "group": "library"
     },
     {
       "name": "papers_manager_library_import_url",
@@ -107,6 +109,36 @@
         "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": true
+      },
+      "group": "library"
+    },
+    {
+      "name": "papers_manager_library_import_file",
+      "title": "Import a local paper file",
+      "description": "Import one regular file from MCP_LOCAL_IMPORT_ROOT and start the normal processing pipeline. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty.",
+      "group": "library",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute path, or a path relative to MCP_LOCAL_IMPORT_ROOT."
+          },
+          "doi": {
+            "type": "string",
+            "description": "Optional DOI to attach to the imported document."
+          }
+        },
+        "required": [
+          "path"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -156,6 +188,34 @@
             "items": {
               "type": "string"
             }
+          },
+          "source_name": {
+            "type": "string",
+            "description": "Source name/proceedings label."
+          },
+          "source_url": {
+            "type": "string",
+            "description": "Canonical source URL."
+          },
+          "published_at": {
+            "type": "string",
+            "description": "Publication date as YYYY-MM-DD or RFC3339. Omit to keep the current date."
+          },
+          "volume": {
+            "type": "string",
+            "description": "Volume."
+          },
+          "issue": {
+            "type": "string",
+            "description": "Issue."
+          },
+          "pages": {
+            "type": "string",
+            "description": "Page range."
+          },
+          "language": {
+            "type": "string",
+            "description": "Language code or label."
           }
         },
         "required": [
@@ -167,7 +227,8 @@
         "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false
-      }
+      },
+      "group": "library"
     },
     {
       "name": "papers_manager_library_delete",
@@ -196,132 +257,8 @@
         "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false
-      }
-    },
-    {
-      "name": "papers_manager_library_list_bases",
-      "title": "List Bases",
-      "description": "List bounded paper Bases.",
-      "inputSchema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "page": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 1
-          },
-          "page_size": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 50,
-            "default": 10
-          }
-        }
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      }
-    },
-    {
-      "name": "papers_manager_library_get_base",
-      "title": "Read one Base",
-      "description": "Read one Base and, optionally, a bounded page of its member documents.",
-      "inputSchema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "base_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "include_documents": {
-            "type": "boolean",
-            "default": false
-          },
-          "page": {
-            "type": "integer",
-            "minimum": 1,
-            "default": 1
-          },
-          "page_size": {
-            "type": "integer",
-            "minimum": 1,
-            "maximum": 50,
-            "default": 10
-          }
-        },
-        "required": [
-          "base_id"
-        ]
-      },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      }
-    },
-    {
-      "name": "papers_manager_library_add_to_base",
-      "title": "Add a document to a Base",
-      "description": "Add one existing document to a Base. This changes membership only and never copies or deletes the document.",
-      "inputSchema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "base_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "document_id": {
-            "type": "string",
-            "format": "uuid"
-          }
-        },
-        "required": [
-          "base_id",
-          "document_id"
-        ]
-      },
-      "annotations": {
-        "readOnlyHint": false,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      }
-    },
-    {
-      "name": "papers_manager_library_remove_from_base",
-      "title": "Remove a document from a Base",
-      "description": "Remove one document's Base membership. This never deletes the document.",
-      "inputSchema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "base_id": {
-            "type": "string",
-            "format": "uuid"
-          },
-          "document_id": {
-            "type": "string",
-            "format": "uuid"
-          }
-        },
-        "required": [
-          "base_id",
-          "document_id"
-        ]
-      },
-      "annotations": {
-        "readOnlyHint": false,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      }
+      "group": "library"
     },
     {
       "name": "papers_manager_processing_status",
@@ -344,6 +281,76 @@
         "readOnlyHint": true,
         "destructiveHint": false,
         "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "group": "library"
+    },
+    {
+      "name": "papers_manager_processing_retry",
+      "title": "Retry document processing",
+      "description": "Retry one processing lane. auto delegates to the document service; markdown restarts recognition; extraction, catalog, and reference retry exactly one paper-information stage.",
+      "group": "library",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "markdown",
+              "extraction",
+              "catalog",
+              "reference"
+            ],
+            "default": "auto"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_processing_cancel",
+      "title": "Cancel document processing",
+      "description": "Cancel the markdown parse or paper-information lane. Cancelling one lane does not cancel the other.",
+      "group": "library",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "target": {
+            "type": "string",
+            "enum": [
+              "markdown",
+              "paper_info"
+            ],
+            "default": "markdown"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
         "openWorldHint": false
       }
     },
@@ -369,31 +376,8 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
-    },
-    {
-      "name": "papers_manager_document_read_markdown",
-      "title": "Read parsed Markdown",
-      "description": "Read bounded parsed Markdown with page count and recognition generation. Responses above the MCP limit fail with PAYLOAD_TOO_LARGE.",
-      "inputSchema": {
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-          "document_id": {
-            "type": "string",
-            "format": "uuid"
-          }
-        },
-        "required": [
-          "document_id"
-        ]
       },
-      "annotations": {
-        "readOnlyHint": true,
-        "destructiveHint": false,
-        "idempotentHint": true,
-        "openWorldHint": false
-      }
+      "group": "reading"
     },
     {
       "name": "papers_manager_document_read_section",
@@ -423,7 +407,33 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "group": "reading"
+    },
+    {
+      "name": "papers_manager_document_read_markdown",
+      "title": "Read parsed Markdown",
+      "description": "Read bounded parsed Markdown with page count and recognition generation. Responses above the MCP limit fail with PAYLOAD_TOO_LARGE.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "group": "reading"
     },
     {
       "name": "papers_manager_document_read_blocks",
@@ -444,6 +454,37 @@
         },
         "required": [
           "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "group": "reading"
+    },
+    {
+      "name": "papers_manager_document_read_block_image",
+      "title": "Read a Block image",
+      "description": "Return the parser-stored PNG crop for an image or table Block as an MCP image content block. The private storage key is never returned.",
+      "group": "reading",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "block_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id",
+          "block_id"
         ]
       },
       "annotations": {
@@ -479,7 +520,8 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "group": "reading"
     },
     {
       "name": "papers_manager_reading_note_read_section",
@@ -508,7 +550,8 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
-      }
+      },
+      "group": "reading"
     },
     {
       "name": "papers_manager_reading_note_create",
@@ -541,7 +584,8 @@
         "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": false
-      }
+      },
+      "group": "reading"
     },
     {
       "name": "papers_manager_reading_note_apply_edits",
@@ -592,13 +636,16 @@
                   "format": "uuid"
                 },
                 "old_text": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "replaceText only: exact text to find. Leave empty for other operations."
                 },
                 "new_text": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "replaceText only: replacement text. Use content for append/insert/replaceRange."
                 },
                 "content": {
-                  "type": "string"
+                  "type": "string",
+                  "description": "replaceRange, insertAt, appendText, replaceSection, and addSection content. Not used by replaceText."
                 },
                 "start": {
                   "type": "object",
@@ -677,6 +724,141 @@
         "destructiveHint": true,
         "idempotentHint": false,
         "openWorldHint": false
+      },
+      "group": "reading"
+    },
+    {
+      "name": "papers_manager_reading_note_replace",
+      "title": "Replace a reading note",
+      "description": "Replace the entire reading note from Markdown, fenced by expected_revision. This is the whole-note import/replace path; use apply_edits for incremental changes.",
+      "group": "reading",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "markdown": {
+            "type": "string",
+            "description": "Complete H1-H3 sectioned Markdown."
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "document_id",
+          "markdown",
+          "expected_revision"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_reading_note_delete",
+      "title": "Delete a reading note",
+      "description": "Delete the entire reading note at the expected revision. Requires explicit user confirmation.",
+      "group": "reading",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "Must be true."
+          }
+        },
+        "required": [
+          "document_id",
+          "expected_revision",
+          "confirm"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_reading_note_export",
+      "title": "Export a reading note",
+      "description": "Return the full concatenated reading-note Markdown with its current revision. Responses larger than 16 MiB return PAYLOAD_TOO_LARGE.",
+      "group": "reading",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_reading_note_replace_section",
+      "title": "Replace a note section",
+      "description": "Replace one whole note section with complete section Markdown, preserving its heading and level. Use apply_edits for smaller changes.",
+      "group": "reading",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "section_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "markdown": {
+            "type": "string"
+          },
+          "expected_revision": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "document_id",
+          "section_id",
+          "markdown",
+          "expected_revision"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
       }
     },
     {
@@ -706,6 +888,616 @@
         "destructiveHint": false,
         "idempotentHint": true,
         "openWorldHint": false
+      },
+      "group": "reading"
+    },
+    {
+      "name": "papers_manager_base_list",
+      "title": "List Bases",
+      "description": "List named paper collections with bounded pagination.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 10
+          }
+        },
+        "required": []
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_get",
+      "title": "Read a Base",
+      "description": "Read one Base and optionally its first/selected member page. Member listing uses the backend's fixed page size.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "include_documents": {
+            "type": "boolean"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          }
+        },
+        "required": [
+          "base_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_list_documents",
+      "title": "List Base members",
+      "description": "List one page of members for a Base.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "exclude_unknown": {
+            "type": "boolean",
+            "description": "Only include documents with an available source file."
+          }
+        },
+        "required": [
+          "base_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_create",
+      "title": "Create a Base",
+      "description": "Create a named collection. This does not copy or modify documents.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_update",
+      "title": "Update a Base",
+      "description": "Rename a Base or change its description. Omitted fields are unchanged.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_delete",
+      "title": "Delete a Base",
+      "description": "Delete a collection and its memberships only; source documents are never deleted. Requires explicit confirmation.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "Must be true."
+          }
+        },
+        "required": [
+          "base_id",
+          "confirm"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_add_document",
+      "title": "Add a document to a Base",
+      "description": "Add one existing document to a Base. Membership only.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "base_id",
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_remove_document",
+      "title": "Remove a document from a Base",
+      "description": "Remove one membership. The source document and its notes are never deleted.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "base_id",
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_bibliography_generate",
+      "title": "Generate a Base bibliography",
+      "description": "Queue a .bib snapshot export for a Base. Poll the returned task ID with base_bibliography_status.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "base_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      }
+    },
+    {
+      "name": "papers_manager_base_bibliography_status",
+      "title": "Read bibliography task status",
+      "description": "Read a Base bibliography generation task and its completed snapshot, if available.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "task_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "base_id",
+          "task_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_list",
+      "title": "List citations",
+      "description": "List one document's outgoing bibliography rows, including unresolved references.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_list_cited_by",
+      "title": "List citing papers",
+      "description": "List bibliography rows whose resolved target is this document.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_add",
+      "title": "Add a citation",
+      "description": "Add one manual bibliography row. Optionally link it to a stored document.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "raw_reference": {
+            "type": "string"
+          },
+          "cited_document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "document_id",
+          "raw_reference"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_replace",
+      "title": "Replace citations",
+      "description": "Replace a document's entire outgoing bibliography. This can remove manual rows; requires explicit confirmation.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "citations": {
+            "type": "array",
+            "maxItems": 500,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "raw_reference": {
+                  "type": "string"
+                },
+                "cited_document_id": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              },
+              "required": [
+                "raw_reference"
+              ]
+            }
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "Must be true."
+          }
+        },
+        "required": [
+          "document_id",
+          "citations",
+          "confirm"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_remove",
+      "title": "Remove a citation",
+      "description": "Delete one bibliography row by reference ID. Requires explicit confirmation.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "confirm": {
+            "type": "boolean",
+            "description": "Must be true."
+          }
+        },
+        "required": [
+          "reference_id",
+          "confirm"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_update_reference",
+      "title": "Edit a reference",
+      "description": "Correct one reference's bibliographic fields. Omitted fields are unchanged; empty values clear text fields. Resolution state is fenced by the service.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "doi": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "authors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "affiliation": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name"
+              ]
+            }
+          },
+          "venue": {
+            "type": "string"
+          },
+          "published_at": {
+            "type": "string",
+            "description": "YYYY-MM-DD or RFC3339; empty clears."
+          },
+          "volume": {
+            "type": "string"
+          },
+          "issue": {
+            "type": "string"
+          },
+          "pages": {
+            "type": "string"
+          },
+          "source_url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_resolve",
+      "title": "Resolve a reference",
+      "description": "Manually link one reference row to an existing document.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "resolved_document_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "reference_id",
+          "resolved_document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_rematch",
+      "title": "Rematch a reference locally",
+      "description": "Retry DOI/title matching against the current local library. No external provider is called.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "reference_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_citation_download_pdf",
+      "title": "Download a reference PDF",
+      "description": "Queue acquisition of one reference's PDF from its trusted source URL. Success creates a new document and links the reference.",
+      "group": "citation",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "reference_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "required": [
+          "reference_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
       }
     }
   ]

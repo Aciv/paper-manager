@@ -58,15 +58,17 @@ type manifestAnnotations struct {
 
 // ToolServer owns the MCP tool registration and backend services.
 type ToolServer struct {
-	cfg        config.Config
-	documents  interfaces.DocumentService
-	reading    interfaces.DocumentReadingService
-	notes      interfaces.NoteReadingService
-	papers     interfaces.PaperService
-	bases      interfaces.DocumentBaseService
-	processing interfaces.ProcessingViewQuery
-	server     *sdk.Server
-	schemas    map[string]*jsonschema.Resolved
+	cfg          config.Config
+	documents    interfaces.DocumentService
+	reading      interfaces.DocumentReadingService
+	notes        interfaces.NoteReadingService
+	papers       interfaces.PaperService
+	bases        interfaces.DocumentBaseService
+	bibliography interfaces.BibliographyService
+	paperInfo    interfaces.PaperInfoService
+	processing   interfaces.ProcessingViewQuery
+	server       *sdk.Server
+	schemas      map[string]*jsonschema.Resolved
 }
 
 // NewToolServer is the production DI constructor. It deliberately accepts the
@@ -78,6 +80,8 @@ func NewToolServer(
 	notes interfaces.NoteReadingService,
 	papers interfaces.PaperService,
 	bases interfaces.DocumentBaseService,
+	bibliography interfaces.BibliographyService,
+	paperInfo interfaces.PaperInfoService,
 	processing interfaces.ProcessingViewQuery,
 ) (*ToolServer, error) {
 	var spec manifest
@@ -92,7 +96,8 @@ func NewToolServer(
 	}
 	s := &ToolServer{
 		cfg: cfg, documents: documents, reading: reading, notes: notes,
-		papers: papers, bases: bases, processing: processing,
+		papers: papers, bases: bases, bibliography: bibliography,
+		paperInfo: paperInfo, processing: processing,
 		schemas: make(map[string]*jsonschema.Resolved, len(spec.Tools)),
 	}
 	s.server = sdk.NewServer(&sdk.Implementation{
@@ -161,20 +166,18 @@ func (s *ToolServer) callTool(ctx context.Context, name string, req *sdk.CallToo
 		data, err = s.libraryGet(ctx, raw)
 	case "papers_manager_library_import_url":
 		data, err = s.libraryImportURL(ctx, raw)
+	case "papers_manager_library_import_file":
+		data, err = s.libraryImportFile(ctx, raw)
 	case "papers_manager_library_update_metadata":
 		data, err = s.libraryUpdateMetadata(ctx, raw)
 	case "papers_manager_library_delete":
 		data, err = s.libraryDelete(ctx, raw)
-	case "papers_manager_library_list_bases":
-		data, err = s.libraryListBases(ctx, raw)
-	case "papers_manager_library_get_base":
-		data, err = s.libraryGetBase(ctx, raw)
-	case "papers_manager_library_add_to_base":
-		data, err = s.libraryAddToBase(ctx, raw)
-	case "papers_manager_library_remove_from_base":
-		data, err = s.libraryRemoveFromBase(ctx, raw)
 	case "papers_manager_processing_status":
 		data, err = s.processingStatus(ctx, raw)
+	case "papers_manager_processing_retry":
+		data, err = s.processingRetry(ctx, raw)
+	case "papers_manager_processing_cancel":
+		data, err = s.processingCancel(ctx, raw)
 	case "papers_manager_document_structure":
 		data, err = s.documentStructure(ctx, raw)
 	case "papers_manager_document_read_section":
@@ -183,6 +186,12 @@ func (s *ToolServer) callTool(ctx context.Context, name string, req *sdk.CallToo
 		data, err = s.documentReadMarkdown(ctx, raw)
 	case "papers_manager_document_read_blocks":
 		data, err = s.documentReadBlocks(ctx, raw)
+	case "papers_manager_document_read_block_image":
+		result, imageErr := s.documentReadBlockImage(ctx, raw)
+		if imageErr != nil {
+			return errorResult(imageErr), nil
+		}
+		return result, nil
 	case "papers_manager_reading_note_outline":
 		data, err = s.readingNoteOutline(ctx, raw)
 	case "papers_manager_reading_note_read_section":
@@ -191,8 +200,54 @@ func (s *ToolServer) callTool(ctx context.Context, name string, req *sdk.CallToo
 		data, err = s.readingNoteCreate(ctx, raw)
 	case "papers_manager_reading_note_apply_edits":
 		data, err = s.readingNoteApplyEdits(ctx, raw)
+	case "papers_manager_reading_note_replace":
+		data, err = s.readingNoteReplace(ctx, raw)
+	case "papers_manager_reading_note_delete":
+		data, err = s.readingNoteDelete(ctx, raw)
+	case "papers_manager_reading_note_export":
+		data, err = s.readingNoteExport(ctx, raw)
+	case "papers_manager_reading_note_replace_section":
+		data, err = s.readingNoteReplaceSection(ctx, raw)
 	case "papers_manager_evidence_validate":
 		data, err = s.evidenceValidate(ctx, raw)
+	case "papers_manager_base_list":
+		data, err = s.baseList(ctx, raw)
+	case "papers_manager_base_get":
+		data, err = s.baseGet(ctx, raw)
+	case "papers_manager_base_list_documents":
+		data, err = s.baseListDocuments(ctx, raw)
+	case "papers_manager_base_create":
+		data, err = s.baseCreate(ctx, raw)
+	case "papers_manager_base_update":
+		data, err = s.baseUpdate(ctx, raw)
+	case "papers_manager_base_delete":
+		data, err = s.baseDelete(ctx, raw)
+	case "papers_manager_base_add_document":
+		data, err = s.baseAddDocument(ctx, raw)
+	case "papers_manager_base_remove_document":
+		data, err = s.baseRemoveDocument(ctx, raw)
+	case "papers_manager_base_bibliography_generate":
+		data, err = s.baseBibliographyGenerate(ctx, raw)
+	case "papers_manager_base_bibliography_status":
+		data, err = s.baseBibliographyStatus(ctx, raw)
+	case "papers_manager_citation_list":
+		data, err = s.citationList(ctx, raw)
+	case "papers_manager_citation_list_cited_by":
+		data, err = s.citationListCitedBy(ctx, raw)
+	case "papers_manager_citation_add":
+		data, err = s.citationAdd(ctx, raw)
+	case "papers_manager_citation_replace":
+		data, err = s.citationReplace(ctx, raw)
+	case "papers_manager_citation_remove":
+		data, err = s.citationRemove(ctx, raw)
+	case "papers_manager_citation_update_reference":
+		data, err = s.citationUpdateReference(ctx, raw)
+	case "papers_manager_citation_resolve":
+		data, err = s.citationResolve(ctx, raw)
+	case "papers_manager_citation_rematch":
+		data, err = s.citationRematch(ctx, raw)
+	case "papers_manager_citation_download_pdf":
+		data, err = s.citationDownloadPDF(ctx, raw)
 	default:
 		return failureResult(toolFailureDetails{Code: "NOT_FOUND", Message: "unknown tool"}), nil
 	}

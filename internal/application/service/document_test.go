@@ -414,6 +414,47 @@ func TestCreateDocumentFromFileReturnsCreatedDocumentWhenInitialQueueFails(t *te
 	_ = reader.Close()
 }
 
+func TestCreateDocumentFromLocalFileStoresAndQueues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "local-paper.pdf")
+	if err := os.WriteFile(path, []byte("%PDF-1.7\nlocal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repo := &documentStatusRepoStub{}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &documentService{
+		repo: repo, storage: storage, taskEnqueuer: &documentTaskEnqueuerStub{},
+	}
+	created, err := svc.CreateDocumentFromLocalFile(context.Background(), path, "10.1000/local")
+	if err != nil {
+		t.Fatalf("CreateDocumentFromLocalFile() error = %v", err)
+	}
+	if created == nil || created.ID == uuid.Nil || created.OriginalFilename != "local-paper.pdf" {
+		t.Fatalf("created document = %#v", created)
+	}
+	if created.DOI != "10.1000/local" {
+		t.Fatalf("created DOI = %q", created.DOI)
+	}
+	if created.MarkdownStatus != types.DocumentStageQueued {
+		t.Fatalf("markdown status = %q, want queued", created.MarkdownStatus)
+	}
+	reader, openErr := storage.Open(context.Background(), created.StorageKey)
+	if openErr != nil {
+		t.Fatalf("stored local file is missing: %v", openErr)
+	}
+	_ = reader.Close()
+}
+
+func TestCreateDocumentFromLocalFileRejectsNonRegularFile(t *testing.T) {
+	svc := &documentService{}
+	if _, err := svc.CreateDocumentFromLocalFile(context.Background(), t.TempDir(), ""); err == nil {
+		t.Fatal("directory import was accepted")
+	}
+}
+
 func documentUploadFileHeader(t *testing.T, filename string, content []byte) *multipart.FileHeader {
 	t.Helper()
 	var body bytes.Buffer

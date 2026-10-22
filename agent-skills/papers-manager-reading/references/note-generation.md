@@ -87,6 +87,10 @@ Write with semantic edits:
 - `replaceSection` for a complete section replacement;
 - `replaceRange` / `replaceText` / `insertAt` / `appendText` for body changes.
 
+Edit fields are op-specific: `replaceText` uses `old_text` + `new_text`;
+`replaceRange`, `insertAt`, `appendText`, `replaceSection`, and `addSection`
+use `content`. Do not put append/insert text in `new_text`.
+
 Do not simulate structure changes by typing headings into the body.
 
 ## Section metadata

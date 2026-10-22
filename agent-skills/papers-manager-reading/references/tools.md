@@ -10,11 +10,16 @@ capabilities to the reading workflow.
 | `papers_manager_document_read_section` | Read one source outline section by ordinal, using its Markdown/page/Block mapping. |
 | `papers_manager_document_read_markdown` | Read bounded full source Markdown when a section cannot be addressed through the outline. |
 | `papers_manager_document_read_blocks` | Read page/Blocks for L3 evidence and exact verification. |
+| `papers_manager_document_read_block_image` | Read a parser-stored PNG crop for an image/table Block. |
 | `papers_manager_reading_note_outline` | Read note revision, section tree, and parsed section descriptions. |
 | `papers_manager_reading_note_read_section` | Read one note section body. |
 | `papers_manager_reading_note_create` | Create an absent note only after user confirmation. |
-| `papers_manager_reading_note_apply_edits` | Apply revision-fenced semantic edits. |
-| `papers_manager_evidence_validate` | Validate a `papers-manager://` evidence target before writing. |
+| `papers_manager_reading_note_apply_edits` | Apply revision-fenced semantic edits (default). |
+| `papers_manager_reading_note_replace` | Replace the whole note only when explicitly requested. |
+| `papers_manager_reading_note_replace_section` | Replace one whole section; preserves the heading guard. |
+| `papers_manager_reading_note_delete` | Delete the note only with explicit confirmation. |
+| `papers_manager_reading_note_export` | Read the full concatenated note when L4 is explicitly needed. |
+| `papers_manager_evidence_validate` | Validate a `papers-manager://` evidence target. Read-only. |
 
 Do not use library-management tools such as `papers_manager_library_delete` from this skill.
 Do not claim that `base_summary` exists until it is registered in the MCP

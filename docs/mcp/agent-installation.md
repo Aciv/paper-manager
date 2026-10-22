@@ -27,6 +27,9 @@ MCP_ENABLED=true
 MCP_ADDR=127.0.0.1:8090
 MCP_TOKEN=
 MCP_MAX_REQUEST_BYTES=8388608
+MCP_MAX_IMAGE_BYTES=12582912
+# Optional: enables papers_manager_library_import_file. Keep it narrow.
+# MCP_LOCAL_IMPORT_ROOT=/absolute/path/to/import-root
 ```
 
 Start the API normally, for example:
@@ -212,8 +215,10 @@ Inside a session:
 /mcp
 ```
 
-Both `papers_manager_library_*` and `papers_manager_reading_note_*` tools
-should be listed. The first skill use should trigger its runtime preflight.
+The host should list 42 tools in four groups: `papers_manager_library_*`,
+`papers_manager_reading_note_*`/`papers_manager_document_*`,
+`papers_manager_base_*`, and `papers_manager_citation_*`. The first skill use
+should trigger its runtime preflight.
 
 ## 5. Codex
 
@@ -479,6 +484,11 @@ The host-side mapping is restricted to loopback, but the container must bind
 `0.0.0.0` for Docker to forward traffic. `MCP_TOKEN` is mandatory in this
 configuration.
 
+If you enable `papers_manager_library_import_file` with Docker, mount the
+import directory into the API container and set `MCP_LOCAL_IMPORT_ROOT` to the
+**container path**, not the host path. The path check uses the API process's
+filesystem view.
+
 Agents running on the host then use:
 
 ```text
@@ -531,8 +541,9 @@ Ask the host to call:
 papers_manager_library_search
 ```
 
-or inspect the MCP server's `tools/list`. All 19 tools start with the
-`papers_manager_` prefix.
+or inspect the MCP server's `tools/list`. All 42 tools start with the
+`papers_manager_` prefix; Base and citation tools use their own
+`papers_manager_base_*` and `papers_manager_citation_*` collections.
 
 Note writes always require `expected_revision`. A `REVISION_CONFLICT` means the
 note changed after it was read: reload the manifest/section and re-plan; do not
@@ -549,8 +560,12 @@ retry with the stale revision.
   metadata replacement. Review tool annotations and host approval settings.
 - Keep tokens in environment variables or a host credential store; never commit
   them to `.mcp.json`, `opencode.json`, `config.toml`, or a DSH profile.
-- MCP URL import accepts HTTP(S) URLs only; there is no arbitrary local-file
-  read or filesystem path input.
+- URL import accepts HTTP(S) URLs only. Local-file import is a separate tool
+  and is confined to `MCP_LOCAL_IMPORT_ROOT`; leave that setting empty unless
+  you intentionally want an Agent to read selected local files. Symlinks are
+  resolved and escapes are rejected.
+- Block-image responses are bounded by `MCP_MAX_IMAGE_BYTES`; they never expose
+  the underlying storage key.
 
 ## 12. Contract references
 

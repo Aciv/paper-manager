@@ -45,7 +45,9 @@ skill's `references/` directory and are loaded only when needed.
 ## Current status
 
 The MCP server/tools are implemented in `internal/mcp` and started by the API
-process when `MCP_ENABLED=true`; the 19 prefixed tools are registered from the
-manifest. The skill source bundles in this directory are usable in a project
-that exposes that MCP server. Formal skill packaging/export (installer or
-download artifact) is still pending.
+process when `MCP_ENABLED=true`; the 42 prefixed tools are registered from the
+manifest across the `library`, `reading`, `base`, and `citation` groups. Base
+and citation operations use independent tool collections. The skill source
+bundles in this directory are usable in a project that exposes that MCP
+server. Formal skill packaging/export (installer or download artifact) is
+still pending.

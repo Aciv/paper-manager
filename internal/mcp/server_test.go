@@ -22,7 +22,7 @@ func newTestServer(t *testing.T) *ToolServer {
 	t.Helper()
 	server, err := NewToolServer(config.Config{
 		MCPAddress: "127.0.0.1:8090", MCPMaxRequestBytes: 8 << 20,
-	}, nil, nil, nil, nil, nil, nil)
+	}, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewToolServer() error = %v", err)
 	}
@@ -72,8 +72,8 @@ func TestToolServerListsAllPrefixedTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools() error = %v", err)
 	}
-	if len(result.Tools) != 19 {
-		t.Fatalf("ListTools() count = %d, want 19", len(result.Tools))
+	if len(result.Tools) != 42 {
+		t.Fatalf("ListTools() count = %d, want 42", len(result.Tools))
 	}
 	for _, tool := range result.Tools {
 		if !strings.HasPrefix(tool.Name, "papers_manager_") {
@@ -117,7 +117,7 @@ func TestMCPAccessRequiresTokenOffLoopback(t *testing.T) {
 func TestMCPHandlerRequiresBearerToken(t *testing.T) {
 	server, err := NewToolServer(config.Config{
 		MCPAddress: "127.0.0.1:8090", MCPToken: "secret", MCPMaxRequestBytes: 1 << 20,
-	}, nil, nil, nil, nil, nil, nil)
+	}, nil, nil, nil, nil, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatalf("NewToolServer() error = %v", err)
 	}

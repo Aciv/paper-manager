@@ -55,7 +55,7 @@ for claim-level evidence links.
 
 ## Base summary
 
-1. `papers_manager_library_list_bases` and `papers_manager_library_get_base`; record member count.
+1. `papers_manager_base_list` and `papers_manager_base_get`; record member count.
 2. Read metadata and note outlines/descriptions for a bounded member set.
 3. Select candidates; read their notes before source sections.
 4. Compare methods/results and verify key claims with page/Blocks.

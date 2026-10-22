@@ -98,6 +98,10 @@ type DocumentRepository interface {
 type DocumentService interface {
 	// CreateDocumentFromFile stores an upload and creates its source record.
 	CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error)
+	// CreateDocumentFromLocalFile stores one regular local file and creates its
+	// source record. The caller is responsible for constraining which paths may
+	// be imported; this method only validates the file itself.
+	CreateDocumentFromLocalFile(ctx context.Context, path, doi string) (*types.Document, error)
 	// CreateDocumentFromURL resolves and safely downloads one explicit remote
 	// PDF, creates its source record, and starts the normal document pipeline.
 	CreateDocumentFromURL(ctx context.Context, command types.DocumentURLImportCommand) (*types.Document, error)

@@ -6,9 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"strings"
 
 	"github.com/google/uuid"
+	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"paperMaster/internal/types"
 )
@@ -238,6 +241,130 @@ func (s *ToolServer) readingNoteCreate(ctx context.Context, raw json.RawMessage)
 		return nil, err
 	}
 	return note, nil
+}
+
+type noteReplaceInput struct {
+	DocumentID       string `json:"document_id"`
+	Markdown         string `json:"markdown"`
+	ExpectedRevision int64  `json:"expected_revision"`
+}
+
+func (s *ToolServer) readingNoteReplace(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input noteReplaceInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	note, err := s.notes.Put(ctx, input.DocumentID, input.ExpectedRevision, input.Markdown)
+	if err != nil {
+		return nil, err
+	}
+	return note, nil
+}
+
+type noteDeleteInput struct {
+	DocumentID       string `json:"document_id"`
+	ExpectedRevision int64  `json:"expected_revision"`
+	Confirm          bool   `json:"confirm"`
+}
+
+func (s *ToolServer) readingNoteDelete(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input noteDeleteInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	if !input.Confirm {
+		return nil, fmt.Errorf("%w: confirm=true is required", errInvalidToolInput)
+	}
+	if err := s.notes.Delete(ctx, input.DocumentID, input.ExpectedRevision); err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": true, "documentId": input.DocumentID}, nil
+}
+
+type noteExportInput struct {
+	DocumentID string `json:"document_id"`
+}
+
+func (s *ToolServer) readingNoteExport(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input noteExportInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	note, err := s.notes.Export(ctx, input.DocumentID)
+	if err != nil {
+		return nil, err
+	}
+	if len(note.Markdown) > 16<<20 {
+		return nil, fmt.Errorf("%w: reading note export exceeds the MCP response limit", errPayloadTooLarge)
+	}
+	return map[string]any{
+		"documentId": note.DocumentID, "revision": note.Revision, "markdown": note.Markdown,
+	}, nil
+}
+
+type noteReplaceSectionInput struct {
+	DocumentID       string `json:"document_id"`
+	SectionID        string `json:"section_id"`
+	Markdown         string `json:"markdown"`
+	ExpectedRevision int64  `json:"expected_revision"`
+}
+
+func (s *ToolServer) readingNoteReplaceSection(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input noteReplaceSectionInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	result, err := s.notes.ReplaceSection(
+		ctx, input.DocumentID, input.SectionID, input.ExpectedRevision, input.Markdown,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+type blockImageInput struct {
+	DocumentID string `json:"document_id"`
+	BlockID    string `json:"block_id"`
+}
+
+// documentReadBlockImage returns the parser-stored PNG crop for image/table
+// Blocks. It never returns the private storage key.
+func (s *ToolServer) documentReadBlockImage(
+	ctx context.Context, raw json.RawMessage,
+) (*sdk.CallToolResult, error) {
+	var input blockImageInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	if s.reading == nil {
+		return nil, fmt.Errorf("document reading service is unavailable")
+	}
+	reader, filename, err := s.reading.GetDocumentBlockImage(ctx, input.DocumentID, input.BlockID)
+	if err != nil {
+		return nil, err
+	}
+	defer reader.Close()
+	maxImageBytes := s.cfg.MCPMaxImageBytes
+	if maxImageBytes <= 0 {
+		maxImageBytes = 12 << 20
+	}
+	content, err := io.ReadAll(io.LimitReader(reader, maxImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(content)) > maxImageBytes {
+		return nil, fmt.Errorf("%w: block image exceeds the MCP image limit", errPayloadTooLarge)
+	}
+	contentType := http.DetectContentType(content)
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, fmt.Errorf("block asset is not an image")
+	}
+	metadata := map[string]any{
+		"documentId": input.DocumentID, "blockId": input.BlockID,
+		"filename": filename, "contentType": contentType, "sizeBytes": len(content),
+	}
+	return successImageResult(metadata, content, contentType), nil
 }
 
 type notePositionInput struct {

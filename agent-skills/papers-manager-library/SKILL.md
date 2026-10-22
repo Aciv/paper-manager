@@ -1,6 +1,6 @@
 ---
 name: papers-manager-library
-description: 管理本地 papersManager 论文库：搜索、导入、检查、修改或删除论文，维护元数据、标签、Base 成员和处理状态。用于入库、整理或书目级操作，不用于阅读注释或 Base 总结；删除和覆盖操作必须先获得用户明确确认。需要 papersManager MCP server；若当前 host 没有这些工具，不要使用本 skill。
+description: 管理本地 papersManager 论文库：搜索、通过 URL 或受控本地文件导入、检查、修改或删除论文，维护元数据、标签、Base 生命周期与成员、引用与书目以及处理状态。用于入库、整理或书目级操作，不用于阅读注释或 Base 总结；删除和覆盖操作必须先获得用户明确确认。需要 papersManager MCP server；若当前 host 没有这些工具，不要使用本 skill。
 ---
 
 # PapersManager Library
@@ -10,10 +10,12 @@ description: 管理本地 papersManager 论文库：搜索、导入、检查、�
 用于管理已经或即将进入 papersManager 的论文：
 
 - 搜索和定位论文；
-- 通过 URL 导入论文；
-- 修正文件名、DOI、标题、作者、摘要、venue、标签；
-- 管理 Base 成员；
-- 查看处理状态、失败原因和可重试阶段；
+- 通过 URL 导入论文，或在用户明确给出本地路径且 MCP 已配置 `MCP_LOCAL_IMPORT_ROOT` 时导入本地文件；
+- 修正文件名、DOI、标题、作者、摘要、venue、标签、出版信息；
+- 创建/改名/删除 Base，管理 Base 成员；
+- 生成 Base 书目；
+- 查询和编辑引用、重新匹配或下载引用 PDF；
+- 查看处理状态、失败原因和可重试阶段，并按用户要求重试/取消；
 - 删除论文。
 
 不用于：
@@ -30,11 +32,23 @@ description: 管理本地 papersManager 论文库：搜索、导入、检查、�
 - 本 skill 依赖 papersManager MCP server。工具名统一使用 `papers_manager_`
   前缀；Host 可能再包一层命名空间，按前缀或 server 名称识别，不要依赖某个固定外层包装。
 - 读取工具：`papers_manager_library_search`、`papers_manager_library_get`、
-  `papers_manager_library_list_bases`、`papers_manager_library_get_base`、
-  `papers_manager_processing_status`。
+  `papers_manager_processing_status`、`papers_manager_base_list`、
+  `papers_manager_base_get`、`papers_manager_base_list_documents`、
+  `papers_manager_citation_list`、`papers_manager_citation_list_cited_by`、
+  `papers_manager_base_bibliography_status`。
 - 写入工具：`papers_manager_library_import_url`、
-  `papers_manager_library_update_metadata`、`papers_manager_library_delete`、
-  `papers_manager_library_add_to_base`、`papers_manager_library_remove_from_base`。
+  `papers_manager_library_import_file`、`papers_manager_library_update_metadata`、
+  `papers_manager_library_delete`、`papers_manager_processing_retry`、
+  `papers_manager_processing_cancel`、`papers_manager_base_create`、
+  `papers_manager_base_update`、`papers_manager_base_delete`、
+  `papers_manager_base_add_document`、`papers_manager_base_remove_document`、
+  `papers_manager_base_bibliography_generate`、`papers_manager_citation_add`、
+  `papers_manager_citation_replace`、`papers_manager_citation_remove`、
+  `papers_manager_citation_update_reference`、`papers_manager_citation_resolve`、
+  `papers_manager_citation_rematch`、`papers_manager_citation_download_pdf`。
+- `papers_manager_library_import_file` 只有在服务端配置了
+  `MCP_LOCAL_IMPORT_ROOT` 时可用；返回 `FORBIDDEN` 时让用户在网页上传，不要尝试
+  绕过路径限制。
 - 缺少读取工具、MCP 无法连接，或工具返回“未知工具/未实现”时：停止并明确报告
   papersManager MCP 不可用。
 - 只有读取工具可用时，可以继续只读查询，但不得声称已经导入、修改或删除。
@@ -64,6 +78,15 @@ description: 管理本地 papersManager 论文库：搜索、导入、检查、�
 - 不要无限等待解析完成；使用 `papers_manager_processing_status` 做有界轮询，或把轮询留给用户界面；
 - 失败时报告阶段和可重试入口，不要重复盲目提交。
 
+### 导入本地文件
+
+只有在用户明确给出路径、且 `papers_manager_library_import_file` 可用时使用：
+
+- 路径必须位于服务端 `MCP_LOCAL_IMPORT_ROOT` 内；
+- 不要猜测路径、扫描目录或尝试导入目录；
+- `FORBIDDEN` 表示本地导入被禁用或路径越界；让用户改网页上传，不要用 shell 读取文件；
+- 导入成功后同样用 `papers_manager_processing_status` 做有界轮询。
+
 ### 修改元数据
 
 使用 `papers_manager_library_update_metadata`，只修改用户明确要求的字段。
@@ -73,13 +96,36 @@ description: 管理本地 papersManager 论文库：搜索、导入、检查、�
 - 不把原文摘要复制到笔记或无关字段；
 - 修改后返回实际保存的字段和来源。
 
-### Base 成员
+### Base 生命周期与成员
 
-使用 `papers_manager_library_list_bases`、`papers_manager_library_get_base`、`papers_manager_library_add_to_base`、`papers_manager_library_remove_from_base`。
+使用 `papers_manager_base_*` 独立集合：
+
+- 读取：`papers_manager_base_list`、`papers_manager_base_get`、`papers_manager_base_list_documents`；
+- 创建/改名：`papers_manager_base_create`、`papers_manager_base_update`；
+- 删除：`papers_manager_base_delete`，必须要求用户确认并传 `confirm=true`；
+- 成员：`papers_manager_base_add_document`、`papers_manager_base_remove_document`；
+- 书目：`papers_manager_base_bibliography_generate` 入队后，用
+  `papers_manager_base_bibliography_status` 有界轮询；不要声称同步生成完成。
 
 - 加入/移除 Base 只改变成员关系，不复制、不删除论文；
+- 删除 Base 只删除集合与成员关系，不删除源文档；
 - 不要为了整理 Base 而删除源文档；
 - 大批量成员变更前给出清单并确认。
+
+### 引用与书目
+
+使用 `papers_manager_citation_*` 独立集合，操作对象是某篇论文的引用行：
+
+- 查询：`papers_manager_citation_list`、`papers_manager_citation_list_cited_by`；
+- 新增/整体替换/删除：`citation_add`、`citation_replace`、`citation_remove`；
+- 修正字段：`citation_update_reference`；
+- 关联/本地重匹配：`citation_resolve`、`citation_rematch`；
+- 获取 PDF：`citation_download_pdf`。
+
+- `citation_replace` 和 `citation_remove` 会改变书目，必须要求用户明确确认并传
+  `confirm=true`；
+- 不要在没有用户要求时自动重解析全部引用或下载 PDF；
+- `citation_rematch` 只查本地库，不调用外部 provider。
 
 ### 删除
 
@@ -99,15 +145,18 @@ description: 管理本地 papersManager 论文库：搜索、导入、检查、�
 - `source_lookup`
 - `reference_lookup`
 
-失败时只建议用户可用的重试/取消动作，不要声称已经自动修复。
+失败时可以使用 `papers_manager_processing_retry` 重试对应 lane，或用
+`papers_manager_processing_cancel` 取消；只在用户要求或明确同意时重试，不要无限
+轮询/自动反复重试，也不要声称已经自动修复。`auto` 交给文档服务选择，其余
+target 只影响一个阶段。
 
 ## 错误
 
 - `NOT_FOUND`：对象不存在或已被删除；重新搜索。
-- `DUPLICATE_DOI` / `DUPLICATE_FILE`：说明重复对象，询问用户是打开已有论文还是取消。
+- `CONFLICT`：重复 DOI/文件、正在处理或对象状态已变化；重新读取后再操作。重复对象要询问用户是打开已有论文还是取消。
 - `INVALID_ARGUMENT`：缺少或非法字段；不要自动猜测。
+- `FORBIDDEN`：本地导入被禁用或路径越界；改用网页上传，不要绕过限制。
 - `UNAVAILABLE`：处理或服务暂时不可用；稍后重试。
-- `CONFLICT`：对象状态已变化；重新读取后再操作。
 
 ## 工具
 

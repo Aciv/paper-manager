@@ -143,17 +143,67 @@ func newDocumentServiceWithProcessing(
 	}
 }
 
+// documentUploadSource is the common input for HTTP multipart uploads and
+// explicitly authorized local-file imports. Open must return a fresh reader on
+// every call so hashing and storage consume the same bytes independently.
+type documentUploadSource struct {
+	Filename    string
+	Size        int64
+	ContentType string
+	Open        func() (io.ReadCloser, error)
+}
+
 func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error) {
 	if file == nil {
 		return nil, errors.New("file is required")
 	}
+	return s.createDocumentFromSource(ctx, documentUploadSource{
+		Filename: file.Filename, Size: file.Size,
+		ContentType: file.Header.Get("Content-Type"),
+		Open: func() (io.ReadCloser, error) {
+			return file.Open()
+		},
+	}, doi)
+}
+
+// CreateDocumentFromLocalFile imports a regular file selected by a trusted
+// caller. Path containment and symlink checks belong to that caller; the
+// service only rejects non-regular files and applies the normal upload rules.
+func (s *documentService) CreateDocumentFromLocalFile(ctx context.Context, path, doi string) (*types.Document, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, errors.New("local file path is required")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("stat local file: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("local file must be a regular file")
+	}
+	return s.createDocumentFromSource(ctx, documentUploadSource{
+		Filename: filepath.Base(path), Size: info.Size(),
+		Open: func() (io.ReadCloser, error) {
+			return os.Open(path)
+		},
+	}, doi)
+}
+
+func (s *documentService) createDocumentFromSource(
+	ctx context.Context,
+	source documentUploadSource,
+	doi string,
+) (*types.Document, error) {
+	if source.Open == nil {
+		return nil, errors.New("file source is required")
+	}
 	// Reject cheaply before the full SHA-256 pass. The handler performs the
 	// same checks for an early 413/415; this keeps batch and future callers
 	// from hashing an invalid file.
-	if _, supported := fileservice.SupportedContentType(file.Filename); !supported {
+	if _, supported := fileservice.SupportedContentType(source.Filename); !supported {
 		return nil, fileservice.ErrUnsupportedFileType
 	}
-	if s.maxUploadSize > 0 && file.Size > s.maxUploadSize {
+	if source.Size < 0 || (s.maxUploadSize > 0 && source.Size > s.maxUploadSize) {
 		return nil, fileservice.ErrFileTooLarge
 	}
 	doi = strings.ToLower(strings.TrimSpace(doi))
@@ -168,7 +218,7 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 			return &page.Items[0], ErrDuplicateDOI
 		}
 	}
-	fileHash, err := multipartFileSHA256(file)
+	fileHash, err := sourceSHA256(source)
 	if err != nil {
 		return nil, err
 	}
@@ -181,10 +231,25 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 		logger.Warn(ctx, "duplicate document file hash rejected", "file_sha256", fileHash)
 		return &page.Items[0], types.ErrDuplicateFileHash
 	}
-	stored, err := fileservice.SaveMultipart(ctx, s.storage, file)
+	input, err := source.Open()
 	if err != nil {
-		logger.Error(ctx, "store document file failed", "filename", file.Filename, "error", err)
+		return nil, fmt.Errorf("open uploaded file: %w", err)
+	}
+	category := interfaces.StorageCategory("")
+	if strings.EqualFold(filepath.Ext(source.Filename), ".pdf") {
+		category = interfaces.StorageCategoryPDF
+	}
+	stored, err := s.storage.Save(ctx, interfaces.FileUpload{
+		Filename: source.Filename, ContentType: source.ContentType,
+		Content: input, Category: category,
+	})
+	closeErr := input.Close()
+	if err != nil {
+		logger.Error(ctx, "store document file failed", "filename", source.Filename, "error", err)
 		return nil, err
+	}
+	if closeErr != nil {
+		logger.Warn(ctx, "close uploaded file failed", "filename", source.Filename, "error", closeErr)
 	}
 	if stored.SHA256 != "" && !strings.EqualFold(stored.SHA256, fileHash) {
 		logger.Error(ctx, "stored document hash differs from uploaded bytes",
@@ -260,8 +325,8 @@ func (s *documentService) loadCreatedDocumentAfterQueue(
 	return persisted
 }
 
-func multipartFileSHA256(file *multipart.FileHeader) (string, error) {
-	input, err := file.Open()
+func sourceSHA256(source documentUploadSource) (string, error) {
+	input, err := source.Open()
 	if err != nil {
 		return "", fmt.Errorf("open uploaded file for hash: %w", err)
 	}

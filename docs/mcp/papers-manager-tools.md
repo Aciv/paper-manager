@@ -1,9 +1,10 @@
 # papersManager MCP tool contract
 
 Status: specification implemented by `internal/mcp` and the in-process MCP
-listener. The manifest remains the source of truth for tool names and schemas.
-Per-host connection and skill installation are covered by
-[agent-installation.md](agent-installation.md).
+listener. The manifest contains 42 tools across four groups: `library`,
+`reading`, `base`, and `citation`. The manifest remains the source of truth for
+tool names and schemas. Per-host connection and skill installation are covered
+by [agent-installation.md](agent-installation.md).
 
 ## Purpose
 
@@ -27,6 +28,11 @@ name; skills should match the prefix or the `papers-manager` server identity,
 not assume one particular outer wrapper. The manifest exposes this as
 `server.toolNamePrefix`.
 
+The manifest's `group` field is descriptive only. Base operations (including
+Base bibliography generation) use the independent `papers_manager_base_*`
+collection, and citation operations use `papers_manager_citation_*`; they are
+not folded into `papers_manager_library_*`.
+
 Skills treat an absent prefix/server as “MCP unavailable” and fail closed.
 
 ## Transport and access
@@ -41,8 +47,14 @@ Skills treat an absent prefix/server as “MCP unavailable” and fail closed.
 - There is no per-user ownership model yet. Do not claim per-Agent isolation.
 - Secrets and API tokens are server configuration, never tool inputs or tool
   output.
-- Import accepts HTTP(S) URLs only. Do not expose arbitrary server filesystem
-  paths or local file uploads through MCP.
+- `papers_manager_library_import_url` accepts HTTP(S) URLs only. Local-file
+  import is a separate, explicitly enabled tool
+  (`papers_manager_library_import_file`) and is confined to
+  `MCP_LOCAL_IMPORT_ROOT`, including symlink resolution. When that setting is
+  empty the tool fails closed with `FORBIDDEN`.
+- Block images are returned as MCP image content and bounded by
+  `MCP_MAX_IMAGE_BYTES` (default 12 MiB). Private storage keys never cross the
+  MCP boundary.
 
 ## Common response envelope
 
@@ -89,13 +101,16 @@ Error codes:
 
 ## Tool annotations
 
-- `readOnlyHint: true` for search/read/metadata reads.
-- `destructiveHint: true` for delete, metadata replacement, note section
-  replacement/deletion, and revision-fenced edits that can overwrite content.
+- `readOnlyHint: true` for search/read/metadata reads, note export, and
+  evidence validation.
+- `destructiveHint: true` for document/note/Base/reference deletion, whole-note
+  or whole-section replacement, citation replacement, and revision-fenced edits
+  that can overwrite content.
 - `idempotentHint` only where repeated identical calls are safe; note edits are
   not treated as idempotent across revisions.
-- `openWorldHint: false` except for
-  `papers_manager_library_import_url`, which contacts an external URL.
+- `openWorldHint: false` except for URL import, reference-PDF download, and
+  Base bibliography generation, which may contact external DOI/provider
+  services.
 
 ## Tools
 
@@ -135,12 +150,28 @@ Output: document ID, created/updated state, and initial processing state. The
 tool returns quickly; do not block until recognition completes. Use
 `papers_manager_processing_status` for bounded polling.
 
+#### `papers_manager_library_import_file`
+
+Import one regular local file and start the normal pipeline. This tool exists
+for local single-user deployments and is disabled unless
+`MCP_LOCAL_IMPORT_ROOT` is configured.
+
+Input: `path` (absolute, or relative to the configured root), optional `doi`.
+Paths outside the root, symlink escapes, directories, unsupported types, and
+files over `FILE_MAX_UPLOAD_SIZE` are rejected before the service is called.
+The service stores a copy; the source file is not referenced afterwards.
+
+Output: the created document and initial processing state.
+
 #### `papers_manager_library_update_metadata`
 
 Correct explicitly requested metadata fields.
 
 Input: `document_id`; optional `original_filename`, `doi`, `title`, `authors`,
-`abstract`, `venue`, `tags`. Omitted fields are unchanged.
+`abstract`, `venue`, `tags`, `source_name`, `source_url`, `published_at`,
+`volume`, `issue`, `pages`, `language`. Omitted fields are unchanged.
+`published_at` accepts `YYYY-MM-DD` or RFC3339; an empty date is not a clear
+operation (omit it to keep the current value).
 
 Output: the persisted fields and their source. Do not infer values from the
 paper text.
@@ -154,17 +185,6 @@ Input: `document_id`, `confirm` (must be `true`).
 Output: deletion result. The tool must reject `confirm` omitted/false. The
 skill requires explicit user confirmation before calling it.
 
-#### `papers_manager_library_list_bases` / `papers_manager_library_get_base`
-
-Read Bases. `papers_manager_library_get_base` may include a bounded member page.
-
-Inputs: `page`, `page_size`, `base_id`, `include_documents`.
-
-#### `papers_manager_library_add_to_base` / `papers_manager_library_remove_from_base`
-
-Change membership only. Inputs: `base_id`, `document_id`. Must not copy or
-delete documents.
-
 #### `papers_manager_processing_status`
 
 Read the single processing projection for one document.
@@ -173,6 +193,22 @@ Input: `document_id`.
 
 Output: stage states, active/terminal spans, safe error codes, and reference
 progress. Never expose storage paths or raw provider responses.
+
+#### `papers_manager_processing_retry`
+
+Retry one processing lane.
+
+Input: `document_id`; `target` = `auto` (default), `markdown`, `extraction`,
+`catalog`, or `reference`. `auto` uses the document service's existing choice;
+`markdown` restarts recognition; the other targets retry exactly one
+paper-information stage. Active work returns `CONFLICT`.
+
+#### `papers_manager_processing_cancel`
+
+Cancel one processing lane.
+
+Input: `document_id`; `target` = `markdown` (default) or `paper_info`.
+Cancelling markdown does not fence paper-information work, and vice versa.
 
 ### Source reading
 
@@ -219,6 +255,16 @@ Input: `document_id`, optional `page_number`.
 Output: Blocks with UUID, type, text, ordinal, page dimensions, and bbox.
 Prefer a single page; a no-page request is bounded by the adapter and may return
 `PAYLOAD_TOO_LARGE`.
+
+#### `papers_manager_document_read_block_image`
+
+Read the parser-stored PNG crop for one image or table Block. Read-only.
+
+Input: `document_id`, `block_id`.
+
+Output: JSON metadata plus an MCP image content block. The image is limited by
+`MCP_MAX_IMAGE_BYTES` (default 12 MiB); the private storage key is never
+returned. Text-only Blocks have no image and return `NOT_FOUND`.
 
 ### Reading notes
 
@@ -289,13 +335,39 @@ Input:
   `POST /reading-note/edits`: `replaceText`, `replaceRange`, `insertAt`,
   `appendText`, `replaceSection`, `addSection`, `deleteSection`.
 
-Content fields follow the HTTP contract. Inline request text is capped at
-1 MiB; larger replacements use the raw section/HTTP path, not MCP.
+Content fields follow the HTTP contract: `replaceText` uses `old_text` and
+`new_text`; `replaceRange`, `insertAt`, `appendText`, `replaceSection`, and
+`addSection` use `content`. Inline request text is capped at 1 MiB; larger
+replacements use the raw section/HTTP path, not MCP.
 
 Output: new revision, directory, changed sections, deleted section IDs.
 
 A stale revision returns `REVISION_CONFLICT`; never auto-refresh and retry the
 same content.
+
+#### `papers_manager_reading_note_replace`
+
+Replace the entire note from Markdown, fenced by `expected_revision`. Input:
+`document_id`, `markdown`, `expected_revision`. Use this for whole-note
+import/replacement; use `apply_edits` for incremental changes. The normal note
+size and H1-H3 heading rules apply.
+
+#### `papers_manager_reading_note_delete`
+
+Delete the entire note. Input: `document_id`, `expected_revision`, `confirm`
+(must be true). The skill requires explicit user confirmation.
+
+#### `papers_manager_reading_note_export`
+
+Return the full concatenated note Markdown and revision. Input: `document_id`.
+Responses larger than 16 MiB return `PAYLOAD_TOO_LARGE`.
+
+#### `papers_manager_reading_note_replace_section`
+
+Replace one whole section with complete section Markdown, preserving its
+heading level. Input: `document_id`, `section_id`, `markdown`,
+`expected_revision`. The same revision fence and heading guard as `apply_edits`
+apply.
 
 ### Evidence
 
@@ -316,6 +388,100 @@ Output:
 The adapter parses evidence links as a consumer. The core note service and
 storage remain evidence-agnostic.
 
+### Base
+
+The Base collection manages collections and memberships only. It never copies
+or deletes source documents.
+
+#### `papers_manager_base_list`
+
+List Bases. Input: `page`, `page_size`. Read-only.
+
+#### `papers_manager_base_get`
+
+Read one Base. Input: `base_id`; optional `include_documents`, `page`.
+Member pages use the backend's fixed page size. Read-only.
+
+#### `papers_manager_base_list_documents`
+
+List one member page. Input: `base_id`, `page`, optional `exclude_unknown`.
+The backend uses a fixed page size for this collection view. Read-only.
+
+#### `papers_manager_base_create` / `papers_manager_base_update`
+
+Create a Base (`name`, optional `description`) or rename/change one
+(`base_id`, optional `name`, `description`). Omitted update fields are
+unchanged.
+
+#### `papers_manager_base_delete`
+
+Delete a Base and its memberships. Input: `base_id`, `confirm` (must be true).
+Source documents and notes are never deleted.
+
+#### `papers_manager_base_add_document` / `papers_manager_base_remove_document`
+
+Change membership. Inputs: `base_id`, `document_id`. Membership only; no
+document copy or deletion.
+
+#### `papers_manager_base_bibliography_generate`
+
+Queue a `.bib` snapshot for a Base. Input: `base_id`. The tool returns a task
+ID immediately; it is not a blocking export.
+
+#### `papers_manager_base_bibliography_status`
+
+Read one bibliography task. Input: `base_id`, `task_id`. A completed task
+includes the snapshot, including `bibtex` and per-entry reports. Read-only.
+
+### Citation
+
+Citation tools operate on `paper_citations` rows. Each row belongs to one
+citing paper; resolving a shared work never changes another paper's row.
+
+#### `papers_manager_citation_list` / `papers_manager_citation_list_cited_by`
+
+List one document's outgoing bibliography rows, or the rows that resolve to a
+document. Input: `document_id`. Read-only.
+
+#### `papers_manager_citation_add`
+
+Add one manual row. Input: `document_id`, `raw_reference`, optional
+`cited_document_id`.
+
+#### `papers_manager_citation_replace`
+
+Replace the entire outgoing bibliography. Input: `document_id`, `citations`
+(0–500 entries of `{raw_reference, cited_document_id?}`), `confirm` (must be
+true). This can remove manual rows.
+
+#### `papers_manager_citation_remove`
+
+Delete one row by reference ID. Input: `reference_id`, `confirm` (must be
+true).
+
+#### `papers_manager_citation_update_reference`
+
+Correct one reference's source fields (`doi`, `title`, `authors`, `venue`,
+`published_at`, `volume`, `issue`, `pages`, `source_url`). Omitted fields are
+unchanged; empty text clears. Editing an unresolved row fences stale provider
+results.
+
+#### `papers_manager_citation_resolve`
+
+Manually link one row to an existing document. Input: `reference_id`,
+`resolved_document_id`.
+
+#### `papers_manager_citation_rematch`
+
+Retry local DOI/title matching against the current library. Input:
+`reference_id`. No external provider is called; the result reports `matched`.
+
+#### `papers_manager_citation_download_pdf`
+
+Queue acquisition of one reference's PDF from its trusted source URL. Input:
+`reference_id`. Success creates a document and links the row; duplicate requests
+return `CONFLICT` while the previous attempt is pending.
+
 ## Deferred tools
 
 Not part of this manifest yet:
@@ -323,9 +489,11 @@ Not part of this manifest yet:
 - `base_summary` / `base_compare` — Phase 3B; until then the reading skill
   composes summaries from existing read tools.
 - Native LLM generation — not a server-side MCP tool until a runner exists.
-- Bibliography generation, citation resolution, and reference download —
-  management workflows can use the existing HTTP APIs separately.
-- Local filesystem imports — intentionally excluded.
+- Arbitrary page rendering — block images cover parser-stored image/table
+  crops. Rendering an arbitrary page rectangle would require wiring a
+  renderer into the API runtime and is intentionally not exposed yet.
+- Batch local-file or local-directory imports — only one explicitly selected
+  file is imported, confined to `MCP_LOCAL_IMPORT_ROOT`.
 
 ## Mapping to existing HTTP surfaces
 
@@ -334,37 +502,48 @@ Not part of this manifest yet:
 | `papers_manager_library_search` | `GET /api/document/search`, `GET /api/paper/search` |
 | `papers_manager_library_get` | `GET /api/document/search?id=`, `GET /api/paper/:id` |
 | `papers_manager_library_import_url` | `POST /api/document/import-url` |
+| `papers_manager_library_import_file` | `DocumentService.CreateDocumentFromLocalFile` (no HTTP equivalent; local single-user adapter) |
 | `papers_manager_library_update_metadata` | `PATCH /api/document/:id`, `PATCH /api/paper/:id` |
 | `papers_manager_library_delete` | `DELETE /api/document/:id` |
-| `papers_manager_library_list_bases` / `papers_manager_library_get_base` | `GET /api/document/bases`, `GET /api/document/bases/:id`, `GET .../documents` |
-| `papers_manager_library_add_to_base` / `papers_manager_library_remove_from_base` | `PUT|DELETE /api/document/bases/:baseID/documents/:documentID` |
 | `papers_manager_processing_status` | `GET /api/document/:id/processing` |
+| `papers_manager_processing_retry` | `POST /api/document/:id/retry`, `POST /api/paper/:id/info/{extraction|catalog|reference}/retry` |
+| `papers_manager_processing_cancel` | `POST /api/document/:id/cancel`, `POST /api/paper/:id/info/cancel` |
 | `papers_manager_document_structure` | `GET /api/document/:id/structure` |
 | `papers_manager_document_read_section` | `GET /api/document/:id/structure` + `GET /api/document/:id/markdown` (adapter slices by outline range) |
 | `papers_manager_document_read_markdown` | `GET /api/document/:id/markdown` |
 | `papers_manager_document_read_blocks` | `GET /api/document/:id/blocks?page=N` |
+| `papers_manager_document_read_block_image` | `GET /api/document/:id/blocks/:blockID/image` |
 | `papers_manager_reading_note_outline` | `GET /api/document/:id/reading-note` + section content endpoints |
 | `papers_manager_reading_note_read_section` | `GET /api/document/:id/reading-note/sections/:sectionId` |
 | `papers_manager_reading_note_create` | `PUT /api/document/:id/reading-note` with `expectedRevision=0` |
 | `papers_manager_reading_note_apply_edits` | `POST /api/document/:id/reading-note/edits` |
+| `papers_manager_reading_note_replace` | `PUT /api/document/:id/reading-note` |
+| `papers_manager_reading_note_delete` | `DELETE /api/document/:id/reading-note` |
+| `papers_manager_reading_note_export` | `GET /api/document/:id/reading-note/export` |
+| `papers_manager_reading_note_replace_section` | `PUT /api/document/:id/reading-note/sections/:sectionId` |
 | `papers_manager_evidence_validate` | consumer-side parser + `document/:id/markdown`, `/blocks`, `/structure` |
+| `papers_manager_base_*` | `/api/document/bases` CRUD, membership, and `/bibliography` endpoints |
+| `papers_manager_citation_*` | `/api/paper/:documentID/citations*`, `/api/references/:referenceID/*` |
 
 The adapter may call application services directly or compose these HTTP
 reads; it must not duplicate persistence logic or bypass revision checks.
 
 ## Skill mapping
 
-- `papers-manager-library` uses the library and processing tools.
-- `papers-manager-reading` uses source reading, note, and evidence tools.
-- Base summary uses library/list/get plus source/note reads until Phase 3B
-  adds a dedicated tool.
+- `papers-manager-library` uses library, processing, Base, and citation tools
+  for ingestion and management.
+- `papers-manager-reading` uses source reading, note, image, and evidence tools.
+- Base summary uses Base/list/get plus source/note reads until Phase 3B adds a
+  dedicated tool. Base bibliography generation is available now.
 
 ## Versioning and tests
 
-- Manifest `schemaVersion: 1`.
+- Manifest `schemaVersion: 1`. The descriptive `group` field is an additive
+  optional field; tool names themselves carry the stable collection prefix.
 - Adding optional fields/tools is backward-compatible; renaming or changing
   semantics requires a new version or tool name.
 - Section metadata remains version 1; evidence links remain version 1.
 - Required tests: schema validation, loopback/token boundary, response bounds,
-  revision conflicts, note creation only when absent, section-meta parsing,
-  evidence validation, and no storage paths/secrets in output.
+  local-import path containment, revision conflicts, note creation only when
+  absent, section-meta parsing, evidence validation, error-code mapping, and
+  no storage paths/secrets in output.

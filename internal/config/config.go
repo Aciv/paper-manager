@@ -50,6 +50,7 @@ const (
 	defaultHTTPUploadConcurrency                             = 4
 	defaultHTTPBatchConcurrency                              = 2
 	defaultMCPMaxRequestBytes                          int64 = 8 << 20
+	defaultMCPMaxImageBytes                            int64 = 12 << 20
 	defaultMCPAddress                                        = "127.0.0.1:8090"
 	defaultBatchImportTimeout                                = 2 * time.Minute
 	defaultAsynqConcurrency                                  = 32
@@ -98,6 +99,11 @@ type Config struct {
 	MCPAddress         string
 	MCPToken           string
 	MCPMaxRequestBytes int64
+	MCPMaxImageBytes   int64
+	// MCPLocalImportRoot enables papers_manager_library_import_file. The MCP
+	// adapter rejects paths outside this directory (including symlink escapes).
+	// Empty disables local-file import entirely.
+	MCPLocalImportRoot string
 	// HTTPTrustedProxies lists proxy CIDRs whose X-Forwarded-For is trusted.
 	// Empty means ClientIP uses RemoteAddr (no proxy spoofing).
 	HTTPTrustedProxies []string
@@ -370,6 +376,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mcpMaxImageBytes, err := positiveInt64Env("MCP_MAX_IMAGE_BYTES", defaultMCPMaxImageBytes, 64<<20)
+	if err != nil {
+		return Config{}, err
+	}
 	batchImportTimeout, err := durationEnv("BATCH_IMPORT_TIMEOUT", defaultBatchImportTimeout)
 	if err != nil {
 		return Config{}, err
@@ -494,6 +504,8 @@ func Load() (Config, error) {
 		MCPAddress:                                  env("MCP_ADDR", defaultMCPAddress),
 		MCPToken:                                    env("MCP_TOKEN", ""),
 		MCPMaxRequestBytes:                          mcpMaxRequestBytes,
+		MCPMaxImageBytes:                            mcpMaxImageBytes,
+		MCPLocalImportRoot:                          env("MCP_LOCAL_IMPORT_ROOT", ""),
 		HTTPTrustedProxies:                          httpTrustedProxies,
 		BatchImportTimeout:                          batchImportTimeout,
 		DatabaseDriver:                              strings.ToLower(env("DB_DRIVER", "postgres")),

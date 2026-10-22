@@ -4,10 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 
+	fileservice "paperMaster/internal/application/service/file"
 	"paperMaster/internal/types"
 )
 
@@ -176,6 +180,102 @@ func (s *ToolServer) libraryImportURL(ctx context.Context, raw json.RawMessage) 
 	return map[string]any{"document": document}, nil
 }
 
+type importFileInput struct {
+	Path string `json:"path"`
+	DOI  string `json:"doi"`
+}
+
+func (s *ToolServer) libraryImportFile(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input importFileInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	path, err := s.resolveLocalImportPath(input.Path)
+	if err != nil {
+		return nil, err
+	}
+	if _, supported := fileservice.SupportedContentType(path); !supported {
+		return nil, fmt.Errorf("%w: unsupported local file type", errInvalidToolInput)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("%w: local file is not readable", errInvalidToolInput)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: path must name a regular file", errInvalidToolInput)
+	}
+	maxSize := s.cfg.MaxUploadSize
+	if maxSize <= 0 {
+		maxSize = fileservice.DefaultMaxUploadSize
+	}
+	if info.Size() > maxSize {
+		return nil, fmt.Errorf("%w: local file exceeds the upload limit", errPayloadTooLarge)
+	}
+	document, err := s.documents.CreateDocumentFromLocalFile(ctx, path, input.DOI)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"document": document}, nil
+}
+
+// resolveLocalImportPath confines filesystem imports to the configured root.
+// The returned path is the symlink-resolved real path; no caller-supplied
+// absolute path escapes the root, including through nested symlinks.
+func (s *ToolServer) resolveLocalImportPath(raw string) (string, error) {
+	root := strings.TrimSpace(s.cfg.MCPLocalImportRoot)
+	if root == "" {
+		return "", fmt.Errorf("%w: local file import is disabled; set MCP_LOCAL_IMPORT_ROOT", errLocalImportDisabled)
+	}
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", fmt.Errorf("%w: local import root is invalid", errLocalImportDisabled)
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", fmt.Errorf("%w: local import root is not accessible", errLocalImportDisabled)
+	}
+	rootInfo, err := os.Stat(rootReal)
+	if err != nil || !rootInfo.IsDir() {
+		return "", fmt.Errorf("%w: local import root must be a directory", errLocalImportDisabled)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("%w: path is required", errInvalidToolInput)
+	}
+	candidate := raw
+	if !filepath.IsAbs(candidate) {
+		candidate = filepath.Join(rootReal, candidate)
+	}
+	candidateAbs, err := filepath.Abs(candidate)
+	if err != nil {
+		return "", fmt.Errorf("%w: invalid local file path", errInvalidToolInput)
+	}
+	realPath, err := filepath.EvalSymlinks(candidateAbs)
+	if err != nil {
+		return "", fmt.Errorf("%w: local file does not exist", errInvalidToolInput)
+	}
+	relative, err := filepath.Rel(rootReal, realPath)
+	if err != nil || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) ||
+		filepath.IsAbs(relative) {
+		return "", fmt.Errorf("%w: path is outside MCP_LOCAL_IMPORT_ROOT", errLocalImportForbidden)
+	}
+	return realPath, nil
+}
+
+func parseToolPublishedAt(raw string) (time.Time, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return time.Time{}, fmt.Errorf("%w: published_at cannot be empty", errInvalidToolInput)
+	}
+	for _, layout := range []string{"2006-01-02", time.RFC3339} {
+		if parsed, err := time.Parse(layout, trimmed); err == nil {
+			return parsed, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("%w: published_at must be YYYY-MM-DD or RFC3339", errInvalidToolInput)
+}
+
 type metadataAuthorInput struct {
 	Name        string `json:"name"`
 	Affiliation string `json:"affiliation"`
@@ -190,6 +290,13 @@ type updateMetadataInput struct {
 	Abstract         *string                `json:"abstract"`
 	Venue            *string                `json:"venue"`
 	Tags             *[]string              `json:"tags"`
+	SourceName       *string                `json:"source_name"`
+	SourceURL        *string                `json:"source_url"`
+	PublishedAt      *string                `json:"published_at"`
+	Volume           *string                `json:"volume"`
+	Issue            *string                `json:"issue"`
+	Pages            *string                `json:"pages"`
+	Language         *string                `json:"language"`
 }
 
 func (s *ToolServer) libraryUpdateMetadata(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -207,6 +314,15 @@ func (s *ToolServer) libraryUpdateMetadata(ctx context.Context, raw json.RawMess
 	}
 	update := types.PaperMetadataUpdate{
 		Title: input.Title, Abstract: input.Abstract, Venue: input.Venue, Tags: input.Tags,
+		SourceName: input.SourceName, SourceURL: input.SourceURL,
+		Volume: input.Volume, Issue: input.Issue, Pages: input.Pages, Language: input.Language,
+	}
+	if input.PublishedAt != nil {
+		publishedAt, err := parseToolPublishedAt(*input.PublishedAt)
+		if err != nil {
+			return nil, err
+		}
+		update.PublishedAt = &publishedAt
 	}
 	if input.Authors != nil {
 		authors := make([]types.PaperAuthor, 0, len(*input.Authors))
@@ -257,87 +373,6 @@ func (s *ToolServer) libraryDelete(ctx context.Context, raw json.RawMessage) (an
 		return nil, err
 	}
 	return map[string]any{"deleted": true, "documentId": input.DocumentID}, nil
-}
-
-type listBasesInput struct {
-	Page     int `json:"page"`
-	PageSize int `json:"page_size"`
-}
-
-func (s *ToolServer) libraryListBases(ctx context.Context, raw json.RawMessage) (any, error) {
-	var input listBasesInput
-	if err := decodeToolArgs(raw, &input); err != nil {
-		return nil, err
-	}
-	page, size := normalizedPage(input.Page, input.PageSize)
-	bases, err := s.bases.ListBases(ctx)
-	if err != nil {
-		return nil, err
-	}
-	start := (page - 1) * size
-	if start > len(bases) {
-		start = len(bases)
-	}
-	end := start + size
-	if end > len(bases) {
-		end = len(bases)
-	}
-	return map[string]any{"items": bases[start:end], "page": page, "pageSize": size, "total": len(bases)}, nil
-}
-
-type getBaseInput struct {
-	BaseID           string `json:"base_id"`
-	IncludeDocuments bool   `json:"include_documents"`
-	Page             int    `json:"page"`
-	PageSize         int    `json:"page_size"`
-}
-
-func (s *ToolServer) libraryGetBase(ctx context.Context, raw json.RawMessage) (any, error) {
-	var input getBaseInput
-	if err := decodeToolArgs(raw, &input); err != nil {
-		return nil, err
-	}
-	base, err := s.bases.GetBase(ctx, input.BaseID)
-	if err != nil {
-		return nil, err
-	}
-	result := map[string]any{"documentBase": base}
-	if input.IncludeDocuments {
-		page, _ := normalizedPage(input.Page, input.PageSize)
-		documents, err := s.bases.ListBaseDocuments(ctx, input.BaseID, page, false)
-		if err != nil {
-			return nil, err
-		}
-		result["documents"] = documents
-	}
-	return result, nil
-}
-
-type baseMembershipInput struct {
-	BaseID     string `json:"base_id"`
-	DocumentID string `json:"document_id"`
-}
-
-func (s *ToolServer) libraryAddToBase(ctx context.Context, raw json.RawMessage) (any, error) {
-	var input baseMembershipInput
-	if err := decodeToolArgs(raw, &input); err != nil {
-		return nil, err
-	}
-	if err := s.bases.AddDocumentToBase(ctx, input.BaseID, input.DocumentID); err != nil {
-		return nil, err
-	}
-	return map[string]any{"added": true}, nil
-}
-
-func (s *ToolServer) libraryRemoveFromBase(ctx context.Context, raw json.RawMessage) (any, error) {
-	var input baseMembershipInput
-	if err := decodeToolArgs(raw, &input); err != nil {
-		return nil, err
-	}
-	if err := s.bases.RemoveDocumentFromBase(ctx, input.BaseID, input.DocumentID); err != nil {
-		return nil, err
-	}
-	return map[string]any{"removed": true}, nil
 }
 
 type documentIDInput struct {
