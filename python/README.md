@@ -1,6 +1,6 @@
-# Python parser worker
+# Python parser server and workers
 
-This worker exposes two independent gRPC services:
+The process exposes three independent gRPC services:
 
 - `DocumentParser.Recognize` accepts PDFs, invokes
   `pymupdf4llm.to_markdown(..., page_chunks=True)`, and returns Markdown plus
@@ -12,9 +12,131 @@ This worker exposes two independent gRPC services:
   compact source map, then returns deterministic title, author, abstract, raw
   reference, confidence, and evidence candidates. It performs no catalog
   lookup and writes no database state.
+- `PdfRenderer.RenderPage` synchronously renders a full PDF page or normalized
+  page bbox to a bounded PNG. It is not an Asynq task and uses only PyMuPDF.
 
 The Go API owns document status, Markdown storage, Block creation, catalog
 resolution, canonical metadata, and all PostgreSQL writes.
+
+## Server / worker topology
+
+`papers_parser.server` is intentionally lightweight. It imports only gRPC,
+protobuf, and the worker-pool runtime; it does **not** import PyMuPDF,
+PyMuPDF4LLM, ONNX Runtime, CRF, or NumPy. Heavy work runs in kind-specific
+worker processes:
+
+- `papers_parser.worker --kind recognize` loads PyMuPDF4LLM and the layout
+  stack, and handles `DocumentParser.Recognize`;
+- `papers_parser.worker --kind extract` loads PyMuPDF plus the CRF/rules
+  engine, and handles `PaperMetadataExtractor.Extract`. It does not import
+  PyMuPDF4LLM/ONNX;
+- `papers_parser.worker --kind render` imports only PyMuPDF and serves
+  `PdfRenderer.RenderPage` for full-page or normalized-region PNGs. It never
+  loads PyMuPDF4LLM/ONNX/CRF and can stay warm longer for frequent page reads.
+
+Each kind has its own bounded pool. Workers start on demand, are reused while
+busy, and exit after `PARSER_WORKER_IDLE_SECONDS` (or after
+`PARSER_WORKER_MAX_JOBS`). The server remains running with a small resident
+set; the external gRPC contract is unchanged. Configure with:
+
+```env
+PARSER_RECOGNIZE_WORKER_MAX=4
+PARSER_EXTRACT_WORKER_MAX=2
+PARSER_RENDER_WORKER_MAX=4
+PARSER_WORKER_IDLE_SECONDS=300
+PARSER_RENDER_WORKER_IDLE_SECONDS=600
+PARSER_WORKER_MAX_JOBS=50
+PARSER_WORKER_QUEUE_TIMEOUT=30
+PARSER_WORKER_START_TIMEOUT=90
+PARSER_RENDER_TIMEOUT=15
+PARSER_RENDER_MAX_DPI=300
+PARSER_RENDER_MAX_PIXELS=20000000
+PARSER_RENDER_MAX_OUTPUT_BYTES=12582912
+```
+
+`PARSER_MAX_WORKERS` and `PARSER_MAX_CONCURRENT_RPCS` still bound the public
+gRPC server. Worker maxima are independent and should be chosen from the
+available memory budget: an idle parser costs tens of MiB, while each active
+worker carries the relevant PyMuPDF/ONNX/CRF working set.
+
+Worker stdout/stderr is captured by the server and logged with a
+`worker[recognize]` / `worker[extract]` prefix. Worker sockets live in a
+private temporary directory and are removed on exit.
+
+## Server / worker interaction
+
+```text
+Go API
+  -> external gRPC (DocumentParser / PaperMetadataExtractor)
+     -> server proxy serializes the protobuf request
+        -> WorkerPool(kind).call(method, payload)
+           -> reuse idle worker, or start one
+              -> Unix socket frame request
+                 -> worker parses protobuf and runs the service
+              <- Unix socket frame response
+           <- proxy parses protobuf response
+     <- external gRPC response
+```
+
+### Starting a worker
+
+`WorkerPool._acquire()` first reuses an idle worker. If none is available and
+the kind's worker count is below its maximum, it reserves a start slot and
+`_spawn()` runs:
+
+```text
+python -m papers_parser.worker
+  --kind recognize|extract
+  --socket <private-temp-dir>/worker.sock
+  --config <base64 JSON: upload dir, limits, engine, model dir>
+  --idle-seconds ...
+  --max-jobs ...
+```
+
+The worker selects its heavy imports only after parsing `--kind`, builds its
+service, binds the Unix socket, then waits for the server connection. The
+server retries the connection until `PARSER_WORKER_START_TIMEOUT`; connect
+success is the readiness signal (heavy imports/model loading happen before the
+bind). Starts can proceed concurrently up to the per-kind maximum. If all
+workers are busy, the request waits up to `PARSER_WORKER_QUEUE_TIMEOUT` and
+then returns `RESOURCE_EXHAUSTED`.
+
+### Request / response frames
+
+The private protocol is a length-prefixed frame over the Unix socket:
+
+```text
+request:  method:uint8 | length:uint32 | protobuf payload
+response: status:uint8 | length:uint32 | protobuf payload or JSON error
+```
+
+Methods are `1 = Recognize`, `2 = Extract`, `3 = RenderPage`. A successful
+response is the serialized `RecognitionResult` / `PaperExtractionResult` /
+`PdfRenderResult`; a failure is
+`{"code": "INVALID_ARGUMENT|UNAVAILABLE|...", "message": "..."}`. Worker
+errors are mapped back to gRPC status codes by the server proxy.
+
+`PdfRenderer.RenderPage` is synchronous and is not an Asynq task. The Go
+application passes an internal relative `source_storage_key`; the render
+worker resolves it below the shared `UPLOAD_DIR`, renders a full page or a
+normalized `bbox` with PyMuPDF, and returns a bounded PNG plus pixel/page
+dimensions. Page rendering has its own pool, timeout, and DPI/pixel/output
+limits. A render worker can stay warm longer than recognition/extraction
+workers, so repeated page reads reuse the process; an application-level cache
+can be added later without changing this RPC.
+
+### Cancellation, idle exit, and shutdown
+
+- The proxy checks the external gRPC context while waiting; a cancelled or
+  expired request sends `SIGUSR1` to the worker and closes that worker.
+- The worker's own `PARSER_RPC_MAX_SECONDS` checkpoints remain active.
+- A worker exits after `PARSER_WORKER_IDLE_SECONDS`, after
+  `PARSER_WORKER_MAX_JOBS`, on socket EOF, or on SIGTERM.
+- The server monitor closes idle workers and keeps the lightweight process
+  alive; a crashed worker is retired and the next request starts a new one.
+- Server shutdown stops accepting RPCs, drains in-flight requests within
+  `PARSER_SHUTDOWN_GRACE_SECONDS`, then stops the pools and their process
+  groups.
 
 Generate stubs and run it after starting the API stack:
 
@@ -45,16 +167,18 @@ owns that line-layout schema and validation; Go neither stores nor exposes it.
 Rules do not reopen the PDF, and a missing/stale source degrades to rules.
 
 `PaperExtractionEngine` in `papers_parser/paper_extractor.py` is the
-replacement boundary. `server.py` constructs both gRPC servicers and injects
-the engine plus request limits into `PaperMetadataExtractionRPC`. Choose its
-runtime mode with `PAPER_EXTRACTION_ENGINE=rules|hybrid|shadow|crf` and point it at a
+replacement boundary. The `extract` worker constructs the engine and injects
+it plus request limits into `PaperMetadataExtractionRPC`. Choose its runtime
+mode with `PAPER_EXTRACTION_ENGINE=rules|hybrid|shadow|crf` and point it at a
 readable artifact directory with `PAPER_CRF_MODEL_DIR`. `hybrid` uses CRF facts
 only above calibrated confidence and falls back to rules when models or layout
 facts are unavailable. `shadow` returns only rule output and logs aggregate,
-content-free CRF disagreement counters. Explicit `crf` fails at startup for missing or
-incompatible artifacts. Compose mounts `model_train/artifacts` read-only at
-`/models` and uses `hybrid` by default. Startup logs artifact names and feature
-versions, never extracted text.
+content-free CRF disagreement counters. Explicit `crf` fails when the first
+extract worker starts if its artifacts are missing or incompatible; the
+failure is returned to the Go caller as an unavailable parser request rather
+than preventing the lightweight server from listening. Compose mounts
+`model_train/artifacts` read-only at `/models` and uses `hybrid` by default.
+Worker startup logs artifact names and feature versions, never extracted text.
 
 Override request limits with
 `PARSER_MAX_EXTRACTION_MARKDOWN_BYTES` and
@@ -76,22 +200,22 @@ shared file path. Without an explicit `UPLOAD_DIR`, the worker uses the reposito
 
 Parser logs use `LOG_PATH` when its parent directory is writable. In the
 read-only Compose container that path is intentionally unavailable, so the
-parser automatically writes structured runtime messages to standard output;
-use `docker compose logs -f parser`. A log-path failure never interrupts an
-RPC. Local non-container runs retain the default `python/Logs/today.log`.
+parser and workers write structured runtime messages to standard output; the
+server prefixes captured worker output and `docker compose logs -f parser`
+shows both. A log-path failure never interrupts an RPC. Local non-container
+runs retain the default `python/Logs/today.log`.
 
-## One-shot PDF region renderer foundation
+## PyMuPDF page renderer
 
-`papers_parser/render_pdf_region.py` is a framework-level CLI for a future Go
-caller. It imports only PyMuPDF and renders one page bbox to PNG on stdout; it
-does not start gRPC or import `pymupdf4llm`, ONNX, or the CRF runtime. The Go
-adapter owns storage-key containment, process concurrency/cancellation, output
-limits, PNG validation, and temporary-file cleanup.
+`papers_parser/render_pdf_region.py` is the PyMuPDF-only renderer used by the
+`render` worker. It supports a full page or one normalized page bbox and
+returns PNG bytes plus page/pixel dimensions. It does not import
+`pymupdf4llm`, ONNX, or CRF.
 
-There is intentionally no application-service call, HTTP route, frontend
-action, dependency-injection binding, environment configuration, or Docker
-packaging yet. The eventual caller will also own authorization and persistence
-of any derived image through `FileStorage`.
+The application service owns document authorization, the internal storage key,
+the render deadline/concurrency limits, PNG validation, and optional caching.
+The parser server owns the render worker pool; the Go API never runs Python.
+The same renderer is still usable as a standalone CLI for diagnostics.
 
 For an isolated local check from `python/`:
 

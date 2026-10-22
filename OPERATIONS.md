@@ -9,6 +9,20 @@ cooldown are shared across processes. The catalog dispatcher's queue and
 provider assignment state are intentionally process-local: run a single API
 process, and expect queued/running catalog work to be failed on restart.
 
+The Python parser is split into a lightweight gRPC server and on-demand
+worker processes. The server stays resident with a small memory footprint and
+spawns `recognize`/`extract`/`render` workers only when requests arrive;
+workers exit after their idle timeout or `PARSER_WORKER_MAX_JOBS`. Each kind
+has its own pool (`PARSER_RECOGNIZE_WORKER_MAX`, `PARSER_EXTRACT_WORKER_MAX`,
+`PARSER_RENDER_WORKER_MAX`) and its own dependency set: recognition loads
+PyMuPDF4LLM/layout, extraction loads PyMuPDF plus rules/CRF without the
+recognition stack, and rendering loads only PyMuPDF. Choose worker maxima from
+the memory budget; the public gRPC admission limits remain
+`PARSER_MAX_WORKERS`/`PARSER_MAX_CONCURRENT_RPCS`. Page/region rendering is a
+synchronous direct `PdfRenderer.RenderPage` RPC (no Asynq), bounded by
+`PARSER_RENDER_TIMEOUT`, `PARSER_RENDER_MAX_DPI`, `PARSER_RENDER_MAX_PIXELS`,
+and `PARSER_RENDER_MAX_OUTPUT_BYTES`.
+
 The `critical`, `default`, and `low` queues handle application work. Remote PDF
 acquisition uses the isolated `download` queue so slow hosts cannot consume all
 parser/catalog capacity. `ASYNQ_CONCURRENCY` controls the total worker pool;

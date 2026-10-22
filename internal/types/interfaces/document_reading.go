@@ -16,4 +16,10 @@ type DocumentReadingService interface {
 	GetDocumentBlockImage(ctx context.Context, documentID, blockID string) (reader io.ReadCloser, filename string, err error)
 	GetDocumentMarkdown(ctx context.Context, id string) (types.DocumentMarkdownContent, error)
 	GetDocumentReadingStructure(ctx context.Context, id string) (types.DocumentReadingStructure, error)
+	// RenderPage returns a bounded page/region PNG. The storage key remains
+	// internal to the application and renderer.
+	RenderPage(
+		ctx context.Context, documentID string, pageNumber int,
+		bbox *types.NormalizedPDFRect, dpi int,
+	) (*types.RenderedPDFPage, error)
 }

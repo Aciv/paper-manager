@@ -191,6 +191,33 @@ func (s *behaviorReadingService) GetDocumentBlockImage(
 	return io.NopCloser(bytes.NewReader(s.image)), "block.png", nil
 }
 
+func (s *behaviorReadingService) RenderPage(
+	context.Context, string, int, *types.NormalizedPDFRect, int,
+) (*types.RenderedPDFPage, error) {
+	return &types.RenderedPDFPage{
+		PNG: s.image, ContentType: "image/png", Width: 10, Height: 20,
+		PageWidth: 600, PageHeight: 800,
+	}, nil
+}
+
+func TestPageImageToolEnforcesMCPImageLimit(t *testing.T) {
+	image := append([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}, bytes.Repeat([]byte{1}, 32)...)
+	server, err := NewToolServer(config.Config{
+		MCPAddress: "127.0.0.1:8090", MCPMaxRequestBytes: 8 << 20,
+		MCPMaxImageBytes: 8,
+	}, nil, &behaviorReadingService{image: image}, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := connectTestClient(t, server)
+	result := callTool(t, client, "papers_manager_document_read_page_image", map[string]any{
+		"document_id": uuid.NewString(), "page_number": 1,
+	})
+	if !result.IsError || !strings.Contains(resultText(t, result), "PAYLOAD_TOO_LARGE") {
+		t.Fatalf("page image result = %s", resultText(t, result))
+	}
+}
+
 func TestManifestToolsHaveDispatchCases(t *testing.T) {
 	source, err := os.ReadFile("server.go")
 	if err != nil {
@@ -381,6 +408,18 @@ func TestNoteAndBlockImageToolsDispatch(t *testing.T) {
 	image, ok := result.Content[1].(*sdk.ImageContent)
 	if !ok || image.MIMEType != "image/png" || len(image.Data) == 0 {
 		t.Fatalf("image content = %#v", result.Content[1])
+	}
+	result = callTool(t, client, "papers_manager_document_read_page_image", map[string]any{
+		"document_id": documentID, "page_number": 1,
+		"bbox": map[string]any{"x0": 0.1, "y0": 0.2, "x1": 0.8, "y1": 0.9},
+		"dpi":  144,
+	})
+	if result.IsError || len(result.Content) != 2 {
+		t.Fatalf("page image result = %#v", result)
+	}
+	if content, ok := result.Content[1].(*sdk.ImageContent); !ok ||
+		content.MIMEType != "image/png" || len(content.Data) == 0 {
+		t.Fatalf("page image content = %#v", result.Content[1])
 	}
 	// Keep the JSON envelope valid even though the image bytes themselves are
 	// not part of it.

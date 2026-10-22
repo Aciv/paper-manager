@@ -215,7 +215,7 @@ Inside a session:
 /mcp
 ```
 
-The host should list 42 tools in four groups: `papers_manager_library_*`,
+The host should list 43 tools in four groups: `papers_manager_library_*`,
 `papers_manager_reading_note_*`/`papers_manager_document_*`,
 `papers_manager_base_*`, and `papers_manager_citation_*`. The first skill use
 should trigger its runtime preflight.
@@ -541,7 +541,7 @@ Ask the host to call:
 papers_manager_library_search
 ```
 
-or inspect the MCP server's `tools/list`. All 42 tools start with the
+or inspect the MCP server's `tools/list`. All 43 tools start with the
 `papers_manager_` prefix; Base and citation tools use their own
 `papers_manager_base_*` and `papers_manager_citation_*` collections.
 
@@ -564,8 +564,9 @@ retry with the stale revision.
   and is confined to `MCP_LOCAL_IMPORT_ROOT`; leave that setting empty unless
   you intentionally want an Agent to read selected local files. Symlinks are
   resolved and escapes are rejected.
-- Block-image responses are bounded by `MCP_MAX_IMAGE_BYTES`; they never expose
-  the underlying storage key.
+- Block-image and page-image responses are bounded by `MCP_MAX_IMAGE_BYTES`;
+  they never expose the underlying storage key. Page rendering is synchronous
+  and bounded by the parser render timeout/DPI/pixel/output limits.
 
 ## 12. Contract references
 

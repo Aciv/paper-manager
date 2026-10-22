@@ -38,6 +38,11 @@ func (s *documentReadingServiceStub) GetDocumentMarkdown(context.Context, string
 func (s *documentReadingServiceStub) GetDocumentReadingStructure(context.Context, string) (types.DocumentReadingStructure, error) {
 	return s.structure, s.err
 }
+func (s *documentReadingServiceStub) RenderPage(
+	context.Context, string, int, *types.NormalizedPDFRect, int,
+) (*types.RenderedPDFPage, error) {
+	return &types.RenderedPDFPage{PNG: []byte("png"), ContentType: "image/png", Width: 1, Height: 1}, s.err
+}
 
 func readingHandlerTestEngine(stub *documentReadingServiceStub) *gin.Engine {
 	gin.SetMode(gin.TestMode)
@@ -46,7 +51,45 @@ func readingHandlerTestEngine(stub *documentReadingServiceStub) *gin.Engine {
 	handler := NewDocumentReadingHandler(stub)
 	engine.GET("/api/document/:id/markdown", handler.Markdown)
 	engine.GET("/api/document/:id/structure", handler.Structure)
+	engine.GET("/api/document/:id/pages/:page/image", handler.PageImage)
 	return engine
+}
+
+func TestDocumentReadingHandlerRendersPageImage(t *testing.T) {
+	id := uuid.New()
+	stub := &documentReadingServiceStub{}
+	engine := readingHandlerTestEngine(stub)
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/document/"+id.String()+"/pages/2/image?dpi=144&bbox=0.1,0.2,0.8,0.9",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
+	if response.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("content type = %q", response.Header().Get("Content-Type"))
+	}
+	if response.Body.String() != "png" {
+		t.Fatalf("body = %q", response.Body.String())
+	}
+}
+
+func TestDocumentReadingHandlerRejectsInvalidPageBBox(t *testing.T) {
+	id := uuid.New()
+	engine := readingHandlerTestEngine(&documentReadingServiceStub{})
+	request := httptest.NewRequest(
+		http.MethodGet,
+		"/api/document/"+id.String()+"/pages/1/image?bbox=0.2,0.1",
+		nil,
+	)
+	response := httptest.NewRecorder()
+	engine.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d body=%s", response.Code, response.Body.String())
+	}
 }
 
 func TestDocumentReadingHandlerReturnsMarkdown(t *testing.T) {

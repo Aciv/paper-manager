@@ -192,6 +192,12 @@ func (s *ToolServer) callTool(ctx context.Context, name string, req *sdk.CallToo
 			return errorResult(imageErr), nil
 		}
 		return result, nil
+	case "papers_manager_document_read_page_image":
+		result, imageErr := s.documentReadPageImage(ctx, raw)
+		if imageErr != nil {
+			return errorResult(imageErr), nil
+		}
+		return result, nil
 	case "papers_manager_reading_note_outline":
 		data, err = s.readingNoteOutline(ctx, raw)
 	case "papers_manager_reading_note_read_section":

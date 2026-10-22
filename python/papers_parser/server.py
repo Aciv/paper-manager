@@ -1,7 +1,8 @@
-"""Synchronous PDF-to-Markdown gRPC parser.
+"""Lightweight parser gRPC front end.
 
-The Go API owns document state and database writes. This process receives one
-authorized source, converts it to Markdown, and returns only parser output.
+The server process only owns transport, admission control, and worker
+lifecycle. PyMuPDF/PyMuPDF4LLM/ONNX/CRF imports live in kind-specific worker
+processes started on demand, so an idle parser keeps a small resident set.
 """
 from __future__ import annotations
 
@@ -15,16 +16,17 @@ from pathlib import Path
 
 import grpc
 
+import document_parser_pb2
 import document_parser_pb2_grpc
 from logger import get_logger
-from papers_parser.extractor_service import PaperMetadataExtractionRPC
-from papers_parser.crf_engine import (
-    CRFPaperExtractionEngine,
-    HybridPaperExtractionEngine,
-    ShadowPaperExtractionEngine,
+from papers_parser.worker_pool import (
+    WorkerPool,
+    WorkerPoolConfig,
+    WorkerQueueFull,
+    WorkerRPCError,
+    WorkerUnavailable,
 )
-from papers_parser.paper_extractor import DeterministicPaperExtractionEngine
-from papers_parser.pdf2md_service import DocumentParser
+from papers_parser.worker_protocol import METHOD_EXTRACT, METHOD_RECOGNIZE, METHOD_RENDER
 
 
 def _log_level_from_env() -> int:
@@ -41,18 +43,12 @@ DEFAULT_UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 
 
 def _resolve_project_path(value: str | Path) -> Path:
-    """Resolve relative parser configuration paths from the repository root.
-
-    The development launcher changes its working directory to ``python/``
-    before starting this module. Configuration lives in the repository-root
-    ``.env``, so resolving ``./model_train/artifacts`` from the process working
-    directory would incorrectly look below ``python/``. Absolute deployment
-    paths, such as Compose's ``/models``, are left unchanged.
-    """
+    """Resolve relative parser configuration paths from the repository root."""
     path = Path(value).expanduser()
     if not path.is_absolute():
         path = PROJECT_ROOT / path
     return path.resolve()
+
 
 DEFAULT_MAX_FILE_SIZE = int(os.getenv("DEFAULT_MAX_FILE_SIZE", 100 << 20))
 DEFAULT_GRPC_MESSAGE_OVERHEAD = int(os.getenv("DEFAULT_GRPC_MESSAGE_OVERHEAD", 1 << 20))
@@ -63,9 +59,6 @@ DEFAULT_EXTRACTION_ENGINE = os.getenv("PAPER_EXTRACTION_ENGINE", "rules").strip(
 DEFAULT_CRF_MODEL_DIR = _resolve_project_path(
     os.getenv("PAPER_CRF_MODEL_DIR", "model_train/artifacts"),
 )
-# 144 DPI keeps routine block previews legible while remaining far below
-# print-resolution pixel counts. Deployments may override the default through
-# PARSER_IMAGE_DPI; DEFAULT_IMAGE_DPI remains a compatibility fallback.
 DEFAULT_IMAGE_DPI = int(os.getenv("DEFAULT_IMAGE_DPI", 144))
 DEFAULT_MAX_PAGES = int(os.getenv("PARSER_MAX_PAGES", 2000))
 DEFAULT_MAX_PAGE_EDGE_POINTS = float(os.getenv("PARSER_MAX_PAGE_EDGE_POINTS", 5000.0))
@@ -81,7 +74,203 @@ DEFAULT_MAX_CONCURRENT_RPCS = int(os.getenv("PARSER_MAX_CONCURRENT_RPCS", 8))
 DEFAULT_SHUTDOWN_GRACE_SECONDS = float(os.getenv("PARSER_SHUTDOWN_GRACE_SECONDS", 30))
 DEFAULT_RPC_MAX_SECONDS = float(os.getenv("PARSER_RPC_MAX_SECONDS", 900))
 
+DEFAULT_RECOGNIZE_WORKER_MAX = int(
+    os.getenv("PARSER_RECOGNIZE_WORKER_MAX", min(4, max(DEFAULT_MAX_CONCURRENT_RPCS, 1)))
+)
+DEFAULT_EXTRACT_WORKER_MAX = int(
+    os.getenv("PARSER_EXTRACT_WORKER_MAX", min(2, max(DEFAULT_MAX_CONCURRENT_RPCS, 1)))
+)
+DEFAULT_WORKER_IDLE_SECONDS = float(os.getenv("PARSER_WORKER_IDLE_SECONDS", 300))
+DEFAULT_WORKER_MAX_JOBS = int(os.getenv("PARSER_WORKER_MAX_JOBS", 50))
+DEFAULT_WORKER_QUEUE_TIMEOUT = float(os.getenv("PARSER_WORKER_QUEUE_TIMEOUT", 30))
+DEFAULT_WORKER_START_TIMEOUT = float(os.getenv("PARSER_WORKER_START_TIMEOUT", 90))
+DEFAULT_RENDER_WORKER_MAX = int(os.getenv("PARSER_RENDER_WORKER_MAX", min(4, max(DEFAULT_MAX_CONCURRENT_RPCS, 1))))
+DEFAULT_RENDER_WORKER_IDLE_SECONDS = float(os.getenv("PARSER_RENDER_WORKER_IDLE_SECONDS", 600))
+DEFAULT_RENDER_TIMEOUT = float(os.getenv("PARSER_RENDER_TIMEOUT", 15))
+DEFAULT_RENDER_MAX_DPI = int(os.getenv("PARSER_RENDER_MAX_DPI", 300))
+DEFAULT_RENDER_MAX_PIXELS = int(os.getenv("PARSER_RENDER_MAX_PIXELS", 20_000_000))
+DEFAULT_RENDER_MAX_OUTPUT_BYTES = int(os.getenv("PARSER_RENDER_MAX_OUTPUT_BYTES", 12 << 20))
 
+
+class _ParserProxy(document_parser_pb2_grpc.DocumentParserServicer):
+    def __init__(self, pool: WorkerPool, call_timeout: float):
+        self.pool = pool
+        self.call_timeout = call_timeout
+
+    def Recognize(self, request, context):  # noqa: N802 - gRPC generated name
+        return self._call(context, request, document_parser_pb2.RecognitionResult())
+
+    def _call(self, context, request, response):
+        try:
+            payload = self.pool.call(
+                METHOD_RECOGNIZE,
+                request.SerializeToString(),
+                cancel_check=_cancel_check(context),
+                timeout=self.call_timeout,
+            )
+        except WorkerQueueFull as exc:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(exc))
+        except WorkerUnavailable as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except WorkerRPCError as exc:
+            _abort_worker_error(context, exc)
+        except Exception:
+            LOG.exception("parser proxy failed")
+            context.abort(grpc.StatusCode.INTERNAL, "parser request failed")
+        try:
+            response.ParseFromString(payload)
+        except Exception:
+            LOG.exception("parser proxy returned an invalid response")
+            context.abort(grpc.StatusCode.INTERNAL, "parser returned an invalid response")
+        return response
+
+
+class _ExtractorProxy(document_parser_pb2_grpc.PaperMetadataExtractorServicer):
+    def __init__(self, pool: WorkerPool, call_timeout: float):
+        self.pool = pool
+        self.call_timeout = call_timeout
+
+    def Extract(self, request, context):  # noqa: N802 - gRPC generated name
+        try:
+            payload = self.pool.call(
+                METHOD_EXTRACT,
+                request.SerializeToString(),
+                cancel_check=_cancel_check(context),
+                timeout=self.call_timeout,
+            )
+        except WorkerQueueFull as exc:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(exc))
+        except WorkerUnavailable as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except WorkerRPCError as exc:
+            _abort_worker_error(context, exc)
+        except Exception:
+            LOG.exception("extractor proxy failed")
+            context.abort(grpc.StatusCode.INTERNAL, "extraction request failed")
+        response = document_parser_pb2.PaperExtractionResult()
+        try:
+            response.ParseFromString(payload)
+        except Exception:
+            LOG.exception("extractor proxy returned an invalid response")
+            context.abort(grpc.StatusCode.INTERNAL, "extractor returned an invalid response")
+        return response
+
+
+class _RendererProxy(document_parser_pb2_grpc.PdfRendererServicer):
+    def __init__(self, pool: WorkerPool, call_timeout: float):
+        self.pool = pool
+        self.call_timeout = call_timeout
+
+    def RenderPage(self, request, context):  # noqa: N802 - gRPC generated name
+        try:
+            payload = self.pool.call(
+                METHOD_RENDER,
+                request.SerializeToString(),
+                cancel_check=_cancel_check(context),
+                timeout=self.call_timeout,
+            )
+        except WorkerQueueFull as exc:
+            context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, str(exc))
+        except WorkerUnavailable as exc:
+            context.abort(grpc.StatusCode.UNAVAILABLE, str(exc))
+        except WorkerRPCError as exc:
+            _abort_worker_error(context, exc)
+        except Exception:
+            LOG.exception("render proxy failed")
+            context.abort(grpc.StatusCode.INTERNAL, "render request failed")
+        response = document_parser_pb2.PdfRenderResult()
+        try:
+            response.ParseFromString(payload)
+        except Exception:
+            LOG.exception("render proxy returned an invalid response")
+            context.abort(grpc.StatusCode.INTERNAL, "renderer returned an invalid response")
+        return response
+
+
+def _cancel_check(context):
+    def check() -> bool:
+        try:
+            if not context.is_active():
+                return True
+            remaining = context.time_remaining()
+            return remaining is not None and remaining <= 0
+        except Exception:
+            return False
+
+    return check
+
+
+def _abort_worker_error(context, exc: WorkerRPCError) -> None:
+    code = getattr(grpc.StatusCode, exc.code, grpc.StatusCode.INTERNAL)
+    if not isinstance(code, grpc.StatusCode):
+        code = grpc.StatusCode.INTERNAL
+    context.abort(code, exc.message)
+
+
+def _worker_config(args) -> dict:
+    return {
+        "upload_dir": str(args.upload_dir),
+        "max_file_size": args.max_file_size,
+        "image_dpi": args.image_dpi,
+        "max_pages": args.max_pages,
+        "max_page_edge_points": args.max_page_edge_points,
+        "max_crop_pixels": args.max_crop_pixels,
+        "max_crops_per_document": args.max_crops_per_document,
+        "max_crop_bytes": args.max_crop_bytes,
+        "max_recognition_markdown_bytes": args.max_recognition_markdown_bytes,
+        "max_extraction_markdown_bytes": args.max_extraction_markdown_bytes,
+        "paper_extraction_engine": args.paper_extraction_engine,
+        "paper_crf_model_dir": str(args.paper_crf_model_dir),
+        "max_extraction_blocks": args.max_extraction_blocks,
+        "max_extraction_layout_lines": args.max_extraction_layout_lines,
+        "grpc_max_message_size": args.grpc_max_message_size,
+        "grpc_message_overhead": DEFAULT_GRPC_MESSAGE_OVERHEAD,
+        "rpc_max_seconds": args.rpc_max_seconds,
+        "render_max_dpi": args.render_max_dpi,
+        "render_max_pixels": args.render_max_pixels,
+        "render_max_output_bytes": args.render_max_output_bytes,
+    }
+
+
+def _build_pools(args) -> tuple[WorkerPool, WorkerPool, WorkerPool]:
+    common = _worker_config(args)
+    recognize_pool = WorkerPool(
+        WorkerPoolConfig(
+            kind="recognize",
+            max_workers=args.recognize_worker_max,
+            idle_seconds=args.worker_idle_seconds,
+            max_jobs=args.worker_max_jobs,
+            queue_timeout=args.worker_queue_timeout,
+            start_timeout=args.worker_start_timeout,
+            max_payload_bytes=args.grpc_max_message_size,
+            worker_config=common,
+        )
+    )
+    extract_pool = WorkerPool(
+        WorkerPoolConfig(
+            kind="extract",
+            max_workers=args.extract_worker_max,
+            idle_seconds=args.worker_idle_seconds,
+            max_jobs=args.worker_max_jobs,
+            queue_timeout=args.worker_queue_timeout,
+            start_timeout=args.worker_start_timeout,
+            max_payload_bytes=args.grpc_max_message_size,
+            worker_config=common,
+        )
+    )
+    render_pool = WorkerPool(
+        WorkerPoolConfig(
+            kind="render",
+            max_workers=args.render_worker_max,
+            idle_seconds=args.render_worker_idle_seconds,
+            max_jobs=args.worker_max_jobs,
+            queue_timeout=args.worker_queue_timeout,
+            start_timeout=args.worker_start_timeout,
+            max_payload_bytes=args.grpc_max_message_size,
+            worker_config=common,
+        )
+    )
+    return recognize_pool, extract_pool, render_pool
 
 
 def main() -> None:
@@ -125,6 +314,26 @@ def main() -> None:
     )
     parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS)
     parser.add_argument("--max-concurrent-rpcs", type=int, default=DEFAULT_MAX_CONCURRENT_RPCS)
+    parser.add_argument("--recognize-worker-max", type=int, default=DEFAULT_RECOGNIZE_WORKER_MAX)
+    parser.add_argument("--extract-worker-max", type=int, default=DEFAULT_EXTRACT_WORKER_MAX)
+    parser.add_argument("--worker-idle-seconds", type=float, default=DEFAULT_WORKER_IDLE_SECONDS)
+    parser.add_argument("--worker-max-jobs", type=int, default=DEFAULT_WORKER_MAX_JOBS)
+    parser.add_argument("--worker-queue-timeout", type=float, default=DEFAULT_WORKER_QUEUE_TIMEOUT)
+    parser.add_argument("--worker-start-timeout", type=float, default=DEFAULT_WORKER_START_TIMEOUT)
+    parser.add_argument("--render-worker-max", type=int, default=DEFAULT_RENDER_WORKER_MAX)
+    parser.add_argument(
+        "--render-worker-idle-seconds",
+        type=float,
+        default=DEFAULT_RENDER_WORKER_IDLE_SECONDS,
+    )
+    parser.add_argument("--render-timeout", type=float, default=DEFAULT_RENDER_TIMEOUT)
+    parser.add_argument("--render-max-dpi", type=int, default=DEFAULT_RENDER_MAX_DPI)
+    parser.add_argument("--render-max-pixels", type=int, default=DEFAULT_RENDER_MAX_PIXELS)
+    parser.add_argument(
+        "--render-max-output-bytes",
+        type=int,
+        default=DEFAULT_RENDER_MAX_OUTPUT_BYTES,
+    )
     parser.add_argument(
         "--shutdown-grace-seconds",
         type=float,
@@ -163,79 +372,80 @@ def main() -> None:
         raise ValueError("PARSER_MAX_WORKERS and PARSER_MAX_CONCURRENT_RPCS must be positive")
     if args.max_concurrent_rpcs > args.max_workers:
         raise ValueError("PARSER_MAX_CONCURRENT_RPCS must not exceed PARSER_MAX_WORKERS")
+    if args.recognize_worker_max <= 0 or args.extract_worker_max <= 0:
+        raise ValueError("parser worker maxima must be positive")
+    if args.worker_idle_seconds <= 0 or args.worker_max_jobs <= 0:
+        raise ValueError("PARSER_WORKER_IDLE_SECONDS and PARSER_WORKER_MAX_JOBS must be positive")
+    if args.worker_queue_timeout < 0 or args.worker_start_timeout <= 0:
+        raise ValueError("parser worker queue/start timeouts are invalid")
+    if args.render_worker_max <= 0 or args.render_worker_max > 16:
+        raise ValueError("PARSER_RENDER_WORKER_MAX must be between 1 and 16")
+    if args.render_worker_idle_seconds <= 0:
+        raise ValueError("PARSER_RENDER_WORKER_IDLE_SECONDS must be positive")
+    if args.render_timeout <= 0:
+        raise ValueError("PARSER_RENDER_TIMEOUT must be positive")
+    if args.render_max_dpi <= 0 or args.render_max_dpi > 300:
+        raise ValueError("PARSER_RENDER_MAX_DPI must be between 1 and 300")
+    if args.render_max_pixels <= 0 or args.render_max_pixels > 50_000_000:
+        raise ValueError("PARSER_RENDER_MAX_PIXELS must be between 1 and 50000000")
+    if args.render_max_output_bytes <= 0 or args.render_max_output_bytes > 32 << 20:
+        raise ValueError("PARSER_RENDER_MAX_OUTPUT_BYTES must be between 1 and 33554432")
     if args.shutdown_grace_seconds < 0 or args.rpc_max_seconds <= 0:
         raise ValueError("PARSER_SHUTDOWN_GRACE_SECONDS must be non-negative and PARSER_RPC_MAX_SECONDS positive")
 
     server = _create_server(args)
-    document_parser_pb2_grpc.add_DocumentParserServicer_to_server(
-        DocumentParser(
-            Path(args.upload_dir),
-            args.max_file_size,
-            args.image_dpi,
-            max_pages=args.max_pages,
-            max_page_edge_points=args.max_page_edge_points,
-            max_crop_pixels=args.max_crop_pixels,
-            max_crops_per_document=args.max_crops_per_document,
-            max_crop_bytes=args.max_crop_bytes,
-            max_markdown_bytes=args.max_recognition_markdown_bytes,
-            max_response_bytes=max(
-                args.grpc_max_message_size - DEFAULT_GRPC_MESSAGE_OVERHEAD, 1
-            ),
-            rpc_max_seconds=args.rpc_max_seconds,
-        ),
-        server,
-    )
-    extraction_engine = _build_extraction_engine(args.paper_extraction_engine, args.paper_crf_model_dir)
-    document_parser_pb2_grpc.add_PaperMetadataExtractorServicer_to_server(
-        PaperMetadataExtractionRPC(
-            extraction_engine,
-            args.max_extraction_markdown_bytes,
-            args.max_extraction_blocks,
-            Path(args.upload_dir),
-            args.max_extraction_layout_lines,
-            rpc_max_seconds=args.rpc_max_seconds,
-        ),
-        server,
-    )
-    server.add_insecure_port(args.address)
-    stop_requested = _install_shutdown_handlers()
-    server.start()
-    LOG.info(
-        "parser services listening on %s configured_extraction_engine=%s active_extraction_engine=%s extraction_markdown_limit=%d extraction_block_limit=%d extraction_layout_line_limit=%d max_pages=%d max_page_edge_points=%s image_dpi=%d max_image_dpi=%d max_crop_pixels=%d max_crop_bytes=%d max_workers=%d max_concurrent_rpcs=%d rpc_max_seconds=%s shutdown_grace_seconds=%s",
-        args.address,
-        args.paper_extraction_engine,
-        extraction_engine.name,
-        args.max_extraction_markdown_bytes,
-        args.max_extraction_blocks,
-        args.max_extraction_layout_lines,
-        args.max_pages,
-        args.max_page_edge_points,
-        args.image_dpi,
-        args.max_image_dpi,
-        args.max_crop_pixels,
-        args.max_crop_bytes,
-        args.max_workers,
-        args.max_concurrent_rpcs,
-        args.rpc_max_seconds,
-        args.shutdown_grace_seconds,
-    )
-    stop_requested.wait()
-    LOG.info(
-        "stopping parser services (grace=%ss)",
-        args.shutdown_grace_seconds,
-    )
-    stopped = server.stop(grace=args.shutdown_grace_seconds)
-    if not stopped.wait(timeout=args.shutdown_grace_seconds + 5):
-        LOG.warning("parser services did not stop within the grace period")
-    LOG.info("parser services stopped")
+    pools: list[WorkerPool] = []
+    try:
+        recognize_pool, extract_pool, render_pool = _build_pools(args)
+        pools = [recognize_pool, extract_pool, render_pool]
+        call_timeout = max(args.rpc_max_seconds + 30, 30)
+        document_parser_pb2_grpc.add_DocumentParserServicer_to_server(
+            _ParserProxy(recognize_pool, call_timeout),
+            server,
+        )
+        document_parser_pb2_grpc.add_PaperMetadataExtractorServicer_to_server(
+            _ExtractorProxy(extract_pool, call_timeout),
+            server,
+        )
+        document_parser_pb2_grpc.add_PdfRendererServicer_to_server(
+            _RendererProxy(render_pool, args.render_timeout),
+            server,
+        )
+        server.add_insecure_port(args.address)
+        stop_requested = _install_shutdown_handlers()
+        server.start()
+        LOG.info(
+            "parser server listening on %s extraction_engine=%s recognize_worker_max=%d "
+            "extract_worker_max=%d render_worker_max=%d worker_idle_seconds=%s "
+            "render_worker_idle_seconds=%s worker_max_jobs=%d max_workers=%d "
+            "max_concurrent_rpcs=%d rpc_max_seconds=%s render_timeout=%s shutdown_grace_seconds=%s",
+            args.address,
+            args.paper_extraction_engine,
+            args.recognize_worker_max,
+            args.extract_worker_max,
+            args.render_worker_max,
+            args.worker_idle_seconds,
+            args.render_worker_idle_seconds,
+            args.worker_max_jobs,
+            args.max_workers,
+            args.max_concurrent_rpcs,
+            args.rpc_max_seconds,
+            args.render_timeout,
+            args.shutdown_grace_seconds,
+        )
+        stop_requested.wait()
+        LOG.info("stopping parser server (grace=%ss)", args.shutdown_grace_seconds)
+        stopped = server.stop(grace=args.shutdown_grace_seconds)
+        if not stopped.wait(timeout=args.shutdown_grace_seconds + 5):
+            LOG.warning("parser server did not stop within the grace period")
+    finally:
+        for pool in pools:
+            pool.close()
+        LOG.info("parser server stopped")
 
 
 def _create_server(args) -> grpc.Server:
-    """Build the gRPC server with bounded concurrency.
-
-    ``maximum_concurrent_rpcs`` rejects excess requests with
-    RESOURCE_EXHAUSTED instead of queueing them behind a saturated thread pool.
-    """
+    """Build the gRPC server with bounded external concurrency."""
     return grpc.server(
         futures.ThreadPoolExecutor(max_workers=args.max_workers),
         options=[
@@ -260,39 +470,10 @@ def _install_shutdown_handlers() -> threading.Event:
 
 
 def _build_extraction_engine(mode: str, model_dir: Path):
-    """Construct rules/CRF/hybrid/shadow once; only CRF mode is fail-closed."""
-    rules = DeterministicPaperExtractionEngine()
-    if mode == "rules":
-        return rules
-    try:
-        crf = CRFPaperExtractionEngine(
-            header_model=model_dir / "phase21" / "header-text-title-priors.crfsuite",
-            reference_model=model_dir / "phase21" / "reference-text.crfsuite",
-            citation_model=model_dir / "phase22" / "citation-context.crfsuite",
-        )
-    except Exception:
-        if mode == "crf":
-            raise
-        LOG.warning("%s CRF artifacts unavailable; using deterministic rules", mode, exc_info=True)
-        return rules
-    summary = crf.model_summary()
-    LOG.info(
-        "paper CRF artifacts loaded header=%s header_features=%s "
-        "reference=%s reference_features=%s citation=%s citation_features=%s",
-        summary["header_model"],
-        summary["header_feature_version"],
-        summary["reference_model"],
-        summary["reference_feature_version"],
-        summary["citation_model"],
-        summary["citation_feature_version"],
-    )
-    if mode == "crf":
-        return crf
-    if mode == "shadow":
-        return ShadowPaperExtractionEngine(rules, crf)
-    return HybridPaperExtractionEngine(rules, crf)
+    """Lazy compatibility wrapper used by operational tests."""
+    from papers_parser.engine_factory import build_extraction_engine
 
-
+    return build_extraction_engine(mode, model_dir)
 
 
 if __name__ == "__main__":

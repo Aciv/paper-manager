@@ -72,8 +72,8 @@ func TestToolServerListsAllPrefixedTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools() error = %v", err)
 	}
-	if len(result.Tools) != 42 {
-		t.Fatalf("ListTools() count = %d, want 42", len(result.Tools))
+	if len(result.Tools) != 43 {
+		t.Fatalf("ListTools() count = %d, want 43", len(result.Tools))
 	}
 	for _, tool := range result.Tools {
 		if !strings.HasPrefix(tool.Name, "papers_manager_") {

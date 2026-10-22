@@ -14,6 +14,7 @@ import (
 	"paperMaster/internal/infrastructure/papercatalog"
 	"paperMaster/internal/infrastructure/paperextraction"
 	"paperMaster/internal/infrastructure/paperurl"
+	"paperMaster/internal/infrastructure/pdfrender"
 	"paperMaster/internal/limit"
 	mcpadapter "paperMaster/internal/mcp"
 	"paperMaster/internal/router"
@@ -49,6 +50,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(router.NewTaskResultInspector))
 	must(dependencies.Provide(docrecognition.NewRecognizer))
 	must(dependencies.Provide(paperextraction.NewExtractor))
+	must(dependencies.Provide(pdfrender.NewRenderer))
 	must(dependencies.Provide(limit.NewEngine))
 	must(dependencies.Provide(papercatalog.NewRegistryFromConfig))
 	must(dependencies.Provide(appservice.NewCatalogDispatcher))
@@ -59,7 +61,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(paperurl.NewDownloadLimiter))
 	must(dependencies.Provide(appservice.NewDocumentServiceWithProcessingAndSpanRecorder))
 	must(dependencies.Provide(appservice.NewDocumentStructureService))
-	must(dependencies.Provide(appservice.NewDocumentReadingService))
+	must(dependencies.Provide(appservice.NewDocumentReadingServiceWithRenderer))
 	must(dependencies.Provide(func(storage interfaces.FileStorage) (interfaces.TextFileEditor, error) {
 		editor, ok := storage.(interfaces.TextFileEditor)
 		if !ok {

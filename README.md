@@ -38,7 +38,7 @@ docker compose up --build -d
 
 - `postgres`：源数据与解析结果；
 - `redis`：Asynq 文档识别队列；
-- `parser`：`pymupdf4llm` PDF 解析 gRPC worker；
+- `parser`：轻量 gRPC server + 按需 `recognize`/`extract`/`render` worker；
 - `api`：Go HTTP API，端口 `8080`；
 - `web`：React 生产站点，端口 `5173`，并反向代理 `/api` 到 API。
 
@@ -201,6 +201,7 @@ revision 乐观锁。笔记中的内部证据链接使用
 - `POST /api/document/import-url`：验证并流式导入显式 PDF、arXiv 页面或受支持的 DOI URL，然后提交正常文档处理流程。
 - `GET /api/document/{id}/content`：以内联方式流式返回原始文件，供 PDF 阅读器使用。
 - `GET /api/document/{id}/blocks?page=N`：读取某一 PDF 页的解析 Block；省略 `page` 返回全部 Block。
+- `GET /api/document/{id}/pages/{page}/image?bbox=x0,y0,x1,y1&dpi=144`：同步渲染整页或归一化区域 PNG；`bbox` 省略时渲染整页。该接口直接调用 parser render worker，不经过 Asynq；有独立超时、DPI/像素/字节上限。
 - `GET /api/document/{id}/markdown`：以 `text/markdown` 返回当前识别生成的论文 Markdown（有大小上限），用于阅读或下游处理。
 - `GET|PUT|DELETE /api/document/{id}/reading-note`：`GET` 只返回 section 目录和 revision；`PUT` 按 `expectedRevision` 整体导入/替换 Markdown，支持 raw `text/markdown` 或 multipart `file` 字段；空 body/空文件创建空白笔记；`DELETE` 删除整份笔记。
 - `GET /api/document/{id}/reading-note/sections/{sectionId}`：只读取指定 section 的元数据、Markdown 和 `lineCount`；阅读目录不返回正文。
@@ -227,9 +228,9 @@ revision 乐观锁。笔记中的内部证据链接使用
 
 `agent-skills/` 定义两个 Agent skill：`papers-manager-library` 负责入库、元数据、Base、处理状态和删除；`papers-manager-reading` 负责 L0-L4 分层阅读、section 笔记生成、section description、证据放置和 Base 总结工作流。Base 总结在 Phase 3B 前不单独成 skill。
 
-MCP 是主要的 Agent 执行边界：`docs/mcp/papers-manager-tools.md` 描述传输、鉴权、错误、边界和工具行为，`docs/mcp/papers-manager-tools.json` 是 42 个工具的机器可读清单，按 `library`、`reading`、`base`、`citation` 四组组织；Base 和引用相关工具分别使用独立的 `papers_manager_base_*`、`papers_manager_citation_*` 集合。所有工具名使用 `papers_manager_` 前缀；Host 可以再包一层命名空间。Skill 只承载策略和渐进披露引用，scripts 不作为第二套后端客户端。两个 Skill 都带运行前置检查：MCP 工具缺失或未配置时明确报告并停止写操作，不用 `curl`/scripts 兜底。实现位于 `internal/mcp`：设置 `MCP_ENABLED=true` 后 API 在同一进程的 loopback `MCP_ADDR` 启动 MCP，共享同一 DI service/note gate；非 loopback 必须配置 `MCP_TOKEN` 并以 Bearer 发送。传输仅支持 MCP Streamable HTTP（`/mcp`），不提供原生 stdio；仅支持 stdio 的 Host 需使用客户端桥接。MCP 支持 URL/受控本地文件导入、分阶段重试/取消、整篇/单 section 笔记替换与导出、Block 图片、Base 生命周期与书目生成、引用查询/编辑/解析/重新匹配/PDF 下载；本地文件导入必须设置 `MCP_LOCAL_IMPORT_ROOT`，图片响应受 `MCP_MAX_IMAGE_BYTES` 限制。Claude Code、Codex、OpenCode、DeepSeek Harness 的 MCP 与 Skill 安装见 [`docs/mcp/agent-installation.md`](docs/mcp/agent-installation.md)。公式来源采用 Block 或 PDF page/rectangle 证据链接：笔记说明公式含义并跳回原文高亮，不从当前 PDF 文本层猜测或重写 LaTeX；内联公式排版暂缓。阅读笔记的 brief/standard/deep 模板、质量清单和当前阅读视图支持的 Markdown 子集见 `agent-skills/papers-manager-reading/references/notes-standard.md`。Skill 源包在 `agent-skills/`，安装方式见安装指南，正式打包/安装器尚未实现；后端不保存 Agent 身份或偏好。
+MCP 是主要的 Agent 执行边界：`docs/mcp/papers-manager-tools.md` 描述传输、鉴权、错误、边界和工具行为，`docs/mcp/papers-manager-tools.json` 是 43 个工具的机器可读清单，按 `library`、`reading`、`base`、`citation` 四组组织；Base 和引用相关工具分别使用独立的 `papers_manager_base_*`、`papers_manager_citation_*` 集合。所有工具名使用 `papers_manager_` 前缀；Host 可以再包一层命名空间。Skill 只承载策略和渐进披露引用，scripts 不作为第二套后端客户端。两个 Skill 都带运行前置检查：MCP 工具缺失或未配置时明确报告并停止写操作，不用 `curl`/scripts 兜底。实现位于 `internal/mcp`：设置 `MCP_ENABLED=true` 后 API 在同一进程的 loopback `MCP_ADDR` 启动 MCP，共享同一 DI service/note gate；非 loopback 必须配置 `MCP_TOKEN` 并以 Bearer 发送。传输仅支持 MCP Streamable HTTP（`/mcp`），不提供原生 stdio；仅支持 stdio 的 Host 需使用客户端桥接。MCP 支持 URL/受控本地文件导入、分阶段重试/取消、整篇/单 section 笔记替换与导出、Block 图片、任意页/区域渲染 PNG、Base 生命周期与书目生成、引用查询/编辑/解析/重新匹配/PDF 下载；本地文件导入必须设置 `MCP_LOCAL_IMPORT_ROOT`，图片响应受 `MCP_MAX_IMAGE_BYTES` 限制。Claude Code、Codex、OpenCode、DeepSeek Harness 的 MCP 与 Skill 安装见 [`docs/mcp/agent-installation.md`](docs/mcp/agent-installation.md)。公式来源采用 Block 或 PDF page/rectangle 证据链接：笔记说明公式含义并跳回原文高亮，不从当前 PDF 文本层猜测或重写 LaTeX；内联公式排版暂缓。阅读笔记的 brief/standard/deep 模板、质量清单和当前阅读视图支持的 Markdown 子集见 `agent-skills/papers-manager-reading/references/notes-standard.md`。Skill 源包在 `agent-skills/`，安装方式见安装指南，正式打包/安装器尚未实现；后端不保存 Agent 身份或偏好。
 
-Python worker 位于 [`python/`](python/README.md)。启动它和 Redis 后，PDF 上传会经 Asynq 与 gRPC 异步解析：`pymupdf4llm` 生成按页 Markdown 和布局块，Go API 将其写入 PostgreSQL 并将文档状态更新为 `ready`。
+Python parser 位于 [`python/`](python/README.md)。启动它和 Redis 后，PDF 上传会经 Asynq 与 gRPC 异步解析：轻量 server 按需启动 `recognize`/`extract` worker，`pymupdf4llm` 生成按页 Markdown 和布局块，Go API 将其写入 PostgreSQL 并将文档状态更新为 `ready`。worker 空闲后自动退出（`PARSER_WORKER_IDLE_SECONDS`），server 保持低内存常驻；worker 并行度和各类型上限由 `PARSER_RECOGNIZE_WORKER_MAX` / `PARSER_EXTRACT_WORKER_MAX` 控制。
 
 ## 论文信息异步流程
 

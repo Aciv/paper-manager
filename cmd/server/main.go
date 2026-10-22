@@ -75,6 +75,7 @@ func main() {
 		sharedLimiter *limit.Engine,
 		recognizer interfaces.DocumentRecognizer,
 		extractor interfaces.PaperMetadataExtractor,
+		renderer interfaces.PDFPageRenderer,
 		toolServer *mcpadapter.ToolServer,
 	) error {
 		// Defer order is intentional (LIFO). The HTTP layer drains first
@@ -83,7 +84,7 @@ func main() {
 		// are the queue, parser connections, and database closed. Drained jobs
 		// are persisted as failed before the database goes away.
 		defer repository.CloseDatabase(db)
-		defer closeParserClients(recognizer, extractor)
+		defer closeParserClients(recognizer, extractor, renderer)
 		defer func() {
 			if err := sharedLimiter.Close(); err != nil {
 				logger.Warn(context.Background(), "close shared limiter failed", "error", err)
@@ -205,13 +206,18 @@ func forceExitOnSecondSignal(signals <-chan os.Signal) {
 
 // closeParserClients releases gRPC connections when the concrete adapters own
 // one. The default recognizer has no connection and does not implement Close.
-func closeParserClients(recognizer interfaces.DocumentRecognizer, extractor interfaces.PaperMetadataExtractor) {
+func closeParserClients(
+	recognizer interfaces.DocumentRecognizer,
+	extractor interfaces.PaperMetadataExtractor,
+	renderer interfaces.PDFPageRenderer,
+) {
 	for _, candidate := range []struct {
 		name  string
 		value any
 	}{
 		{"document recognizer", recognizer},
 		{"paper extractor", extractor},
+		{"PDF page renderer", renderer},
 	} {
 		closer, ok := candidate.value.(interface{ Close() error })
 		if !ok {

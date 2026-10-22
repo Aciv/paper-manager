@@ -15,6 +15,41 @@ service DocumentParser {
 service PaperMetadataExtractor {
   rpc Extract(PaperExtractionRequest) returns (PaperExtractionResult);
 }
+
+// PdfRenderer renders one bounded page view from a Go-owned source object.
+// It is synchronous and separate from the staged recognition/extraction work.
+service PdfRenderer {
+  rpc RenderPage(PdfRenderRequest) returns (PdfRenderResult);
+}
+
+message PdfNormalizedRect {
+  double x0 = 1;
+  double y0 = 2;
+  double x1 = 3;
+  double y1 = 4;
+}
+
+message PdfRenderRequest {
+  string document_id = 1;
+  // Relative FileStorage key. The parser resolves it below its UPLOAD_DIR and
+  // never returns it to the caller.
+  string source_storage_key = 2;
+  int32 page_number = 3;
+  bool full_page = 4;
+  // Normalized page rectangle in [0,1]. Ignored when full_page is true.
+  PdfNormalizedRect bbox = 5;
+  int32 dpi = 6;
+  int64 recognition_generation = 7;
+}
+
+message PdfRenderResult {
+  bytes png = 1;
+  string content_type = 2;
+  int32 width = 3;
+  int32 height = 4;
+  double page_width = 5;
+  double page_height = 6;
+}
 message RecognitionRequest {
   string document_id = 1;
   string filename = 2;

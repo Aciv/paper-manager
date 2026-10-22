@@ -100,6 +100,62 @@ func (h *DocumentReadingHandler) BlockImage(c *gin.Context) {
 	serveStream(c, filename, contentType, -1, streamModTime(reader, time.Time{}), "", reader)
 }
 
+// PageImage renders one full page or normalized page region through the
+// parser renderer. It is a synchronous read and never enqueues a task.
+func (h *DocumentReadingHandler) PageImage(c *gin.Context) {
+	documentID, err := uuid.Parse(c.Param("id"))
+	if err != nil {
+		abortServerError(c, "document page render failed", apperrors.NewBadRequestError("invalid document id"), err)
+		return
+	}
+	pageNumber, err := strconv.Atoi(strings.TrimSpace(c.Param("page")))
+	if err != nil || pageNumber < 1 || pageNumber > 100000 {
+		abortServerError(c, "document page render failed", apperrors.NewBadRequestError("page must be between 1 and 100000"), err)
+		return
+	}
+	dpi := 0
+	if rawDPI := strings.TrimSpace(c.Query("dpi")); rawDPI != "" {
+		dpi, err = strconv.Atoi(rawDPI)
+		if err != nil || dpi < 1 || dpi > types.MaxPDFRenderDPI {
+			abortServerError(c, "document page render failed", apperrors.NewBadRequestError("dpi is outside the supported range"), err)
+			return
+		}
+	}
+	var bbox *types.NormalizedPDFRect
+	if rawBBox := strings.TrimSpace(c.Query("bbox")); rawBBox != "" {
+		parts := strings.Split(rawBBox, ",")
+		if len(parts) != 4 {
+			abortServerError(c, "document page render failed", apperrors.NewBadRequestError("bbox must be x0,y0,x1,y1"), nil)
+			return
+		}
+		values := make([]float64, 4)
+		for index, part := range parts {
+			value, parseErr := strconv.ParseFloat(strings.TrimSpace(part), 64)
+			if parseErr != nil {
+				abortServerError(c, "document page render failed", apperrors.NewBadRequestError("bbox must contain four numbers"), parseErr)
+				return
+			}
+			values[index] = value
+		}
+		bbox = &types.NormalizedPDFRect{X0: values[0], Y0: values[1], X1: values[2], Y1: values[3]}
+	}
+	result, err := h.documents.RenderPage(c.Request.Context(), documentID.String(), pageNumber, bbox, dpi)
+	if err != nil {
+		h.handleError(c, err, "render document page")
+		return
+	}
+	contentType := result.ContentType
+	if contentType == "" {
+		contentType = "image/png"
+	}
+	c.Header("Content-Disposition", mime.FormatMediaType("inline", map[string]string{
+		"filename": "page-" + strconv.Itoa(pageNumber) + ".png",
+	}))
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Cache-Control", "private, max-age=60")
+	c.Data(http.StatusOK, contentType, result.PNG)
+}
+
 // Markdown returns the parsed Markdown source as text. The Markdown manifest
 // remains the durable metadata; this endpoint is the explicit source read.
 func (h *DocumentReadingHandler) Markdown(c *gin.Context) {
@@ -147,6 +203,12 @@ func (h *DocumentReadingHandler) handleError(c *gin.Context, err error, action s
 		abortServerError(c, "document reading request failed", apperrors.NewPayloadTooLargeError("document structure exceeds configured limit"), err)
 	case errors.Is(err, types.ErrDocumentMarkdownTooLarge):
 		abortServerError(c, "document reading request failed", apperrors.NewPayloadTooLargeError("document Markdown exceeds configured read limit"), err)
+	case errors.Is(err, types.ErrInvalidPDFRenderRequest):
+		abortServerError(c, "document page render failed", apperrors.NewBadRequestError("invalid page render request"), err)
+	case errors.Is(err, types.ErrPDFRenderTooLarge):
+		abortServerError(c, "document page render failed", apperrors.NewPayloadTooLargeError("rendered page exceeds configured limit"), err)
+	case errors.Is(err, types.ErrPDFRenderUnavailable):
+		abortServerError(c, "document page render failed", apperrors.NewServiceUnavailableError("PDF renderer is unavailable"), err)
 	case errors.Is(err, c.Request.Context().Err()):
 		return
 	default:

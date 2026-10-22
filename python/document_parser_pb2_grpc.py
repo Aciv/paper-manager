@@ -185,3 +185,81 @@ class PaperMetadataExtractor:
             timeout,
             metadata,
             _registered_method=True)
+
+
+class PdfRendererStub:
+    """PdfRenderer renders one bounded page view from a Go-owned source object.
+    It is synchronous and separate from the staged recognition/extraction work.
+    """
+
+    def __init__(self, channel):
+        """Constructor.
+
+        Args:
+            channel: A grpc.Channel.
+        """
+        self.RenderPage = channel.unary_unary(
+                '/papers.v1.PdfRenderer/RenderPage',
+                request_serializer=document__parser__pb2.PdfRenderRequest.SerializeToString,
+                response_deserializer=document__parser__pb2.PdfRenderResult.FromString,
+                _registered_method=True)
+
+
+class PdfRendererServicer:
+    """PdfRenderer renders one bounded page view from a Go-owned source object.
+    It is synchronous and separate from the staged recognition/extraction work.
+    """
+
+    def RenderPage(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
+
+def add_PdfRendererServicer_to_server(servicer, server):
+    rpc_method_handlers = {
+            'RenderPage': grpc.unary_unary_rpc_method_handler(
+                    servicer.RenderPage,
+                    request_deserializer=document__parser__pb2.PdfRenderRequest.FromString,
+                    response_serializer=document__parser__pb2.PdfRenderResult.SerializeToString,
+            ),
+    }
+    generic_handler = grpc.method_handlers_generic_handler(
+            'papers.v1.PdfRenderer', rpc_method_handlers)
+    server.add_generic_rpc_handlers((generic_handler,))
+    server.add_registered_method_handlers('papers.v1.PdfRenderer', rpc_method_handlers)
+
+
+ # This class is part of an EXPERIMENTAL API.
+class PdfRenderer:
+    """PdfRenderer renders one bounded page view from a Go-owned source object.
+    It is synchronous and separate from the staged recognition/extraction work.
+    """
+
+    @staticmethod
+    def RenderPage(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/papers.v1.PdfRenderer/RenderPage',
+            document__parser__pb2.PdfRenderRequest.SerializeToString,
+            document__parser__pb2.PdfRenderResult.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)

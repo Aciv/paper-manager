@@ -323,6 +323,52 @@ func (s *ToolServer) readingNoteReplaceSection(ctx context.Context, raw json.Raw
 	return result, nil
 }
 
+type pageImageInput struct {
+	DocumentID string                   `json:"document_id"`
+	PageNumber int                      `json:"page_number"`
+	BBox       *types.NormalizedPDFRect `json:"bbox"`
+	DPI        int                      `json:"dpi"`
+}
+
+// documentReadPageImage renders a full page or normalized page region. The
+// renderer is synchronous; no Asynq task or stage state is involved.
+func (s *ToolServer) documentReadPageImage(
+	ctx context.Context, raw json.RawMessage,
+) (*sdk.CallToolResult, error) {
+	var input pageImageInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	if s.reading == nil {
+		return nil, fmt.Errorf("document reading service is unavailable")
+	}
+	result, err := s.reading.RenderPage(
+		ctx, input.DocumentID, input.PageNumber, input.BBox, input.DPI,
+	)
+	if err != nil {
+		return nil, err
+	}
+	maxImageBytes := s.cfg.MCPMaxImageBytes
+	if maxImageBytes <= 0 {
+		maxImageBytes = 12 << 20
+	}
+	if int64(len(result.PNG)) > maxImageBytes {
+		return nil, fmt.Errorf("%w: rendered page exceeds the MCP image limit", errPayloadTooLarge)
+	}
+	dpi := input.DPI
+	if dpi == 0 {
+		dpi = types.DefaultPDFRenderDPI
+	}
+	metadata := map[string]any{
+		"documentId": input.DocumentID, "pageNumber": input.PageNumber,
+		"dpi": dpi, "contentType": result.ContentType,
+		"width": result.Width, "height": result.Height,
+		"pageWidth": result.PageWidth, "pageHeight": result.PageHeight,
+		"sizeBytes": len(result.PNG),
+	}
+	return successImageResult(metadata, result.PNG, result.ContentType), nil
+}
+
 type blockImageInput struct {
 	DocumentID string `json:"document_id"`
 	BlockID    string `json:"block_id"`

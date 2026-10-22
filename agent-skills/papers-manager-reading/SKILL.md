@@ -26,6 +26,7 @@ description: 在本地 papersManager 论文库中分层阅读、总结和注释�
   `papers_manager_document_structure`、`papers_manager_document_read_section`、
   `papers_manager_document_read_markdown`、`papers_manager_document_read_blocks`、
   `papers_manager_document_read_block_image`、
+  `papers_manager_document_read_page_image`、
   `papers_manager_reading_note_outline`、`papers_manager_reading_note_read_section`、
   `papers_manager_reading_note_export`、`papers_manager_evidence_validate`。
   `evidence_validate` 只解析和校验链接，不写笔记。
@@ -51,7 +52,7 @@ description: 在本地 papersManager 论文库中分层阅读、总结和注释�
 | L0 | 标题、作者、摘要、venue、DOI、tags | `papers_manager_library_search` / `papers_manager_library_get` | 判断相关性 |
 | L1 | source outline、note directory、section description | `papers_manager_document_structure`、`papers_manager_reading_note_outline` | 规划读哪些部分 |
 | L2 | 选中的 source/note section Markdown | `papers_manager_document_read_section`、`papers_manager_reading_note_read_section` | 精读、分析、写笔记 |
-| L3 | 具体 page、Block、rect、表格/图片 | `papers_manager_document_read_blocks`、`papers_manager_document_read_block_image`、`papers_manager_evidence_validate` | 验证主张、查看图表、生成证据 |
+| L3 | 具体 page、Block、rect、表格/图片 | `papers_manager_document_read_blocks`、`papers_manager_document_read_block_image`、`papers_manager_document_read_page_image`、`papers_manager_evidence_validate` | 验证主张、查看整页/区域、图表、生成证据 |
 | L4 | 整篇 PDF 或整篇 note export | `papers_manager_reading_note_export` / 用户界面 | 用户明确要求或前面层级不足 |
 
 详细选择策略见 [references/reading-levels.md](references/reading-levels.md)。
@@ -176,6 +177,7 @@ papers_manager_document_read_section
 papers_manager_reading_note_read_section
 papers_manager_document_read_blocks
 papers_manager_document_read_block_image   # only for image/table Blocks
+papers_manager_document_read_page_image    # full page or normalized bbox
 papers_manager_reading_note_export          # only when a full-note view is needed
 papers_manager_evidence_validate
 papers_manager_reading_note_apply_edits

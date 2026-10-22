@@ -11,6 +11,7 @@ capabilities to the reading workflow.
 | `papers_manager_document_read_markdown` | Read bounded full source Markdown when a section cannot be addressed through the outline. |
 | `papers_manager_document_read_blocks` | Read page/Blocks for L3 evidence and exact verification. |
 | `papers_manager_document_read_block_image` | Read a parser-stored PNG crop for an image/table Block. |
+| `papers_manager_document_read_page_image` | Render a full page or normalized page bbox as PNG (synchronous, not a task). |
 | `papers_manager_reading_note_outline` | Read note revision, section tree, and parsed section descriptions. |
 | `papers_manager_reading_note_read_section` | Read one note section body. |
 | `papers_manager_reading_note_create` | Create an absent note only after user confirmation. |

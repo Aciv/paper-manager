@@ -18,7 +18,7 @@ from papers_parser.paper_extractor import (
     ExtractionOutput,
 )
 from papers_parser.paper_extractor import SourceBlock, SourceLocation
-from papers_parser.pdf2md_service import extract_layout_lines_from_storage
+from papers_parser.layout_lines import extract_layout_lines_from_storage
 
 
 MAX_MARKDOWN_BYTES = 32 << 20

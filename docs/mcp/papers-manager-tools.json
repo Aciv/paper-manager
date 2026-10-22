@@ -495,6 +495,75 @@
       }
     },
     {
+      "name": "papers_manager_document_read_page_image",
+      "title": "Read a PDF page image",
+      "description": "Render one full PDF page or normalized page region as a bounded PNG. This is a direct read, not an asynchronous processing task; the private storage key is never returned.",
+      "group": "reading",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "page_number": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "bbox": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "Normalized page rectangle in [0,1]; omit for the full page.",
+            "properties": {
+              "x0": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y0": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "x1": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              },
+              "y1": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            },
+            "required": [
+              "x0",
+              "y0",
+              "x1",
+              "y1"
+            ]
+          },
+          "dpi": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 300,
+            "default": 144
+          }
+        },
+        "required": [
+          "document_id",
+          "page_number"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
       "name": "papers_manager_reading_note_outline",
       "title": "Read the reading-note outline",
       "description": "Read the revisioned note directory and consumer-derived section descriptions. The adapter reads bounded section Markdown and parses section-meta; the backend does not expose descriptions.",

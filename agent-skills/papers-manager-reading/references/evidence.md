@@ -25,6 +25,8 @@ comparison. A single-paper note normally uses `self`.
 
 - Source page and section: `papers_manager_document_structure`.
 - Block UUID, page dimensions, bbox: `papers_manager_document_read_blocks`.
+- Visual check of a page or normalized region:
+  `papers_manager_document_read_page_image` (omit bbox for a full page).
 - Normalize a block rectangle as:
   - `x0 = bboxX0 / pageWidth`
   - `y0 = bboxY0 / pageHeight`

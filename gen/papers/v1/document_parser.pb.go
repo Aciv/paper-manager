@@ -21,6 +21,253 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+type PdfNormalizedRect struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	X0            float64                `protobuf:"fixed64,1,opt,name=x0,proto3" json:"x0,omitempty"`
+	Y0            float64                `protobuf:"fixed64,2,opt,name=y0,proto3" json:"y0,omitempty"`
+	X1            float64                `protobuf:"fixed64,3,opt,name=x1,proto3" json:"x1,omitempty"`
+	Y1            float64                `protobuf:"fixed64,4,opt,name=y1,proto3" json:"y1,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PdfNormalizedRect) Reset() {
+	*x = PdfNormalizedRect{}
+	mi := &file_document_parser_proto_msgTypes[0]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PdfNormalizedRect) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PdfNormalizedRect) ProtoMessage() {}
+
+func (x *PdfNormalizedRect) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[0]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PdfNormalizedRect.ProtoReflect.Descriptor instead.
+func (*PdfNormalizedRect) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{0}
+}
+
+func (x *PdfNormalizedRect) GetX0() float64 {
+	if x != nil {
+		return x.X0
+	}
+	return 0
+}
+
+func (x *PdfNormalizedRect) GetY0() float64 {
+	if x != nil {
+		return x.Y0
+	}
+	return 0
+}
+
+func (x *PdfNormalizedRect) GetX1() float64 {
+	if x != nil {
+		return x.X1
+	}
+	return 0
+}
+
+func (x *PdfNormalizedRect) GetY1() float64 {
+	if x != nil {
+		return x.Y1
+	}
+	return 0
+}
+
+type PdfRenderRequest struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	DocumentId string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
+	// Relative FileStorage key. The parser resolves it below its UPLOAD_DIR and
+	// never returns it to the caller.
+	SourceStorageKey string `protobuf:"bytes,2,opt,name=source_storage_key,json=sourceStorageKey,proto3" json:"source_storage_key,omitempty"`
+	PageNumber       int32  `protobuf:"varint,3,opt,name=page_number,json=pageNumber,proto3" json:"page_number,omitempty"`
+	FullPage         bool   `protobuf:"varint,4,opt,name=full_page,json=fullPage,proto3" json:"full_page,omitempty"`
+	// Normalized page rectangle in [0,1]. Ignored when full_page is true.
+	Bbox                  *PdfNormalizedRect `protobuf:"bytes,5,opt,name=bbox,proto3" json:"bbox,omitempty"`
+	Dpi                   int32              `protobuf:"varint,6,opt,name=dpi,proto3" json:"dpi,omitempty"`
+	RecognitionGeneration int64              `protobuf:"varint,7,opt,name=recognition_generation,json=recognitionGeneration,proto3" json:"recognition_generation,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
+}
+
+func (x *PdfRenderRequest) Reset() {
+	*x = PdfRenderRequest{}
+	mi := &file_document_parser_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PdfRenderRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PdfRenderRequest) ProtoMessage() {}
+
+func (x *PdfRenderRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PdfRenderRequest.ProtoReflect.Descriptor instead.
+func (*PdfRenderRequest) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *PdfRenderRequest) GetDocumentId() string {
+	if x != nil {
+		return x.DocumentId
+	}
+	return ""
+}
+
+func (x *PdfRenderRequest) GetSourceStorageKey() string {
+	if x != nil {
+		return x.SourceStorageKey
+	}
+	return ""
+}
+
+func (x *PdfRenderRequest) GetPageNumber() int32 {
+	if x != nil {
+		return x.PageNumber
+	}
+	return 0
+}
+
+func (x *PdfRenderRequest) GetFullPage() bool {
+	if x != nil {
+		return x.FullPage
+	}
+	return false
+}
+
+func (x *PdfRenderRequest) GetBbox() *PdfNormalizedRect {
+	if x != nil {
+		return x.Bbox
+	}
+	return nil
+}
+
+func (x *PdfRenderRequest) GetDpi() int32 {
+	if x != nil {
+		return x.Dpi
+	}
+	return 0
+}
+
+func (x *PdfRenderRequest) GetRecognitionGeneration() int64 {
+	if x != nil {
+		return x.RecognitionGeneration
+	}
+	return 0
+}
+
+type PdfRenderResult struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Png           []byte                 `protobuf:"bytes,1,opt,name=png,proto3" json:"png,omitempty"`
+	ContentType   string                 `protobuf:"bytes,2,opt,name=content_type,json=contentType,proto3" json:"content_type,omitempty"`
+	Width         int32                  `protobuf:"varint,3,opt,name=width,proto3" json:"width,omitempty"`
+	Height        int32                  `protobuf:"varint,4,opt,name=height,proto3" json:"height,omitempty"`
+	PageWidth     float64                `protobuf:"fixed64,5,opt,name=page_width,json=pageWidth,proto3" json:"page_width,omitempty"`
+	PageHeight    float64                `protobuf:"fixed64,6,opt,name=page_height,json=pageHeight,proto3" json:"page_height,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PdfRenderResult) Reset() {
+	*x = PdfRenderResult{}
+	mi := &file_document_parser_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PdfRenderResult) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PdfRenderResult) ProtoMessage() {}
+
+func (x *PdfRenderResult) ProtoReflect() protoreflect.Message {
+	mi := &file_document_parser_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PdfRenderResult.ProtoReflect.Descriptor instead.
+func (*PdfRenderResult) Descriptor() ([]byte, []int) {
+	return file_document_parser_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *PdfRenderResult) GetPng() []byte {
+	if x != nil {
+		return x.Png
+	}
+	return nil
+}
+
+func (x *PdfRenderResult) GetContentType() string {
+	if x != nil {
+		return x.ContentType
+	}
+	return ""
+}
+
+func (x *PdfRenderResult) GetWidth() int32 {
+	if x != nil {
+		return x.Width
+	}
+	return 0
+}
+
+func (x *PdfRenderResult) GetHeight() int32 {
+	if x != nil {
+		return x.Height
+	}
+	return 0
+}
+
+func (x *PdfRenderResult) GetPageWidth() float64 {
+	if x != nil {
+		return x.PageWidth
+	}
+	return 0
+}
+
+func (x *PdfRenderResult) GetPageHeight() float64 {
+	if x != nil {
+		return x.PageHeight
+	}
+	return 0
+}
+
 type RecognitionRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	DocumentId  string                 `protobuf:"bytes,1,opt,name=document_id,json=documentId,proto3" json:"document_id,omitempty"`
@@ -38,7 +285,7 @@ type RecognitionRequest struct {
 
 func (x *RecognitionRequest) Reset() {
 	*x = RecognitionRequest{}
-	mi := &file_document_parser_proto_msgTypes[0]
+	mi := &file_document_parser_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -50,7 +297,7 @@ func (x *RecognitionRequest) String() string {
 func (*RecognitionRequest) ProtoMessage() {}
 
 func (x *RecognitionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[0]
+	mi := &file_document_parser_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -63,7 +310,7 @@ func (x *RecognitionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionRequest.ProtoReflect.Descriptor instead.
 func (*RecognitionRequest) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{0}
+	return file_document_parser_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *RecognitionRequest) GetDocumentId() string {
@@ -161,7 +408,7 @@ type RecognitionResult struct {
 
 func (x *RecognitionResult) Reset() {
 	*x = RecognitionResult{}
-	mi := &file_document_parser_proto_msgTypes[1]
+	mi := &file_document_parser_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -173,7 +420,7 @@ func (x *RecognitionResult) String() string {
 func (*RecognitionResult) ProtoMessage() {}
 
 func (x *RecognitionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[1]
+	mi := &file_document_parser_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -186,7 +433,7 @@ func (x *RecognitionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionResult.ProtoReflect.Descriptor instead.
 func (*RecognitionResult) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{1}
+	return file_document_parser_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *RecognitionResult) GetMarkdown() []byte {
@@ -274,7 +521,7 @@ type RecognitionOutline struct {
 
 func (x *RecognitionOutline) Reset() {
 	*x = RecognitionOutline{}
-	mi := &file_document_parser_proto_msgTypes[2]
+	mi := &file_document_parser_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -286,7 +533,7 @@ func (x *RecognitionOutline) String() string {
 func (*RecognitionOutline) ProtoMessage() {}
 
 func (x *RecognitionOutline) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[2]
+	mi := &file_document_parser_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -299,7 +546,7 @@ func (x *RecognitionOutline) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionOutline.ProtoReflect.Descriptor instead.
 func (*RecognitionOutline) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{2}
+	return file_document_parser_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *RecognitionOutline) GetSchemaVersion() int32 {
@@ -352,7 +599,7 @@ type RecognitionOutlineSection struct {
 
 func (x *RecognitionOutlineSection) Reset() {
 	*x = RecognitionOutlineSection{}
-	mi := &file_document_parser_proto_msgTypes[3]
+	mi := &file_document_parser_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -364,7 +611,7 @@ func (x *RecognitionOutlineSection) String() string {
 func (*RecognitionOutlineSection) ProtoMessage() {}
 
 func (x *RecognitionOutlineSection) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[3]
+	mi := &file_document_parser_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -377,7 +624,7 @@ func (x *RecognitionOutlineSection) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionOutlineSection.ProtoReflect.Descriptor instead.
 func (*RecognitionOutlineSection) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{3}
+	return file_document_parser_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RecognitionOutlineSection) GetOrdinal() int32 {
@@ -504,7 +751,7 @@ type RecognitionBlock struct {
 
 func (x *RecognitionBlock) Reset() {
 	*x = RecognitionBlock{}
-	mi := &file_document_parser_proto_msgTypes[4]
+	mi := &file_document_parser_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -516,7 +763,7 @@ func (x *RecognitionBlock) String() string {
 func (*RecognitionBlock) ProtoMessage() {}
 
 func (x *RecognitionBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[4]
+	mi := &file_document_parser_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -529,7 +776,7 @@ func (x *RecognitionBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RecognitionBlock.ProtoReflect.Descriptor instead.
 func (*RecognitionBlock) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{4}
+	return file_document_parser_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *RecognitionBlock) GetOrdinal() int32 {
@@ -646,7 +893,7 @@ type PaperExtractionRequest struct {
 
 func (x *PaperExtractionRequest) Reset() {
 	*x = PaperExtractionRequest{}
-	mi := &file_document_parser_proto_msgTypes[5]
+	mi := &file_document_parser_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -658,7 +905,7 @@ func (x *PaperExtractionRequest) String() string {
 func (*PaperExtractionRequest) ProtoMessage() {}
 
 func (x *PaperExtractionRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[5]
+	mi := &file_document_parser_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -671,7 +918,7 @@ func (x *PaperExtractionRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaperExtractionRequest.ProtoReflect.Descriptor instead.
 func (*PaperExtractionRequest) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{5}
+	return file_document_parser_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *PaperExtractionRequest) GetDocumentId() string {
@@ -714,7 +961,7 @@ type PaperSourceBlock struct {
 
 func (x *PaperSourceBlock) Reset() {
 	*x = PaperSourceBlock{}
-	mi := &file_document_parser_proto_msgTypes[6]
+	mi := &file_document_parser_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +973,7 @@ func (x *PaperSourceBlock) String() string {
 func (*PaperSourceBlock) ProtoMessage() {}
 
 func (x *PaperSourceBlock) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[6]
+	mi := &file_document_parser_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +986,7 @@ func (x *PaperSourceBlock) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaperSourceBlock.ProtoReflect.Descriptor instead.
 func (*PaperSourceBlock) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{6}
+	return file_document_parser_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *PaperSourceBlock) GetOrdinal() int32 {
@@ -787,7 +1034,7 @@ type PaperSourceLocation struct {
 
 func (x *PaperSourceLocation) Reset() {
 	*x = PaperSourceLocation{}
-	mi := &file_document_parser_proto_msgTypes[7]
+	mi := &file_document_parser_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -799,7 +1046,7 @@ func (x *PaperSourceLocation) String() string {
 func (*PaperSourceLocation) ProtoMessage() {}
 
 func (x *PaperSourceLocation) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[7]
+	mi := &file_document_parser_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -812,7 +1059,7 @@ func (x *PaperSourceLocation) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaperSourceLocation.ProtoReflect.Descriptor instead.
 func (*PaperSourceLocation) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{7}
+	return file_document_parser_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *PaperSourceLocation) GetPageNumber() int32 {
@@ -900,7 +1147,7 @@ type PaperExtractionResult struct {
 
 func (x *PaperExtractionResult) Reset() {
 	*x = PaperExtractionResult{}
-	mi := &file_document_parser_proto_msgTypes[8]
+	mi := &file_document_parser_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -912,7 +1159,7 @@ func (x *PaperExtractionResult) String() string {
 func (*PaperExtractionResult) ProtoMessage() {}
 
 func (x *PaperExtractionResult) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[8]
+	mi := &file_document_parser_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -925,7 +1172,7 @@ func (x *PaperExtractionResult) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaperExtractionResult.ProtoReflect.Descriptor instead.
 func (*PaperExtractionResult) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{8}
+	return file_document_parser_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *PaperExtractionResult) GetTitle() *PaperTextCandidate {
@@ -1004,7 +1251,7 @@ type PaperReferenceCandidate struct {
 
 func (x *PaperReferenceCandidate) Reset() {
 	*x = PaperReferenceCandidate{}
-	mi := &file_document_parser_proto_msgTypes[9]
+	mi := &file_document_parser_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1016,7 +1263,7 @@ func (x *PaperReferenceCandidate) String() string {
 func (*PaperReferenceCandidate) ProtoMessage() {}
 
 func (x *PaperReferenceCandidate) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[9]
+	mi := &file_document_parser_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1029,7 +1276,7 @@ func (x *PaperReferenceCandidate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaperReferenceCandidate.ProtoReflect.Descriptor instead.
 func (*PaperReferenceCandidate) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{9}
+	return file_document_parser_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *PaperReferenceCandidate) GetRawReference() string {
@@ -1113,7 +1360,7 @@ type PaperTextCandidate struct {
 
 func (x *PaperTextCandidate) Reset() {
 	*x = PaperTextCandidate{}
-	mi := &file_document_parser_proto_msgTypes[10]
+	mi := &file_document_parser_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1125,7 +1372,7 @@ func (x *PaperTextCandidate) String() string {
 func (*PaperTextCandidate) ProtoMessage() {}
 
 func (x *PaperTextCandidate) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[10]
+	mi := &file_document_parser_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1138,7 +1385,7 @@ func (x *PaperTextCandidate) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaperTextCandidate.ProtoReflect.Descriptor instead.
 func (*PaperTextCandidate) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{10}
+	return file_document_parser_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *PaperTextCandidate) GetValue() string {
@@ -1174,7 +1421,7 @@ type PaperSourceEvidence struct {
 
 func (x *PaperSourceEvidence) Reset() {
 	*x = PaperSourceEvidence{}
-	mi := &file_document_parser_proto_msgTypes[11]
+	mi := &file_document_parser_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1186,7 +1433,7 @@ func (x *PaperSourceEvidence) String() string {
 func (*PaperSourceEvidence) ProtoMessage() {}
 
 func (x *PaperSourceEvidence) ProtoReflect() protoreflect.Message {
-	mi := &file_document_parser_proto_msgTypes[11]
+	mi := &file_document_parser_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1199,7 +1446,7 @@ func (x *PaperSourceEvidence) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PaperSourceEvidence.ProtoReflect.Descriptor instead.
 func (*PaperSourceEvidence) Descriptor() ([]byte, []int) {
-	return file_document_parser_proto_rawDescGZIP(), []int{11}
+	return file_document_parser_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *PaperSourceEvidence) GetBlockOrdinal() int32 {
@@ -1234,7 +1481,31 @@ var File_document_parser_proto protoreflect.FileDescriptor
 
 const file_document_parser_proto_rawDesc = "" +
 	"\n" +
-	"\x15document_parser.proto\x12\tpapers.v1\"\xda\x01\n" +
+	"\x15document_parser.proto\x12\tpapers.v1\"S\n" +
+	"\x11PdfNormalizedRect\x12\x0e\n" +
+	"\x02x0\x18\x01 \x01(\x01R\x02x0\x12\x0e\n" +
+	"\x02y0\x18\x02 \x01(\x01R\x02y0\x12\x0e\n" +
+	"\x02x1\x18\x03 \x01(\x01R\x02x1\x12\x0e\n" +
+	"\x02y1\x18\x04 \x01(\x01R\x02y1\"\x9a\x02\n" +
+	"\x10PdfRenderRequest\x12\x1f\n" +
+	"\vdocument_id\x18\x01 \x01(\tR\n" +
+	"documentId\x12,\n" +
+	"\x12source_storage_key\x18\x02 \x01(\tR\x10sourceStorageKey\x12\x1f\n" +
+	"\vpage_number\x18\x03 \x01(\x05R\n" +
+	"pageNumber\x12\x1b\n" +
+	"\tfull_page\x18\x04 \x01(\bR\bfullPage\x120\n" +
+	"\x04bbox\x18\x05 \x01(\v2\x1c.papers.v1.PdfNormalizedRectR\x04bbox\x12\x10\n" +
+	"\x03dpi\x18\x06 \x01(\x05R\x03dpi\x125\n" +
+	"\x16recognition_generation\x18\a \x01(\x03R\x15recognitionGeneration\"\xb4\x01\n" +
+	"\x0fPdfRenderResult\x12\x10\n" +
+	"\x03png\x18\x01 \x01(\fR\x03png\x12!\n" +
+	"\fcontent_type\x18\x02 \x01(\tR\vcontentType\x12\x14\n" +
+	"\x05width\x18\x03 \x01(\x05R\x05width\x12\x16\n" +
+	"\x06height\x18\x04 \x01(\x05R\x06height\x12\x1d\n" +
+	"\n" +
+	"page_width\x18\x05 \x01(\x01R\tpageWidth\x12\x1f\n" +
+	"\vpage_height\x18\x06 \x01(\x01R\n" +
+	"pageHeight\"\xda\x01\n" +
 	"\x12RecognitionRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1a\n" +
@@ -1366,7 +1637,10 @@ const file_document_parser_proto_rawDesc = "" +
 	"\x0eDocumentParser\x12H\n" +
 	"\tRecognize\x12\x1d.papers.v1.RecognitionRequest\x1a\x1c.papers.v1.RecognitionResult2h\n" +
 	"\x16PaperMetadataExtractor\x12N\n" +
-	"\aExtract\x12!.papers.v1.PaperExtractionRequest\x1a .papers.v1.PaperExtractionResultB$Z\"paperMaster/gen/papers/v1;papersv1b\x06proto3"
+	"\aExtract\x12!.papers.v1.PaperExtractionRequest\x1a .papers.v1.PaperExtractionResult2T\n" +
+	"\vPdfRenderer\x12E\n" +
+	"\n" +
+	"RenderPage\x12\x1b.papers.v1.PdfRenderRequest\x1a\x1a.papers.v1.PdfRenderResultB$Z\"paperMaster/gen/papers/v1;papersv1b\x06proto3"
 
 var (
 	file_document_parser_proto_rawDescOnce sync.Once
@@ -1380,41 +1654,47 @@ func file_document_parser_proto_rawDescGZIP() []byte {
 	return file_document_parser_proto_rawDescData
 }
 
-var file_document_parser_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_document_parser_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
 var file_document_parser_proto_goTypes = []any{
-	(*RecognitionRequest)(nil),        // 0: papers.v1.RecognitionRequest
-	(*RecognitionResult)(nil),         // 1: papers.v1.RecognitionResult
-	(*RecognitionOutline)(nil),        // 2: papers.v1.RecognitionOutline
-	(*RecognitionOutlineSection)(nil), // 3: papers.v1.RecognitionOutlineSection
-	(*RecognitionBlock)(nil),          // 4: papers.v1.RecognitionBlock
-	(*PaperExtractionRequest)(nil),    // 5: papers.v1.PaperExtractionRequest
-	(*PaperSourceBlock)(nil),          // 6: papers.v1.PaperSourceBlock
-	(*PaperSourceLocation)(nil),       // 7: papers.v1.PaperSourceLocation
-	(*PaperExtractionResult)(nil),     // 8: papers.v1.PaperExtractionResult
-	(*PaperReferenceCandidate)(nil),   // 9: papers.v1.PaperReferenceCandidate
-	(*PaperTextCandidate)(nil),        // 10: papers.v1.PaperTextCandidate
-	(*PaperSourceEvidence)(nil),       // 11: papers.v1.PaperSourceEvidence
+	(*PdfNormalizedRect)(nil),         // 0: papers.v1.PdfNormalizedRect
+	(*PdfRenderRequest)(nil),          // 1: papers.v1.PdfRenderRequest
+	(*PdfRenderResult)(nil),           // 2: papers.v1.PdfRenderResult
+	(*RecognitionRequest)(nil),        // 3: papers.v1.RecognitionRequest
+	(*RecognitionResult)(nil),         // 4: papers.v1.RecognitionResult
+	(*RecognitionOutline)(nil),        // 5: papers.v1.RecognitionOutline
+	(*RecognitionOutlineSection)(nil), // 6: papers.v1.RecognitionOutlineSection
+	(*RecognitionBlock)(nil),          // 7: papers.v1.RecognitionBlock
+	(*PaperExtractionRequest)(nil),    // 8: papers.v1.PaperExtractionRequest
+	(*PaperSourceBlock)(nil),          // 9: papers.v1.PaperSourceBlock
+	(*PaperSourceLocation)(nil),       // 10: papers.v1.PaperSourceLocation
+	(*PaperExtractionResult)(nil),     // 11: papers.v1.PaperExtractionResult
+	(*PaperReferenceCandidate)(nil),   // 12: papers.v1.PaperReferenceCandidate
+	(*PaperTextCandidate)(nil),        // 13: papers.v1.PaperTextCandidate
+	(*PaperSourceEvidence)(nil),       // 14: papers.v1.PaperSourceEvidence
 }
 var file_document_parser_proto_depIdxs = []int32{
-	4,  // 0: papers.v1.RecognitionResult.blocks:type_name -> papers.v1.RecognitionBlock
-	2,  // 1: papers.v1.RecognitionResult.outline:type_name -> papers.v1.RecognitionOutline
-	3,  // 2: papers.v1.RecognitionOutline.sections:type_name -> papers.v1.RecognitionOutlineSection
-	6,  // 3: papers.v1.PaperExtractionRequest.blocks:type_name -> papers.v1.PaperSourceBlock
-	7,  // 4: papers.v1.PaperSourceBlock.location:type_name -> papers.v1.PaperSourceLocation
-	10, // 5: papers.v1.PaperExtractionResult.title:type_name -> papers.v1.PaperTextCandidate
-	10, // 6: papers.v1.PaperExtractionResult.authors:type_name -> papers.v1.PaperTextCandidate
-	10, // 7: papers.v1.PaperExtractionResult.abstract:type_name -> papers.v1.PaperTextCandidate
-	9,  // 8: papers.v1.PaperExtractionResult.reference_candidates:type_name -> papers.v1.PaperReferenceCandidate
-	11, // 9: papers.v1.PaperTextCandidate.evidence:type_name -> papers.v1.PaperSourceEvidence
-	0,  // 10: papers.v1.DocumentParser.Recognize:input_type -> papers.v1.RecognitionRequest
-	5,  // 11: papers.v1.PaperMetadataExtractor.Extract:input_type -> papers.v1.PaperExtractionRequest
-	1,  // 12: papers.v1.DocumentParser.Recognize:output_type -> papers.v1.RecognitionResult
-	8,  // 13: papers.v1.PaperMetadataExtractor.Extract:output_type -> papers.v1.PaperExtractionResult
-	12, // [12:14] is the sub-list for method output_type
-	10, // [10:12] is the sub-list for method input_type
-	10, // [10:10] is the sub-list for extension type_name
-	10, // [10:10] is the sub-list for extension extendee
-	0,  // [0:10] is the sub-list for field type_name
+	0,  // 0: papers.v1.PdfRenderRequest.bbox:type_name -> papers.v1.PdfNormalizedRect
+	7,  // 1: papers.v1.RecognitionResult.blocks:type_name -> papers.v1.RecognitionBlock
+	5,  // 2: papers.v1.RecognitionResult.outline:type_name -> papers.v1.RecognitionOutline
+	6,  // 3: papers.v1.RecognitionOutline.sections:type_name -> papers.v1.RecognitionOutlineSection
+	9,  // 4: papers.v1.PaperExtractionRequest.blocks:type_name -> papers.v1.PaperSourceBlock
+	10, // 5: papers.v1.PaperSourceBlock.location:type_name -> papers.v1.PaperSourceLocation
+	13, // 6: papers.v1.PaperExtractionResult.title:type_name -> papers.v1.PaperTextCandidate
+	13, // 7: papers.v1.PaperExtractionResult.authors:type_name -> papers.v1.PaperTextCandidate
+	13, // 8: papers.v1.PaperExtractionResult.abstract:type_name -> papers.v1.PaperTextCandidate
+	12, // 9: papers.v1.PaperExtractionResult.reference_candidates:type_name -> papers.v1.PaperReferenceCandidate
+	14, // 10: papers.v1.PaperTextCandidate.evidence:type_name -> papers.v1.PaperSourceEvidence
+	3,  // 11: papers.v1.DocumentParser.Recognize:input_type -> papers.v1.RecognitionRequest
+	8,  // 12: papers.v1.PaperMetadataExtractor.Extract:input_type -> papers.v1.PaperExtractionRequest
+	1,  // 13: papers.v1.PdfRenderer.RenderPage:input_type -> papers.v1.PdfRenderRequest
+	4,  // 14: papers.v1.DocumentParser.Recognize:output_type -> papers.v1.RecognitionResult
+	11, // 15: papers.v1.PaperMetadataExtractor.Extract:output_type -> papers.v1.PaperExtractionResult
+	2,  // 16: papers.v1.PdfRenderer.RenderPage:output_type -> papers.v1.PdfRenderResult
+	14, // [14:17] is the sub-list for method output_type
+	11, // [11:14] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_document_parser_proto_init() }
@@ -1422,7 +1702,7 @@ func file_document_parser_proto_init() {
 	if File_document_parser_proto != nil {
 		return
 	}
-	file_document_parser_proto_msgTypes[0].OneofWrappers = []any{
+	file_document_parser_proto_msgTypes[3].OneofWrappers = []any{
 		(*RecognitionRequest_Content)(nil),
 		(*RecognitionRequest_FilePath)(nil),
 		(*RecognitionRequest_SourceUrl)(nil),
@@ -1433,9 +1713,9 @@ func file_document_parser_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_document_parser_proto_rawDesc), len(file_document_parser_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   12,
+			NumMessages:   15,
 			NumExtensions: 0,
-			NumServices:   2,
+			NumServices:   3,
 		},
 		GoTypes:           file_document_parser_proto_goTypes,
 		DependencyIndexes: file_document_parser_proto_depIdxs,

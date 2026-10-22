@@ -228,3 +228,111 @@ var PaperMetadataExtractor_ServiceDesc = grpc.ServiceDesc{
 	Streams:  []grpc.StreamDesc{},
 	Metadata: "document_parser.proto",
 }
+
+const (
+	PdfRenderer_RenderPage_FullMethodName = "/papers.v1.PdfRenderer/RenderPage"
+)
+
+// PdfRendererClient is the client API for PdfRenderer service.
+//
+// For semantics around ctx use and closing/ending streaming RPCs, please refer to https://pkg.go.dev/google.golang.org/grpc/?tab=doc#ClientConn.NewStream.
+//
+// PdfRenderer renders one bounded page view from a Go-owned source object.
+// It is synchronous and separate from the staged recognition/extraction work.
+type PdfRendererClient interface {
+	RenderPage(ctx context.Context, in *PdfRenderRequest, opts ...grpc.CallOption) (*PdfRenderResult, error)
+}
+
+type pdfRendererClient struct {
+	cc grpc.ClientConnInterface
+}
+
+func NewPdfRendererClient(cc grpc.ClientConnInterface) PdfRendererClient {
+	return &pdfRendererClient{cc}
+}
+
+func (c *pdfRendererClient) RenderPage(ctx context.Context, in *PdfRenderRequest, opts ...grpc.CallOption) (*PdfRenderResult, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PdfRenderResult)
+	err := c.cc.Invoke(ctx, PdfRenderer_RenderPage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// PdfRendererServer is the server API for PdfRenderer service.
+// All implementations must embed UnimplementedPdfRendererServer
+// for forward compatibility.
+//
+// PdfRenderer renders one bounded page view from a Go-owned source object.
+// It is synchronous and separate from the staged recognition/extraction work.
+type PdfRendererServer interface {
+	RenderPage(context.Context, *PdfRenderRequest) (*PdfRenderResult, error)
+	mustEmbedUnimplementedPdfRendererServer()
+}
+
+// UnimplementedPdfRendererServer must be embedded to have
+// forward compatible implementations.
+//
+// NOTE: this should be embedded by value instead of pointer to avoid a nil
+// pointer dereference when methods are called.
+type UnimplementedPdfRendererServer struct{}
+
+func (UnimplementedPdfRendererServer) RenderPage(context.Context, *PdfRenderRequest) (*PdfRenderResult, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method RenderPage not implemented")
+}
+func (UnimplementedPdfRendererServer) mustEmbedUnimplementedPdfRendererServer() {}
+func (UnimplementedPdfRendererServer) testEmbeddedByValue()                     {}
+
+// UnsafePdfRendererServer may be embedded to opt out of forward compatibility for this service.
+// Use of this interface is not recommended, as added methods to PdfRendererServer will
+// result in compilation errors.
+type UnsafePdfRendererServer interface {
+	mustEmbedUnimplementedPdfRendererServer()
+}
+
+func RegisterPdfRendererServer(s grpc.ServiceRegistrar, srv PdfRendererServer) {
+	// If the following call pancis, it indicates UnimplementedPdfRendererServer was
+	// embedded by pointer and is nil.  This will cause panics if an
+	// unimplemented method is ever invoked, so we test this at initialization
+	// time to prevent it from happening at runtime later due to I/O.
+	if t, ok := srv.(interface{ testEmbeddedByValue() }); ok {
+		t.testEmbeddedByValue()
+	}
+	s.RegisterService(&PdfRenderer_ServiceDesc, srv)
+}
+
+func _PdfRenderer_RenderPage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PdfRenderRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(PdfRendererServer).RenderPage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: PdfRenderer_RenderPage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(PdfRendererServer).RenderPage(ctx, req.(*PdfRenderRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+// PdfRenderer_ServiceDesc is the grpc.ServiceDesc for PdfRenderer service.
+// It's only intended for direct use with grpc.RegisterService,
+// and not to be introspected or modified (even as a copy)
+var PdfRenderer_ServiceDesc = grpc.ServiceDesc{
+	ServiceName: "papers.v1.PdfRenderer",
+	HandlerType: (*PdfRendererServer)(nil),
+	Methods: []grpc.MethodDesc{
+		{
+			MethodName: "RenderPage",
+			Handler:    _PdfRenderer_RenderPage_Handler,
+		},
+	},
+	Streams:  []grpc.StreamDesc{},
+	Metadata: "document_parser.proto",
+}

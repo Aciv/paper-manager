@@ -1,8 +1,8 @@
-"""Minimal one-shot PDF region renderer.
+"""PyMuPDF-only page/region renderer used by the render worker.
 
-This module deliberately imports only PyMuPDF. It is a framework-level helper
-for a future Go caller, not part of the gRPC parser server, HTTP API, frontend,
-or Docker image yet. PNG bytes are written to stdout; diagnostics use stderr.
+This module deliberately imports only PyMuPDF, so the render worker never
+loads PyMuPDF4LLM, ONNX Runtime, or CRF. PNG bytes are written to stdout for the
+standalone CLI; the gRPC worker calls the functions directly.
 """
 from __future__ import annotations
 
@@ -73,6 +73,94 @@ def render_region(
         if pixmap.width * pixmap.height > max_pixels:
             raise RegionRenderError("rendered region exceeds pixel limit")
         return pixmap.tobytes("png")
+    finally:
+        document.close()
+
+
+def resolve_storage_source(upload_dir: Path, storage_key: str) -> Path:
+    """Resolve a Go-owned storage key below the shared upload root."""
+    key = Path(storage_key)
+    root = upload_dir.resolve()
+    if not storage_key or key.is_absolute():
+        raise RegionRenderError("source storage key must be a relative path")
+    source = (root / key).resolve()
+    if not source.is_relative_to(root) or not source.is_file():
+        raise RegionRenderError("source storage key is outside the parser upload directory")
+    if source.suffix.lower() != ".pdf":
+        raise RegionRenderError("source storage key does not identify a PDF")
+    return source
+
+
+def render_page_image(
+    source: Path,
+    page_number: int,
+    *,
+    normalized_bbox: tuple[float, float, float, float] | None,
+    full_page: bool,
+    dpi: int,
+    max_dpi: int,
+    max_pixels: int,
+) -> tuple[bytes, int, int, float, float]:
+    """Render a full page or a normalized rectangle and return PNG metadata.
+
+    Normalized coordinates are relative to ``page.rect``. This keeps the
+    public contract independent of page rotation while the renderer remains
+    the owner of PDF coordinate conversion.
+    """
+    if page_number < 1:
+        raise RegionRenderError("page number must be positive")
+    if dpi <= 0 or max_dpi <= 0 or dpi > max_dpi:
+        raise RegionRenderError("DPI is outside the configured range")
+    if max_pixels <= 0:
+        raise RegionRenderError("max pixels must be positive")
+    if not source.is_file():
+        raise RegionRenderError("source PDF is unavailable")
+
+    try:
+        document = pymupdf.open(str(source))
+    except Exception as exc:
+        raise RegionRenderError("source is not a readable PDF") from exc
+    try:
+        if not document.is_pdf:
+            raise RegionRenderError("source is not a PDF")
+        if page_number > document.page_count:
+            raise RegionRenderError("page number exceeds document page count")
+        page = document[page_number - 1]
+        page_rect = page.rect
+        if full_page:
+            clip = pymupdf.Rect(page_rect)
+        else:
+            if normalized_bbox is None or len(normalized_bbox) != 4:
+                raise RegionRenderError("bbox is required unless full_page is true")
+            if not all(math.isfinite(value) for value in normalized_bbox):
+                raise RegionRenderError("bbox coordinates must be finite")
+            x0, y0, x1, y1 = normalized_bbox
+            if not (0 <= x0 < x1 <= 1 and 0 <= y0 < y1 <= 1):
+                raise RegionRenderError("bbox must be a positive normalized rectangle")
+            clip = pymupdf.Rect(
+                page_rect.x0 + x0 * page_rect.width,
+                page_rect.y0 + y0 * page_rect.height,
+                page_rect.x0 + x1 * page_rect.width,
+                page_rect.y0 + y1 * page_rect.height,
+            )
+        scale = dpi / 72.0
+        requested_pixels = max(clip.width * scale, 1.0) * max(clip.height * scale, 1.0)
+        if requested_pixels > max_pixels:
+            scale *= math.sqrt(max_pixels / requested_pixels) * 0.99
+        pixmap = page.get_pixmap(
+            matrix=pymupdf.Matrix(scale, scale),
+            clip=clip,
+            alpha=False,
+        )
+        if pixmap.width * pixmap.height > max_pixels:
+            raise RegionRenderError("rendered page exceeds pixel limit")
+        return (
+            pixmap.tobytes("png"),
+            pixmap.width,
+            pixmap.height,
+            page_rect.width,
+            page_rect.height,
+        )
     finally:
         document.close()
 

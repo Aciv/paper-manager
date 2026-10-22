@@ -122,6 +122,7 @@ func ServerFile(
 		router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/content", readingHandler.Content)
 		router.GET("/api/document/:id/blocks", readingHandler.ListBlocks)
 		router.Match([]string{http.MethodGet, http.MethodHead}, "/api/document/:id/blocks/:blockID/image", readingHandler.BlockImage)
+		router.GET("/api/document/:id/pages/:page/image", readingHandler.PageImage)
 		router.GET("/api/document/:id/markdown", readingHandler.Markdown)
 		router.GET("/api/document/:id/structure", readingHandler.Structure)
 	}

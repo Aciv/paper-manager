@@ -12,7 +12,7 @@ import grpc
 import document_parser_pb2
 import document_parser_pb2_grpc
 from logger import get_logger
-from papers_parser.pdf2md_service import extract_layout_lines_from_storage
+from papers_parser.layout_lines import extract_layout_lines_from_storage
 from papers_parser.paper_extractor import (
     ExtractionOutput,
     PaperExtractionEngine,

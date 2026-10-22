@@ -1,7 +1,7 @@
 # papersManager MCP tool contract
 
 Status: specification implemented by `internal/mcp` and the in-process MCP
-listener. The manifest contains 42 tools across four groups: `library`,
+listener. The manifest contains 43 tools across four groups: `library`,
 `reading`, `base`, and `citation`. The manifest remains the source of truth for
 tool names and schemas. Per-host connection and skill installation are covered
 by [agent-installation.md](agent-installation.md).
@@ -266,6 +266,21 @@ Output: JSON metadata plus an MCP image content block. The image is limited by
 `MCP_MAX_IMAGE_BYTES` (default 12 MiB); the private storage key is never
 returned. Text-only Blocks have no image and return `NOT_FOUND`.
 
+#### `papers_manager_document_read_page_image`
+
+Render one full PDF page or a normalized page region. Read-only. This is a
+synchronous direct renderer call, not an Asynq task.
+
+Input: `document_id`, `page_number`; optional `bbox`
+(`{x0,y0,x1,y1}` normalized to `[0,1]`, omitted for the full page); optional
+`dpi` (default 144, max 300).
+
+Output: JSON metadata plus an MCP image content block. Bounds come from
+`MCP_MAX_IMAGE_BYTES` and the parser render limits
+(`PARSER_RENDER_MAX_DPI`, `PARSER_RENDER_MAX_PIXELS`,
+`PARSER_RENDER_MAX_OUTPUT_BYTES`). The private storage key is never returned.
+The renderer is a PyMuPDF-only worker and never loads PyMuPDF4LLM/ONNX/CRF.
+
 ### Reading notes
 
 #### `papers_manager_reading_note_outline`
@@ -489,11 +504,10 @@ Not part of this manifest yet:
 - `base_summary` / `base_compare` — Phase 3B; until then the reading skill
   composes summaries from existing read tools.
 - Native LLM generation — not a server-side MCP tool until a runner exists.
-- Arbitrary page rendering — block images cover parser-stored image/table
-  crops. Rendering an arbitrary page rectangle would require wiring a
-  renderer into the API runtime and is intentionally not exposed yet.
 - Batch local-file or local-directory imports — only one explicitly selected
   file is imported, confined to `MCP_LOCAL_IMPORT_ROOT`.
+- High-DPI whole-document pre-rendering — page/region images are rendered on
+  demand and cached by the caller; there is no bulk page-image export yet.
 
 ## Mapping to existing HTTP surfaces
 
@@ -513,6 +527,7 @@ Not part of this manifest yet:
 | `papers_manager_document_read_markdown` | `GET /api/document/:id/markdown` |
 | `papers_manager_document_read_blocks` | `GET /api/document/:id/blocks?page=N` |
 | `papers_manager_document_read_block_image` | `GET /api/document/:id/blocks/:blockID/image` |
+| `papers_manager_document_read_page_image` | `GET /api/document/:id/pages/:page/image` (direct `PdfRenderer.RenderPage`, no Asynq) |
 | `papers_manager_reading_note_outline` | `GET /api/document/:id/reading-note` + section content endpoints |
 | `papers_manager_reading_note_read_section` | `GET /api/document/:id/reading-note/sections/:sectionId` |
 | `papers_manager_reading_note_create` | `PUT /api/document/:id/reading-note` with `expectedRevision=0` |
