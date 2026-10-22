@@ -171,9 +171,13 @@ func validateLookupQuery(query types.PaperLookupQuery) (types.PaperLookupQuery, 
 	query.DOI = normalizeDOI(query.DOI)
 	query.Title = normalizeSpace(query.Title)
 	query.SourceURL = strings.TrimSpace(query.SourceURL)
-	for index := range query.Authors {
-		query.Authors[index] = normalizeSpace(query.Authors[index])
+	authors := make([]string, 0, len(query.Authors))
+	for _, author := range query.Authors {
+		if author = normalizeSpace(author); author != "" {
+			authors = append(authors, author)
+		}
 	}
+	query.Authors = authors
 	if err := query.Validate(); err != nil {
 		return types.PaperLookupQuery{}, err
 	}

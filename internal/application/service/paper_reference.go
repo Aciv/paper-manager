@@ -746,11 +746,7 @@ func referenceLookupQueryFor(reference types.PaperReference) types.PaperLookupQu
 		Venue:     strings.TrimSpace(reference.Venue),
 		Limit:     types.DefaultPaperCatalogLimit,
 	}
-	for _, author := range reference.Authors {
-		if name := strings.TrimSpace(author.Name); name != "" {
-			query.Authors = append(query.Authors, name)
-		}
-	}
+	query.Authors = paperCatalogAuthorNames(reference.Authors)
 	if reference.PublishedAt != nil {
 		query.PublishedYear = reference.PublishedAt.Year()
 	}

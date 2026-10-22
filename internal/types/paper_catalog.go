@@ -113,11 +113,9 @@ func (query PaperLookupQuery) Validate() error {
 	if query.Limit < 0 || query.Limit > MaxPaperCatalogLimit {
 		return fmt.Errorf("%w: limit must be between 0 and %d", ErrInvalidPaperCatalogData, MaxPaperCatalogLimit)
 	}
-	for index, author := range query.Authors {
-		if strings.TrimSpace(author) == "" {
-			return fmt.Errorf("%w: author %d is empty", ErrInvalidPaperCatalogData, index)
-		}
-	}
+	// Authors are optional matching hints. The lookup itself only requires
+	// DOI/title/source URL, so an empty or dirty author entry must not reject
+	// the query; adapters normalize and drop empty hints before searching.
 	return nil
 }
 

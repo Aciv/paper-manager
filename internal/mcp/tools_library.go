@@ -162,8 +162,51 @@ func (s *ToolServer) libraryGet(ctx context.Context, raw json.RawMessage) (any, 
 }
 
 type importURLInput struct {
-	URL string `json:"url"`
-	DOI string `json:"doi"`
+	URL    string `json:"url"`
+	DOI    string `json:"doi"`
+	BaseID string `json:"base_id"`
+}
+
+// acquireImportSlot bounds concurrent import calls. URL imports download
+// synchronously inside the tool call, so an unbounded agent loop could open
+// many publisher downloads and parser jobs at once.
+func (s *ToolServer) acquireImportSlot() (func(), error) {
+	select {
+	case s.importSlots <- struct{}{}:
+		return func() { <-s.importSlots }, nil
+	default:
+		return nil, errImportBusy
+	}
+}
+
+// validateImportBase checks a requested base before any document is created,
+// so an invalid base_id cannot leave a half-applied import behind.
+func (s *ToolServer) validateImportBase(ctx context.Context, baseID string) error {
+	baseID = strings.TrimSpace(baseID)
+	if baseID == "" {
+		return nil
+	}
+	if s.bases == nil {
+		return fmt.Errorf("%w: base service is unavailable", errInvalidToolInput)
+	}
+	_, err := s.bases.GetBase(ctx, baseID)
+	return err
+}
+
+func (s *ToolServer) attachImportedDocumentToBase(
+	ctx context.Context, baseID string, document *types.Document,
+) error {
+	baseID = strings.TrimSpace(baseID)
+	if baseID == "" {
+		return nil
+	}
+	if document == nil {
+		return fmt.Errorf("%w: imported document is missing", errInvalidToolInput)
+	}
+	if s.bases == nil {
+		return fmt.Errorf("%w: base service is unavailable", errInvalidToolInput)
+	}
+	return s.bases.AddDocumentToBase(ctx, baseID, document.ID.String())
 }
 
 func (s *ToolServer) libraryImportURL(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -171,18 +214,34 @@ func (s *ToolServer) libraryImportURL(ctx context.Context, raw json.RawMessage) 
 	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
 	}
+	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
+		return nil, err
+	}
+	release, err := s.acquireImportSlot()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	document, err := s.documents.CreateDocumentFromURL(ctx, types.DocumentURLImportCommand{
 		URL: input.URL, DOI: input.DOI,
 	})
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"document": document}, nil
+	if err := s.attachImportedDocumentToBase(ctx, input.BaseID, document); err != nil {
+		return nil, err
+	}
+	result := map[string]any{"document": document}
+	if baseID := strings.TrimSpace(input.BaseID); baseID != "" {
+		result["baseId"] = baseID
+	}
+	return result, nil
 }
 
 type importFileInput struct {
-	Path string `json:"path"`
-	DOI  string `json:"doi"`
+	Path   string `json:"path"`
+	DOI    string `json:"doi"`
+	BaseID string `json:"base_id"`
 }
 
 func (s *ToolServer) libraryImportFile(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -190,32 +249,198 @@ func (s *ToolServer) libraryImportFile(ctx context.Context, raw json.RawMessage)
 	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
 	}
-	path, err := s.resolveLocalImportPath(input.Path)
+	path, err := s.validateLocalImportFile(input.Path)
 	if err != nil {
 		return nil, err
 	}
+	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
+		return nil, err
+	}
+	release, err := s.acquireImportSlot()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	document, err := s.documents.CreateDocumentFromLocalFile(ctx, path, input.DOI)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.attachImportedDocumentToBase(ctx, input.BaseID, document); err != nil {
+		return nil, err
+	}
+	result := map[string]any{"document": document}
+	if baseID := strings.TrimSpace(input.BaseID); baseID != "" {
+		result["baseId"] = baseID
+	}
+	return result, nil
+}
+
+// validateImportBatch enforces the shared 1..20 item bound and the optional
+// per-item DOI alignment used by both batch import tools.
+func validateImportBatch(count, doiCount int, field string) error {
+	if count == 0 || count > types.MaxDocumentBatchItems {
+		return fmt.Errorf(
+			"%w: %s must contain between 1 and %d items",
+			errInvalidToolInput, field, types.MaxDocumentBatchItems,
+		)
+	}
+	if doiCount != 0 && doiCount != count {
+		return fmt.Errorf("%w: provide no dois or exactly one per item", errInvalidToolInput)
+	}
+	return nil
+}
+
+func batchDOI(dois []string, index int) string {
+	if len(dois) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(dois[index])
+}
+
+type libraryImportBatchResult struct {
+	types.DocumentBatchResult
+	BaseID string `json:"baseId,omitempty"`
+}
+
+// attachImportBatchToBase applies base_id to every accepted or duplicate item.
+// Attachment failures are reported per item because the documents already
+// exist; they must not be reported as a failed import.
+func (s *ToolServer) attachImportBatchToBase(
+	ctx context.Context, baseID string, result types.DocumentBatchResult,
+) libraryImportBatchResult {
+	baseID = strings.TrimSpace(baseID)
+	output := libraryImportBatchResult{DocumentBatchResult: result, BaseID: baseID}
+	if baseID == "" {
+		return output
+	}
+	attachFailed := false
+	for index := range output.Items {
+		item := &output.Items[index]
+		if item.Document == nil ||
+			(item.Status != types.DocumentImportItemAccepted && item.Status != types.DocumentImportItemDuplicate) {
+			continue
+		}
+		if err := s.attachImportedDocumentToBase(ctx, baseID, item.Document); err != nil {
+			item.Status = types.DocumentImportItemFailed
+			item.Error = "document was imported but could not be added to the Base"
+			attachFailed = true
+		}
+	}
+	if attachFailed {
+		message := "some documents could not be added to the Base"
+		if output.Error == "" {
+			output.Error = message
+		} else {
+			output.Error += "; " + message
+		}
+	}
+	return output
+}
+
+type importURLsInput struct {
+	URLs   []string `json:"urls"`
+	DOIs   []string `json:"dois"`
+	BaseID string   `json:"base_id"`
+}
+
+func (s *ToolServer) libraryImportURLs(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input importURLsInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	if err := validateImportBatch(len(input.URLs), len(input.DOIs), "urls"); err != nil {
+		return nil, err
+	}
+	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
+		return nil, err
+	}
+	release, err := s.acquireImportSlot()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	commands := make([]types.DocumentURLImportCommand, len(input.URLs))
+	for index, url := range input.URLs {
+		commands[index] = types.DocumentURLImportCommand{
+			URL: strings.TrimSpace(url), DOI: batchDOI(input.DOIs, index),
+		}
+	}
+	timeout := s.cfg.BatchImportTimeout
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	batchCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	result, err := s.documents.CreateDocumentsFromURLs(batchCtx, commands)
+	if err != nil {
+		return nil, err
+	}
+	return s.attachImportBatchToBase(ctx, input.BaseID, result), nil
+}
+
+type importFilesInput struct {
+	Paths  []string `json:"paths"`
+	DOIs   []string `json:"dois"`
+	BaseID string   `json:"base_id"`
+}
+
+func (s *ToolServer) libraryImportFiles(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input importFilesInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	if err := validateImportBatch(len(input.Paths), len(input.DOIs), "paths"); err != nil {
+		return nil, err
+	}
+	paths := make([]string, len(input.Paths))
+	for index, rawPath := range input.Paths {
+		path, err := s.validateLocalImportFile(rawPath)
+		if err != nil {
+			return nil, fmt.Errorf("path %d: %w", index+1, err)
+		}
+		paths[index] = path
+	}
+	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
+		return nil, err
+	}
+	release, err := s.acquireImportSlot()
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	result, err := s.documents.CreateDocumentsFromLocalFiles(ctx, paths, input.DOIs)
+	if err != nil {
+		return nil, err
+	}
+	return s.attachImportBatchToBase(ctx, input.BaseID, result), nil
+}
+
+// validateLocalImportFile confines one path to the configured root and applies
+// the same type, regular-file, and size checks as the service.
+func (s *ToolServer) validateLocalImportFile(raw string) (string, error) {
+	path, err := s.resolveLocalImportPath(raw)
+	if err != nil {
+		return "", err
+	}
 	if _, supported := fileservice.SupportedContentType(path); !supported {
-		return nil, fmt.Errorf("%w: unsupported local file type", errInvalidToolInput)
+		return "", fmt.Errorf("%w: unsupported local file type", errInvalidToolInput)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: local file is not readable", errInvalidToolInput)
+		return "", fmt.Errorf("%w: local file is not readable", errInvalidToolInput)
 	}
 	if !info.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: path must name a regular file", errInvalidToolInput)
+		return "", fmt.Errorf("%w: path must name a regular file", errInvalidToolInput)
 	}
 	maxSize := s.cfg.MaxUploadSize
 	if maxSize <= 0 {
 		maxSize = fileservice.DefaultMaxUploadSize
 	}
 	if info.Size() > maxSize {
-		return nil, fmt.Errorf("%w: local file exceeds the upload limit", errPayloadTooLarge)
+		return "", fmt.Errorf("%w: local file exceeds the upload limit", errPayloadTooLarge)
 	}
-	document, err := s.documents.CreateDocumentFromLocalFile(ctx, path, input.DOI)
-	if err != nil {
-		return nil, err
-	}
-	return map[string]any{"document": document}, nil
+	return path, nil
 }
 
 // resolveLocalImportPath confines filesystem imports to the configured root.
@@ -411,4 +636,140 @@ func (s *ToolServer) processingStatus(ctx context.Context, raw json.RawMessage) 
 		view.ReferenceProgress = &progress
 	}
 	return map[string]any{"processing": view}, nil
+}
+
+type libraryGetManyInput struct {
+	DocumentIDs       []string `json:"document_ids"`
+	IncludeProcessing bool     `json:"include_processing"`
+}
+
+type libraryGetManyItem struct {
+	Document      types.Document                `json:"document"`
+	PaperMetadata *types.PaperMetadata          `json:"paperMetadata,omitempty"`
+	Processing    *types.DocumentProcessingView `json:"processing,omitempty"`
+}
+
+type libraryGetManyResult struct {
+	Items              []libraryGetManyItem `json:"items"`
+	MissingDocumentIDs []string             `json:"missingDocumentIds,omitempty"`
+}
+
+// validateDocumentIDBatch normalizes, deduplicates, and bounds one batch read
+// request. Duplicate IDs collapse to one result; missing IDs are reported by
+// the callers, not treated as an error.
+func validateDocumentIDBatch(ids []string) ([]string, error) {
+	if len(ids) == 0 || len(ids) > types.MaxDocumentProjectionIDs {
+		return nil, fmt.Errorf(
+			"%w: document_ids must contain between 1 and %d ids",
+			errInvalidToolInput, types.MaxDocumentProjectionIDs,
+		)
+	}
+	result := make([]string, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
+	for _, raw := range ids {
+		id, err := uuid.Parse(strings.TrimSpace(raw))
+		if err != nil || id == uuid.Nil {
+			return nil, fmt.Errorf("%w: invalid document id", errInvalidToolInput)
+		}
+		canonical := id.String()
+		if _, exists := seen[canonical]; exists {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		result = append(result, canonical)
+	}
+	return result, nil
+}
+
+func (s *ToolServer) loadDocumentProjections(
+	ctx context.Context, ids []string, includeMetadata, includeProcessing bool,
+) (map[uuid.UUID]types.DocumentProjection, []string, error) {
+	if s.documents == nil {
+		return nil, nil, fmt.Errorf("document service is unavailable")
+	}
+	projections, err := s.documents.GetDocumentProjections(ctx, types.DocumentProjectionQuery{
+		DocumentIDs: ids, IncludeMetadata: includeMetadata, IncludeProcessing: includeProcessing,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	byID := make(map[uuid.UUID]types.DocumentProjection, len(projections))
+	for _, projection := range projections {
+		byID[projection.Document.ID] = projection
+	}
+	missing := make([]string, 0)
+	for _, raw := range ids {
+		id, parseErr := uuid.Parse(raw)
+		if parseErr != nil {
+			continue
+		}
+		if _, found := byID[id]; !found {
+			missing = append(missing, raw)
+		}
+	}
+	return byID, missing, nil
+}
+
+func (s *ToolServer) libraryGetMany(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input libraryGetManyInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	ids, err := validateDocumentIDBatch(input.DocumentIDs)
+	if err != nil {
+		return nil, err
+	}
+	byID, missing, err := s.loadDocumentProjections(ctx, ids, true, input.IncludeProcessing)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]libraryGetManyItem, 0, len(ids)-len(missing))
+	for _, id := range ids {
+		projection, found := byID[uuid.MustParse(id)]
+		if !found {
+			continue
+		}
+		items = append(items, libraryGetManyItem{
+			Document: projection.Document, PaperMetadata: projection.Metadata,
+			Processing: projection.Processing,
+		})
+	}
+	return libraryGetManyResult{Items: items, MissingDocumentIDs: missing}, nil
+}
+
+type processingStatusManyInput struct {
+	DocumentIDs []string `json:"document_ids"`
+}
+
+type processingStatusManyResult struct {
+	Items              []types.DocumentProcessingView `json:"items"`
+	MissingDocumentIDs []string                       `json:"missingDocumentIds,omitempty"`
+}
+
+func (s *ToolServer) processingStatusMany(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input processingStatusManyInput
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	ids, err := validateDocumentIDBatch(input.DocumentIDs)
+	if err != nil {
+		return nil, err
+	}
+	byID, missing, err := s.loadDocumentProjections(ctx, ids, false, true)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]types.DocumentProcessingView, 0, len(ids)-len(missing))
+	for _, id := range ids {
+		projection, found := byID[uuid.MustParse(id)]
+		if !found {
+			continue
+		}
+		view := types.DocumentProcessingView{DocumentID: projection.Document.ID}
+		if projection.Processing != nil {
+			view = *projection.Processing
+		}
+		items = append(items, view)
+	}
+	return processingStatusManyResult{Items: items, MissingDocumentIDs: missing}, nil
 }

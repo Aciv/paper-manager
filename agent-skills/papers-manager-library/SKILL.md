@@ -32,12 +32,14 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 本 skill 依赖 papersManager MCP server。工具名统一使用 `papers_manager_`
   前缀；Host 可能再包一层命名空间，按前缀或 server 名称识别，不要依赖某个固定外层包装。
 - 读取工具：`papers_manager_library_search`、`papers_manager_library_get`、
-  `papers_manager_processing_status`、`papers_manager_base_list`、
+  `papers_manager_library_get_many`、`papers_manager_processing_status`、
+  `papers_manager_processing_status_many`、`papers_manager_base_list`、
   `papers_manager_base_get`、`papers_manager_base_list_documents`、
   `papers_manager_citation_list`、`papers_manager_citation_list_cited_by`、
   `papers_manager_base_bibliography_status`。
 - 写入工具：`papers_manager_library_import_url`、
-  `papers_manager_library_import_file`、`papers_manager_library_update_metadata`、
+  `papers_manager_library_import_urls`、`papers_manager_library_import_file`、
+  `papers_manager_library_import_files`、`papers_manager_library_update_metadata`、
   `papers_manager_library_delete`、`papers_manager_processing_retry`、
   `papers_manager_processing_cancel`、`papers_manager_base_create`、
   `papers_manager_base_update`、`papers_manager_base_delete`、
@@ -46,9 +48,11 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
   `papers_manager_citation_replace`、`papers_manager_citation_remove`、
   `papers_manager_citation_update_reference`、`papers_manager_citation_resolve`、
   `papers_manager_citation_rematch`、`papers_manager_citation_download_pdf`。
-- `papers_manager_library_import_file` 只有在服务端配置了
+- `papers_manager_library_import_file` / `import_files` 只有在服务端配置了
   `MCP_LOCAL_IMPORT_ROOT` 时可用；返回 `FORBIDDEN` 时让用户在网页上传，不要尝试
   绕过路径限制。
+- 批次导入工具每次最多 20 项，单次调用内按顺序处理；超过 20 项时拆成多次调用，
+  不要依赖并发调用绕开单项限制。
 - 缺少读取工具、MCP 无法连接，或工具返回“未知工具/未实现”时：停止并明确报告
   papersManager MCP 不可用。
 - 只有读取工具可用时，可以继续只读查询，但不得声称已经导入、修改或删除。
@@ -68,13 +72,30 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 
 使用 `papers_manager_library_search`，优先用 DOI 或精确标题。不要为了“看看有没有”而无界翻页；需要更多结果时明确说明当前页和总数。
 
+### 批量读取状态与元数据
+
+已经有一组 document ID（搜索结果、批次导入的 `items`、用户给出的列表）时，不要逐个调用单项工具：
+
+- 需要标题、作者、venue、source、标签等论文源信息：
+  `papers_manager_library_get_many`（每次 1–200 个 ID）；
+- 只需要处理阶段和引用进度：`papers_manager_processing_status_many`（每次 1–200 个 ID）；
+- 两者都会去重、按请求顺序返回，并把已不存在的 ID 放在 `missingDocumentIds`；
+  不要因为个别 ID 缺失而重试整批；
+- 超过 200 个 ID 时按页拆分（例如每页 100 个），不要无界并发批次；
+- 元数据缺失是允许的，不要从正文推断或用 `update_metadata` 补猜。
+
 ### 导入 URL
 
 使用 `papers_manager_library_import_url`：
 
 - 只接受用户提供的 HTTP/HTTPS URL；
 - 不接受服务器本地路径或任意文件系统访问；
+- 如果用户要求导入到某个 Base，传入可选的 `base_id`，不要先导入再单独调用成员工具；批次导入时 `base_id` 会应用到每个 accepted/duplicate 项；
+- 用户一次给出多个 URL 时，优先使用 `papers_manager_library_import_urls`：每次 1–20 个 URL，可选 `dois` 必须与 URL 一一对齐或整体省略；超过 20 个拆成多次调用；
+- 批次调用内按顺序处理，受 `BATCH_IMPORT_TIMEOUT`（默认 2 分钟）约束；超时会返回已完成项、`stopped=true` 和未处理项的失败状态；
+- 批次结果必须逐项检查 `status`（accepted/duplicate/rejected/failed）和 `error`，不能只看整体成功；
 - 导入成功返回 document ID 和初始处理状态；
+- 导入工具（单项与批次）共享并发限制（默认最多同时 20 个调用）；遇到 `RESOURCE_EXHAUSTED` 时等待后重试，不要并发堆积；
 - 不要无限等待解析完成；使用 `papers_manager_processing_status` 做有界轮询，或把轮询留给用户界面；
 - 失败时报告阶段和可重试入口，不要重复盲目提交。
 
@@ -84,7 +105,10 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 
 - 路径必须位于服务端 `MCP_LOCAL_IMPORT_ROOT` 内；
 - 不要猜测路径、扫描目录或尝试导入目录；
+- 用户一次给出多个本地路径时使用 `papers_manager_library_import_files`（每次 1–20 个）；工具会先整体校验所有路径，任一越界/不支持/超限会整批拒绝且不导入任何文件；
 - `FORBIDDEN` 表示本地导入被禁用或路径越界；让用户改网页上传，不要用 shell 读取文件；
+- 与 URL 导入共用并发上限（默认 20）；遇到 `RESOURCE_EXHAUSTED` 时等待后重试；
+- 如果用户要求导入到某个 Base，传入可选的 `base_id`，批次中会应用到每个 accepted/duplicate 项；
 - 导入成功后同样用 `papers_manager_processing_status` 做有界轮询。
 
 ### 修改元数据

@@ -509,10 +509,6 @@ func (s *documentService) GetReferenceProgress(ctx context.Context, id string) (
 	return s.repo.CitationTargetProgress(ctx, documentID)
 }
 
-// maxDocumentProjectionIDs bounds one batch read-model request. Callers page
-// documents and then batch only the current page.
-const maxDocumentProjectionIDs = 200
-
 func (s *documentService) GetDocumentProjections(
 	ctx context.Context, query types.DocumentProjectionQuery,
 ) ([]types.DocumentProjection, error) {
@@ -532,8 +528,8 @@ func (s *documentService) GetDocumentProjections(
 	if len(ids) == 0 {
 		return []types.DocumentProjection{}, nil
 	}
-	if len(ids) > maxDocumentProjectionIDs {
-		return nil, fmt.Errorf("at most %d document ids are allowed", maxDocumentProjectionIDs)
+	if len(ids) > types.MaxDocumentProjectionIDs {
+		return nil, fmt.Errorf("at most %d document ids are allowed", types.MaxDocumentProjectionIDs)
 	}
 	documents, err := s.repo.GetMany(ctx, ids)
 	if err != nil {

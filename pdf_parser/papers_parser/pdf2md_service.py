@@ -14,7 +14,76 @@ from typing import Sequence
 from urllib.parse import urlsplit
 from uuid import UUID
 
+import sys
+
 import grpc
+
+
+def _pymupdf_layout_enabled() -> bool:
+    """Return whether PyMuPDF4LLM's ONNX layout engine should be used."""
+    value = os.getenv("PARSER_PYMUPDF_LAYOUT", "true").strip().lower()
+    return value not in {"0", "false", "no", "off", "disabled"}
+
+
+def _layout_thread_count() -> int:
+    """Per-worker ONNX thread budget (PARSER_LAYOUT_THREADS)."""
+    raw = os.getenv("PARSER_LAYOUT_THREADS", "4").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return 4
+
+
+_LAYOUT_ENABLED = _pymupdf_layout_enabled()
+_LAYOUT_THREADS = _layout_thread_count()
+
+if _LAYOUT_ENABLED:
+    # PyMuPDF4LLM 1.28 imports pymupdf.layout and creates its ONNX sessions at
+    # import time. Cap each worker's intra-op pool before that happens;
+    # otherwise every worker starts a full-core pool (60+ native threads on a
+    # 16-core host) and parallel workers oversubscribe the CPU.
+    import onnxruntime as _ort
+
+    _ORIGINAL_INFERENCE_SESSION = _ort.InferenceSession
+
+    class _BoundedInferenceSession(_ORIGINAL_INFERENCE_SESSION):
+        """InferenceSession with bounded pools when the caller left them auto."""
+
+        def __init__(
+            self,
+            path_or_bytes,
+            sess_options=None,
+            providers=None,
+            provider_options=None,
+            **kwargs,
+        ):
+            if sess_options is None:
+                sess_options = _ort.SessionOptions()
+            try:
+                if getattr(sess_options, "intra_op_num_threads", 0) in (0, None):
+                    sess_options.intra_op_num_threads = _LAYOUT_THREADS
+                if getattr(sess_options, "inter_op_num_threads", 0) in (0, None):
+                    sess_options.inter_op_num_threads = 1
+            except Exception:
+                pass
+            super().__init__(
+                path_or_bytes,
+                sess_options=sess_options,
+                providers=providers,
+                provider_options=provider_options,
+                **kwargs,
+            )
+
+    # Keep the attribute a class: pymupdf4llm uses it in runtime annotations
+    # such as `ort.InferenceSession | None`.
+    _ort.InferenceSession = _BoundedInferenceSession
+else:
+    # Make pymupdf4llm's optional `import pymupdf.layout` fail *before* it
+    # loads the ONNX model. Calling use_layout(False) after the import is too
+    # late: the model and its thread pools are already resident in every
+    # worker. This restores the pre-1.28 processing path and its memory use.
+    sys.modules["pymupdf.layout"] = None
+
 import pymupdf
 import pymupdf4llm
 
@@ -36,6 +105,16 @@ def _log_level_from_env() -> int:
 
 LOG = get_logger(__name__, _log_level_from_env())
 
+
+# PyMuPDF4LLM 1.28 activates its layout model on import. The model is accurate
+# but costs tens of CPU-seconds per paper; the legacy path is sufficient for
+# Markdown extraction and is far cheaper on small hosts.
+if not _LAYOUT_ENABLED and hasattr(pymupdf4llm, "use_layout"):
+    pymupdf4llm.use_layout(False)
+    LOG.warning(
+        "PyMuPDF layout engine disabled; block source maps, bounding boxes "
+        "and image/table crops will be unavailable"
+    )
 
 
 SUPPORTED_TYPES = {"application/pdf"}

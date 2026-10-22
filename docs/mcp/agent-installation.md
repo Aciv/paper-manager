@@ -28,7 +28,11 @@ MCP_ADDR=127.0.0.1:8090
 MCP_TOKEN=
 MCP_MAX_REQUEST_BYTES=8388608
 MCP_MAX_IMAGE_BYTES=12582912
-# Optional: enables papers_manager_library_import_file. Keep it narrow.
+# Shared limit for concurrent import calls. Single and batch tools share this
+# gate; each batch call accepts 1-20 items and processes them sequentially.
+MCP_IMPORT_CONCURRENCY=20
+# Optional: enables papers_manager_library_import_file / import_files.
+# Keep it narrow.
 # MCP_LOCAL_IMPORT_ROOT=/absolute/path/to/import-root
 ```
 
@@ -215,7 +219,7 @@ Inside a session:
 /mcp
 ```
 
-The host should list 43 tools in four groups: `papers_manager_library_*`,
+The host should list 47 tools in four groups: `papers_manager_library_*`,
 `papers_manager_reading_note_*`/`papers_manager_document_*`,
 `papers_manager_base_*`, and `papers_manager_citation_*`. The first skill use
 should trigger its runtime preflight.
@@ -251,7 +255,8 @@ Set the environment variable in the shell that launches Codex:
 export PAPERS_MANAGER_MCP_TOKEN=dev-token
 ```
 
-`tool_timeout_sec = 120` is useful because `library_import_url` and metadata
+`tool_timeout_sec = 120` is useful because `library_import_url`,
+`library_import_urls` (bounded by `BATCH_IMPORT_TIMEOUT`), and metadata
 operations may wait for remote downloads and queues.
 
 ### 5.3 Skills
@@ -484,8 +489,9 @@ The host-side mapping is restricted to loopback, but the container must bind
 `0.0.0.0` for Docker to forward traffic. `MCP_TOKEN` is mandatory in this
 configuration.
 
-If you enable `papers_manager_library_import_file` with Docker, mount the
-import directory into the API container and set `MCP_LOCAL_IMPORT_ROOT` to the
+If you enable `papers_manager_library_import_file` /
+`papers_manager_library_import_files` with Docker, mount the import directory
+into the API container and set `MCP_LOCAL_IMPORT_ROOT` to the
 **container path**, not the host path. The path check uses the API process's
 filesystem view.
 
@@ -541,7 +547,7 @@ Ask the host to call:
 papers_manager_library_search
 ```
 
-or inspect the MCP server's `tools/list`. All 43 tools start with the
+or inspect the MCP server's `tools/list`. All 47 tools start with the
 `papers_manager_` prefix; Base and citation tools use their own
 `papers_manager_base_*` and `papers_manager_citation_*` collections.
 

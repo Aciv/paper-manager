@@ -5,13 +5,16 @@ services:
   upload-permissions:
     image: alpine:3.20
     user: "0:0"
-    command: ["sh", "-c", "mkdir -p /data/uploads /data/recognition-output && chown -R 10001:10001 /data/uploads /data/recognition-output && chmod 0750 /data/uploads /data/recognition-output"]
+    command: ["sh", "-c", "mkdir -p /data/uploads /data/recognition-output /data/api-tmp && chown -R 10001:10001 /data/uploads /data/recognition-output && chmod 0750 /data/uploads /data/recognition-output && chmod 0700 /data/api-tmp"]
     volumes:
       - ./data/uploads:/data/uploads
       - ./data/recognition-output:/data/recognition-output
+      - ./data/api-tmp:/data/api-tmp
 
   postgres:
     image: postgres:17-alpine
+    mem_limit: ${POSTGRES_MEM_LIMIT:-768m}
+    memswap_limit: ${POSTGRES_MEM_LIMIT:-768m}
     environment:
       POSTGRES_USER: papers
       POSTGRES_PASSWORD: papers
@@ -28,6 +31,8 @@ services:
 
   redis:
     image: redis:7-alpine
+    mem_limit: ${REDIS_MEM_LIMIT:-256m}
+    memswap_limit: ${REDIS_MEM_LIMIT:-256m}
     ports:
       - "127.0.0.1:${REDIS_HOST_PORT:-6379}:6379"
     command: ["redis-server", "--appendonly", "yes"]
@@ -64,13 +69,30 @@ services:
       PARSER_MAX_EXTRACTION_MARKDOWN_BYTES: ${PARSER_MAX_EXTRACTION_MARKDOWN_BYTES:-33554432}
       PARSER_MAX_EXTRACTION_BLOCKS: ${PARSER_MAX_EXTRACTION_BLOCKS:-50000}
       PARSER_MAX_EXTRACTION_LAYOUT_LINES: ${PARSER_MAX_EXTRACTION_LAYOUT_LINES:-100000}
+      # shared: lightweight server; one on-demand worker per kind, each with an
+      # internal thread pool (shared model/heavy imports) and idle exit.
+      # worker: per-task subprocess pools; inprocess: old single gRPC process.
+      PARSER_EXECUTION_MODE: ${PARSER_EXECUTION_MODE:-shared}
       PARSER_MAX_WORKERS: ${PARSER_MAX_WORKERS:-8}
       PARSER_MAX_CONCURRENT_RPCS: ${PARSER_MAX_CONCURRENT_RPCS:-8}
-      PARSER_RECOGNIZE_WORKER_MAX: ${PARSER_RECOGNIZE_WORKER_MAX:-4}
-      PARSER_EXTRACT_WORKER_MAX: ${PARSER_EXTRACT_WORKER_MAX:-2}
-      PARSER_RENDER_WORKER_MAX: ${PARSER_RENDER_WORKER_MAX:-4}
-      PARSER_WORKER_IDLE_SECONDS: ${PARSER_WORKER_IDLE_SECONDS:-300}
-      PARSER_RENDER_WORKER_IDLE_SECONDS: ${PARSER_RENDER_WORKER_IDLE_SECONDS:-600}
+      # Shared mode starts one worker per kind; concurrency lives inside it.
+      PARSER_RECOGNIZE_WORKER_MAX: ${PARSER_RECOGNIZE_WORKER_MAX:-1}
+      PARSER_EXTRACT_WORKER_MAX: ${PARSER_EXTRACT_WORKER_MAX:-1}
+      PARSER_RENDER_WORKER_MAX: ${PARSER_RENDER_WORKER_MAX:-1}
+      PARSER_RECOGNIZE_CONCURRENCY: ${PARSER_RECOGNIZE_CONCURRENCY:-4}
+      PARSER_EXTRACT_CONCURRENCY: ${PARSER_EXTRACT_CONCURRENCY:-4}
+      PARSER_RENDER_CONCURRENCY: ${PARSER_RENDER_CONCURRENCY:-4}
+      # The worker process uses 2x this value as its idle timeout.
+      PARSER_WORKER_IDLE_SECONDS: ${PARSER_WORKER_IDLE_SECONDS:-120}
+      PARSER_RENDER_WORKER_IDLE_SECONDS: ${PARSER_RENDER_WORKER_IDLE_SECONDS:-120}
+      # Keep the ONNX layout engine (per-page blocks/boxes/crops). The thread
+      # cap below is what keeps 4 workers from each starting a full-core pool
+      # and blowing up memory; do not disable layout just for memory unless
+      # blocks are expendable (false returns blocks=0).
+      PARSER_PYMUPDF_LAYOUT: ${PARSER_PYMUPDF_LAYOUT:-true}
+      # ONNX intra-op threads. shared/inprocess use one model/pool (core count);
+      # worker mode uses cores / worker count (e.g. 4) per process.
+      PARSER_LAYOUT_THREADS: ${PARSER_LAYOUT_THREADS:-16}
       PARSER_WORKER_MAX_JOBS: ${PARSER_WORKER_MAX_JOBS:-50}
       PARSER_WORKER_QUEUE_TIMEOUT: ${PARSER_WORKER_QUEUE_TIMEOUT:-30}
       PARSER_WORKER_START_TIMEOUT: ${PARSER_WORKER_START_TIMEOUT:-90}
@@ -89,6 +111,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,noexec,nosuid,nodev
+    mem_limit: ${PARSER_MEM_LIMIT:-4g}
+    memswap_limit: ${PARSER_MEM_LIMIT:-4g}
+    cpus: ${PARSER_CPUS:-16}
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -135,6 +160,7 @@ services:
       ASYNQ_CONCURRENCY: ${ASYNQ_CONCURRENCY:-32}
       DOCUMENT_RECOGNITION_CONCURRENCY: ${DOCUMENT_RECOGNITION_CONCURRENCY:-4}
       DOCUMENT_EXTRACTION_CONCURRENCY: ${DOCUMENT_EXTRACTION_CONCURRENCY:-4}
+      FILE_MAX_UPLOAD_SIZE: ${FILE_MAX_UPLOAD_SIZE:-104857600}
       ASYNQ_SHUTDOWN_TIMEOUT: ${ASYNQ_SHUTDOWN_TIMEOUT:-30s}
       HTTP_READ_TIMEOUT: ${HTTP_READ_TIMEOUT:-5m}
       HTTP_WRITE_TIMEOUT: ${HTTP_WRITE_TIMEOUT:-10m}
@@ -159,6 +185,7 @@ services:
       MCP_TOKEN: ${MCP_TOKEN:-}
       MCP_MAX_REQUEST_BYTES: ${MCP_MAX_REQUEST_BYTES:-8388608}
       MCP_MAX_IMAGE_BYTES: ${MCP_MAX_IMAGE_BYTES:-12582912}
+      MCP_IMPORT_CONCURRENCY: ${MCP_IMPORT_CONCURRENCY:-20}
       MCP_LOCAL_IMPORT_ROOT: ${MCP_LOCAL_IMPORT_ROOT:-}
       PAPER_CATALOG_PROVIDERS: ${PAPER_CATALOG_PROVIDERS:-arxiv,semantic_scholar,openalex,crossref}
       PAPER_CATALOG_TIMEOUT: ${PAPER_CATALOG_TIMEOUT:-10s}
@@ -199,6 +226,13 @@ services:
     volumes:
       - ./data/uploads:/data/uploads
       - ./data/recognition-output:/data/recognition-output
+      # The runtime image is FROM scratch, so it has no writable /tmp. Go's
+      # multipart parser spills bodies over 32 MiB to disk; without this mount
+      # large batch uploads fail with "invalid multipart batch upload".
+      - ./data/api-tmp:/tmp
+    mem_limit: ${API_MEM_LIMIT:-1g}
+    memswap_limit: ${API_MEM_LIMIT:-1g}
+    cpus: ${API_CPUS:-4}
     depends_on:
       postgres:
         condition: service_healthy
@@ -223,6 +257,8 @@ services:
         HTTP_PROXY: ${HTTP_PROXY:-${ALL_PROXY:-}}
         HTTPS_PROXY: ${HTTPS_PROXY:-${ALL_PROXY:-}}
         NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}
+    mem_limit: ${WEB_MEM_LIMIT:-256m}
+    memswap_limit: ${WEB_MEM_LIMIT:-256m}
     depends_on:
       - api
     ports:

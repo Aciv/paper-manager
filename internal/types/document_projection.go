@@ -1,5 +1,9 @@
 package types
 
+// MaxDocumentProjectionIDs bounds one batch read-model request. Callers page
+// documents and then batch only the current page.
+const MaxDocumentProjectionIDs = 200
+
 // DocumentProjectionQuery requests a bounded batch read model for the library
 // first paint and the citation-progress dialog. The frontend pages documents
 // with the normal list endpoints, then asks for all visible rows in batches

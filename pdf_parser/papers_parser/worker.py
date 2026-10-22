@@ -16,7 +16,7 @@ from pathlib import Path
 import document_parser_pb2
 from logger import get_logger
 from papers_parser.worker_protocol import METHOD_EXTRACT, METHOD_RECOGNIZE, METHOD_RENDER
-from papers_parser.worker_runtime import WorkerAbort, serve_worker
+from papers_parser.worker_runtime import WorkerAbort, serve_shared_worker, serve_worker
 
 LOG = get_logger(__name__)
 
@@ -28,6 +28,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--config", required=True, help="base64-encoded JSON config")
     parser.add_argument("--idle-seconds", type=float, required=True)
     parser.add_argument("--max-jobs", type=int, required=True)
+    parser.add_argument("--concurrency", type=int, default=1)
     return parser.parse_args()
 
 
@@ -167,6 +168,8 @@ def main() -> None:
         raise SystemExit("--max-jobs must be positive")
     if args.idle_seconds <= 0:
         raise SystemExit("--idle-seconds must be positive")
+    if args.concurrency <= 0:
+        raise SystemExit("--concurrency must be positive")
     if args.kind == "recognize":
         method, handler = _build_recognize_handler(config)
     elif args.kind == "extract":
@@ -174,18 +177,20 @@ def main() -> None:
     else:
         method, handler = _build_render_handler(config)
     LOG.info(
-        "parser worker starting kind=%s pid=%d extraction_engine=%s",
+        "parser worker starting kind=%s pid=%d extraction_engine=%s concurrency=%d",
         args.kind,
         os.getpid(),
         config.get("paper_extraction_engine", ""),
+        args.concurrency,
     )
-    serve_worker(
+    serve_shared_worker(
         socket_path=args.socket,
         expected_method=method,
         handler=handler,
         idle_seconds=args.idle_seconds,
         max_jobs=args.max_jobs,
         max_payload_bytes=int(config["grpc_max_message_size"]),
+        concurrency=args.concurrency,
     )
 
 

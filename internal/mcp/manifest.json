@@ -85,9 +85,45 @@
       "group": "library"
     },
     {
+      "name": "papers_manager_library_get_many",
+      "title": "Read multiple documents",
+      "description": "Read 1-200 documents and their paper metadata in one call. Use include_processing=true for stage state and reference progress. Results preserve the requested order; IDs that do not resolve are reported in missingDocumentIds. Duplicate IDs are deduplicated. Read-only.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_ids": {
+            "type": "array",
+            "description": "1-200 document IDs. Duplicate IDs are deduplicated.",
+            "minItems": 1,
+            "maxItems": 200,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "include_processing": {
+            "type": "boolean",
+            "description": "Include the processing view for each document (default false).",
+            "default": false
+          }
+        },
+        "required": [
+          "document_ids"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "group": "library"
+    },
+    {
       "name": "papers_manager_library_import_url",
       "title": "Import a paper URL",
-      "description": "Import one HTTP(S) paper URL and start normal processing. Returns quickly with a document ID and initial processing state; use processing_status for bounded polling.",
+      "description": "Import one HTTP(S) paper URL and start normal processing. Import calls are bounded by MCP_IMPORT_CONCURRENCY (default 20, matching the web batch limit); excess calls fail with RESOURCE_EXHAUSTED. Returns quickly with a document ID and initial processing state; use processing_status for bounded polling. Optionally adds the document to a Base via base_id.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -98,6 +134,10 @@
           },
           "doi": {
             "type": "string"
+          },
+          "base_id": {
+            "type": "string",
+            "description": "Optional Base ID. When set, the imported document is added to this Base (idempotent)."
           }
         },
         "required": [
@@ -115,7 +155,7 @@
     {
       "name": "papers_manager_library_import_file",
       "title": "Import a local paper file",
-      "description": "Import one regular file from MCP_LOCAL_IMPORT_ROOT and start the normal processing pipeline. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty.",
+      "description": "Import one regular file from MCP_LOCAL_IMPORT_ROOT and start the normal processing pipeline. Import calls are bounded by MCP_IMPORT_CONCURRENCY (default 20, matching the web batch limit); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds the document to a Base via base_id.",
       "group": "library",
       "inputSchema": {
         "type": "object",
@@ -128,10 +168,99 @@
           "doi": {
             "type": "string",
             "description": "Optional DOI to attach to the imported document."
+          },
+          "base_id": {
+            "type": "string",
+            "description": "Optional Base ID. When set, the imported document is added to this Base (idempotent)."
           }
         },
         "required": [
           "path"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_library_import_urls",
+      "title": "Import paper URLs in a batch",
+      "description": "Import 1-20 HTTP(S) paper URLs in one call and start normal processing. Items are accepted sequentially and each returns its own accepted/duplicate/rejected/failed result; the batch is bounded by BATCH_IMPORT_TIMEOUT. Import calls share the MCP_IMPORT_CONCURRENCY gate (default 20); excess calls fail with RESOURCE_EXHAUSTED. Optionally adds each resulting document to a Base via base_id.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "urls": {
+            "type": "array",
+            "description": "1-20 HTTP(S) paper URLs, processed sequentially in order.",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "string",
+              "format": "uri"
+            }
+          },
+          "dois": {
+            "type": "array",
+            "description": "Optional DOIs aligned by index with urls. Omit or provide exactly one entry per URL; an empty string means no DOI.",
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            }
+          },
+          "base_id": {
+            "type": "string",
+            "description": "Optional Base ID. Each accepted or duplicate document is added to this Base (idempotent)."
+          }
+        },
+        "required": [
+          "urls"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true
+      },
+      "group": "library"
+    },
+    {
+      "name": "papers_manager_library_import_files",
+      "title": "Import local paper files in a batch",
+      "description": "Import 1-20 regular files from MCP_LOCAL_IMPORT_ROOT in one call and start the normal processing pipeline. All paths are validated before any import; items are then accepted sequentially with per-item results. Import calls share the MCP_IMPORT_CONCURRENCY gate (default 20); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds each resulting document to a Base via base_id.",
+      "group": "library",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "paths": {
+            "type": "array",
+            "description": "1-20 paths, absolute or relative to MCP_LOCAL_IMPORT_ROOT. All paths must resolve inside the root.",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            }
+          },
+          "dois": {
+            "type": "array",
+            "description": "Optional DOIs aligned by index with paths. Omit or provide exactly one entry per file; an empty string means no DOI.",
+            "maxItems": 20,
+            "items": {
+              "type": "string"
+            }
+          },
+          "base_id": {
+            "type": "string",
+            "description": "Optional Base ID. Each accepted or duplicate document is added to this Base (idempotent)."
+          }
+        },
+        "required": [
+          "paths"
         ]
       },
       "annotations": {
@@ -275,6 +404,37 @@
         },
         "required": [
           "document_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "group": "library"
+    },
+    {
+      "name": "papers_manager_processing_status_many",
+      "title": "Read multiple document processing statuses",
+      "description": "Read processing projections for 1-200 documents in one call: stage states, active or terminal spans, safe errors, and reference progress. Results preserve the requested order; IDs that do not resolve are reported in missingDocumentIds. Duplicate IDs are deduplicated. Read-only.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "document_ids": {
+            "type": "array",
+            "description": "1-200 document IDs. Duplicate IDs are deduplicated.",
+            "minItems": 1,
+            "maxItems": 200,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "required": [
+          "document_ids"
         ]
       },
       "annotations": {

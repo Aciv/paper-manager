@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"math"
 	"regexp"
@@ -40,7 +41,14 @@ var (
 	ErrStalePaperInfo = errors.New("paper info source state is stale")
 	// ErrPaperCatalogNoMatch means providers were reachable but no candidate
 	// was sufficiently similar to safely overwrite canonical paper data.
-	ErrPaperCatalogNoMatch = errors.New("no satisfactory paper catalog match")
+	ErrPaperCatalogNoMatch    = errors.New("no satisfactory paper catalog match")
+	paperAuthorHTMLTagPattern = regexp.MustCompile(`<[^>]*>`)
+	// Layout-aware extraction can mistake affiliations for author names.
+	// Catalog queries only need person names; affiliations and markup reduce
+	// match quality and can normalize to empty strings.
+	paperAuthorAffiliationPattern = regexp.MustCompile(
+		`(?i)\b(?:university|institute|college|school|department|dept\.?|laborator(?:y|ies)|academy|faculty|research center|inc\.?|ltd\.?|corp\.?|gmbh|company)\b`,
+	)
 	// ErrPaperInfoExtractionUnavailable means there is no parsed Markdown to
 	// submit to the Python extractor.
 	ErrPaperInfoExtractionUnavailable = errors.New("paper metadata extraction is unavailable")
@@ -655,6 +663,47 @@ func (s *paperInfoService) ensureCatalogSourceCurrent(
 	return nil
 }
 
+// sanitizePaperAuthorName removes markup/entities and footnote markers that
+// layout-aware extraction sometimes attaches to author names.
+func sanitizePaperAuthorName(name string) string {
+	name = compactPaperText(name)
+	name = paperAuthorHTMLTagPattern.ReplaceAllString(name, " ")
+	name = html.UnescapeString(name)
+	name = compactPaperText(name)
+	name = strings.TrimSpace(strings.TrimRight(name, "*†‡∗"))
+	if name == "" {
+		return ""
+	}
+	for _, r := range name {
+		if unicode.IsLetter(r) {
+			return name
+		}
+	}
+	return ""
+}
+
+// paperCatalogAuthorNames returns plausible person names for catalog queries.
+// Empty/HTML/numeric entries are dropped, as are affiliation lines such as
+// "Huazhong University of Science and" that extraction can put in the author
+// list. Duplicates are removed case-insensitively.
+func paperCatalogAuthorNames(authors []types.PaperAuthor) []string {
+	names := make([]string, 0, len(authors))
+	seen := make(map[string]struct{}, len(authors))
+	for _, author := range authors {
+		name := sanitizePaperAuthorName(author.Name)
+		if name == "" || paperAuthorAffiliationPattern.MatchString(name) {
+			continue
+		}
+		key := strings.ToLower(name)
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		names = append(names, name)
+	}
+	return names
+}
+
 func extractionMetadataUpdate(
 	result *types.PaperExtractionResult,
 ) types.PaperMetadataUpdate {
@@ -670,11 +719,18 @@ func extractionMetadataUpdate(
 		}
 	}
 	authors := make([]types.PaperAuthor, 0, len(result.Authors))
+	seenAuthors := make(map[string]struct{}, len(result.Authors))
 	for _, candidate := range result.Authors {
-		name := compactPaperText(candidate.Value)
-		if name != "" {
-			authors = append(authors, types.PaperAuthor{Name: name})
+		name := sanitizePaperAuthorName(candidate.Value)
+		if name == "" || paperAuthorAffiliationPattern.MatchString(name) {
+			continue
 		}
+		key := strings.ToLower(name)
+		if _, exists := seenAuthors[key]; exists {
+			continue
+		}
+		seenAuthors[key] = struct{}{}
+		authors = append(authors, types.PaperAuthor{Name: name})
 	}
 	if len(authors) > 0 {
 		update.Authors = &authors
@@ -756,12 +812,7 @@ func metadataLookupQuery(
 	query.Title = metadata.Title
 	query.SourceURL = metadata.SourceURL
 	query.Venue = metadata.Venue
-	query.Authors = make([]string, 0, len(metadata.Authors))
-	for _, author := range metadata.Authors {
-		if name := strings.TrimSpace(author.Name); name != "" {
-			query.Authors = append(query.Authors, name)
-		}
-	}
+	query.Authors = paperCatalogAuthorNames(metadata.Authors)
 	if metadata.PublishedAt != nil {
 		query.PublishedYear = metadata.PublishedAt.Year()
 	}
@@ -941,12 +992,20 @@ func catalogMetadataUpdate(
 		update.Abstract = &abstract
 	}
 	authors := make([]types.PaperAuthor, 0, len(candidate.Authors))
+	seenAuthors := make(map[string]struct{}, len(candidate.Authors))
 	for _, author := range candidate.Authors {
-		if name := compactPaperText(author.Name); name != "" {
-			author.Name = name
-			author.Affiliation = compactPaperText(author.Affiliation)
-			authors = append(authors, author)
+		name := sanitizePaperAuthorName(author.Name)
+		if name == "" {
+			continue
 		}
+		author.Name = name
+		author.Affiliation = compactPaperText(author.Affiliation)
+		key := strings.ToLower(name + "\x00" + author.Affiliation)
+		if _, exists := seenAuthors[key]; exists {
+			continue
+		}
+		seenAuthors[key] = struct{}{}
+		authors = append(authors, author)
 	}
 	if len(authors) > 0 {
 		update.Authors = &authors

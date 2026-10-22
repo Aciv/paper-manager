@@ -69,6 +69,9 @@ type ToolServer struct {
 	processing   interfaces.ProcessingViewQuery
 	server       *sdk.Server
 	schemas      map[string]*jsonschema.Resolved
+	// importSlots bounds concurrent import tool calls. URL imports download
+	// synchronously inside the request, so this mirrors the HTTP upload gate.
+	importSlots chan struct{}
 }
 
 // NewToolServer is the production DI constructor. It deliberately accepts the
@@ -94,11 +97,16 @@ func NewToolServer(
 	if spec.Server.ToolNamePrefix != "papers_manager_" {
 		return nil, fmt.Errorf("MCP tools must use the papers_manager_ prefix")
 	}
+	importConcurrency := cfg.MCPImportConcurrency
+	if importConcurrency <= 0 {
+		importConcurrency = 2
+	}
 	s := &ToolServer{
 		cfg: cfg, documents: documents, reading: reading, notes: notes,
 		papers: papers, bases: bases, bibliography: bibliography,
 		paperInfo: paperInfo, processing: processing,
-		schemas: make(map[string]*jsonschema.Resolved, len(spec.Tools)),
+		schemas:     make(map[string]*jsonschema.Resolved, len(spec.Tools)),
+		importSlots: make(chan struct{}, importConcurrency),
 	}
 	s.server = sdk.NewServer(&sdk.Implementation{
 		Name: serverName, Title: "papersManager", Version: serverVersion,
@@ -164,16 +172,24 @@ func (s *ToolServer) callTool(ctx context.Context, name string, req *sdk.CallToo
 		data, err = s.librarySearch(ctx, raw)
 	case "papers_manager_library_get":
 		data, err = s.libraryGet(ctx, raw)
+	case "papers_manager_library_get_many":
+		data, err = s.libraryGetMany(ctx, raw)
 	case "papers_manager_library_import_url":
 		data, err = s.libraryImportURL(ctx, raw)
+	case "papers_manager_library_import_urls":
+		data, err = s.libraryImportURLs(ctx, raw)
 	case "papers_manager_library_import_file":
 		data, err = s.libraryImportFile(ctx, raw)
+	case "papers_manager_library_import_files":
+		data, err = s.libraryImportFiles(ctx, raw)
 	case "papers_manager_library_update_metadata":
 		data, err = s.libraryUpdateMetadata(ctx, raw)
 	case "papers_manager_library_delete":
 		data, err = s.libraryDelete(ctx, raw)
 	case "papers_manager_processing_status":
 		data, err = s.processingStatus(ctx, raw)
+	case "papers_manager_processing_status_many":
+		data, err = s.processingStatusMany(ctx, raw)
 	case "papers_manager_processing_retry":
 		data, err = s.processingRetry(ctx, raw)
 	case "papers_manager_processing_cancel":

@@ -10,11 +10,15 @@ collections, not `papers_manager_library_*` operations.
 | --- | --- | --- |
 | `papers_manager_library_search` | Search by title, DOI, tags, or ID; paginated. | Read-only |
 | `papers_manager_library_get` | Read one document and its paper metadata. | Read-only |
-| `papers_manager_library_import_url` | Import an HTTP(S) URL and start processing. | Requires a user-supplied URL |
-| `papers_manager_library_import_file` | Import one local file under `MCP_LOCAL_IMPORT_ROOT`. | Disabled unless configured; path is confined to the root |
+| `papers_manager_library_get_many` | Read 1–200 documents and their paper metadata in one call; optional processing. | Read-only; >200 IDs rejected; missing IDs reported |
+| `papers_manager_library_import_url` | Import an HTTP(S) URL and start processing. Optional `base_id` adds the document to a Base. | Requires a user-supplied URL; shares the 20-call import concurrency gate |
+| `papers_manager_library_import_urls` | Import 1–20 HTTP(S) URLs in one call, sequentially; per-item results. Optional `dois` align by index; optional `base_id` applies to every accepted/duplicate item. | Requires user-supplied URLs; >20 items, misaligned `dois`, and the 2-minute batch deadline are enforced |
+| `papers_manager_library_import_file` | Import one local file under `MCP_LOCAL_IMPORT_ROOT`. Optional `base_id` adds the document to a Base. | Disabled unless configured; path is confined to the root; shares the 20-call import concurrency gate |
+| `papers_manager_library_import_files` | Import 1–20 local files under `MCP_LOCAL_IMPORT_ROOT`, sequentially; all paths validated before any import. Optional `base_id` applies to every accepted/duplicate item. | Disabled unless configured; one invalid path rejects the whole call; shares the 20-call import concurrency gate |
 | `papers_manager_library_update_metadata` | Correct filename, DOI, title, authors, abstract, venue, tags, and publication fields. | Only explicit field changes |
 | `papers_manager_library_delete` | Delete one document. | Requires `confirm=true` and user confirmation |
 | `papers_manager_processing_status` | Read async stage state for one document. | Read-only |
+| `papers_manager_processing_status_many` | Read async stage state for 1–200 documents in one call. | Read-only; >200 IDs rejected; missing IDs reported |
 | `papers_manager_processing_retry` | Retry one lane (`auto`/`markdown`/`extraction`/`catalog`/`reference`). | Only when the user asks; no unbounded retry loops |
 | `papers_manager_processing_cancel` | Cancel `markdown` or `paper_info`. | State-changing; does not cancel the other lane |
 

@@ -1,7 +1,7 @@
 # papersManager MCP tool contract
 
 Status: specification implemented by `internal/mcp` and the in-process MCP
-listener. The manifest contains 43 tools across four groups: `library`,
+listener. The manifest contains 47 tools across four groups: `library`,
 `reading`, `base`, and `citation`. The manifest remains the source of truth for
 tool names and schemas. Per-host connection and skill installation are covered
 by [agent-installation.md](agent-installation.md).
@@ -52,6 +52,14 @@ Skills treat an absent prefix/server as “MCP unavailable” and fail closed.
   (`papers_manager_library_import_file`) and is confined to
   `MCP_LOCAL_IMPORT_ROOT`, including symlink resolution. When that setting is
   empty the tool fails closed with `FORBIDDEN`.
+- Import calls share one concurrency gate: at most `MCP_IMPORT_CONCURRENCY`
+  (default 20, matching the web batch limit) import calls may run at once,
+  whether single (`import_url`/`import_file`) or batch
+  (`import_urls`/`import_files`). A call over the limit fails immediately with
+  `RESOURCE_EXHAUSTED`; wait and retry instead of piling up calls. Each batch
+  call accepts 1–20 items and processes them sequentially while holding one
+  gate slot, so the gate still bounds concurrent item imports. URL downloads
+  also pass through the shared remote-PDF download bounds.
 - Block images are returned as MCP image content and bounded by
   `MCP_MAX_IMAGE_BYTES` (default 12 MiB). Private storage keys never cross the
   MCP boundary.
@@ -140,15 +148,68 @@ Input: `document_id`.
 Output: document metadata, paper metadata, source state, and a compact
 processing summary. Missing metadata is allowed.
 
+#### `papers_manager_library_get_many`
+
+Read 1–200 documents and their paper metadata in one bounded call. Use this
+instead of issuing `library_get` once per row when the caller already has a
+list of document IDs (for example, search results or a pipeline batch).
+
+Input: `document_ids` (1–200 UUIDs; duplicates are deduplicated), optional
+`include_processing` (default `false`). When `include_processing=true`, each
+item also carries the processing view (stage states, spans, safe errors, and
+reference progress).
+
+Limits and semantics:
+
+- more than 200 IDs is rejected with `INVALID_ARGUMENT`;
+- results preserve the requested order; IDs that no longer resolve are listed
+  in `missingDocumentIds` instead of failing the whole call;
+- this is a read-only projection; it never queues work or exposes storage
+  keys/raw provider responses.
+
+Output: `items` of `{document, paperMetadata, processing?}` plus
+`missingDocumentIds` when applicable.
+
 #### `papers_manager_library_import_url`
 
 Import one HTTP(S) URL and start the normal processing pipeline.
 
-Input: `url` (URI), optional `doi`.
+Input: `url` (URI), optional `doi`, optional `base_id`. When `base_id` is
+set, the document is added to that Base after import (idempotent).
+
+One call imports one paper. Concurrent import calls share the
+`MCP_IMPORT_CONCURRENCY` gate (default 20); calls over the limit fail with
+`RESOURCE_EXHAUSTED`.
 
 Output: document ID, created/updated state, and initial processing state. The
 tool returns quickly; do not block until recognition completes. Use
 `papers_manager_processing_status` for bounded polling.
+
+#### `papers_manager_library_import_urls`
+
+Import 1–20 HTTP(S) URLs in one bounded batch and start the normal processing
+pipeline. Uses the same resolver, SSRF validation, download limits, hash
+deduplication, and queueing as `import_url` for every item.
+
+Input: `urls` (1–20 URIs), optional `dois` (omit entirely or provide exactly
+one entry per URL; an empty string means no DOI), optional `base_id`. When
+`base_id` is set, every accepted or duplicate document is added to that Base
+(idempotent).
+
+Limits and semantics:
+
+- more than 20 URLs is rejected with `INVALID_ARGUMENT`;
+- the batch holds one `MCP_IMPORT_CONCURRENCY` slot and processes items
+  sequentially in order;
+- the whole call is bounded by `BATCH_IMPORT_TIMEOUT` (default 2 minutes);
+  on deadline the response keeps completed items, sets `stopped=true`, and
+  marks unprocessed items as failed;
+- one bad item does not discard the rest; inspect `items[].status`
+  (`accepted` / `duplicate` / `rejected` / `failed`) and
+  `items[].error`.
+
+Output: `items`, `stopped`, `error`, and `baseId` when requested. Each item
+carries its own document, queue state, and safe error category.
 
 #### `papers_manager_library_import_file`
 
@@ -156,12 +217,41 @@ Import one regular local file and start the normal pipeline. This tool exists
 for local single-user deployments and is disabled unless
 `MCP_LOCAL_IMPORT_ROOT` is configured.
 
-Input: `path` (absolute, or relative to the configured root), optional `doi`.
-Paths outside the root, symlink escapes, directories, unsupported types, and
-files over `FILE_MAX_UPLOAD_SIZE` are rejected before the service is called.
-The service stores a copy; the source file is not referenced afterwards.
+Input: `path` (absolute, or relative to the configured root), optional `doi`,
+optional `base_id`. Paths outside the root, symlink escapes, directories,
+unsupported types, and files over `FILE_MAX_UPLOAD_SIZE` are rejected before
+the service is called. When `base_id` is set, the document is added to that
+Base after import (idempotent). The service stores a copy; the source file is
+not referenced afterwards.
+
+One call imports one file. It shares the `MCP_IMPORT_CONCURRENCY` gate and
+`RESOURCE_EXHAUSTED` behavior described for `import_url`.
 
 Output: the created document and initial processing state.
+
+#### `papers_manager_library_import_files`
+
+Import 1–20 regular local files in one bounded batch and start the normal
+processing pipeline. Disabled unless `MCP_LOCAL_IMPORT_ROOT` is configured.
+
+Input: `paths` (1–20 paths, absolute or relative to the root), optional `dois`
+(omit entirely or provide exactly one entry per path), optional `base_id`.
+When `base_id` is set, every accepted or duplicate document is added to that
+Base (idempotent).
+
+Limits and semantics:
+
+- all paths are validated **before any import**: root containment (including
+  symlink escapes), regular-file, supported type, and
+  `FILE_MAX_UPLOAD_SIZE`; one invalid path rejects the whole call and creates
+  nothing;
+- more than 20 paths is rejected with `INVALID_ARGUMENT`;
+- the batch holds one `MCP_IMPORT_CONCURRENCY` slot and processes items
+  sequentially in order;
+- one bad item does not discard the rest; inspect `items[].status` and
+  `items[].error`.
+
+Output: `items`, `stopped`, `error`, and `baseId` when requested.
 
 #### `papers_manager_library_update_metadata`
 
@@ -193,6 +283,25 @@ Input: `document_id`.
 
 Output: stage states, active/terminal spans, safe error codes, and reference
 progress. Never expose storage paths or raw provider responses.
+
+#### `papers_manager_processing_status_many`
+
+Read processing projections for 1–200 documents in one bounded call.
+
+Input: `document_ids` (1–200 UUIDs; duplicates are deduplicated).
+
+Limits and semantics:
+
+- more than 200 IDs is rejected with `INVALID_ARGUMENT`;
+- results preserve the requested order; IDs that no longer resolve are listed
+  in `missingDocumentIds` instead of failing the whole call;
+- one call is backed by the same batch projection as
+  `papers_manager_library_get_many`, so use this tool when only status is
+  needed and the general tool when metadata is also needed.
+
+Output: `items` of processing views (`documentId`, `stageStates`, `stages`,
+`referenceProgress`, ...) plus `missingDocumentIds` when applicable. Never
+expose storage paths or raw provider responses.
 
 #### `papers_manager_processing_retry`
 
@@ -504,8 +613,8 @@ Not part of this manifest yet:
 - `base_summary` / `base_compare` — Phase 3B; until then the reading skill
   composes summaries from existing read tools.
 - Native LLM generation — not a server-side MCP tool until a runner exists.
-- Batch local-file or local-directory imports — only one explicitly selected
-  file is imported, confined to `MCP_LOCAL_IMPORT_ROOT`.
+- Local-directory imports/scanning — only explicitly listed files (up to 20
+  per call) are imported, confined to `MCP_LOCAL_IMPORT_ROOT`.
 - High-DPI whole-document pre-rendering — page/region images are rendered on
   demand and cached by the caller; there is no bulk page-image export yet.
 
@@ -515,11 +624,15 @@ Not part of this manifest yet:
 | --- | --- |
 | `papers_manager_library_search` | `GET /api/document/search`, `GET /api/paper/search` |
 | `papers_manager_library_get` | `GET /api/document/search?id=`, `GET /api/paper/:id` |
+| `papers_manager_library_get_many` | `POST /api/document/projections` (metadata; optional processing) |
 | `papers_manager_library_import_url` | `POST /api/document/import-url` |
+| `papers_manager_library_import_urls` | `POST /api/document/batch-import-url` |
 | `papers_manager_library_import_file` | `DocumentService.CreateDocumentFromLocalFile` (no HTTP equivalent; local single-user adapter) |
+| `papers_manager_library_import_files` | `DocumentService.CreateDocumentsFromLocalFiles` (no HTTP equivalent; local single-user adapter) |
 | `papers_manager_library_update_metadata` | `PATCH /api/document/:id`, `PATCH /api/paper/:id` |
 | `papers_manager_library_delete` | `DELETE /api/document/:id` |
 | `papers_manager_processing_status` | `GET /api/document/:id/processing` |
+| `papers_manager_processing_status_many` | `POST /api/document/projections` (processing only) |
 | `papers_manager_processing_retry` | `POST /api/document/:id/retry`, `POST /api/paper/:id/info/{extraction|catalog|reference}/retry` |
 | `papers_manager_processing_cancel` | `POST /api/document/:id/cancel`, `POST /api/paper/:id/info/cancel` |
 | `papers_manager_document_structure` | `GET /api/document/:id/structure` |

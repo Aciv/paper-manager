@@ -455,6 +455,60 @@ func TestCreateDocumentFromLocalFileRejectsNonRegularFile(t *testing.T) {
 	}
 }
 
+func TestCreateDocumentsFromLocalFilesProcessesEachItem(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.pdf")
+	second := filepath.Join(dir, "second.pdf")
+	if err := os.WriteFile(first, []byte("%PDF-1.7\nfirst"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("%PDF-1.7\nsecond"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc := &documentService{
+		repo: &documentStatusRepoStub{}, storage: storage,
+		taskEnqueuer: &documentTaskEnqueuerStub{},
+	}
+	result, err := svc.CreateDocumentsFromLocalFiles(
+		context.Background(), []string{first, second}, []string{"10.1000/first", ""},
+	)
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromLocalFiles() error = %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("items = %#v", result.Items)
+	}
+	for index, item := range result.Items {
+		if item.Status != types.DocumentImportItemAccepted || item.Document == nil {
+			t.Fatalf("item %d = %#v", index, item)
+		}
+	}
+	if result.Items[0].Document.DOI != "10.1000/first" ||
+		result.Items[1].Document.DOI != "" {
+		t.Fatalf("DOIs = %q, %q", result.Items[0].Document.DOI, result.Items[1].Document.DOI)
+	}
+}
+
+func TestCreateDocumentsFromLocalFilesEnforcesBatchLimits(t *testing.T) {
+	svc := &documentService{}
+	paths := make([]string, types.MaxDocumentBatchItems+1)
+	for index := range paths {
+		paths[index] = filepath.Join(t.TempDir(), "paper.pdf")
+	}
+	if _, err := svc.CreateDocumentsFromLocalFiles(context.Background(), paths, nil); err == nil {
+		t.Fatal("oversized batch was accepted")
+	}
+	if _, err := svc.CreateDocumentsFromLocalFiles(
+		context.Background(), []string{"one.pdf", "two.pdf"}, []string{"10.1000/one"},
+	); err == nil {
+		t.Fatal("misaligned DOI batch was accepted")
+	}
+}
+
 func documentUploadFileHeader(t *testing.T, filename string, content []byte) *multipart.FileHeader {
 	t.Helper()
 	var body bytes.Buffer

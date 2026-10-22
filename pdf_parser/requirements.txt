@@ -1,6 +1,9 @@
 grpcio>=1.82.1,<2
 grpcio-tools>=1.82.1,<2
 # Keep the tested PyMuPDF stack: pymupdf4llm 2.0 no longer installs pymupdf.
+# 1.28 also activates the ONNX layout engine on import; PARSER_LAYOUT_THREADS
+# caps its per-worker thread pool, and PARSER_PYMUPDF_LAYOUT=false is a legacy
+# fallback (no blocks).
 pymupdf==1.28.0
 pymupdf4llm==1.28.0
 python-crfsuite>=0.9.11,<0.10

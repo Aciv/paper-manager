@@ -112,6 +112,9 @@ type DocumentService interface {
 	// CreateDocumentsFromURLs independently resolves and accepts a bounded URL
 	// batch through the same SSRF-protected single-item import path.
 	CreateDocumentsFromURLs(ctx context.Context, commands []types.DocumentURLImportCommand) (types.DocumentBatchResult, error)
+	// CreateDocumentsFromLocalFiles independently accepts a bounded batch of
+	// local files whose paths the caller has already contained and validated.
+	CreateDocumentsFromLocalFiles(ctx context.Context, paths []string, dois []string) (types.DocumentBatchResult, error)
 	// GetDocumentByID parses and retrieves a document by its textual UUID.
 	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
 	GetReferenceProgress(ctx context.Context, id string) (types.PaperReferenceProgress, error)

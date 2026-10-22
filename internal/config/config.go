@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"paperMaster/internal/types"
 )
 
 const DefaultMaxUploadSize int64 = 100 << 20 // 100 MiB
@@ -51,28 +53,32 @@ const (
 	defaultHTTPBatchConcurrency                              = 2
 	defaultMCPMaxRequestBytes                          int64 = 8 << 20
 	defaultMCPMaxImageBytes                            int64 = 12 << 20
-	defaultMCPAddress                                        = "127.0.0.1:8090"
-	defaultBatchImportTimeout                                = 2 * time.Minute
-	defaultAsynqConcurrency                                  = 32
-	defaultDocumentRecognitionConcurrency                    = 4
-	defaultDocumentExtractionConcurrency                     = 4
-	defaultAsynqShutdownTimeout                              = 30 * time.Second
-	defaultDBMaxOpenConns                                    = 48
-	defaultDBMaxIdleConns                                    = 24
-	defaultDBStatementTimeout                                = 30 * time.Second
-	defaultBibliographyMaxEntries                            = 200
-	defaultBibliographyDOIConcurrency                        = 4
-	defaultBibliographyDOITimeout                            = 5 * time.Second
-	defaultBibliographyTotalTimeout                          = 30 * time.Second
-	defaultBibliographyDOIMaxBodyBytes                 int64 = 256 << 10
-	defaultBibliographyMaxOutputBytes                  int64 = 8 << 20
-	defaultBibliographyMaxResponseBytes                int64 = 12 << 20
-	defaultBibliographyDOICacheEntries                       = 100
-	defaultBibliographyDOICacheTTL                           = 30 * time.Minute
-	defaultBibliographyTaskConcurrency                       = 2
-	defaultBibliographyTaskTimeout                           = 45 * time.Second
-	defaultBibliographyTaskMaxRetry                          = 2
-	defaultBibliographyResultRetention                       = 30 * time.Minute
+	// Match the web batch endpoints, which accept up to
+	// types.MaxDocumentBatchItems (20) items per request, so an Agent can keep
+	// the same number of imports in flight.
+	defaultMCPImportConcurrency                 = types.MaxDocumentBatchItems
+	defaultMCPAddress                           = "127.0.0.1:8090"
+	defaultBatchImportTimeout                   = 2 * time.Minute
+	defaultAsynqConcurrency                     = 32
+	defaultDocumentRecognitionConcurrency       = 4
+	defaultDocumentExtractionConcurrency        = 4
+	defaultAsynqShutdownTimeout                 = 30 * time.Second
+	defaultDBMaxOpenConns                       = 48
+	defaultDBMaxIdleConns                       = 24
+	defaultDBStatementTimeout                   = 30 * time.Second
+	defaultBibliographyMaxEntries               = 200
+	defaultBibliographyDOIConcurrency           = 4
+	defaultBibliographyDOITimeout               = 5 * time.Second
+	defaultBibliographyTotalTimeout             = 30 * time.Second
+	defaultBibliographyDOIMaxBodyBytes    int64 = 256 << 10
+	defaultBibliographyMaxOutputBytes     int64 = 8 << 20
+	defaultBibliographyMaxResponseBytes   int64 = 12 << 20
+	defaultBibliographyDOICacheEntries          = 100
+	defaultBibliographyDOICacheTTL              = 30 * time.Minute
+	defaultBibliographyTaskConcurrency          = 2
+	defaultBibliographyTaskTimeout              = 45 * time.Second
+	defaultBibliographyTaskMaxRetry             = 2
+	defaultBibliographyResultRetention          = 30 * time.Minute
 )
 
 // Config contains the infrastructure options selected at process startup.
@@ -100,6 +106,10 @@ type Config struct {
 	MCPToken           string
 	MCPMaxRequestBytes int64
 	MCPMaxImageBytes   int64
+	// MCPImportConcurrency bounds concurrent MCP import tool calls. URL
+	// imports download synchronously, so this is the MCP equivalent of the
+	// HTTP upload/batch concurrency gates.
+	MCPImportConcurrency int
 	// MCPLocalImportRoot enables papers_manager_library_import_file. The MCP
 	// adapter rejects paths outside this directory (including symlink escapes).
 	// Empty disables local-file import entirely.
@@ -380,6 +390,10 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mcpImportConcurrency, err := positiveIntEnv("MCP_IMPORT_CONCURRENCY", defaultMCPImportConcurrency, 1000)
+	if err != nil {
+		return Config{}, err
+	}
 	batchImportTimeout, err := durationEnv("BATCH_IMPORT_TIMEOUT", defaultBatchImportTimeout)
 	if err != nil {
 		return Config{}, err
@@ -505,6 +519,7 @@ func Load() (Config, error) {
 		MCPToken:                                    env("MCP_TOKEN", ""),
 		MCPMaxRequestBytes:                          mcpMaxRequestBytes,
 		MCPMaxImageBytes:                            mcpMaxImageBytes,
+		MCPImportConcurrency:                        mcpImportConcurrency,
 		MCPLocalImportRoot:                          env("MCP_LOCAL_IMPORT_ROOT", ""),
 		HTTPTrustedProxies:                          httpTrustedProxies,
 		BatchImportTimeout:                          batchImportTimeout,

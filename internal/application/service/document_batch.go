@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"mime/multipart"
+	"path/filepath"
 	"strings"
 	"unicode/utf8"
 
@@ -83,6 +84,54 @@ func (s *documentService) CreateDocumentsFromURLs(
 	return result, nil
 }
 
+// CreateDocumentsFromLocalFiles independently accepts a bounded batch of local
+// files whose paths the caller has already contained and validated. It applies
+// the same file, size, DOI, and duplicate rules as a single local import.
+func (s *documentService) CreateDocumentsFromLocalFiles(
+	ctx context.Context, paths []string, dois []string,
+) (types.DocumentBatchResult, error) {
+	if err := validateBatchLength(len(paths)); err != nil {
+		return types.DocumentBatchResult{}, err
+	}
+	if len(dois) != 0 && len(dois) != len(paths) {
+		return types.DocumentBatchResult{}, errors.New("each batch file requires at most one matching doi")
+	}
+
+	result := types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(paths))}
+	for index, path := range paths {
+		if ctx.Err() != nil {
+			return stopLocalBatchForContext(ctx, result, index, paths), nil
+		}
+		path = strings.TrimSpace(path)
+		doi := ""
+		if len(dois) != 0 {
+			doi = strings.TrimSpace(dois[index])
+		}
+		item := types.DocumentBatchItemResult{Index: index}
+		if path != "" {
+			item.Filename = filepath.Base(path)
+		}
+		if !validBatchDOI(doi) {
+			item.Status = types.DocumentImportItemRejected
+			item.Error = "doi must be at most 255 characters and contain no control characters"
+			result.Items = append(result.Items, item)
+			continue
+		}
+		if path == "" {
+			item.Status = types.DocumentImportItemRejected
+			item.Error = "path is required"
+			result.Items = append(result.Items, item)
+			continue
+		}
+		created, err := s.CreateDocumentFromLocalFile(ctx, path, doi)
+		if errors.Is(err, errDocumentDuplicateLookup) {
+			return stopBatchForDeduplicationFailure(ctx, result, item, err), nil
+		}
+		result.Items = append(result.Items, batchResultForDocument(item, created, err))
+	}
+	return result, nil
+}
+
 // stopBatchForContext preserves completed items and marks every unprocessed
 // URL failed. The handler returns the partial result within its deadline
 // instead of holding the HTTP connection for the full per-item budget.
@@ -101,6 +150,33 @@ func stopBatchForContext(
 	for index := nextIndex; index < len(commands); index++ {
 		result.Items = append(result.Items, types.DocumentBatchItemResult{
 			Index: index, URL: strings.TrimSpace(commands[index].URL),
+			Status: types.DocumentImportItemFailed,
+			Error:  "batch import stopped before this item",
+		})
+	}
+	return result
+}
+
+// stopLocalBatchForContext mirrors stopBatchForContext for local paths.
+func stopLocalBatchForContext(
+	ctx context.Context,
+	result types.DocumentBatchResult,
+	nextIndex int,
+	paths []string,
+) types.DocumentBatchResult {
+	result.Stopped = true
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		result.Error = "batch import deadline exceeded"
+	} else {
+		result.Error = "batch import cancelled"
+	}
+	for index := nextIndex; index < len(paths); index++ {
+		filename := ""
+		if path := strings.TrimSpace(paths[index]); path != "" {
+			filename = filepath.Base(path)
+		}
+		result.Items = append(result.Items, types.DocumentBatchItemResult{
+			Index: index, Filename: filename,
 			Status: types.DocumentImportItemFailed,
 			Error:  "batch import stopped before this item",
 		})

@@ -24,6 +24,7 @@ var (
 	errInvalidEvidence      = errors.New("invalid evidence")
 	errLocalImportDisabled  = errors.New("local file import is disabled")
 	errLocalImportForbidden = errors.New("local file path is not allowed")
+	errImportBusy           = errors.New("too many concurrent imports")
 )
 
 type toolFailureDetails struct {
@@ -100,6 +101,8 @@ func classifyToolError(err error) toolFailureDetails {
 		return toolFailureDetails{Code: "FORBIDDEN", Message: "local file import is disabled; configure MCP_LOCAL_IMPORT_ROOT"}
 	case errors.Is(err, errLocalImportForbidden):
 		return toolFailureDetails{Code: "FORBIDDEN", Message: "local file path is outside the allowed import root"}
+	case errors.Is(err, errImportBusy):
+		return toolFailureDetails{Code: "RESOURCE_EXHAUSTED", Message: "too many concurrent import calls; retry shortly", Retryable: true}
 	case errors.Is(err, appservice.ErrInvalidDocumentFilename),
 		errors.Is(err, appservice.ErrInvalidDocumentDOI),
 		errors.Is(err, appservice.ErrInvalidDocumentBaseName),

@@ -156,6 +156,11 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.maxUploadSize+1024*1024)
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
+		logger.Warn(c.Request.Context(), "multipart upload parse failed",
+			"content_length", c.Request.ContentLength,
+			"content_type", c.Request.Header.Get("Content-Type"),
+			"max_upload_size", h.maxUploadSize,
+			"error", err)
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
 			h.writeError(c, apperrors.NewPayloadTooLargeError("file exceeds the configured upload limit"), err)
@@ -163,6 +168,9 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		}
 		h.writeError(c, apperrors.NewBadRequestError("multipart field 'file' is required"), err)
 		return
+	}
+	if c.Request.MultipartForm != nil {
+		defer c.Request.MultipartForm.RemoveAll()
 	}
 	if _, supported := fileservice.SupportedContentType(fileHeader.Filename); !supported {
 		h.writeError(c, apperrors.NewUnsupportedMediaTypeError("unsupported file type"), nil)
@@ -204,6 +212,11 @@ func (h *DocumentHandler) UploadBatch(c *gin.Context) {
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, batchLimit)
 	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
+		logger.Warn(c.Request.Context(), "batch multipart parse failed",
+			"content_length", c.Request.ContentLength,
+			"content_type", c.Request.Header.Get("Content-Type"),
+			"batch_limit", batchLimit,
+			"error", err)
 		var maxBytesError *http.MaxBytesError
 		if errors.As(err, &maxBytesError) {
 			h.writeError(c, apperrors.NewPayloadTooLargeError("batch upload exceeds the configured batch limit"), err)
