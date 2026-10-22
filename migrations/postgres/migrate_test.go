@@ -246,6 +246,17 @@ func TestDocumentReadingNotesMigrationCreatesBoundedRevisionedNote(t *testing.T)
 	}
 }
 
+func TestDocumentReadingNoteLimitsMigrationAllowsEmptyAndSixtyMiB(t *testing.T) {
+	for _, fragment := range []string{
+		"DROP CONSTRAINT IF EXISTS chk_document_reading_notes_size",
+		"size_bytes >= 0 AND size_bytes <= 62914560",
+	} {
+		if !strings.Contains(documentReadingNoteLimitsUp, fragment) {
+			t.Fatalf("document reading note limits migration does not include %q", fragment)
+		}
+	}
+}
+
 func TestPaperCitationsMigrationCreatesDirectionalCascadeRelation(t *testing.T) {
 	for _, fragment := range []string{
 		"CREATE TABLE IF NOT EXISTS paper_citations",
@@ -347,8 +358,8 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 31 {
-		t.Fatalf("latest migration version = %d, want 31", got)
+	if got := migrations[len(migrations)-1].version; got != 32 {
+		t.Fatalf("latest migration version = %d, want 32", got)
 	}
 	for _, fragment := range []string{
 		"CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public",

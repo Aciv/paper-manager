@@ -23,6 +23,8 @@ type NoteReadingService interface {
 	ReadSection(ctx context.Context, documentID, sectionID string) (types.ReadingNoteSection, error)
 	Export(ctx context.Context, documentID string) (types.ReadingNoteExport, error)
 	ApplyOperations(ctx context.Context, documentID string, request types.ReadingNoteOperations) (types.ReadingNoteEditResult, error)
+	ApplyEdits(ctx context.Context, documentID string, request types.ReadingNoteEdits) (types.ReadingNoteEditResult, error)
+	ReplaceSection(ctx context.Context, documentID, sectionID string, expectedRevision int64, markdown string) (types.ReadingNoteEditResult, error)
 	Put(ctx context.Context, documentID string, expectedRevision int64, markdown string) (types.DocumentReadingNote, error)
 	Delete(ctx context.Context, documentID string, expectedRevision int64) error
 }

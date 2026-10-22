@@ -10,6 +10,30 @@ export type OutlineEntry = {
   items?: OutlineEntry[];
 };
 
+// The backend outline persists a flat, ordered list with parent ordinals. It
+// carries source pages but no PDF destination, so navigation is page-based.
+export type OutlineSectionInput = {
+  title: string;
+  parentOrdinal: number;
+  startPage: number;
+};
+
+export function outlineFromSections(sections: readonly OutlineSectionInput[]): OutlineEntry[] {
+  const nodes = sections.map((section) => ({
+    title: section.title,
+    dest: undefined,
+    page: section.startPage > 0 ? section.startPage : undefined,
+    items: [] as OutlineEntry[],
+  }));
+  const roots: OutlineEntry[] = [];
+  sections.forEach((section, index) => {
+    const parent = section.parentOrdinal >= 0 ? nodes[section.parentOrdinal] : undefined;
+    if (parent) parent.items = [...(parent.items ?? []), nodes[index]];
+    else roots.push(nodes[index]);
+  });
+  return roots;
+}
+
 type DestinationResolvers = {
   getDestination(dest: unknown): Promise<unknown>;
   getPageIndex(reference: unknown): Promise<number>;

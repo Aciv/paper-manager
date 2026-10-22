@@ -161,9 +161,15 @@ Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，
 缓存不是真值，删除后会从 PostgreSQL 中保存的 outline 重建，不会重新打开 PDF。
 结构响应不复制完整 Blocks；PDF 阅读器继续通过
 `GET /api/document/:id/blocks?page=N` 按页读取并用 ordinal 关联目录位置。
-每个文档的可修订阅读笔记不超过 10 MiB，按 H1-H3 拆成
+每个文档的可修订阅读笔记不超过 60 MiB，按 H1-H3 拆成
 `notes/{document_id}/{section_id}.md`；数据库只记录章节目录、单调 revision 和时间戳，
-不保存正文。整份 Markdown 重导入期间读接口明确返回暂不可用，不会读到半完成状态；
+不保存正文。空白笔记是合法状态：目录为空、`size_bytes = 0`，可直接从空 Markdown
+开始编辑，保存后再拆分 section。目录中的 `order` 是稀疏、单调递增的排序值：
+新增 section 取相邻 order 的中点（或末尾加固定步长），删除只留下空洞，不会重排已有 section。
+整份 Markdown 重导入期间读接口明确返回暂不可用，不会读到半完成状态；整篇/section
+文件上传会在读取请求体前检查 `Content-Length` 和前端 `file.size`，超过 60 MiB 直接返回
+413；section 文件上传不会先在浏览器 `file.text()` 整份读取，而是上传后再通过 raw
+section content 读取一次。
 普通修改使用 Plan B 的 section 内 `insertText`/`deleteText` 原语和 section
 `addSection`/`deleteSection`，替换由 delete + insert 组合。写入与删除继续使用
 revision 乐观锁。笔记中的内部证据链接使用
@@ -185,6 +191,8 @@ revision 乐观锁。笔记中的内部证据链接使用
 - 文档识别通过 `DocumentRecognizer` 端口接入：`default` 在 Go 本地转换 TXT、Markdown、JSON 与 CSV，`builtin` 调用 `proto/document_parser.proto` 的 Python gRPC `DocumentParser.Recognize`。识别任务由 Asynq 执行；Python 返回 Markdown 与页级 source-map Blocks，Go 负责文件存储、数据库事务和状态更新。
 - 解析结果写入 `document_blocks`。每个块包含 `type`、文本、页面尺寸、PyMuPDF 坐标与 Markdown Unicode code-point 区间；网页可据此将块高亮回原 PDF。图片和表格需要独立资产 URL，因此在资产导出实现前不会被持久化为 `image` / `table` Block。
 - 阅读端使用 PDF.js（通过 `react-pdf`）渲染 PDF、复制文本，并可切换到解析 Block 选择模式。
+- 阅读库左侧「PDF 目录」读取持久化 source outline（`GET /api/document/{id}/structure`），并标注来源是 PDF 原生目录还是 Markdown 标题回退；右侧「阅读注释」只读取 section 目录，按需加载单个 section，通过 revision 乐观锁的 Plan B `/reading-note/operations` 编辑，整篇创建/导入使用 `PUT`，导出使用 `/reading-note/export`。注释面板分为「阅读」和「编辑」两个视图：阅读视图用前端安全渲染的 Markdown 预览展示当前 section，证据链接可直接定位 PDF；编辑视图才显示 textarea、新增/删除 section 和保存操作。目录和当前 section 的证据列表共用面板内部的同一个侧边栏：可在「目录」和「证据」之间切换，侧边栏可折叠为窄轨，并记住开关状态和上次选择的栏目。开始状态把「创建笔记」「空白开始」「上传 .md」排列为带说明的统一操作项。支持创建空白笔记、上传整篇 `.md`、上传单个 section `.md`；新增 section 只有两个向后插入动作：`增加子节`（加入当前 section 的子节末尾，H3 禁用）和 `插入下一节`（在当前 section 子树之后插入同级 section）；删除后目录顺序自动补齐。409 冲突会重新加载最新 revision，导入期间的 503 会明确提示。
+- 阅读器中的「插入证据」取代原来的空处理动作：文本、Block 或框选只把一条 `papers-manager://` 证据链接插入当前 section，不复制原文；证据链接由前端 `evidenceLinks.ts` 构造和解析，后端不解析。只有当前选中的 section 的证据区域会叠加显示在可见 PDF 页面上，切换 section 后旧 section 的叠加立即清除；点击链接或「定位」按 page/rectangle 跳转，block hint 失效时降级到矩形。
 
 ## API
 
@@ -194,10 +202,13 @@ revision 乐观锁。笔记中的内部证据链接使用
 - `GET /api/document/{id}/content`：以内联方式流式返回原始文件，供 PDF 阅读器使用。
 - `GET /api/document/{id}/blocks?page=N`：读取某一 PDF 页的解析 Block；省略 `page` 返回全部 Block。
 - `GET /api/document/{id}/markdown`：以 `text/markdown` 返回当前识别生成的论文 Markdown（有大小上限），用于阅读或下游处理。
-- `GET|PUT|DELETE /api/document/{id}/reading-note`：`GET` 只返回 section 目录和 revision；`PUT` 按 `expectedRevision` 整体导入/替换 Markdown；`DELETE` 删除整份笔记。
-- `GET /api/document/{id}/reading-note/sections/{sectionId}`：只读取指定 section 的 Markdown；阅读目录不返回正文。
+- `GET|PUT|DELETE /api/document/{id}/reading-note`：`GET` 只返回 section 目录和 revision；`PUT` 按 `expectedRevision` 整体导入/替换 Markdown，支持 raw `text/markdown` 或 multipart `file` 字段；空 body/空文件创建空白笔记；`DELETE` 删除整份笔记。
+- `GET /api/document/{id}/reading-note/sections/{sectionId}`：只读取指定 section 的元数据、Markdown 和 `lineCount`；阅读目录不返回正文。
+- `GET /api/document/{id}/reading-note/sections/{sectionId}/content`：以 raw `text/markdown` 流返回 section 正文，适合大 section 和文件下载。
+- `PUT /api/document/{id}/reading-note/sections/{sectionId}?expectedRevision=N`：以 raw `text/markdown` 或 multipart `file` 整体替换一个 section；内容必须保留该 section 的 H1-H3 标题和级别。
 - `GET /api/document/{id}/reading-note/export`：显式拼接全部分 section 并下载整篇 Markdown，这是唯一会加载全篇正文的读取路径。
-- `POST /api/document/{id}/reading-note/operations`：按 `expectedRevision` 原子执行操作序列：`insertText`、`deleteText`、`addSection`、`deleteSection`。文本操作使用 section ID 和 section 内 Unicode code point 偏移；`replace` 由 `deleteText` + `insertText` 组合，不单独设原语。文本操作不能改变 section 的 H1-H3 标题结构。
+- `POST /api/document/{id}/reading-note/operations`：按 `expectedRevision` 原子执行原语操作序列：`insertText`、`deleteText`、`addSection`、`deleteSection`。文本操作使用 section ID 和 section 内 Unicode code point 偏移，位置相对前序操作结果；`replace` 由 `deleteText` + `insertText` 组合，不单独设原语。文本操作不能改变 section 的 H1-H3 标题结构。`addSection` 可用 `parentId` 指定父 section，用 `afterId` 在其中同级插入；两者都省略时追加到末尾，级别大于 1 的末尾追加会继承最近的更低级 section 作为父级。
+- `POST /api/document/{id}/reading-note/edits`：面向 Agent/自动化的语义编辑层，按 `expectedRevision` 快照原子执行 `replaceText`、`replaceRange`、`insertAt`、`appendText`、`replaceSection`、`addSection`、`deleteSection`。位置是 section 内 1-based 行号和 1-based Unicode code-point 列边界，范围为 end-exclusive；省略开始列表示行首、省略结束列表示行尾。所有内容统一放在 `content`：普通编辑是插入/替换文本，`replaceSection`/`addSection` 要求内容是包含一个 H1-H3 标题的完整 section Markdown。`replaceText` 默认要求唯一匹配，可用 `lineStart`/`lineEnd` 缩小窗口；同一 section 的文本范围不能重叠或共享起点。结构编辑先于文本编辑应用，`replaceSection` 必须是该 section 的唯一编辑。服务端把语义编辑转换为 `insertText`/`deleteText` 原语后再提交同一个 revision。内联语义编辑字段上限为 256 KiB、请求文本总预算 1 MiB；更大内容使用 raw `PUT .../sections/{sectionId}` 或整篇文件上传。
 - `GET /api/document/{id}/structure`：返回持久化论文目录的可重建紧凑结构，不包含完整 Blocks；阅读笔记 section 由 `/reading-note` 独立读取。
 - 笔记 Markdown 中的 `papers-manager://` 证据链接由前端、Agent 或 MCP 自行解析；Go 后端不索引、不持久化、也不解析笔记证据。
 - `PATCH /api/document/{id}`：仅更新 `originalFilename`、`doi`。旧的请求字段 `filename` 暂作为输入别名兼容。

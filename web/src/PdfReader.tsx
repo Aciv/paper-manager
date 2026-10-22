@@ -5,23 +5,38 @@ import { EventBus, FindState, PDFFindController, PDFLinkService, PDFViewer, Scro
 import 'pdfjs-dist/web/pdf_viewer.css';
 
 import './PdfReader.css';
-import { api, Block, contentUrl, Document as PaperDocument, DocumentSelectionResult, type PaperCitation } from './api';
+import {
+  api,
+  Block,
+  contentUrl,
+  Document as PaperDocument,
+  type DocumentOutlineSource,
+  type DocumentReadingStructure,
+  type PaperCitation,
+} from './api';
 import { matchCitationTargets } from './citationLinkMatcher';
+import type { EvidenceLinkTarget, EvidenceSeed } from './evidenceLinks';
 import { PDFLinkPreview, destinationPDFPoint, destinationPreviewRegion, mergeAdjacentPDFLinks, viewportRegion } from './pdfLinkPreview';
-import { LatestPDFSelection, NormalizedPDFRegion, SelectionGeneration, canvasCropForRegion, normalizedRegion, regionIsLargeEnough } from './pdfSelection';
+import { LatestPDFSelection, NormalizedPDFRegion, canvasCropForRegion, normalizedRegion, regionIsLargeEnough } from './pdfSelection';
 import { type SelectedPDFBlock, type TranslationRequestSeed } from './translation/index.ts';
 import type { TranslationPreview } from './TranslationPanel';
-import { activeOutlineNode, annotateOutlinePages, type OutlineEntry } from './pdfOutline';
+import { activeOutlineNode, annotateOutlinePages, outlineFromSections, type OutlineEntry } from './pdfOutline';
 import { isDocumentRead, localFileReadingKey, readingRecord, saveReadingPage, setDocumentRead, subscribeReadingState } from './readingState';
 
 GlobalWorkerOptions.workerSrc = new URL('pdfjs-dist/build/pdf.worker.min.mjs', import.meta.url).toString();
 
 type SelectionMode = 'text' | 'block' | 'area';
 
+export type ReaderEvidenceOverlay = EvidenceLinkTarget & {
+  id: string;
+  label?: string;
+  sectionId?: string;
+};
+
 const MODE_HINTS: Record<SelectionMode, string> = {
-  text: '拖动文本层形成文本草稿；右键打开翻译与处理菜单。',
+  text: '拖动文本层形成文本草稿；右键打开翻译与证据菜单。',
   block: '点击高亮区域形成 Block 草稿；Shift/Ctrl+点击可多选翻译；右键打开菜单。',
-  area: '在单页内拖动形成区域草稿；右键打开处理菜单。',
+  area: '在单页内拖动形成区域草稿；右键打开翻译与证据菜单。',
 };
 
 // Freehand strokes and rectangles drawn over an area selection. Points are
@@ -96,6 +111,42 @@ function groupLinks(links: PDFLinkPreview[]): Map<number, PDFLinkPreview[]> {
     else map.set(link.sourcePageNumber, [link]);
   }
   return map;
+}
+
+function evidenceTargetKey(target: EvidenceLinkTarget): string {
+  const rects = target.rects.map((rect) => `${rect.x0},${rect.y0},${rect.x1},${rect.y1}`).join('|');
+  return `${target.page}:${target.blockId ?? ''}:${rects}`;
+}
+
+function blockRegion(block: Block): NormalizedPDFRegion | undefined {
+  const location = block.location;
+  if (!location || !location.pageWidth || !location.pageHeight
+    || location.bboxX0 === undefined || location.bboxY0 === undefined
+    || location.bboxX1 === undefined || location.bboxY1 === undefined) return undefined;
+  return normalizedRegion(
+    location.bboxX0 / location.pageWidth,
+    location.bboxY0 / location.pageHeight,
+    location.bboxX1 / location.pageWidth,
+    location.bboxY1 / location.pageHeight,
+  );
+}
+
+function evidenceRegions(target: ReaderEvidenceOverlay, blocks: Block[]): NormalizedPDFRegion[] {
+  if (target.rects.length > 0) return target.rects;
+  if (!target.blockId) return [];
+  const block = blocks.find((candidate) => candidate.id === target.blockId);
+  const region = block ? blockRegion(block) : undefined;
+  return region ? [region] : [];
+}
+
+function outlineSourceLabel(source?: DocumentOutlineSource): string {
+  switch (source) {
+    case 'pdf_outline': return 'PDF 原生目录';
+    case 'markdown_headings': return 'Markdown 标题回退';
+    case 'none': return '未识别目录';
+    case 'unavailable': return '旧数据无目录';
+    default: return '';
+  }
 }
 
 type PositionedPDFText = { text: string; x: number; y: number };
@@ -235,7 +286,7 @@ export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Pro
 
 // One overlay layer per pdf.js page element. pdf.js owns the page DOM (and may
 // re-create it), so everything the app renders on a page goes through here.
-const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pageNumber, mode, links, citationMatches, selectedBlockId, pickedBlockIds, onSelection, onBlockToggle, onBlockContextMenu, onMessage, onPreviewCitations, onFollowLink, previewLink, areaSelection, strokes, annotationTool, onAnnotation }: {
+const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pageNumber, mode, links, citationMatches, selectedBlockId, pickedBlockIds, evidence, focusedEvidenceKey, onSelection, onBlockToggle, onBlockContextMenu, onMessage, onPreviewCitations, onFollowLink, previewLink, areaSelection, strokes, annotationTool, onAnnotation }: {
   // Absent for a PDF opened from disk: it has no parsed blocks, but text and
   // area selection still work — those are handled in the browser.
   documentId?: string;
@@ -246,6 +297,8 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
   citationMatches: Map<string, PaperCitation[]>;
   selectedBlockId?: string;
   pickedBlockIds?: ReadonlySet<string>;
+  evidence: ReaderEvidenceOverlay[];
+  focusedEvidenceKey?: string;
   onSelection(selection: LatestPDFSelection): void;
   onBlockToggle?(block: SelectedPDFBlock): void;
   onBlockContextMenu?(block: SelectedPDFBlock, clientX: number, clientY: number): void;
@@ -373,11 +426,13 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
         if (!location || !location.pageWidth || !location.pageHeight || location.bboxX0 === undefined || location.bboxY0 === undefined || location.bboxX1 === undefined || location.bboxY1 === undefined) return null;
         const picked = pickedBlockIds?.has(block.id) ?? false;
         const selectedBlock = selectedBlockId === block.id;
+        const region = blockRegion(block);
         const blockPick: SelectedPDFBlock = {
           blockId: block.id,
           blockType: block.type,
           text: block.text,
           pageNumber: location.pageNumber,
+          region,
         };
         return <button key={block.id} className={`pdf-block pdf-block-${block.type}${selectedBlock ? ' selected' : ''}${picked ? ' picked' : ''}`} tabIndex={mode === 'block' ? 0 : -1} style={{
           left: `${(location.bboxX0 / location.pageWidth) * 100}%`, top: `${(location.bboxY0 / location.pageHeight) * 100}%`,
@@ -390,7 +445,7 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
           }
           onSelection({
             kind: 'block', documentId: selectionTarget, blockId: block.id, pageNumber: location.pageNumber,
-            blockType: block.type, previewText: block.text,
+            blockType: block.type, previewText: block.text, region,
           });
         }} onContextMenu={(event) => {
           if (!onBlockContextMenu) return;
@@ -485,6 +540,21 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
       </div>
     </div>}
 
+    {evidence.length > 0 && <div className="pdf-evidence-overlay" aria-hidden="true">
+      {evidence.map((target) => {
+        const focused = focusedEvidenceKey === evidenceTargetKey(target);
+        return evidenceRegions(target, blocks).map((region, index) => <div
+          key={`${target.id}-${index}`}
+          className={`pdf-evidence-region${focused ? ' focused' : ''}`}
+          title={target.label ?? `第 ${target.page} 页证据`}
+          style={{
+            left: `${region.x0 * 100}%`, top: `${region.y0 * 100}%`,
+            width: `${(region.x1 - region.x0) * 100}%`, height: `${(region.y1 - region.y0) * 100}%`,
+          }}
+        />);
+      })}
+    </div>}
+
     {loadError && <p className="pdf-block-error">解析块未加载：{loadError}</p>}
   </div>;
 });
@@ -494,7 +564,7 @@ type OutlineNode = OutlineEntry;
 // A real outline tree: a chevron per branch and a guide line per nesting level.
 // Indentation comes from the nested list itself, so every level lines up under
 // its parent's chevron instead of a per-depth pixel offset.
-function OutlineTreeNode({ node, onNavigate, active }: { node: OutlineNode; onNavigate(dest: unknown): void; active?: OutlineNode }) {
+function OutlineTreeNode({ node, onNavigate, active }: { node: OutlineNode; onNavigate(node: OutlineNode): void; active?: OutlineNode }) {
   const children = node.items ?? [];
   const [open, setOpen] = useState(true);
   const rowRef = useRef<HTMLDivElement>(null);
@@ -510,8 +580,8 @@ function OutlineTreeNode({ node, onNavigate, active }: { node: OutlineNode; onNa
           <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" /></svg>
         </button>
         : <span className="pdf-outline-toggle" aria-hidden="true" />}
-      {node.dest
-        ? <button className="pdf-outline-link" type="button" aria-current={isActive ? 'true' : undefined} onClick={() => onNavigate(node.dest)}>{node.title}</button>
+      {node.dest || node.page
+        ? <button className="pdf-outline-link" type="button" aria-current={isActive ? 'true' : undefined} onClick={() => onNavigate(node)}>{node.title}</button>
         : <span className="pdf-outline-text" aria-current={isActive ? 'true' : undefined}>{node.title}</span>}
     </div>
     {children.length > 0 && open && <ul className="pdf-outline-children">
@@ -520,13 +590,13 @@ function OutlineTreeNode({ node, onNavigate, active }: { node: OutlineNode; onNa
   </li>;
 }
 
-function OutlineTree({ nodes, onNavigate, active }: { nodes: OutlineNode[]; onNavigate(dest: unknown): void; active?: OutlineNode }) {
+function OutlineTree({ nodes, onNavigate, active }: { nodes: OutlineNode[]; onNavigate(node: OutlineNode): void; active?: OutlineNode }) {
   return <ul className="pdf-outline-tree">
     {nodes.map((node, index) => <OutlineTreeNode key={`${index}-${node.title}`} node={node} onNavigate={onNavigate} active={active} />)}
   </ul>;
 }
 
-export function PdfReader({ document, file, citations = [], onCitationLinks, onTranslate, onTranslationSource, translationPreview, onMessage, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
+export function PdfReader({ document, file, citations = [], onCitationLinks, onTranslate, onTranslationSource, translationPreview, onMessage, onInsertEvidence, evidenceTargets = [], evidenceJump, outlinePlacement = 'internal', outlineTarget, modeRail = false }: {
   document?: PaperDocument;
   // A PDF straight from the user's disk. It has no backend record, so anything
   // keyed by a document id (parsed blocks, metadata, citations, selection
@@ -546,6 +616,16 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   // when translation was started from its right-click menu.
   translationPreview?: TranslationPreview;
   onMessage(message: string): void;
+  // Replaces the old no-op backend selection process: the reader forwards a
+  // selection seed and the host inserts readable evidence Markdown into the
+  // active reading-note section.
+  onInsertEvidence?(seed: EvidenceSeed): void;
+  // Note evidence links loaded by the note panel. Only self-document targets
+  // are drawn, and only on the pages the viewer has actually rendered.
+  evidenceTargets?: ReaderEvidenceOverlay[];
+  // A note-panel "定位" action. Every jump is page/rectangle based; block IDs
+  // are hints that degrade to the rectangle when the block is gone.
+  evidenceJump?: { id: string; target: EvidenceLinkTarget } | null;
   // `external` renders the outline through a portal into `outlineTarget` so a
   // host page can place it anywhere; `internal` keeps it beside the pages.
   outlinePlacement?: 'internal' | 'external';
@@ -562,8 +642,6 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   const pdfLoadGeneration = useRef(0);
   const previewCache = useRef(new Map<string, string>());
   const previewPageCache = useRef(new Map<string, Promise<HTMLCanvasElement>>());
-  const generations = useRef(new SelectionGeneration());
-  const processController = useRef<AbortController | undefined>(undefined);
 
   const [mode, setMode] = useState<SelectionMode>('text');
   const [outlineCollapsed, setOutlineCollapsed] = useState(false);
@@ -577,10 +655,13 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   const [translationPopup, setTranslationPopup] = useState<{ x: number; y: number }>();
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const [processing, setProcessing] = useState(false);
-  const [result, setResult] = useState<DocumentSelectionResult>();
   const [pageCount, setPageCount] = useState(0);
   const [zoom, setZoom] = useState(1);
-  const [outline, setOutline] = useState<OutlineNode[]>([]);
+  // The persisted backend outline is authoritative when it has sections; the
+  // PDF.js outline stays as a fallback for local files and structure failures.
+  const [nativeOutline, setNativeOutline] = useState<OutlineNode[]>([]);
+  const [sourceStructure, setSourceStructure] = useState<DocumentReadingStructure>();
+  const [focusedEvidenceKey, setFocusedEvidenceKey] = useState<string>();
   const [slots, setSlots] = useState<Array<{ pageNumber: number; node: HTMLElement }>>([]);
   const [linksByPage, setLinksByPage] = useState<Map<number, PDFLinkPreview[]>>(new Map());
   const [links, setLinks] = useState<PDFLinkPreview[]>([]);
@@ -1011,7 +1092,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
         linkServiceRef.current?.setDocument(pdfDocument);
         void pdfDocument.getOutline().then(async nodes => {
           if (!nodes || nodes.length === 0) {
-            if (!disposed && pdfLoadGeneration.current === generation) setOutline([]);
+            if (!disposed && pdfLoadGeneration.current === generation) setNativeOutline([]);
             return;
           }
           // Resolving destination → page once per load is what lets the outline
@@ -1021,8 +1102,8 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
             getPageIndex: reference => pdfDocument.getPageIndex(reference as never),
             numPages: pdfDocument.numPages,
           });
-          if (!disposed && pdfLoadGeneration.current === generation) setOutline(entries);
-        }).catch(() => { if (!disposed) setOutline([]); });
+          if (!disposed && pdfLoadGeneration.current === generation) setNativeOutline(entries);
+        }).catch(() => { if (!disposed) setNativeOutline([]); });
         void collectPDFLinkPreviews(pdfDocument).then(links => {
           if (disposed || pdfLoadGeneration.current !== generation) return;
           setLinks(links);
@@ -1050,7 +1131,8 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       setLinks([]);
       setLinksByPage(new Map());
       setLinkCount(0);
-      setOutline([]);
+      setNativeOutline([]);
+      setSourceStructure(undefined);
       setFindOpen(false);
       setFindQuery('');
       setFindMatches(null);
@@ -1059,6 +1141,19 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       if (opened.task) void opened.task.destroy();
     };
   }, [sourceKey, localFile, documentId, readingKey, onMessage]);
+
+  // Persisted source outline from the recognition generation. It carries the
+  // native/fallback source label and page mappings; when it has no sections the
+  // reader keeps the PDF.js outline loaded above.
+  useEffect(() => {
+    setSourceStructure(undefined);
+    if (!documentId) return;
+    let active = true;
+    void api.getDocumentStructure(documentId)
+      .then((structure) => { if (active) setSourceStructure(structure); })
+      .catch(() => { /* structure is a disposable read model; PDF.js stays the fallback */ });
+    return () => { active = false; };
+  }, [documentId, sourceKey]);
 
   // Target text extraction and citation scoring happen as soon as both the PDF
   // links and the already-loaded citation list are available. Hover handling is
@@ -1105,16 +1200,13 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
 
   // Source switch: drop any selection draft from the previous file.
   useEffect(() => {
-    generations.current.replace();
-    processController.current?.abort();
     setSelection(undefined);
     resetPickedBlocks();
     setContextMenu(undefined);
     setTranslationPopup(undefined);
-    setResult(undefined);
+    setFocusedEvidenceKey(undefined);
     setProcessing(false);
     if (!documentId) setMode('text'); // block mode needs parsed blocks
-    return () => { generations.current.replace(); processController.current?.abort(); };
   }, [sourceKey]);
 
   // The selection action surface is a right-click menu. Close it on an outside
@@ -1334,10 +1426,56 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     onCitationLinks?.(referenceIds);
   }, [onCitationLinks]);
 
-  const navigateOutline = useCallback((dest: unknown) => {
+  const navigateOutline = useCallback((node: OutlineNode) => {
     rememberPosition();
-    linkServiceRef.current?.goToDestination(dest as never);
+    // Native PDF outlines keep their exact destination; persisted outlines
+    // carry only a start page.
+    if (node.dest) {
+      linkServiceRef.current?.goToDestination(node.dest as never);
+      return;
+    }
+    if (node.page) {
+      viewerRef.current?.scrollPageIntoView({ pageNumber: node.page });
+      setCurrentPage(node.page);
+    }
   }, [rememberPosition]);
+
+  const evidenceByPage = useMemo(() => {
+    const map = new Map<number, ReaderEvidenceOverlay[]>();
+    for (const target of evidenceTargets) {
+      if (target.documentId && target.documentId !== documentId) continue;
+      const list = map.get(target.page);
+      if (list) list.push(target);
+      else map.set(target.page, [target]);
+    }
+    return map;
+  }, [documentId, evidenceTargets]);
+
+  // Note-panel navigation: jump to the evidence page and pulse its rectangle.
+  // Block IDs are only hints; the link's page/rectangle is always the fallback.
+  useEffect(() => {
+    if (!evidenceJump) return;
+    const { target } = evidenceJump;
+    if (target.documentId && target.documentId !== documentId) {
+      onMessage('该证据指向其他文档，当前阅读器无法跳转。');
+      return;
+    }
+    if (pageCount > 0 && target.page > pageCount) {
+      onMessage(`证据指向第 ${target.page} 页，但当前 PDF 只有 ${pageCount} 页；请重新解析或更新笔记。`);
+      return;
+    }
+    rememberPosition();
+    viewerRef.current?.scrollPageIntoView({ pageNumber: target.page });
+    setCurrentPage(target.page);
+    setFocusedEvidenceKey(evidenceTargetKey(target));
+    if (target.rects.length === 0 && !target.blockId) {
+      onMessage(`该证据只有页码提示，已跳到第 ${target.page} 页。`);
+    } else if (target.rects.length === 0 && target.blockId) {
+      onMessage(`已按第 ${target.page} 页定位；Block hint 仅作参考，区域以当前解析结果为准。`);
+    }
+    const timer = window.setTimeout(() => setFocusedEvidenceKey(undefined), 3200);
+    return () => window.clearTimeout(timer);
+  }, [documentId, evidenceJump?.id, onMessage, rememberPosition]);
 
   function resetPickedBlocks() {
     pickedBlocksRef.current = [];
@@ -1432,16 +1570,14 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   }
 
   const replaceSelection = useCallback((next: LatestPDFSelection) => {
-    processController.current?.abort();
-    generations.current.replace();
     setStrokes(NO_STROKES);
     setAnnotationTool(null);
     setAnnotationDone(false);
+    setFocusedEvidenceKey(undefined);
     resetPickedBlocks();
     setContextMenu(undefined);
     setTranslationPopup(undefined);
     setSelection(next);
-    setResult(undefined);
     setProcessing(false);
     // Selecting is only source seeding; the panel must not translate until the
     // user explicitly chooses 翻译 from the context menu or the panel.
@@ -1455,6 +1591,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
           blockType: next.blockType,
           text: next.previewText,
           pageNumber: next.pageNumber,
+          region: next.region,
         }],
       });
     }
@@ -1473,14 +1610,13 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
         pageNumber: block.pageNumber,
         blockType: block.blockType,
         previewText: block.text,
+        region: block.region,
       });
     }
     setContextMenu(contextMenuPosition(clientX, clientY));
   }
 
   function clearSelection() {
-    processController.current?.abort();
-    generations.current.replace();
     setStrokes(NO_STROKES);
     setAnnotationTool(null);
     setAnnotationDone(false);
@@ -1488,7 +1624,6 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     setContextMenu(undefined);
     setTranslationPopup(undefined);
     setSelection(undefined);
-    setResult(undefined);
     setProcessing(false);
   }
 
@@ -1526,64 +1661,54 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     return new Promise<Blob>((resolve, reject) => canvas.toBlob(blob => blob ? resolve(blob) : reject(new Error('浏览器无法生成 PNG 截图。')), 'image/png'));
   }
 
-  async function processSelection() {
+  async function handleSelectionAction() {
     if (!selection) return;
-    if (!documentId) {
-      // Local file: no backend round-trip. Text goes to the clipboard, an area
-      // draft is cropped out of the page canvas and saved as a PNG.
-      setProcessing(true);
-      try {
-        if (selection.kind === 'text') {
-          await navigator.clipboard.writeText(selection.text);
-          onMessage(`已复制第 ${selection.pageNumber ?? '?'} 页的所选文本（${selection.text.length} 字符），未上传。`);
-        } else if (selection.kind === 'area') {
-          const temporary = cropAreaSelection(selection.region, selection.pageNumber);
-          const blob = await canvasToPNG(temporary);
-          temporary.width = 0;
-          temporary.height = 0;
-          const url = URL.createObjectURL(blob);
-          const link = window.document.createElement('a');
-          link.href = url;
-          link.download = `selection-p${selection.pageNumber}.png`;
-          link.click();
-          window.setTimeout(() => URL.revokeObjectURL(url), 10000);
-          onMessage(`已保存第 ${selection.pageNumber} 页的框选截图（${blob.size} 字节），未上传。`);
+    if (documentId && onInsertEvidence) {
+      // Stored document: hand the selection to the reading-note panel. The
+      // panel builds the Markdown link, chooses the active section, and commits
+      // through the revision-fenced operations endpoint.
+      const seed: EvidenceSeed = selection.kind === 'text'
+        ? {
+          kind: 'text', excerpt: selection.text, pageNumber: selection.pageNumber,
+          region: selection.region,
         }
-      } catch (error) {
-        onMessage(`本地处理选择失败：${error instanceof Error ? error.message : '未知错误'}`);
-      } finally {
-        setProcessing(false);
-      }
+        : selection.kind === 'block'
+          ? {
+            kind: 'block', excerpt: selection.previewText, pageNumber: selection.pageNumber,
+            region: selection.region, blockId: selection.blockId,
+          }
+          : { kind: 'area', excerpt: '', pageNumber: selection.pageNumber, region: selection.region };
+      onInsertEvidence(seed);
       return;
     }
-    const generation = generations.current.current();
-    const controller = new AbortController();
-    processController.current?.abort();
-    processController.current = controller;
+    if (documentId) {
+      onMessage('阅读注释不可用，无法插入证据。');
+      return;
+    }
+    // Local file: no backend round-trip. Text goes to the clipboard, an area
+    // draft is cropped out of the page canvas and saved as a PNG.
     setProcessing(true);
-    setResult(undefined);
-    let captureBlob: Blob | undefined;
     try {
-      let response: { result: DocumentSelectionResult };
       if (selection.kind === 'text') {
-        response = await api.processDocumentSelection(documentId, { kind: 'text', text: selection.text, pageNumber: selection.pageNumber, region: selection.region }, controller.signal);
-      } else if (selection.kind === 'block') {
-        response = await api.processDocumentSelection(documentId, { kind: 'block', blockId: selection.blockId }, controller.signal);
-      } else {
+        await navigator.clipboard.writeText(selection.text);
+        onMessage(`已复制第 ${selection.pageNumber ?? '?'} 页的所选文本（${selection.text.length} 字符），未上传。`);
+      } else if (selection.kind === 'area') {
         const temporary = cropAreaSelection(selection.region, selection.pageNumber);
-        captureBlob = await canvasToPNG(temporary);
+        const blob = await canvasToPNG(temporary);
         temporary.width = 0;
         temporary.height = 0;
-        response = await api.processDocumentSelection(documentId, { kind: 'area', pageNumber: selection.pageNumber, region: selection.region, image: captureBlob }, controller.signal);
+        const url = URL.createObjectURL(blob);
+        const link = window.document.createElement('a');
+        link.href = url;
+        link.download = `selection-p${selection.pageNumber}.png`;
+        link.click();
+        window.setTimeout(() => URL.revokeObjectURL(url), 10000);
+        onMessage(`已保存第 ${selection.pageNumber} 页的框选截图（${blob.size} 字节），未上传。`);
       }
-      if (!generations.current.isCurrent(generation) || controller.signal.aborted) return;
-      setResult(response.result);
-      onMessage('当前选择已由 Go 临时处理边界接收；未写入数据库或文件存储。');
     } catch (error) {
-      if (!controller.signal.aborted && generations.current.isCurrent(generation)) onMessage(`处理当前选择失败：${error instanceof Error ? error.message : '未知错误'}`);
+      onMessage(`本地处理选择失败：${error instanceof Error ? error.message : '未知错误'}`);
     } finally {
-      captureBlob = undefined;
-      if (generations.current.isCurrent(generation)) setProcessing(false);
+      setProcessing(false);
     }
   }
 
@@ -1822,10 +1947,26 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     });
   }, [railPlacement]);
 
+  const sourceOutline = useMemo(
+    () => outlineFromSections(sourceStructure?.outline.sections ?? []),
+    [sourceStructure],
+  );
+  const outline = sourceOutline.length > 0 ? sourceOutline : nativeOutline;
+  const outlineSource = sourceOutline.length > 0
+    ? sourceStructure?.outline.source
+    : nativeOutline.length > 0 ? 'pdf_outline' : sourceStructure?.outline.source;
+  const outlineDiagnostics = [
+    ...(sourceStructure?.diagnostics ?? []),
+    ...(sourceStructure?.outline.diagnostics ?? []),
+  ];
   const activeOutline = useMemo(() => activeOutlineNode(outline, currentPage), [outline, currentPage]);
-  const outlineTree = useMemo(() => outline.length === 0
-    ? <p className="hint">该 PDF 未提供目录。</p>
-    : <OutlineTree nodes={outline} onNavigate={navigateOutline} active={activeOutline} />, [outline, navigateOutline, activeOutline]);
+  const outlineTree = useMemo(() => <>
+    {outlineSource && <p className="pdf-outline-source">目录来源：{outlineSourceLabel(outlineSource)}</p>}
+    {outline.length === 0
+      ? <p className="hint">{outlineSource === 'none' ? '未识别论文目录。' : '该 PDF 未提供目录。'}</p>
+      : <OutlineTree nodes={outline} onNavigate={navigateOutline} active={activeOutline} />}
+    {outlineDiagnostics.map((diagnostic) => <p className="pdf-outline-diagnostic" key={diagnostic}>{diagnostic}</p>)}
+  </>, [activeOutline, navigateOutline, outline, outlineDiagnostics, outlineSource]);
 
   return <section className={`pdf-viewer-panel${nightMode ? ' pdf-night' : ''}`} ref={panelRef}>
     {!modeRail && <div className="pdf-reader-controls"><strong>PDF 阅读与定位</strong>
@@ -1841,11 +1982,12 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       {selection.kind === 'block' && <p>{selection.previewText}</p>}
       {selection.kind === 'area' && <code>{JSON.stringify(selection.region)}</code>}
       <div className="pdf-selection-actions">
-        <button className="primary" type="button" disabled={processing} onClick={() => void processSelection()}>{processing ? '处理中…' : '处理当前选择'}</button>
+        <button className="primary" type="button" disabled={processing} onClick={() => void handleSelectionAction()}>
+          {processing ? '处理中…' : documentId && onInsertEvidence ? '插入证据' : selection.kind === 'text' ? '复制文本' : '保存截图'}
+        </button>
         {onTranslate && selection.kind !== 'area' && <button type="button" disabled={processing} onClick={() => translateSelection()}>翻译</button>}
         <button type="button" disabled={processing} onClick={clearSelection}>清除</button>
       </div>
-      {result && <p className="pdf-selection-result">已接收：{result.kind}{result.imageWidth ? ` · ${result.imageWidth}×${result.imageHeight}` : ''}</p>}
     </div>}
     <div className={`pdf-reader-frame${outlineExternal ? ' outline-external' : ''}${outlineCollapsed ? ' outline-collapsed' : ''}`}>
       {!outlineExternal && <aside className="outline"><h3>目录</h3>{outlineTree}<p className="hint">在阅读区上下滚动可连续阅读全部页面。</p></aside>}
@@ -1976,7 +2118,8 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       <PageOverlay documentId={documentId} selectionTarget={selectionTarget} pageNumber={entry.pageNumber} mode={mode}
         links={linksByPage.get(entry.pageNumber) ?? []} citationMatches={citationMatchesByLink}
         selectedBlockId={selection?.kind === 'block' ? selection.blockId : undefined}
-        pickedBlockIds={pickedBlockIds} onSelection={replaceSelection} onBlockToggle={toggleBlockPick}
+        pickedBlockIds={pickedBlockIds} evidence={evidenceByPage.get(entry.pageNumber) ?? []}
+        focusedEvidenceKey={focusedEvidenceKey} onSelection={replaceSelection} onBlockToggle={toggleBlockPick}
         onBlockContextMenu={openBlockContextMenu} onMessage={onMessage}
         onPreviewCitations={previewCitations}
         onFollowLink={followLink} previewLink={previewLink}
@@ -2003,8 +2146,8 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
         {onTranslate && selection.kind !== 'area' && <button type="button" role="menuitem" disabled={processing}
           onClick={() => runContextAction(() => translateSelection(true))}>翻译</button>}
         <button type="button" role="menuitem" disabled={processing}
-          onClick={() => runContextAction(() => void processSelection())}>
-          {processing ? '处理中…' : processable ? '处理当前选择' : selection.kind === 'text' ? '复制文本' : '保存截图'}
+          onClick={() => runContextAction(() => void handleSelectionAction())}>
+          {processing ? '处理中…' : documentId && onInsertEvidence ? '插入证据' : selection.kind === 'text' ? '复制文本' : '保存截图'}
         </button>
         {processable && selection.kind === 'text' && <button type="button" role="menuitem" disabled={processing}
           onClick={() => runContextAction(() => void copySelectedText())}>复制文本</button>}

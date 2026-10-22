@@ -178,6 +178,11 @@ type splitReadingNoteSection struct {
 	content string
 }
 
+// New manifests start with gaps so later sibling/child insertions can pick a
+// midpoint without renumbering existing sections. Older manifests with dense
+// 0,1,2 orders remain valid; float midpoints fill those gaps too.
+const readingNoteOrderStep = 1024.0
+
 func splitReadingNoteMarkdown(markdown string) ([]splitReadingNoteSection, error) {
 	if err := types.ValidateReadingNoteMarkdown(markdown); err != nil {
 		return nil, err
@@ -238,7 +243,7 @@ func splitReadingNoteMarkdown(markdown string) ([]splitReadingNoteSection, error
 			stack = stack[:len(stack)-1]
 		}
 		id := uuid.New()
-		entry := types.ReadingNoteSectionEntry{ID: id, Order: len(sections), Level: item.level,
+		entry := types.ReadingNoteSectionEntry{ID: id, Order: float64(len(sections)) * readingNoteOrderStep, Level: item.level,
 			Title: item.title, ContentRevision: 1}
 		if len(stack) > 0 {
 			parent := sections[stack[len(stack)-1]].entry.ID

@@ -205,6 +205,19 @@ span.pdf-outline-toggle { cursor:default; }
 .pdf-block span { position:absolute; left:0; top:0; padding:2px 4px; border-radius:0 0 3px 0; background:#1d4ed8; color:#fff; font-size:10px; }
 .pdf-block-error { position:absolute; left:8px; bottom:8px; max-width:95%; margin:0; padding:5px 7px; border-radius:4px; background:#fff1f2; color:#9f1239; font-size:11px; }
 
+/* Reading-note evidence links: subtle dashed regions on every rendered page,
+   with a pulsing highlight after the note panel's 定位 action. */
+.pdf-evidence-overlay { position:absolute; inset:0; z-index:2; pointer-events:none; }
+.pdf-evidence-region { position:absolute; border:1.5px dashed rgb(217 119 6 / 78%); border-radius:2px; background:rgb(245 158 11 / 9%); pointer-events:none; }
+.pdf-evidence-region.focused { border:2px solid #2563eb; background:rgb(37 99 235 / 18%); box-shadow:0 0 0 2px rgb(37 99 235 / 30%), 0 0 18px rgb(37 99 235 / 45%); animation:pdf-evidence-pulse 1.2s ease-out 2; }
+@keyframes pdf-evidence-pulse {
+  0% { box-shadow:0 0 0 2px rgb(37 99 235 / 30%), 0 0 4px rgb(37 99 235 / 25%); }
+  55% { box-shadow:0 0 0 5px rgb(37 99 235 / 18%), 0 0 24px rgb(37 99 235 / 60%); }
+  100% { box-shadow:0 0 0 2px rgb(37 99 235 / 30%), 0 0 18px rgb(37 99 235 / 45%); }
+}
+.pdf-outline-source { margin:0 0 5px; color:#64748b; font-size:11px; }
+.pdf-outline-diagnostic { margin:3px 0 0; color:#b45309; font-size:10.5px; }
+
 @media (max-width: 980px) {
   .pdf-reader-frame { grid-template-columns:minmax(0, 1fr); }
   .pdf-reader-frame:not(.outline-collapsed) .outline { display:block; max-height:220px; border-right:0; border-bottom:1px solid #dce3ed; }

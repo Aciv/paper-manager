@@ -9,7 +9,7 @@ type SelectionBase = { documentId: string };
 
 export type LatestPDFSelection =
   | (SelectionBase & { kind: 'text'; text: string; pageNumber?: number; region?: NormalizedPDFRegion })
-  | (SelectionBase & { kind: 'block'; blockId: string; pageNumber?: number; blockType: string; previewText: string })
+  | (SelectionBase & { kind: 'block'; blockId: string; pageNumber?: number; blockType: string; previewText: string; region?: NormalizedPDFRegion })
   | (SelectionBase & { kind: 'area'; pageNumber: number; region: NormalizedPDFRegion });
 
 export type PixelCrop = { sx: number; sy: number; width: number; height: number };

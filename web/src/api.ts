@@ -248,6 +248,41 @@ export type DocumentSelectionResult = {
   message: string;
 };
 
+export type DocumentOutlineSource = 'pdf_outline' | 'markdown_headings' | 'none' | 'unavailable';
+export type DocumentOutlineSection = {
+  ordinal: number;
+  title: string;
+  level: number;
+  parentOrdinal: number;
+  startPage: number;
+  startX: number;
+  startY: number;
+  endPage: number;
+  endX: number;
+  endY: number;
+  startBlockOrdinal: number;
+  endBlockOrdinal: number;
+  markdownCodepointStart: number;
+  markdownCodepointEnd: number;
+};
+export type DocumentOutline = {
+  schemaVersion: number;
+  source: DocumentOutlineSource;
+  sections: DocumentOutlineSection[];
+  diagnostics?: string[];
+};
+export type DocumentReadingStructure = {
+  schemaVersion: number;
+  documentId: string;
+  recognitionGeneration: number;
+  fingerprint: string;
+  outline: DocumentOutline;
+  diagnostics?: string[];
+};
+
+// Kept in sync with MaxDocumentReadingNoteBytes on the Go side.
+export const MAX_READING_NOTE_BYTES = 60 * 1024 * 1024;
+
 export type DocumentReadingNote = {
   documentId: string;
   directory: ReadingNoteDirectory;
@@ -271,16 +306,33 @@ export type ReadingNoteSection = {
   revision: number;
   section: ReadingNoteSectionEntry;
   markdown: string;
+  lineCount: number;
 };
 // Text offsets and lengths are Unicode code-point positions inside one section,
 // relative to the content produced by earlier operations in the same sequence.
-// Replace is composed as deleteText followed by insertText.
+// Replace is composed as deleteText followed by insertText. Primitive operations
+// keep their op-specific fields (`text`, `markdown`); the unified `content`
+// field belongs only to the agent-facing ReadingNoteEdit layer below.
 export type ReadingNoteOperation =
   | { op: 'insertText'; sectionId: string; offset: number; text: string }
   | { op: 'deleteText'; sectionId: string; offset: number; length: number }
   | { op: 'addSection'; parentId?: string; afterId?: string; markdown: string }
   | { op: 'deleteSection'; sectionId: string };
 export type ReadingNoteOperations = { expectedRevision: number; operations: ReadingNoteOperation[] };
+// Agent-facing edits are resolved against the expectedRevision snapshot.
+// Line and column are 1-based; an omitted column means line start/end.
+// `content` is op-defined: insertion/replacement text, or a complete section
+// Markdown fragment for replaceSection/addSection.
+export type ReadingNotePosition = { line: number; column?: number };
+export type ReadingNoteEdit =
+  | { op: 'replaceText'; sectionId: string; oldText: string; newText: string; lineStart?: number; lineEnd?: number }
+  | { op: 'replaceRange'; sectionId: string; start: ReadingNotePosition; end: ReadingNotePosition; content: string }
+  | { op: 'insertAt'; sectionId: string; position: ReadingNotePosition; content: string }
+  | { op: 'appendText'; sectionId: string; content: string }
+  | { op: 'replaceSection'; sectionId: string; content: string }
+  | { op: 'addSection'; parentId?: string; afterId?: string; content: string }
+  | { op: 'deleteSection'; sectionId: string };
+export type ReadingNoteEdits = { expectedRevision: number; edits: ReadingNoteEdit[] };
 export type ReadingNoteEditResult = {
   documentId: string;
   revision: number;
@@ -292,6 +344,30 @@ export type ReadingNoteEditResult = {
 const baseUrl = (import.meta.env.VITE_API_URL ?? '/api/document').replace(/\/$/, '');
 const paperBaseUrl = baseUrl.endsWith('/document') ? `${baseUrl.slice(0, -'/document'.length)}/paper` : '/api/paper';
 const referenceBaseUrl = baseUrl.endsWith('/document') ? `${baseUrl.slice(0, -'/document'.length)}/references` : '/api/references';
+
+// APIError keeps the HTTP status available to callers that need to react to
+// 404/409/503 differently, while remaining a normal Error for message-only UI.
+export class APIError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = 'APIError';
+    this.status = status;
+  }
+}
+
+async function responseErrorMessage(response: Response, contentType: string): Promise<string> {
+  const body = contentType.includes('application/json')
+    ? await response.json().catch(() => null) as { error?: { message?: string } } | null
+    : null;
+  if (body?.error?.message) return body.error.message;
+  // Non-JSON failures (a proxy, an extension, a truncated response) would
+  // otherwise surface as a bare statusText like "Forbidden"; keep the status
+  // and a snippet of the body so the cause is visible.
+  const detail = contentType.includes('application/json') ? '' : (await response.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 120);
+  return `HTTP ${response.status} ${response.statusText}${detail ? ` · ${detail}` : ''}`.trim();
+}
 
 async function request<T>(pathname: string, options?: RequestInit): Promise<T> {
   return requestFrom<T>(baseUrl, pathname, options);
@@ -307,26 +383,14 @@ async function requestFrom<T>(resourceBaseUrl: string, pathname: string, options
     }
     return response.json() as Promise<T>;
   }
-  const body = contentType.includes('application/json')
-    ? await response.json().catch(() => null) as { error?: { message?: string } } | null
-    : null;
-  if (body?.error?.message) throw new Error(body.error.message);
-  // Non-JSON failures (a proxy, an extension, a truncated response) would
-  // otherwise surface as a bare statusText like "Forbidden"; keep the status
-  // and a snippet of the body so the cause is visible.
-  const detail = contentType.includes('application/json') ? '' : (await response.text().catch(() => '')).replace(/\s+/g, ' ').trim().slice(0, 120);
-  throw new Error(`HTTP ${response.status} ${response.statusText}${detail ? ` · ${detail}` : ''}`.trim());
+  throw new APIError(response.status, await responseErrorMessage(response, contentType));
 }
 
 async function requestText(pathname: string): Promise<string> {
   const response = await fetch(`${baseUrl}${pathname}`);
   if (response.ok) return response.text();
   const contentType = response.headers.get('content-type') ?? '';
-  const body = contentType.includes('application/json')
-    ? await response.json().catch(() => null) as { error?: { message?: string } } | null
-    : null;
-  if (body?.error?.message) throw new Error(body.error.message);
-  throw new Error(`HTTP ${response.status} ${response.statusText}`.trim());
+  throw new APIError(response.status, await responseErrorMessage(response, contentType));
 }
 
 export const api = {
@@ -424,12 +488,40 @@ export const api = {
     return request<{ items: Block[] }>(`/${encodeURIComponent(id)}/blocks${query}`);
   },
   getDocumentMarkdown: (id: string): Promise<string> => requestText(`/${encodeURIComponent(id)}/markdown`),
+  getDocumentStructure: (id: string): Promise<DocumentReadingStructure> => request<DocumentReadingStructure>(
+    `/${encodeURIComponent(id)}/structure`,
+  ),
   getDocumentReadingNote: (id: string): Promise<DocumentReadingNote> => request<DocumentReadingNote>(`/${encodeURIComponent(id)}/reading-note`),
   getDocumentReadingNoteSection: (id: string, sectionId: string): Promise<ReadingNoteSection> => request<ReadingNoteSection>(
     `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}`,
   ),
+  getDocumentReadingNoteSectionContent: (id: string, sectionId: string): Promise<string> => requestText(
+    `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}/content`,
+  ),
+  uploadDocumentReadingNoteFile: (id: string, file: File, expectedRevision: number): Promise<DocumentReadingNote> => {
+    const body = new FormData();
+    body.set('file', file);
+    return request<DocumentReadingNote>(
+      `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
+      { method: 'PUT', body },
+    );
+  },
+  uploadDocumentReadingNoteSectionFile: (
+    id: string, sectionId: string, file: File, expectedRevision: number,
+  ): Promise<ReadingNoteEditResult> => {
+    const body = new FormData();
+    body.set('file', file);
+    return request<ReadingNoteEditResult>(
+      `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
+      { method: 'PUT', body },
+    );
+  },
   applyDocumentReadingNoteOperations: (id: string, requestBody: ReadingNoteOperations): Promise<ReadingNoteEditResult> => request<ReadingNoteEditResult>(
     `/${encodeURIComponent(id)}/reading-note/operations`,
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
+  ),
+  applyDocumentReadingNoteEdits: (id: string, requestBody: ReadingNoteEdits): Promise<ReadingNoteEditResult> => request<ReadingNoteEditResult>(
+    `/${encodeURIComponent(id)}/reading-note/edits`,
     { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) },
   ),
   putDocumentReadingNote: (id: string, markdown: string, expectedRevision: number): Promise<DocumentReadingNote> => request<DocumentReadingNote>(
@@ -439,6 +531,9 @@ export const api = {
   deleteDocumentReadingNote: (id: string, expectedRevision: number): Promise<void> => request<void>(
     `/${encodeURIComponent(id)}/reading-note?expectedRevision=${encodeURIComponent(String(expectedRevision))}`,
     { method: 'DELETE' },
+  ),
+  getDocumentReadingNoteExport: (id: string): Promise<string> => requestText(
+    `/${encodeURIComponent(id)}/reading-note/export`,
   ),
   processDocumentSelection: (id: string, selection: DocumentSelectionProcess, signal?: AbortSignal): Promise<{ result: DocumentSelectionResult }> => {
     const body = new FormData();

@@ -33,6 +33,9 @@ export type SelectedPDFBlock = {
   blockType: string;
   text: string;
   pageNumber?: number;
+  // Normalized page rectangle. Translation ignores it; evidence links use it
+  // as the page/rectangle fallback when the block hint is stale.
+  region?: { x0: number; y0: number; x1: number; y1: number };
 };
 
 export type TranslationRequestSeed =

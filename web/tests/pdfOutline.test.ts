@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { activeOutlineNode, annotateOutlinePages, destinationPage, type OutlineEntry } from '../src/pdfOutline.ts';
+import {
+  activeOutlineNode,
+  annotateOutlinePages,
+  destinationPage,
+  outlineFromSections,
+  type OutlineEntry,
+} from '../src/pdfOutline.ts';
 
 test('reads a numeric page reference from a destination', async () => {
   const resolvers = { getDestination: async () => null, getPageIndex: async () => { throw new Error('unused'); }, numPages: 10 };
@@ -63,4 +69,19 @@ test('picks the deepest entry at or before the current page', () => {
   assert.equal(activeOutlineNode(outline, 11)?.title, 'A Proofs');
   // entries without a resolved page never win
   assert.equal(activeOutlineNode([{ title: 'only', dest: null }], 3), undefined);
+});
+
+test('rebuilds the persisted parent-ordinal outline and keeps page-based navigation', () => {
+  const outline = outlineFromSections([
+    { title: '1 Introduction', parentOrdinal: -1, startPage: 1 },
+    { title: '2 Method', parentOrdinal: -1, startPage: 3 },
+    { title: '2.1 Setup', parentOrdinal: 1, startPage: 3 },
+    { title: '2.2 Training', parentOrdinal: 1, startPage: 5 },
+    { title: 'Appendix', parentOrdinal: -1, startPage: 0 },
+  ]);
+  assert.deepEqual(outline.map((node) => node.title), ['1 Introduction', '2 Method', 'Appendix']);
+  assert.equal(outline[1].items?.[0].title, '2.1 Setup');
+  assert.equal(outline[1].items?.[1].page, 5);
+  assert.equal(outline[2].page, undefined);
+  assert.equal(activeOutlineNode(outline, 4)?.title, '2.1 Setup');
 });

@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"sort"
 
 	"paperMaster/internal/logger"
 	"paperMaster/internal/types"
@@ -28,26 +29,52 @@ func (s *noteReadingService) ApplyOperations(
 		return types.ReadingNoteEditResult{}, fmt.Errorf("%w: operations must contain between 1 and %d entries",
 			types.ErrInvalidReadingNote, types.MaxReadingNoteOperations)
 	}
-	gate := s.gate(id)
-	if !gate.content.TryRLock() {
-		return types.ReadingNoteEditResult{}, types.ErrReadingNoteUnavailable
-	}
-	defer gate.content.RUnlock()
-	gate.manifest.Lock()
-	defer gate.manifest.Unlock()
-	note, err := s.notes.Get(ctx, id)
+	note, release, err := s.lockReadingNoteEdit(ctx, id, request.ExpectedRevision)
 	if err != nil {
 		return types.ReadingNoteEditResult{}, err
 	}
-	if note.Revision != request.ExpectedRevision {
-		return types.ReadingNoteEditResult{}, types.ErrReadingNoteConflict
-	}
+	defer release()
 	state := newReadingNoteEditState(note)
 	for index, operation := range request.Operations {
 		if err := state.apply(ctx, s, operation); err != nil {
 			return types.ReadingNoteEditResult{}, fmt.Errorf("operation %d (%s): %w", index+1, operation.Op, err)
 		}
 	}
+	return s.commitReadingNoteEdits(ctx, note, state)
+}
+
+// lockReadingNoteEdit serializes one edit batch and validates its revision.
+func (s *noteReadingService) lockReadingNoteEdit(
+	ctx context.Context, id uuid.UUID, expectedRevision int64,
+) (types.DocumentReadingNote, func(), error) {
+	gate := s.gate(id)
+	if !gate.content.TryRLock() {
+		return types.DocumentReadingNote{}, nil, types.ErrReadingNoteUnavailable
+	}
+	gate.manifest.Lock()
+	note, err := s.notes.Get(ctx, id)
+	if err != nil {
+		gate.manifest.Unlock()
+		gate.content.RUnlock()
+		return types.DocumentReadingNote{}, nil, err
+	}
+	if note.Revision != expectedRevision {
+		gate.manifest.Unlock()
+		gate.content.RUnlock()
+		return types.DocumentReadingNote{}, nil, types.ErrReadingNoteConflict
+	}
+	return note, func() {
+		gate.manifest.Unlock()
+		gate.content.RUnlock()
+	}, nil
+}
+
+// commitReadingNoteEdits validates the final section structure and publishes
+// exactly one revision. Intermediate states inside a batch may be temporarily
+// invalid.
+func (s *noteReadingService) commitReadingNoteEdits(
+	ctx context.Context, note types.DocumentReadingNote, state *readingNoteEditState,
+) (types.ReadingNoteEditResult, error) {
 	if len(state.sections) == 0 {
 		return types.ReadingNoteEditResult{}, fmt.Errorf("%w: a note must retain at least one section; delete the note instead",
 			types.ErrInvalidReadingNote)
@@ -65,7 +92,7 @@ func (s *noteReadingService) ApplyOperations(
 	state.reorder()
 	if !state.changed() {
 		return types.ReadingNoteEditResult{
-			DocumentID:      id,
+			DocumentID:      state.documentID,
 			Revision:        note.Revision,
 			Directory:       publicDirectory(note.Directory),
 			ChangedSections: []types.ReadingNoteSectionEntry{},
@@ -196,14 +223,82 @@ func (s *readingNoteEditState) addSection(operation types.ReadingNoteOperation) 
 	if len(s.sections)+1 > types.MaxReadingNoteHeadings {
 		return fmt.Errorf("%w: too many note sections", types.ErrInvalidReadingNote)
 	}
+	entry := parsed[0].entry
+	// splitReadingNoteMarkdown sees only the new fragment, so it cannot know the
+	// target hierarchy. ParentID is the caller's explicit parent for a child or
+	// same-parent "after" insertion. A bare append keeps the nearest preceding
+	// lower-level section as its parent so a level-2/3 append is not left as a
+	// root entry.
+	if operation.ParentID != nil {
+		entry.ParentID = operation.ParentID
+	} else if operation.AfterID == nil && entry.Level > 1 {
+		entry.ParentID = readingNoteAppendParent(entries, entry.Level)
+	}
+	order, err := readingNoteInsertionOrder(entries, insertAt)
+	if err != nil {
+		return err
+	}
+	entry.Order = order
 	section := &readingNoteEditSection{
-		entry: parsed[0].entry, content: parsed[0].content,
+		entry: entry, content: parsed[0].content,
 		loaded: true, isNew: true, dirty: true,
 	}
 	s.sections = append(s.sections, nil)
 	copy(s.sections[insertAt+1:], s.sections[insertAt:])
 	s.sections[insertAt] = section
 	s.reorder()
+	return nil
+}
+
+// readingNoteInsertionOrder returns a sort key strictly between the sections
+// around the insertion index. Existing keys are never rewritten; deletion just
+// leaves gaps. Sparse initial keys and float midpoints make exhaustion
+// practically unreachable for a bounded note.
+func readingNoteInsertionOrder(sections []types.ReadingNoteSectionEntry, insertAt int) (float64, error) {
+	var before, after *float64
+	if insertAt > 0 {
+		value := sections[insertAt-1].Order
+		before = &value
+	}
+	if insertAt < len(sections) {
+		value := sections[insertAt].Order
+		after = &value
+	}
+	switch {
+	case before == nil && after == nil:
+		return 0, nil
+	case before == nil:
+		if *after > readingNoteOrderStep {
+			return *after - readingNoteOrderStep, nil
+		}
+		if *after > 0 {
+			return *after / 2, nil
+		}
+		return 0, fmt.Errorf("%w: no order space before the first section", types.ErrInvalidReadingNote)
+	case after == nil:
+		return *before + readingNoteOrderStep, nil
+	default:
+		order := *before + (*after-*before)/2
+		if order <= *before || order >= *after {
+			return 0, fmt.Errorf("%w: section order space exhausted", types.ErrInvalidReadingNote)
+		}
+		return order, nil
+	}
+}
+
+// readingNoteAppendParent picks the nearest preceding lower-level heading as
+// the implicit parent of a section appended at the end. Preamble (level 0) is
+// not a parent. H1 appends stay roots.
+func readingNoteAppendParent(sections []types.ReadingNoteSectionEntry, level int) *uuid.UUID {
+	if level <= 1 {
+		return nil
+	}
+	for index := len(sections) - 1; index >= 0; index-- {
+		if sections[index].Level > 0 && sections[index].Level < level {
+			parent := sections[index].ID
+			return &parent
+		}
+	}
 	return nil
 }
 
@@ -242,10 +337,13 @@ func (s *readingNoteEditState) entries() []types.ReadingNoteSectionEntry {
 	return entries
 }
 
+// reorder keeps the in-memory slice aligned with the sparse order keys. It
+// never rewrites the keys, so deleting or inserting a section cannot change an
+// existing section's identity in the directory.
 func (s *readingNoteEditState) reorder() {
-	for index := range s.sections {
-		s.sections[index].entry.Order = index
-	}
+	sort.SliceStable(s.sections, func(left, right int) bool {
+		return s.sections[left].entry.Order < s.sections[right].entry.Order
+	})
 }
 
 func (s *readingNoteEditState) changed() bool {

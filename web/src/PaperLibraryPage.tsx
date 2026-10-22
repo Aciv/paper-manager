@@ -18,6 +18,8 @@ import { ReferenceEditorDialog } from './ReferenceEditorDialog';
 import { CitationExportDialog } from './CitationExportDialog';
 import { BibliographyExportDialog } from './BibliographyExportDialog';
 import { TranslationPanel, type TranslationPreview } from './TranslationPanel';
+import { ReadingNotePanel, type NoteEvidenceOverlay, type NoteInsertionRequest } from './ReadingNotePanel';
+import type { EvidenceLinkTarget, EvidenceSeed } from './evidenceLinks';
 import type { DoiCitationTarget } from './doiCitation';
 import type { TranslationRequestSeed } from './translation/index.ts';
 import { fetchAllDocumentPages } from './documentPagination';
@@ -43,12 +45,14 @@ function localPath(file: File): string {
 }
 
 const LEFT_MENUS = ['catalog', 'base', 'outline'] as const;
-const RIGHT_MENUS = ['info', 'citations', 'translation'] as const;
+const RIGHT_MENUS = ['info', 'citations', 'notes', 'translation'] as const;
 type LeftMenu = typeof LEFT_MENUS[number];
 type RightMenu = typeof RIGHT_MENUS[number];
 
 const LEFT_MENU_LABELS: Record<LeftMenu, string> = { catalog: '论文目录', base: '类别', outline: 'PDF 目录' };
-const RIGHT_MENU_LABELS: Record<RightMenu, string> = { info: '论文信息', citations: '引用信息', translation: '翻译' };
+const RIGHT_MENU_LABELS: Record<RightMenu, string> = {
+  info: '论文信息', citations: '引用信息', notes: '阅读注释', translation: '翻译',
+};
 
 type LibraryTranslationRequest = TranslationRequestSeed & {
   requestId: string;
@@ -202,6 +206,11 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [exportBibliographyBase, setExportBibliographyBase] = useState<DocumentBase>();
   const [translationRequest, setTranslationRequest] = useState<LibraryTranslationRequest>();
   const [translationPreview, setTranslationPreview] = useState<TranslationPreview>();
+  // The note panel and reader share two one-way signals: a selection seed going
+  // in, and a note evidence target coming back for a page jump.
+  const [noteInsertion, setNoteInsertion] = useState<NoteInsertionRequest>();
+  const [noteEvidenceTargets, setNoteEvidenceTargets] = useState<NoteEvidenceOverlay[]>([]);
+  const [noteEvidenceJump, setNoteEvidenceJump] = useState<{ id: string; target: EvidenceLinkTarget }>();
   const [citationPaperInfoOpen, setCitationPaperInfoOpen] = useState(false);
   const [citationPaperInfo, setCitationPaperInfo] = useState<PaperMetadata>();
   const [citationReference, setCitationReference] = useState<PaperReference>();
@@ -249,7 +258,26 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   useEffect(() => {
     setTranslationRequest(undefined);
     setTranslationPreview(undefined);
+    setNoteInsertion(undefined);
+    setNoteEvidenceTargets([]);
+    setNoteEvidenceJump(undefined);
   }, [selected?.id, localSelected]);
+
+  // 插入证据 is an explicit reader action: unlike translation hover it may open
+  // the right column and select the note tab, because the user asked to write.
+  const requestEvidenceInsertion = useCallback((seed: EvidenceSeed) => {
+    setRightCollapsed(false);
+    setRightMenu('notes');
+    setNoteInsertion({ id: newTranslationRequestId(), seed });
+  }, []);
+
+  const navigateNoteEvidence = useCallback((target: EvidenceLinkTarget) => {
+    setNoteEvidenceJump({ id: newTranslationRequestId(), target });
+  }, []);
+
+  const consumeNoteInsertion = useCallback((requestId: string) => {
+    setNoteInsertion((current) => current?.id === requestId ? undefined : current);
+  }, []);
 
   // Selecting text/Blocks only seeds the translation panel's editable source.
   // Translation starts from the explicit 翻译 action (reader menu or panel).
@@ -1020,8 +1048,20 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
           </ol>}
         </>}
       </section>}
-      {/* Kept mounted while another right-hand tab is active so switching to
-          论文信息/引用信息 does not discard the current translations. */}
+      {/* Kept mounted while another tab is active so switching between panels
+          does not discard unsaved note drafts or the current translations. */}
+      <div className="library-panel-slot" hidden={rightMenu !== 'notes'}>
+        {localMode || selected
+          ? <ReadingNotePanel
+            documentId={localMode ? undefined : selected?.id}
+            insertion={noteInsertion}
+            onInsertionConsumed={consumeNoteInsertion}
+            onNavigateEvidence={navigateNoteEvidence}
+            onEvidenceTargetsChange={setNoteEvidenceTargets}
+            onMessage={setMessage}
+          />
+          : <p className="hint">选择论文后显示阅读注释。</p>}
+      </div>
       <div className="library-panel-slot" hidden={rightMenu !== 'translation'}>
         <TranslationPanel request={translationRequest} onTranslationResult={setTranslationPreview} />
       </div>
@@ -1039,7 +1079,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     </button>}
     {(narrow ? rightCollapsed : rightCollapsed && !!rightHandle) && <button className={`library-peek${narrow ? ' library-peek-right' : ''}`} style={narrow ? undefined : { left: rightHandle?.x ?? 0, top: rightHandle?.y ?? 96 }} type="button"
       onClick={() => { handleSuppressed.current.right = true; setRightHandle(null); setRightCollapsed(false); }}
-      title="展开右栏（论文信息、引用与翻译）" aria-label="展开右栏">
+      title="展开右栏（论文信息、引用、阅读注释与翻译）" aria-label="展开右栏">
       <span aria-hidden="true">«</span>
     </button>}
 
@@ -1056,7 +1096,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
           : !selected
             ? <div className="library-empty"><p>从左侧论文目录选择一篇论文开始阅读。</p></div>
             : selectedIsPDF
-              ? <PdfReader document={selected} citations={citations} onCitationLinks={filterCitationsFromPDF} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} translationPreview={translationPreview} onMessage={setMessage} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+              ? <PdfReader document={selected} citations={citations} onCitationLinks={filterCitationsFromPDF} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} translationPreview={translationPreview} onMessage={setMessage} onInsertEvidence={requestEvidenceInsertion} evidenceTargets={noteEvidenceTargets} evidenceJump={noteEvidenceJump} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
               : <div className="library-empty"><p>该论文不是 PDF，无法在阅读库中预览。</p></div>}
       </Suspense>
       {message && <p className="library-message">{message}</p>}

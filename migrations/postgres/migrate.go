@@ -144,6 +144,12 @@ var documentReadingNotesUp string
 //go:embed 000031_document_reading_notes.down.sql
 var documentReadingNotesDown string
 
+//go:embed 000032_document_reading_note_limits.up.sql
+var documentReadingNoteLimitsUp string
+
+//go:embed 000032_document_reading_note_limits.down.sql
+var documentReadingNoteLimitsDown string
+
 type migration struct {
 	version int64
 	up      string
@@ -182,6 +188,7 @@ var migrations = []migration{
 	{version: 29, up: bibliographyOrderUp},
 	{version: 30, up: documentOutlineUp},
 	{version: 31, up: documentReadingNotesUp},
+	{version: 32, up: documentReadingNoteLimitsUp},
 }
 
 // Migrate applies every unapplied PostgreSQL migration exactly once. The

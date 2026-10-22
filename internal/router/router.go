@@ -72,7 +72,10 @@ func NewRouter(params RouterParams) *gin.Engine {
 	if params.NoteReadingHandler != nil {
 		r.GET("/api/document/:id/reading-note", params.NoteReadingHandler.Get)
 		r.GET("/api/document/:id/reading-note/sections/:sectionId", params.NoteReadingHandler.ReadSection)
+		r.GET("/api/document/:id/reading-note/sections/:sectionId/content", params.NoteReadingHandler.ReadSectionContent)
+		r.PUT("/api/document/:id/reading-note/sections/:sectionId", params.NoteReadingHandler.PutSection)
 		r.POST("/api/document/:id/reading-note/operations", params.NoteReadingHandler.ApplyOperations)
+		r.POST("/api/document/:id/reading-note/edits", params.NoteReadingHandler.ApplyEdits)
 		r.PUT("/api/document/:id/reading-note", params.NoteReadingHandler.Put)
 		r.DELETE("/api/document/:id/reading-note", params.NoteReadingHandler.Delete)
 		r.GET("/api/document/:id/reading-note/export", params.NoteReadingHandler.Export)

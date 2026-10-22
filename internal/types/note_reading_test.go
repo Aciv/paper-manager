@@ -11,8 +11,8 @@ func TestValidateReadingNoteMarkdownBoundsUTF8AndBytes(t *testing.T) {
 	if err := ValidateReadingNoteMarkdown("# 注释"); err != nil {
 		t.Fatal(err)
 	}
-	if err := ValidateReadingNoteMarkdown(""); !errors.Is(err, ErrInvalidReadingNote) {
-		t.Fatalf("empty Markdown error = %v", err)
+	if err := ValidateReadingNoteMarkdown(""); err != nil {
+		t.Fatalf("empty Markdown should be allowed for a blank note: %v", err)
 	}
 	if err := ValidateReadingNoteMarkdown(string([]byte{0xff})); !errors.Is(err, ErrInvalidReadingNote) {
 		t.Fatalf("invalid UTF-8 error = %v", err)

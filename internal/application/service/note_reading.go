@@ -82,7 +82,8 @@ func (s *noteReadingService) ReadSection(ctx context.Context, rawID, rawSectionI
 	if err != nil {
 		return types.ReadingNoteSection{}, err
 	}
-	return types.ReadingNoteSection{DocumentID: id, Revision: note.Revision, Section: publicSection(section), Markdown: content}, nil
+	return types.ReadingNoteSection{DocumentID: id, Revision: note.Revision, Section: publicSection(section),
+		Markdown: content, LineCount: readingNoteLineCount(content)}, nil
 }
 
 func (s *noteReadingService) GetManifest(ctx context.Context, rawID string) (types.DocumentReadingNote, error) {
@@ -114,9 +115,14 @@ func (s *noteReadingService) Put(ctx context.Context, rawID string, expectedRevi
 	if err := types.ValidateReadingNoteMarkdown(markdown); err != nil {
 		return types.DocumentReadingNote{}, err
 	}
-	sections, err := splitReadingNoteMarkdown(markdown)
-	if err != nil {
-		return types.DocumentReadingNote{}, err
+	// An empty whole-note import creates (or clears) a blank editable note with
+	// no section directory entries and no section files.
+	var sections []splitReadingNoteSection
+	if markdown != "" {
+		sections, err = splitReadingNoteMarkdown(markdown)
+		if err != nil {
+			return types.DocumentReadingNote{}, err
+		}
 	}
 	gate := s.gate(id)
 	gate.content.Lock()

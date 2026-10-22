@@ -104,6 +104,133 @@
 .library-panel { display: flex; flex: 1 1 auto; flex-direction: column; gap: 9px; min-height: 0; padding: 12px; }
 .library-panel-catalog, .library-panel-citations { overflow: hidden; }
 .library-panel-base, .library-panel-outline, .library-panel-info { overflow: auto; }
+
+/* Reading notes: a collapsible section sidebar, separate read/edit views,
+   and evidence links. The panel stays mounted while another tab is active, so
+   switching tabs does not discard an unsaved draft. */
+.library-panel-notes { position: relative; overflow: hidden; gap: 7px; }
+.reading-note-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-bottom: 6px; border-bottom: 1px solid var(--pl-border); }
+.reading-note-title { display: flex; align-items: baseline; gap: 7px; margin-right: auto; color: var(--pl-text); }
+.reading-note-title strong { font-size: 13px; }
+.reading-note-revision { padding: 1px 5px; border: 1px solid var(--pl-border-2); border-radius: 999px; color: var(--pl-faint); font-size: 10px; line-height: 1.4; }
+.reading-note-toolbar-actions { display: flex; gap: 3px; flex-wrap: wrap; justify-content: flex-end; }
+.paper-library .reading-note-toolbar-actions button { padding: 3px 7px; font-size: 11px; }
+.paper-library .reading-note-danger { color: var(--pl-faint); }
+.paper-library .reading-note-danger:hover:not(:disabled) { border-color: #6d3a3e; background: var(--pl-danger-bg); color: var(--pl-danger); }
+
+/* Empty note: three evenly sized start actions instead of a loose button row. */
+.reading-note-empty { display: flex; flex: 1 1 auto; flex-direction: column; gap: 10px; min-height: 0; padding: 12px; overflow: auto; border: 1px solid var(--pl-border); border-radius: 10px; background: var(--pl-surface-2); }
+.reading-note-empty-head strong { display: block; margin-bottom: 3px; color: var(--pl-text); font-size: 13px; }
+.reading-note-empty-head p, .reading-note-empty p { margin: 0; color: var(--pl-dim); font-size: 11.5px; line-height: 1.55; }
+.reading-note-start-actions { display: grid; gap: 6px; width: 100%; }
+.paper-library .reading-note-start-option { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 9px 10px; border-color: var(--pl-border); background: var(--pl-surface); text-align: left; }
+.paper-library .reading-note-start-option:hover:not(:disabled) { border-color: var(--pl-border-3); background: var(--pl-surface-3); }
+.paper-library .reading-note-start-option.primary { border-color: var(--pl-border-3); background: #2e323a; }
+.reading-note-start-label { color: var(--pl-text); font-size: 12.5px; font-weight: 600; }
+.reading-note-start-desc { color: var(--pl-faint); font-size: 10.5px; font-weight: 400; line-height: 1.45; }
+.paper-library .reading-note-start-option.primary .reading-note-start-desc { color: var(--pl-dim); }
+.paper-library .reading-note-cancel { align-self: flex-start; padding: 2px 0; border: 0; background: transparent; color: var(--pl-faint); font-size: 11px; text-decoration: underline; }
+.paper-library .reading-note-cancel:hover:not(:disabled) { border: 0; background: transparent; color: var(--pl-dim); }
+.reading-note-pending { width: 100%; padding: 8px 9px; border-left: 2px solid var(--pl-border-3); border-radius: 0 6px 6px 0; background: var(--pl-surface-3); }
+.reading-note-pending strong { display: block; margin-bottom: 3px; color: var(--pl-text); font-size: 11.5px; }
+.reading-note-pending p { max-height: 74px; overflow: auto; white-space: pre-wrap; }
+.reading-note-pending > span { display: block; margin-top: 5px; color: var(--pl-faint); font-size: 10.5px; }
+
+/* Blank notes keep the same read/edit switch before their first split. */
+.reading-note-blank { display: flex; flex: 1 1 auto; flex-direction: column; gap: 7px; min-height: 0; }
+.reading-note-blank-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.reading-note-blank .reading-note-body { flex: 1 1 auto; }
+
+/* Section directory: a real sidebar that collapses to a slim rail. */
+.reading-note-workspace { display: flex; flex: 1 1 auto; gap: 8px; min-height: 0; }
+.reading-note-sidebar { display: flex; flex: 0 0 138px; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--pl-border); border-radius: 8px; background: var(--pl-surface-2); }
+.reading-note-sidebar.collapsed { flex-basis: 28px; }
+.reading-note-sidebar-head { display: flex; align-items: center; gap: 2px; padding: 4px; border-bottom: 1px solid var(--pl-border); }
+.reading-note-sidebar-tabs { display: flex; flex: 1 1 auto; gap: 2px; min-width: 0; }
+.paper-library .reading-note-sidebar-tabs button { flex: 1 1 0; min-width: 0; padding: 3px 4px; border: 0; border-radius: 4px; background: transparent; color: var(--pl-faint); font-size: 10.5px; line-height: 1.4; }
+.paper-library .reading-note-sidebar-tabs button:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
+.paper-library .reading-note-sidebar-tabs button.active { border: 0; background: var(--pl-surface-3); color: #fff; box-shadow: none; }
+.paper-library .reading-note-sidebar-collapse { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 0; background: transparent; color: var(--pl-faint); font-size: 14px; line-height: 1; }
+.paper-library .reading-note-sidebar-collapse:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
+.reading-note-directory { display: flex; flex: 1 1 auto; flex-direction: column; gap: 1px; min-height: 0; overflow: auto; padding: 4px; }
+.paper-library .reading-note-directory button { display: flex; align-items: center; justify-content: space-between; gap: 4px; width: 100%; padding: 5px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--pl-dim); font-size: 11.5px; text-align: left; }
+.paper-library .reading-note-directory button:hover:not(:disabled) { background: var(--pl-surface-3); color: var(--pl-text); }
+.paper-library .reading-note-directory button.active { background: var(--pl-surface-3); color: #fff; }
+.reading-note-section-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reading-note-dirty { color: #f0c674; font-size: 9px; line-height: 1; }
+.paper-library .reading-note-sidebar-rail { display: flex; flex: 1 1 auto; flex-direction: column; align-items: center; gap: 8px; width: 100%; height: 100%; padding: 7px 0; border: 0; border-radius: 0; background: transparent; color: var(--pl-faint); font-size: 14px; }
+.paper-library .reading-note-sidebar-rail:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
+.reading-note-sidebar-rail-label { writing-mode: vertical-rl; font-size: 9.5px; letter-spacing: .12em; text-orientation: upright; }
+
+/* Content column: section header, editable body, read-only preview. */
+.reading-note-content { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
+.reading-note-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
+.reading-note-section-meta { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.reading-note-section-meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pl-text); font-size: 12.5px; }
+.reading-note-section-meta span { color: var(--pl-faint); font-size: 10.5px; }
+.reading-note-view-tabs { display: flex; flex: 0 0 auto; gap: 2px; padding: 2px; border: 1px solid var(--pl-border); border-radius: 6px; background: var(--pl-bg); }
+.paper-library .reading-note-view-tabs button { padding: 3px 7px; border: 0; border-radius: 4px; background: transparent; color: var(--pl-faint); font-size: 10.5px; line-height: 1.4; }
+.paper-library .reading-note-view-tabs button:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
+.paper-library .reading-note-view-tabs button.active { border: 0; background: var(--pl-surface-3); color: #fff; box-shadow: none; }
+.reading-note-view-tabs .reading-note-dirty { margin-left: 3px; }
+.reading-note-section-actions { display: flex; gap: 4px; }
+.paper-library .reading-note-section-actions button { flex: 1 1 auto; padding: 4px 6px; color: var(--pl-dim); font-size: 10.5px; white-space: nowrap; }
+.reading-note-add-description { margin: 0; color: var(--pl-dim); font-size: 11px; }
+.reading-note-body { flex: 1 1 auto; min-height: 130px; resize: vertical; padding: 8px; border: 1px solid var(--pl-border-2); border-radius: 7px; background: var(--pl-bg); color: var(--pl-text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.reading-note-body:focus { outline: 1px solid var(--pl-border-3); outline-offset: 0; }
+.reading-note-editor-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.paper-library .reading-note-editor-actions button { padding: 5px 8px; font-size: 11.5px; }
+.paper-library .reading-note-editor-actions .reading-note-danger { color: var(--pl-faint); }
+.paper-library .reading-note-editor-actions .reading-note-danger:hover:not(:disabled) { border-color: #6d3a3e; background: var(--pl-danger-bg); color: var(--pl-danger); }
+.reading-note-dirty-label { color: #f0c674; font-size: 11px; }
+.reading-note-inline-form { display: grid; gap: 5px; padding: 8px; border: 1px solid var(--pl-border); border-radius: 7px; background: var(--pl-surface-2); }
+.reading-note-inline-form label { display: flex; align-items: center; gap: 6px; color: var(--pl-dim); font-size: 11.5px; }
+.reading-note-inline-form select, .reading-note-inline-form input, .reading-note-inline-form textarea { min-width: 0; padding: 5px 6px; border: 1px solid var(--pl-border-2); border-radius: 5px; background: var(--pl-bg); color: var(--pl-text); font-size: 12px; }
+.reading-note-inline-form textarea { resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.reading-note-inline-form > div { display: flex; gap: 6px; }
+
+/* Read-only Markdown preview. */
+.reading-note-preview, .reading-note-preview-empty { flex: 1 1 auto; min-height: 130px; border: 1px solid var(--pl-border-2); border-radius: 7px; background: var(--pl-bg); }
+.reading-note-preview { padding: 10px 11px; overflow: auto; color: var(--pl-text); font-size: 12.5px; line-height: 1.7; overflow-wrap: anywhere; }
+.reading-note-preview-empty { display: grid; place-items: center; padding: 12px; color: var(--pl-faint); font-size: 11.5px; text-align: center; }
+.reading-note-preview > :first-child { margin-top: 0; }
+.reading-note-preview > :last-child { margin-bottom: 0; }
+.reading-note-preview h1, .reading-note-preview h2, .reading-note-preview h3,
+.reading-note-preview h4, .reading-note-preview h5, .reading-note-preview h6 { margin: .9em 0 .4em; color: #fff; font-weight: 650; line-height: 1.35; }
+.reading-note-preview h1 { padding-bottom: 4px; border-bottom: 1px solid var(--pl-border); font-size: 16px; }
+.reading-note-preview h2 { font-size: 14.5px; }
+.reading-note-preview h3 { font-size: 13.5px; }
+.reading-note-preview h4, .reading-note-preview h5, .reading-note-preview h6 { font-size: 12.5px; }
+.reading-note-preview p { margin: 0 0 .7em; }
+.reading-note-preview ul, .reading-note-preview ol { margin: 0 0 .7em; padding-left: 1.5em; }
+.reading-note-preview li { margin: 2px 0; }
+.reading-note-preview blockquote { margin: .6em 0; padding: 2px 0 2px 10px; border-left: 2px solid var(--pl-border-3); color: var(--pl-dim); }
+.reading-note-preview blockquote p:last-child { margin-bottom: 0; }
+.reading-note-preview code { padding: 1px 4px; border-radius: 4px; background: var(--pl-surface-3); color: #dfe5ee; font: .94em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.reading-note-preview pre { margin: .7em 0; padding: 9px 10px; overflow: auto; border: 1px solid var(--pl-border); border-radius: 6px; background: #17181b; }
+.reading-note-preview pre code { padding: 0; background: transparent; font-size: 11.5px; line-height: 1.55; white-space: pre; }
+.reading-note-preview a { color: #a9c7ea; text-decoration: underline; text-underline-offset: 2px; }
+.reading-note-preview hr { margin: 1em 0; border: 0; border-top: 1px solid var(--pl-border); }
+.paper-library .reading-note-preview .reading-note-preview-evidence { display: inline; padding: 0 2px; border: 0; border-radius: 3px; background: transparent; color: #a9c7ea; font: inherit; text-decoration: underline dotted; text-underline-offset: 2px; cursor: pointer; }
+.paper-library .reading-note-preview .reading-note-preview-evidence:hover { border: 0; background: var(--pl-surface-3); color: #fff; }
+
+.reading-note-evidence-pane { flex: 1 1 auto; min-height: 0; overflow: auto; padding: 7px; }
+.reading-note-evidence-pane .hint { margin: 0; font-size: 11px; line-height: 1.55; }
+.reading-note-evidence-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; color: var(--pl-dim); font-size: 11px; }
+.reading-note-evidence-list li { display: flex; align-items: center; justify-content: space-between; gap: 4px; flex-wrap: wrap; padding: 5px 6px; border: 1px solid var(--pl-border); border-radius: 6px; background: var(--pl-surface); }
+.reading-note-evidence-list li > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.paper-library .reading-note-evidence-list button { flex: 0 0 auto; padding: 2px 6px; font-size: 10.5px; }
+.reading-note-evidence-list .reading-note-diagnostic { flex-basis: 100%; line-height: 1.4; }
+.reading-note-evidence-pane > .reading-note-diagnostic { margin: 6px 0 0; line-height: 1.45; }
+.reading-note-diagnostic { color: #e6b980; font-size: 11px; }
+.reading-note-status { flex: 0 0 auto; margin: 0; color: var(--pl-dim); font-size: 11.5px; }
+.reading-note-error { margin: 0; color: var(--pl-danger); font-size: 12px; }
+.reading-note-dialog { position: absolute; z-index: 30; inset: 8px; display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--pl-border-2); border-radius: 9px; background: var(--pl-surface-2); box-shadow: 0 16px 36px rgb(0 0 0 / 55%); }
+.reading-note-dialog header, .reading-note-dialog footer { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.reading-note-dialog header strong { font-size: 12.5px; }
+.reading-note-dialog p { margin: 0; }
+.reading-note-dialog textarea { flex: 1 1 auto; min-height: 180px; resize: none; padding: 8px; border: 1px solid var(--pl-border-2); border-radius: 6px; background: var(--pl-bg); color: var(--pl-text); font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
 .library-detail-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0; color: var(--pl-faint); font-size: 11.5px; }
 
 /* Catalog filters + sort. The whole scope is loaded, so these run locally. */
@@ -374,6 +501,7 @@
   .paper-library-main { height: 100dvh; padding: calc(8px + env(safe-area-inset-top, 0px)) calc(8px + env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) calc(8px + env(safe-area-inset-left, 0px)); }
   .paper-library .pdf-viewer-panel { height: 100%; }
   .library-document-list > button { padding: 11px 10px; }
+  .reading-note-sidebar { flex-basis: 118px; }
 }
 
 @media (max-width: 640px) {
