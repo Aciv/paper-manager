@@ -184,8 +184,9 @@ services:
       DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:-30s}
       CORS_ORIGIN: http://localhost:5173
       # Docker publishes MCP on loopback below. The container listener must
-      # bind 0.0.0.0 for the forwarding to work, and a non-loopback bind
-      # requires MCP_TOKEN (see docs/mcp/agent-installation.md).
+      # bind 0.0.0.0 for the forwarding to work. MCP_TOKEN is optional: when
+      # set it is required on every request, when empty authentication is
+      # disabled (see docs/mcp/agent-installation.md).
       MCP_ENABLED: ${MCP_ENABLED:-false}
       MCP_ADDR: ${MCP_ADDR:-127.0.0.1:8090}
       MCP_TOKEN: ${MCP_TOKEN:-}

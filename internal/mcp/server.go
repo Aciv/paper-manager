@@ -17,6 +17,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"paperMaster/internal/config"
+	"paperMaster/internal/logger"
 	"paperMaster/internal/types/interfaces"
 )
 
@@ -148,7 +149,8 @@ func NewToolServer(
 // on a separate loopback listener so MCP requests share services and note gates
 // without passing through Gin middleware.
 func (s *ToolServer) Handler() (http.Handler, error) {
-	if err := validateMCPAccess(s.cfg.MCPAddress, s.cfg.MCPToken); err != nil {
+	host, err := mcpListenHost(s.cfg.MCPAddress)
+	if err != nil {
 		return nil, err
 	}
 	handler := sdk.NewStreamableHTTPHandler(func(*http.Request) *sdk.Server {
@@ -161,6 +163,14 @@ func (s *ToolServer) Handler() (http.Handler, error) {
 	})
 	token := strings.TrimSpace(s.cfg.MCPToken)
 	if token == "" {
+		// An empty token disables authentication. That is the default for
+		// local use; a non-loopback bind is only warned about so a missing
+		// env var cannot take the whole API down (Docker publishes MCP on
+		// host loopback even though the container listener binds 0.0.0.0).
+		if !isLoopbackMCPHost(host) {
+			logger.Warn(context.Background(), "MCP server is listening without a bearer token",
+				"address", s.cfg.MCPAddress)
+		}
 		return handler, nil
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -176,20 +186,18 @@ func (s *ToolServer) Handler() (http.Handler, error) {
 	}), nil
 }
 
-func validateMCPAccess(address, token string) error {
+func mcpListenHost(address string) (string, error) {
 	host, _, err := net.SplitHostPort(strings.TrimSpace(address))
 	if err != nil {
-		return fmt.Errorf("MCP_ADDR must be host:port: %w", err)
+		return "", fmt.Errorf("MCP_ADDR must be host:port: %w", err)
 	}
-	if strings.TrimSpace(token) != "" {
-		return nil
-	}
+	return host, nil
+}
+
+func isLoopbackMCPHost(host string) bool {
 	if strings.EqualFold(host, "localhost") {
-		return nil
+		return true
 	}
 	ip := net.ParseIP(host)
-	if ip == nil || !ip.IsLoopback() {
-		return fmt.Errorf("MCP_TOKEN is required when MCP_ADDR is not loopback")
-	}
-	return nil
+	return ip != nil && ip.IsLoopback()
 }

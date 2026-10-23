@@ -68,8 +68,10 @@ Streamable HTTP directly and do not need a bridge.
 
 ### 1.3 Token policy
 
-- Loopback (`127.0.0.1`, `::1`, or `localhost`) may run without a token.
-- A non-loopback bind **fails at startup** unless `MCP_TOKEN` is set.
+- `MCP_TOKEN` is optional; an empty token disables authentication.
+- A non-loopback bind without a token still starts, but logs a warning. Set a
+  token whenever the address is reachable by anything other than the local
+  user.
 - When `MCP_TOKEN` is set, every request must send:
 
 ```http
@@ -486,8 +488,10 @@ services:
 ```
 
 The host-side mapping is restricted to loopback, but the container must bind
-`0.0.0.0` for Docker to forward traffic. `MCP_TOKEN` is mandatory in this
-configuration.
+`0.0.0.0` for Docker to forward traffic. Since the container listener is
+non-loopback, setting `MCP_TOKEN` is recommended; without it the server logs a
+warning and accepts unauthenticated requests from anything that can reach the
+container port.
 
 If you enable `papers_manager_library_import_file` /
 `papers_manager_library_import_files` with Docker, mount the import directory
@@ -508,7 +512,8 @@ If an Agent runs in another container, use the API service name
 
 If the API runs in WSL and the Agent runs on Windows, `localhost` usually
 forwards to WSL automatically. If it does not, use the WSL VM address and set a
-token; binding a non-loopback address without `MCP_TOKEN` is rejected.
+token; a non-loopback bind without `MCP_TOKEN` starts but logs a warning and
+disables authentication.
 
 ### 9.3 Remote host
 
@@ -533,11 +538,11 @@ any client with the token has the same access as a human user.
 | `401 unauthorized` | Client header value matches `MCP_TOKEN`; token variable loaded in the host process. |
 | `connection refused` | API is running, `MCP_ENABLED=true`, and `MCP_ADDR` is exposed/published. |
 | `404` | URL must end in `/mcp`. |
-| Server exits on startup with “MCP_TOKEN is required” | Non-loopback bind without a token. Set `MCP_TOKEN` or bind `127.0.0.1`. |
+| MCP accepts requests without a token | `MCP_TOKEN` is empty; set it to require `Authorization: Bearer <token>`. |
 | Tools missing in host | Host has been restarted/reloaded; server name and URL are correct; skill preflight reports MCP availability. |
 | Tool timeout | Increase the host timeout (`tool_timeout_sec` in Codex, `timeout` in OpenCode, MCP Center timeout in DSH). |
 | Skill not discovered | Directory name matches the `name` field; `SKILL.md` is at the root; `references/` is present; host is reading the expected skills root. |
-| Docker connection fails | Port publishes to `127.0.0.1:8090`; container `MCP_ADDR=0.0.0.0:8090`; token set. |
+| Docker connection fails | Port publishes to `127.0.0.1:8090`; container `MCP_ADDR=0.0.0.0:8090`; token matches when one is set. |
 
 ### 10.2 Tool-level checks
 
@@ -559,7 +564,8 @@ retry with the stale revision.
 
 - MCP defaults to loopback; do not expose it to a LAN or the internet without a
   token.
-- A non-loopback bind without `MCP_TOKEN` fails closed.
+- A non-loopback bind without `MCP_TOKEN` disables authentication and only logs
+  a warning; set a token for anything beyond local use.
 - The server has no per-Agent identity or ownership model; tokens are server
   configuration, not user accounts.
 - Agents can perform the same operations as the web UI, including deletes and

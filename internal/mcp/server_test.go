@@ -102,15 +102,42 @@ func TestToolSchemaRejectsMissingRequiredArgument(t *testing.T) {
 	}
 }
 
-func TestMCPAccessRequiresTokenOffLoopback(t *testing.T) {
-	if err := validateMCPAccess("127.0.0.1:8090", ""); err != nil {
-		t.Fatalf("loopback without token rejected: %v", err)
+func TestMCPAddressValidation(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:8090", "0.0.0.0:8090", "localhost:8090"} {
+		if _, err := mcpListenHost(address); err != nil {
+			t.Fatalf("valid address %q rejected: %v", address, err)
+		}
 	}
-	if err := validateMCPAccess("0.0.0.0:8090", ""); err == nil {
-		t.Fatal("non-loopback without token accepted")
+	if _, err := mcpListenHost("no-port"); err == nil {
+		t.Fatal("invalid address accepted")
 	}
-	if err := validateMCPAccess("0.0.0.0:8090", "secret"); err != nil {
-		t.Fatalf("non-loopback with token rejected: %v", err)
+	if !isLoopbackMCPHost("127.0.0.1") || !isLoopbackMCPHost("::1") || !isLoopbackMCPHost("localhost") {
+		t.Fatal("loopback hosts were not detected")
+	}
+	if isLoopbackMCPHost("0.0.0.0") || isLoopbackMCPHost("") || isLoopbackMCPHost("192.168.1.5") {
+		t.Fatal("non-loopback host was treated as loopback")
+	}
+}
+
+func TestMCPHandlerAllowsEmptyToken(t *testing.T) {
+	server, err := NewToolServer(config.Config{
+		MCPAddress: "0.0.0.0:8090", MCPMaxRequestBytes: 1 << 20,
+	}, nil, nil, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatalf("NewToolServer() error = %v", err)
+	}
+	handler, err := server.Handler()
+	if err != nil {
+		t.Fatalf("Handler() error = %v", err)
+	}
+	body := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	handler.ServeHTTP(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("empty-token status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
 	}
 }
 
