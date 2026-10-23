@@ -1,0 +1,23 @@
+{
+  "corpus_manifest_sha256": "bf2e68617c0c15d1e29e345871a98d788bbab0ac0af45de3be1c9741ca00288d",
+  "feature_version": "paper-line-crf/v2",
+  "labels": [
+    "TITLE",
+    "AUTHOR",
+    "ABSTRACT",
+    "O"
+  ],
+  "metrics": {
+    "training_lines": 25985,
+    "training_sequences": 662
+  },
+  "model_name": "header-text",
+  "model_sha256": "854868e81914121c5f05d3b1ca6fdbde41359ce081ac97f2272b1bd0830e6249",
+  "model_version": "phase21a",
+  "schema_version": "paper-crf-artifact/v1",
+  "training_parameters": {
+    "max_iterations": 50,
+    "max_sequences": 0,
+    "mode": "text"
+  }
+}

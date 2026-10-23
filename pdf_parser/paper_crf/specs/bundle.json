@@ -1,0 +1,28 @@
+{
+  "schema_version": "paper-crf-bundle/v1",
+  "models": {
+    "header": {
+      "weights": "weights/header-text-title-priors.crfsuite",
+      "spec": "specs/header-text-title-priors.json"
+    },
+    "reference": {
+      "weights": "weights/reference-text.crfsuite",
+      "spec": "specs/reference-text.json"
+    },
+    "citation": {
+      "weights": "weights/citation-context.crfsuite",
+      "spec": "specs/citation-context.json"
+    }
+  },
+  "runtime": {
+    "header_threshold": 0.912,
+    "reference_threshold": 0.946,
+    "header_use_layout": false,
+    "reference_use_layout": false
+  },
+  "provenance": {
+    "header": "model_train/artifacts/phase21/header-text-title-priors.crfsuite",
+    "reference": "model_train/artifacts/phase21/reference-text.crfsuite",
+    "citation": "model_train/artifacts/phase22/citation-context.crfsuite"
+  }
+}

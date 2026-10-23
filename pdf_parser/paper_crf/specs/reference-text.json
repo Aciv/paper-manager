@@ -1,0 +1,23 @@
+{
+  "corpus_manifest_sha256": "bf2e68617c0c15d1e29e345871a98d788bbab0ac0af45de3be1c9741ca00288d",
+  "feature_version": "paper-line-crf/v1",
+  "labels": [
+    "PRE",
+    "REF_HEAD",
+    "B-REF",
+    "I-REF",
+    "POST"
+  ],
+  "metrics": {
+    "training_lines": 579912,
+    "training_sequences": 633
+  },
+  "model_name": "reference_layout-text",
+  "model_sha256": "896aee013242c05809896ded0f1be1588d41d94b48fbf42d8b42576bb654e19b",
+  "model_version": "v0",
+  "schema_version": "paper-crf-artifact/v1",
+  "training_parameters": {
+    "max_iterations": 12,
+    "mode": "text"
+  }
+}

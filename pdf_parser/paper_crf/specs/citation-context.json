@@ -1,0 +1,33 @@
+{
+  "corpus_manifest_sha256": "bf2e68617c0c15d1e29e345871a98d788bbab0ac0af45de3be1c9741ca00288d",
+  "feature_version": "paper-citation-crf/v1",
+  "labels": [
+    "O",
+    "B-AUTHOR",
+    "I-AUTHOR",
+    "B-TITLE",
+    "I-TITLE",
+    "B-VENUE",
+    "I-VENUE",
+    "B-YEAR",
+    "I-YEAR",
+    "B-ID",
+    "I-ID",
+    "B-VOLUME",
+    "I-VOLUME",
+    "B-PAGES",
+    "I-PAGES"
+  ],
+  "metrics": {
+    "training_sequences": 6806,
+    "training_tokens": 240016
+  },
+  "model_name": "citation-context",
+  "model_sha256": "72bed699c06d4ba42f099e8c4b72b6cc11f753c2428020b88585eda22b697e18",
+  "model_version": "phase22",
+  "schema_version": "paper-crf-artifact/v1",
+  "training_parameters": {
+    "max_iterations": 50,
+    "mode": "context"
+  }
+}

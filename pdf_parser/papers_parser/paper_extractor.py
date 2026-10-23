@@ -1,9 +1,10 @@
 """
 Paper metadata extraction engines independent of gRPC transport.
 
-The deterministic engine is the current production implementation.  The
-``PaperExtractionEngine`` protocol is intentionally small so a future CRF
-engine can replace it without changing protobuf handling or server startup.
+The deterministic engine is the rules fallback. The CRF/hybrid/shadow engines
+live in ``crf_engine.py`` and load the runtime-owned ``paper_crf`` bundle. The
+``PaperExtractionEngine`` protocol stays small so the engines can share
+protobuf handling and server startup.
 """
 from __future__ import annotations
 

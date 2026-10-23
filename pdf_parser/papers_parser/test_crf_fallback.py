@@ -309,5 +309,41 @@ class HybridConfidenceSelectionTest(unittest.TestCase):
         self.assertEqual(result.title.value, "Explicit heading title")
 
 
+class ReferenceSourceTest(unittest.TestCase):
+    class _Engine:
+        def __init__(self, output):
+            self.output = output
+
+        def extract(self, *_args):
+            return self.output
+
+        def reference_candidates(self, references):
+            return tuple(ReferenceCandidate(raw_reference=ref) for ref in references)
+
+    def test_non_empty_crf_references_are_used(self) -> None:
+        rules = ExtractionOutput(references=("[rule] First.",))
+        learned = ExtractionOutput(
+            references=("[crf] First.",), references_detected=True
+        )
+        engine = HybridPaperExtractionEngine(self._Engine(rules), self._Engine(learned))
+
+        result = engine.extract("ignored", (), (object(),))
+
+        self.assertEqual(result.references, ("[crf] First.",))
+        self.assertTrue(result.references_detected)
+
+    def test_empty_crf_references_fall_back_to_rules(self) -> None:
+        rules = ExtractionOutput(
+            references=("[rule] First.",), references_detected=True
+        )
+        learned = ExtractionOutput()
+        engine = HybridPaperExtractionEngine(self._Engine(rules), self._Engine(learned))
+
+        result = engine.extract("ignored", (), (object(),))
+
+        self.assertEqual(result.references, ("[rule] First.",))
+        self.assertTrue(result.references_detected)
+
+
 if __name__ == "__main__":
     unittest.main()

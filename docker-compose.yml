@@ -109,11 +109,14 @@ services:
       PARSER_RPC_MAX_SECONDS: ${PARSER_RPC_MAX_SECONDS:-900}
       PARSER_SHUTDOWN_GRACE_SECONDS: ${PARSER_SHUTDOWN_GRACE_SECONDS:-30}
       PAPER_EXTRACTION_ENGINE: ${PAPER_EXTRACTION_ENGINE:-hybrid}
-      PAPER_CRF_MODEL_DIR: /models
+      # Reference entries stay rule-owned unless this is explicitly enabled.
+      PAPER_REFERENCE_CRF_ENABLED: ${PAPER_REFERENCE_CRF_ENABLED:-false}
+      # Runtime CRF code, weights, and specs are baked into the parser image at
+      # /app/pdf_parser/paper_crf. Override PAPER_CRF_MODEL_DIR only to test an
+      # unreleased bundle mounted into the container.
     volumes:
       - ./data/uploads:/data/uploads:ro
       - ./data/recognition-output:/data/recognition-output
-      - ./model_train/artifacts:/models:ro
     read_only: true
     tmpfs:
       - /tmp:size=64m,noexec,nosuid,nodev

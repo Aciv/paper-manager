@@ -1,8 +1,10 @@
 """Runtime adapters for the reproducible paper CRF artifacts.
 
-The training package remains the only owner of feature functions.  This module
-loads those exact functions and artifacts once at parser startup, then applies
-small, conservative post-processing around them.
+Feature extraction, schema, and decoding live in the runtime-owned
+``paper_crf.models`` package; ``model_train`` is the internal training
+workspace and is never imported at runtime. This module loads the selected
+weights/specs once at parser startup, then applies small, conservative
+post-processing around them.
 """
 from __future__ import annotations
 
@@ -10,7 +12,6 @@ import json
 import logging
 import os
 import re
-import sys
 import threading
 from pathlib import Path
 from typing import Sequence
@@ -27,18 +28,18 @@ from papers_parser.paper_extractor import (
 )
 from papers_parser.regex_metadata_find import filter_reference_items
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from model_train.paper_crf.citation_features import (  # noqa: E402
+from paper_crf.models.citation_features import (
     CITATION_FEATURE_VERSION,
     CITATION_TOKEN_RE,
     extract_citation_features,
 )
-from model_train.paper_crf.line_features import FEATURE_VERSION, extract_line_features  # noqa: E402
-from model_train.paper_crf.reference_layout import decode_reference_layout  # noqa: E402
-from model_train.paper_crf.schema import CitationToken, LayoutLine as TrainingLayoutLine  # noqa: E402
+from paper_crf.models.line_features import FEATURE_VERSION, extract_line_features
+from paper_crf.models.reference_layout import decode_reference_layout
+from paper_crf.models.schema import (
+    ARTIFACT_SCHEMA_VERSION,
+    CitationToken,
+    LayoutLine as TrainingLayoutLine,
+)
 
 
 def _log_level_from_env() -> int:
@@ -99,13 +100,23 @@ _DATE_LIKE_RE = re.compile(
 class _CRF:
     """One immutable artifact plus a lock around pycrfsuite's mutable tagger."""
 
-    def __init__(self, model_path: Path, feature_version: str | tuple[str, ...]) -> None:
+    def __init__(
+        self,
+        model_path: Path,
+        feature_version: str | tuple[str, ...],
+        manifest_path: Path | None = None,
+    ) -> None:
         if not model_path.is_file():
             raise ValueError(f"CRF artifact is missing: {model_path}")
-        manifest_path = model_path.with_suffix(".json")
+        manifest_path = manifest_path or model_path.with_suffix(".json")
         if not manifest_path.is_file():
             raise ValueError(f"CRF manifest is missing: {manifest_path}")
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("schema_version") != ARTIFACT_SCHEMA_VERSION:
+            raise ValueError(
+                f"CRF manifest schema mismatch for {model_path.name}: "
+                f"{manifest.get('schema_version')!r} != {ARTIFACT_SCHEMA_VERSION!r}"
+            )
         accepted_versions = (feature_version,) if isinstance(feature_version, str) else feature_version
         if manifest.get("feature_version") not in accepted_versions:
             raise ValueError(
@@ -137,34 +148,50 @@ class CRFPaperExtractionEngine:
     def __init__(
         self,
         header_model: Path,
-        reference_model: Path,
+        reference_model: Path | None,
         citation_model: Path,
         header_use_layout: bool = False,
         reference_use_layout: bool = False,
         header_threshold: float = 0.912,
         reference_threshold: float = 0.946,
+        header_manifest: Path | None = None,
+        reference_manifest: Path | None = None,
+        citation_manifest: Path | None = None,
     ) -> None:
-        self._header = _CRF(header_model, FEATURE_VERSION)
-        # The retained reference-text artifact predates the Header-only v2
-        # priors. Extra header-prefixed runtime features are ignored by CRF,
-        # while all v1 reference features remain identical.
-        self._reference = _CRF(reference_model, ("paper-line-crf/v1", FEATURE_VERSION))
-        self._citation = _CRF(citation_model, CITATION_FEATURE_VERSION)
+        self._header = _CRF(header_model, FEATURE_VERSION, header_manifest)
+        # The reference region CRF is optional and disabled by default
+        # (PAPER_REFERENCE_CRF_ENABLED=false). When disabled it is not opened
+        # at all; references remain rule-owned. The retained reference-text
+        # artifact predates the Header-only v2 priors, so extra header-prefixed
+        # runtime features are ignored by CRF while all v1 features remain.
+        self._reference = (
+            _CRF(reference_model, ("paper-line-crf/v1", FEATURE_VERSION), reference_manifest)
+            if reference_model is not None
+            else None
+        )
+        self._citation = _CRF(citation_model, CITATION_FEATURE_VERSION, citation_manifest)
         self._header_use_layout = header_use_layout
         self._reference_use_layout = reference_use_layout
         self._header_threshold = header_threshold
         self._reference_threshold = reference_threshold
 
+    @property
+    def reference_enabled(self) -> bool:
+        """Whether the optional reference-region model is loaded."""
+        return self._reference is not None
+
     def model_summary(self) -> dict[str, str]:
         """Return safe artifact identifiers for startup observability."""
-        return {
+        summary = {
             "header_model": self._header.model_path.name,
             "header_feature_version": self._header.feature_version,
-            "reference_model": self._reference.model_path.name,
-            "reference_feature_version": self._reference.feature_version,
             "citation_model": self._citation.model_path.name,
             "citation_feature_version": self._citation.feature_version,
         }
+        if self._reference is not None:
+            summary["reference_model"] = self._reference.model_path.name
+            summary["reference_feature_version"] = self._reference.feature_version
+        return summary
 
     def extract(
         self,
@@ -180,25 +207,25 @@ class CRFPaperExtractionEngine:
         authors = _text_candidates(lines, header_labels, header_confidence, "AUTHOR", self._header_threshold)
         abstract = _joined_text_candidate(lines, header_labels, header_confidence, "ABSTRACT", self._header_threshold)
 
-        reference_labels, reference_confidence = self._reference.predict(extract_line_features(lines, use_layout=self._reference_use_layout))
-        reference_indexes = [
-            index for index, label in enumerate(reference_labels)
-            if label in {"REF_HEAD", "B-REF", "I-REF"}
-        ]
-        if reference_indexes and min(reference_confidence[index] for index in reference_indexes) >= self._reference_threshold:
-            decoded = decode_reference_layout("runtime", lines, reference_labels)
-            references = tuple(filter_reference_items(entry.raw_text for entry in decoded.entries))
-            references_detected = True
-        else:
-            references = ()
-            references_detected = False
+        references: tuple[str, ...] = ()
+        references_detected = False
+        if self._reference is not None:
+            reference_labels, reference_confidence = self._reference.predict(extract_line_features(lines, use_layout=self._reference_use_layout))
+            reference_indexes = [
+                index for index, label in enumerate(reference_labels)
+                if label in {"REF_HEAD", "B-REF", "I-REF"}
+            ]
+            if reference_indexes and min(reference_confidence[index] for index in reference_indexes) >= self._reference_threshold:
+                decoded = decode_reference_layout("runtime", lines, reference_labels)
+                references = tuple(filter_reference_items(entry.raw_text for entry in decoded.entries))
+                references_detected = True
         return ExtractionOutput(
             title=title,
             authors=authors,
             abstract=abstract,
             references_detected=references_detected,
             references=references,
-            reference_candidates=self.reference_candidates(references),
+            reference_candidates=self.reference_candidates(references) if references else (),
             extractor_name=self.name, extractor_version=self.version,
         )
 
@@ -236,18 +263,30 @@ class HybridPaperExtractionEngine:
     version = "v1"
     requires_layout = True
 
-    def __init__(self, rules, crf: CRFPaperExtractionEngine) -> None:
+    def __init__(
+        self,
+        rules,
+        crf: CRFPaperExtractionEngine,
+        *,
+        prefer_crf_header: bool = False,
+        name: str | None = None,
+    ) -> None:
         self._rules = rules
         self._crf = crf
+        self._prefer_crf_header = prefer_crf_header
+        if name is not None:
+            self.name = name
 
     def extract(self, markdown: str, blocks, layout_lines: Sequence[LayoutLine] = ()) -> ExtractionOutput:
         base = self._rules.extract(markdown, blocks, layout_lines)
-        # The reference region is rule-owned: the deterministic splitter is
-        # the only region/extraction source. The learned line model can fill
-        # absent header facts, but its reference entries neither replace an
-        # empty rule region nor add items (both would duplicate 序号 or invent
-        # unnumbered entries).
+        # Reference entries are rule-owned by default: the reference-region
+        # CRF is disabled unless PAPER_REFERENCE_CRF_ENABLED=true, and the
+        # current quality gate prefers the deterministic splitter (the CRF
+        # entries can duplicate 序号 or invent unnumbered entries). When the
+        # optional model is enabled and returns entries, use those entries so
+        # the path can be evaluated without a code change.
         references = base.references
+        references_detected = base.references_detected
         if not layout_lines:
             # No layout: the line-level CRFs cannot run, but Citation-CRF
             # field extraction only needs the raw entry strings and must still
@@ -263,15 +302,23 @@ class HybridPaperExtractionEngine:
                 extractor_name=self.name + "-no-layout", extractor_version=self.version,
             )
         learned = self._crf.extract(markdown, blocks, layout_lines)
-        title = _prefer_text_candidate(base.title, learned.title)
-        authors = base.authors or learned.authors
-        abstract = base.abstract or learned.abstract
+        if learned.references:
+            references = learned.references
+            references_detected = learned.references_detected
+        if self._prefer_crf_header:
+            title = learned.title or base.title
+            authors = learned.authors or base.authors
+            abstract = learned.abstract or base.abstract
+        else:
+            title = _prefer_text_candidate(base.title, learned.title)
+            authors = base.authors or learned.authors
+            abstract = base.abstract or learned.abstract
         candidates = self._crf.reference_candidates(references)
         return ExtractionOutput(
             title=title,
             authors=authors,
             abstract=abstract,
-            references_detected=base.references_detected,
+            references_detected=references_detected,
             references=tuple(references), reference_candidates=candidates,
             extractor_name=self.name, extractor_version=self.version,
         )
@@ -337,8 +384,11 @@ class ShadowPaperExtractionEngine:
             updates["author_disagreements"] = 1
         if _candidate_value(base.abstract) != _candidate_value(learned.abstract):
             updates["abstract_disagreements"] = 1
-        if _normalized_reference_set(base.references) != _normalized_reference_set(learned.references):
-            updates["reference_disagreements"] = 1
+        # The reference model is optional; skip this comparison when it was
+        # not loaded instead of reporting a false disagreement on every run.
+        if getattr(self._crf, "reference_enabled", True):
+            if _normalized_reference_set(base.references) != _normalized_reference_set(learned.references):
+                updates["reference_disagreements"] = 1
         self._record(updates)
         return base
 

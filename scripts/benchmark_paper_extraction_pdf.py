@@ -18,14 +18,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "pdf_parser"), str(ROOT)]
 
 import document_parser_pb2  # noqa: E402
-from papers_parser.crf_engine import (  # noqa: E402
-    CRFPaperExtractionEngine,
-    HybridPaperExtractionEngine,
-    ShadowPaperExtractionEngine,
-)
+from papers_parser.engine_factory import build_extraction_engine  # noqa: E402
 from papers_parser.extractor_service import _decode_extraction_request  # noqa: E402
-from papers_parser.paper_extractor import DeterministicPaperExtractionEngine  # noqa: E402
-from papers_parser.pdf2md_service import DocumentParser, extract_layout_lines_from_pdf  # noqa: E402
+from papers_parser.layout_lines import extract_layout_lines_from_pdf  # noqa: E402
+from papers_parser.pdf2md_service import DocumentParser  # noqa: E402
 
 
 class _Context:
@@ -45,7 +41,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("pdf", type=Path, help="local PDF to parse")
     parser.add_argument("--engine", choices=("rules", "crf", "hybrid", "shadow"), default="hybrid")
-    parser.add_argument("--model-dir", type=Path, default=ROOT / "model_train" / "artifacts")
+    parser.add_argument(
+        "--reference-crf-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=os.getenv("PAPER_REFERENCE_CRF_ENABLED", "false").strip().lower()
+        in {"1", "true", "yes", "on"},
+        help="evaluate the optional reference-region CRF; default keeps references rule-owned",
+    )
+    parser.add_argument("--model-dir", type=Path, default=ROOT / "pdf_parser" / "paper_crf")
     parser.add_argument("--image-dpi", type=int, default=72)
     # Production parser/extraction caps (see .env.example and server.py). The
     # previous diagnostic used len(source)+1 / 64 MiB / 100k, which bypassed
@@ -86,7 +89,11 @@ def main() -> None:
     markdown, blocks, _ = _decode_extraction_request(
         request, args.extraction_markdown_bytes, args.extraction_blocks,
     )
-    engine = build_engine(args.engine, args.model_dir)
+    engine = build_extraction_engine(
+        args.engine,
+        args.model_dir,
+        reference_crf_enabled=args.reference_crf_enabled,
+    )
     started = time.perf_counter()
     lines = extract_layout_lines_from_pdf(pdf, blocks, args.layout_lines) if getattr(engine, "requires_layout", False) else ()
     result = engine.extract(markdown, blocks, lines)
@@ -118,22 +125,6 @@ def main() -> None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         file_report = render(preview=False)
         args.output.write_text(json.dumps(file_report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def build_engine(mode: str, model_dir: Path):
-    rules = DeterministicPaperExtractionEngine()
-    if mode == "rules":
-        return rules
-    crf = CRFPaperExtractionEngine(
-        model_dir / "phase21" / "header-text-title-priors.crfsuite",
-        model_dir / "phase21" / "reference-text.crfsuite",
-        model_dir / "phase22" / "citation-context.crfsuite",
-    )
-    if mode == "crf":
-        return crf
-    if mode == "shadow":
-        return ShadowPaperExtractionEngine(rules, crf)
-    return HybridPaperExtractionEngine(rules, crf)
 
 
 if __name__ == "__main__":

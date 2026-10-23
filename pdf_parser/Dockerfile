@@ -15,9 +15,9 @@ RUN HTTP_PROXY="$HTTP_PROXY" HTTPS_PROXY="${HTTPS_PROXY:-$HTTP_PROXY}" NO_PROXY=
 RUN python -c "import pymupdf, pymupdf4llm"
 COPY proto /app/proto
 COPY pdf_parser /app/pdf_parser
-# Runtime imports the exact pure feature functions used during training, but
-# artifacts are mounted read-only by Compose rather than baked into the image.
-COPY model_train/paper_crf /app/model_train/paper_crf
+# Runtime CRF code, weights, and specs live under pdf_parser/paper_crf and are
+# baked into the image when present. CRF is optional: hybrid/shadow fall back
+# to deterministic rules if the bundle is missing or incompatible.
 # Generated stubs are checked in, but regenerate them during image construction
 # so the image always matches the contract it receives.
 RUN python -m grpc_tools.protoc -I/app/proto --python_out=. --grpc_python_out=. /app/proto/document_parser.proto

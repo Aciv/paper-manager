@@ -169,16 +169,35 @@ Rules do not reopen the PDF, and a missing/stale source degrades to rules.
 `PaperExtractionEngine` in `papers_parser/paper_extractor.py` is the
 replacement boundary. The `extract` worker constructs the engine and injects
 it plus request limits into `PaperMetadataExtractionRPC`. Choose its runtime
-mode with `PAPER_EXTRACTION_ENGINE=rules|hybrid|shadow|crf` and point it at a
-readable artifact directory with `PAPER_CRF_MODEL_DIR`. `hybrid` uses CRF facts
+mode with `PAPER_EXTRACTION_ENGINE=rules|hybrid|shadow|crf`.
+
+CRF runtime code, weights, and specs live in `pdf_parser/paper_crf/`:
+
+```text
+paper_crf/
+  models/    # feature extraction, schema, decoding
+  weights/   # selected .crfsuite files
+  specs/     # artifact manifests + bundle.json
+```
+
+`specs/bundle.json` selects the header/reference/citation artifacts and owns
+the calibrated thresholds. The default bundle root is this package;
+`PAPER_CRF_MODEL_DIR` overrides it for evaluating another promoted bundle.
+The reference-region CRF is opt-in (`PAPER_REFERENCE_CRF_ENABLED=false` by
+default): when disabled its model is not opened and reference entries remain
+rule-owned; header and citation CRFs are unaffected. `hybrid` uses CRF facts
 only above calibrated confidence and falls back to rules when models or layout
 facts are unavailable. `shadow` returns only rule output and logs aggregate,
-content-free CRF disagreement counters. Explicit `crf` fails when the first
-extract worker starts if its artifacts are missing or incompatible; the
-failure is returned to the Go caller as an unavailable parser request rather
-than preventing the lightweight server from listening. Compose mounts
-`model_train/artifacts` read-only at `/models` and uses `hybrid` by default.
-Worker startup logs artifact names and feature versions, never extracted text.
+content-free header disagreement counters (reference comparison is skipped
+when the reference model is disabled). Explicit `crf` is the full
+header+reference+citation cascade when the reference flag is enabled; otherwise
+it composes the header/citation CRFs with rule-owned references. It fails when
+the first extract worker starts if the required artifacts are missing or
+incompatible; the failure is returned to the Go caller as an unavailable
+parser request rather than preventing the lightweight server from listening. Compose bakes `pdf_parser/paper_crf` into the parser
+image and uses `hybrid` by default. `model_train/` is the training workspace
+and is not imported at runtime. Worker startup logs artifact names and feature
+versions, never extracted text.
 
 Override request limits with
 `PARSER_MAX_EXTRACTION_MARKDOWN_BYTES` and

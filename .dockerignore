@@ -5,6 +5,5 @@ model_train/data
 web/node_modules
 web/dist
 web/tsconfig.tsbuildinfo
-pdf_parser/__pycache__
-pdf_parser/papers_parser/__pycache__
-*.pyc
+**/__pycache__
+**/*.pyc

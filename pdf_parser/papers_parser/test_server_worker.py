@@ -168,7 +168,7 @@ class ServerImportTest(unittest.TestCase):
             "import sys, pathlib; "
             "from papers_parser.engine_factory import build_extraction_engine; "
             "build_extraction_engine('rules', pathlib.Path('/tmp')); "
-            "heavy=[name for name in ('pymupdf4llm','pymupdf_layout','onnxruntime','pycrfsuite','model_train') if name in sys.modules]; "
+            "heavy=[name for name in ('pymupdf4llm','pymupdf_layout','onnxruntime','pycrfsuite','paper_crf') if name in sys.modules]; "
             "print(','.join(heavy))"
         )
         completed = subprocess.run(

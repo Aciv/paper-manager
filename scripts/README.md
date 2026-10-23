@@ -12,10 +12,14 @@ candidates and separate recognition/extraction timings:
 ```
 
 Use `--engine rules` to compare the fallback, `--engine shadow` to return the
-rules result while logging aggregate CRF disagreements, or `--engine crf` to
-fail fast if the selected artifacts are missing/incompatible. Artifacts default to
-`model_train/artifacts`; override with `--model-dir` when testing a promoted
-model directory.
+rules result while logging aggregate CRF disagreements, or `--engine crf` for
+header/citation CRF with rule-owned references. Reference entries stay
+rule-owned by default; add `--reference-crf-enabled` (the default follows
+`PAPER_REFERENCE_CRF_ENABLED`) to evaluate the optional reference-region CRF.
+With that flag, `--engine crf` restores the full header+reference+citation
+cascade.
+The runtime bundle defaults to `pdf_parser/paper_crf`; override `--model-dir`
+when testing another promoted bundle.
 
 Start the API stack first, then run focused checks from the repository root:
 

@@ -83,6 +83,7 @@ def _build_extract_handler(config: dict):
     engine = build_extraction_engine(
         str(config["paper_extraction_engine"]),
         Path(config["paper_crf_model_dir"]),
+        reference_crf_enabled=bool(config.get("reference_crf_enabled", False)),
     )
     extractor = PaperMetadataExtractionRPC(
         engine,

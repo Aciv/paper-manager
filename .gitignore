@@ -19,3 +19,8 @@ data/
 
 # Local model corpora and trained artifacts
 model_train
+
+# Runtime CRF weights are release artifacts. The reference model exceeds
+# GitHub's 100 MiB file limit, so they are not tracked; copy them from the
+# training workspace when a build should include CRF.
+pdf_parser/paper_crf/weights/*.crfsuite

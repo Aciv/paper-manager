@@ -131,9 +131,14 @@ python3 -m venv .venv
 
 Parser 默认仍可只使用规则。若要启用已训练的论文提取 CRF，在 `.env` 设置
 `PAPER_EXTRACTION_ENGINE=hybrid`（缺失或不兼容模型自动退回规则）、`shadow`
-（仅记录累计差异，写入仍使用规则结果）或 `crf`（模型问题即启动失败）；模型目录由
-`PAPER_CRF_MODEL_DIR` 指定。Compose 默认
-将 `model_train/artifacts` 以只读方式挂载到 parser。单独评估本地 PDF 的识别与
+（仅记录累计差异，写入仍使用规则结果）或 `crf`（默认 header/citation 使用
+CRF、reference 仍走规则；开启下面的 flag 后恢复完整三模型 CRF；缺失 required
+模型会启动失败）。reference 区域的 CRF 默认关闭
+（`PAPER_REFERENCE_CRF_ENABLED=false`），参考文献条目由规则切分；header 和
+citation 的 CRF 不受影响。
+运行时的 CRF 代码、权重和规范位于 `pdf_parser/paper_crf/{models,weights,specs}`，
+parser 默认直接使用该目录，并把它打进 parser 镜像；`model_train/` 只用于内部训练。
+`PAPER_CRF_MODEL_DIR` 仅用于临时评估另一份 bundle。单独评估本地 PDF 的识别与
 提取耗时可运行：
 
 ```bash

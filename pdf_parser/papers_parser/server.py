@@ -42,7 +42,8 @@ def _log_level_from_env() -> int:
 
 LOG = get_logger(__name__, _log_level_from_env())
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+PARSER_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = PARSER_ROOT.parent
 DEFAULT_UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 
 
@@ -54,15 +55,29 @@ def _resolve_project_path(value: str | Path) -> Path:
     return path.resolve()
 
 
+def _env_flag(name: str, default: bool = False) -> bool:
+    """Read a boolean environment flag using the project's usual spellings."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 DEFAULT_MAX_FILE_SIZE = int(os.getenv("DEFAULT_MAX_FILE_SIZE", 100 << 20))
 DEFAULT_GRPC_MESSAGE_OVERHEAD = int(os.getenv("DEFAULT_GRPC_MESSAGE_OVERHEAD", 1 << 20))
 MAX_EXTRACTION_MARKDOWN_BYTES = int(os.getenv("MAX_EXTRACTION_MARKDOWN_BYTES", 32 << 20))
 MAX_EXTRACTION_BLOCKS = int(os.getenv("MAX_EXTRACTION_BLOCKS", 50000))
 MAX_EXTRACTION_LAYOUT_LINES = int(os.getenv("MAX_EXTRACTION_LAYOUT_LINES", 100000))
 DEFAULT_EXTRACTION_ENGINE = os.getenv("PAPER_EXTRACTION_ENGINE", "rules").strip().lower()
+# A CRF model directory is a paper_crf bundle root: models/ + weights/ + specs/.
+# The packaged runtime bundle is the default; PAPER_CRF_MODEL_DIR overrides it
+# only for evaluating another promoted bundle.
 DEFAULT_CRF_MODEL_DIR = _resolve_project_path(
-    os.getenv("PAPER_CRF_MODEL_DIR", "model_train/artifacts"),
+    os.getenv("PAPER_CRF_MODEL_DIR", str(PARSER_ROOT / "paper_crf")),
 )
+# The reference-region CRF is optional and off by default: reference entries
+# stay rule-owned. Set true only to evaluate the learned reference region.
+DEFAULT_REFERENCE_CRF_ENABLED = _env_flag("PAPER_REFERENCE_CRF_ENABLED", False)
 DEFAULT_IMAGE_DPI = int(os.getenv("DEFAULT_IMAGE_DPI", 144))
 DEFAULT_MAX_PAGES = int(os.getenv("PARSER_MAX_PAGES", 2000))
 DEFAULT_MAX_PAGE_EDGE_POINTS = float(os.getenv("PARSER_MAX_PAGE_EDGE_POINTS", 5000.0))
@@ -230,6 +245,7 @@ def _worker_config(args) -> dict:
         "max_extraction_markdown_bytes": args.max_extraction_markdown_bytes,
         "paper_extraction_engine": args.paper_extraction_engine,
         "paper_crf_model_dir": str(args.paper_crf_model_dir),
+        "reference_crf_enabled": args.reference_crf_enabled,
         "max_extraction_blocks": args.max_extraction_blocks,
         "max_extraction_layout_lines": args.max_extraction_layout_lines,
         "grpc_max_message_size": args.grpc_max_message_size,
@@ -423,6 +439,7 @@ def _add_inprocess_services(server, args) -> None:
     engine = build_extraction_engine(
         args.paper_extraction_engine,
         args.paper_crf_model_dir,
+        reference_crf_enabled=args.reference_crf_enabled,
     )
     extractor = PaperMetadataExtractionRPC(
         engine,
@@ -502,7 +519,18 @@ def main() -> None:
         default=int(os.getenv("PARSER_MAX_EXTRACTION_MARKDOWN_BYTES", MAX_EXTRACTION_MARKDOWN_BYTES)),
     )
     parser.add_argument("--paper-extraction-engine", choices=("rules", "crf", "hybrid", "shadow"), default=DEFAULT_EXTRACTION_ENGINE)
-    parser.add_argument("--paper-crf-model-dir", type=Path, default=DEFAULT_CRF_MODEL_DIR)
+    parser.add_argument(
+        "--paper-crf-model-dir",
+        type=Path,
+        default=DEFAULT_CRF_MODEL_DIR,
+        help="paper_crf bundle root (models/weights/specs); defaults to pdf_parser/paper_crf",
+    )
+    parser.add_argument(
+        "--reference-crf-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_REFERENCE_CRF_ENABLED,
+        help="use the reference-region CRF; default false leaves references rule-owned",
+    )
     parser.add_argument(
         "--max-extraction-blocks",
         type=int,
@@ -773,11 +801,17 @@ def _install_shutdown_handlers() -> threading.Event:
     return stop_requested
 
 
-def _build_extraction_engine(mode: str, model_dir: Path):
+def _build_extraction_engine(
+    mode: str,
+    model_dir: Path,
+    reference_crf_enabled: bool = False,
+):
     """Lazy compatibility wrapper used by operational tests."""
     from papers_parser.engine_factory import build_extraction_engine
 
-    return build_extraction_engine(mode, model_dir)
+    return build_extraction_engine(
+        mode, model_dir, reference_crf_enabled=reference_crf_enabled
+    )
 
 
 if __name__ == "__main__":
