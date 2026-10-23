@@ -8,6 +8,8 @@ export type Document = {
   sizeBytes: number;
   doi?: string;
   sourceState: DocumentSourceState;
+  // Present on search/list responses; optional so older payloads remain valid.
+  markdownStatus?: DocumentStageStatus;
   createdAt: string;
   updatedAt: string;
 };
@@ -386,8 +388,8 @@ async function requestFrom<T>(resourceBaseUrl: string, pathname: string, options
   throw new APIError(response.status, await responseErrorMessage(response, contentType));
 }
 
-async function requestText(pathname: string): Promise<string> {
-  const response = await fetch(`${baseUrl}${pathname}`);
+async function requestText(pathname: string, signal?: AbortSignal): Promise<string> {
+  const response = await fetch(`${baseUrl}${pathname}`, { signal });
   if (response.ok) return response.text();
   const contentType = response.headers.get('content-type') ?? '';
   throw new APIError(response.status, await responseErrorMessage(response, contentType));
@@ -517,8 +519,9 @@ export const api = {
   getDocumentReadingNoteSection: (id: string, sectionId: string): Promise<ReadingNoteSection> => request<ReadingNoteSection>(
     `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}`,
   ),
-  getDocumentReadingNoteSectionContent: (id: string, sectionId: string): Promise<string> => requestText(
+  getDocumentReadingNoteSectionContent: (id: string, sectionId: string, signal?: AbortSignal): Promise<string> => requestText(
     `/${encodeURIComponent(id)}/reading-note/sections/${encodeURIComponent(sectionId)}/content`,
+    signal,
   ),
   uploadDocumentReadingNoteFile: async (id: string, file: File, expectedRevision: number): Promise<DocumentReadingNote> => {
     const body = new FormData();

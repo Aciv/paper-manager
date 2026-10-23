@@ -53,6 +53,30 @@ const LEFT_MENU_LABELS: Record<LeftMenu, string> = { catalog: '论文目录', ba
 const RIGHT_MENU_LABELS: Record<RightMenu, string> = {
   info: '论文信息', citations: '引用信息', notes: '阅读注释', translation: '翻译',
 };
+// The column header is a single row, so only the short labels are shown; the
+// full label remains in the button's title and aria-label.
+const LEFT_MENU_SHORT_LABELS: Record<LeftMenu, string> = { catalog: '论文', base: '类别', outline: '大纲' };
+const RIGHT_MENU_SHORT_LABELS: Record<RightMenu, string> = {
+  info: '信息', citations: '引用', notes: '注释', translation: '翻译',
+};
+const LEFT_COLUMN_DEFAULT_WIDTH = 290;
+const RIGHT_MENU_DEFAULT_WIDTH: Record<RightMenu, number> = {
+  info: 340, citations: 380, notes: 680, translation: 360,
+};
+
+// Right-column widths are remembered per tab: notes need a text-workbench
+// width while metadata and citation lists stay compact. The legacy single
+// width is reused for the info tab so existing layouts do not jump.
+function readRightWidths(): Record<RightMenu, number> {
+  let legacy = 0;
+  try { legacy = Number(window.localStorage.getItem('library.rightWidth')) || 0; } catch { /* blocked storage */ }
+  const read = (menu: RightMenu): number => {
+    let stored = 0;
+    try { stored = Number(window.localStorage.getItem(`library.rightWidth.${menu}`)) || 0; } catch { /* blocked storage */ }
+    return stored > 0 ? stored : menu === 'info' && legacy > 0 ? legacy : RIGHT_MENU_DEFAULT_WIDTH[menu];
+  };
+  return { info: read('info'), citations: read('citations'), notes: read('notes'), translation: read('translation') };
+}
 
 type LibraryTranslationRequest = TranslationRequestSeed & {
   requestId: string;
@@ -151,9 +175,9 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
   // Side column widths: draggable via the handle on each column's inner edge,
-  // remembered across reloads.
-  const [leftWidth, setLeftWidth] = useState(() => Math.max(180, Number(window.localStorage.getItem('library.leftWidth')) || 290));
-  const [rightWidth, setRightWidth] = useState(() => Math.max(200, Number(window.localStorage.getItem('library.rightWidth')) || 320));
+  // remembered across reloads. The right column remembers one width per tab.
+  const [leftWidth, setLeftWidth] = useState(() => Math.max(180, Number(window.localStorage.getItem('library.leftWidth')) || LEFT_COLUMN_DEFAULT_WIDTH));
+  const [rightWidths, setRightWidths] = useState<Record<RightMenu, number>>(readRightWidths);
   const [resizing, setResizing] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   // Compact windows and tablets: the columns become overlay sheets so the PDF
@@ -244,10 +268,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const citationInfoRequest = useRef(0);
   const citationCards = useRef(new Map<string, HTMLLIElement>());
   const loadGeneration = useRef(0);
-  const resizeDrag = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number } | null>(null);
-  // Widen at most once per visit to the notes tab, so a later manual drag or
-  // window resize never snaps the column back.
-  const notesAutoWidened = useRef(false);
+  const resizeDrag = useRef<{ side: 'left' | 'right'; startX: number; startWidth: number; menu: RightMenu } | null>(null);
   // Floating edge button for a collapsed column: appears only while the pointer
   // is near that edge, pinned at the position of the first approach; clicking it
   // expands the column. Collapsing itself uses the menu-bar button.
@@ -305,41 +326,45 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     });
   }, []);
 
-  // Column widths: the user's drag is honoured while there is room, capped to a
-  // share of the viewport, and never squeezing the reading area below a minimum.
-  const MIN_READER_WIDTH = 360;
+  // Column widths: the user's drag is honoured while there is room. The right
+  // column has no fixed share cap; its only limit is keeping the reader usable.
+  const MIN_READER_WIDTH = 320;
   const MIN_COLUMN_WIDTH = 180;
   // The citation panel stacks a direction switch, filters and a card footer
   // with up to four actions. Below ~300px its labels and actions wrap into
   // vertical columns, so keep that side wider while the catalog stays compact.
   const MIN_RIGHT_COLUMN_WIDTH = 300;
-  // Reading notes are a text surface, not a metadata list: the section
-  // sidebar plus the Markdown column need more room than citation cards.
-  const NOTES_MIN_COLUMN_WIDTH = 560;
   const columnMin = (side: 'left' | 'right') => side === 'right' ? MIN_RIGHT_COLUMN_WIDTH : MIN_COLUMN_WIDTH;
-  const columnCap = Math.max(MIN_RIGHT_COLUMN_WIDTH, Math.round(viewportWidth * 0.45));
+  const rightWidth = rightWidths[rightMenu];
+  const setRightWidth = (value: number | ((current: number) => number)) => {
+    setRightWidths((current) => ({
+      ...current,
+      [rightMenu]: typeof value === 'function' ? value(current[rightMenu]) : value,
+    }));
+  };
   const widthMax = (side: 'left' | 'right') => {
     // The other side contributes at least its own floor, even when a stale
     // stored width from before that floor existed is smaller.
     const other = side === 'left'
       ? (rightCollapsed ? 0 : Math.max(columnMin('right'), rightWidth))
       : (leftCollapsed ? 0 : Math.max(columnMin('left'), leftWidth));
-    return Math.max(columnMin(side), Math.min(columnCap, viewportWidth - other - MIN_READER_WIDTH));
+    return Math.max(columnMin(side), viewportWidth - other - MIN_READER_WIDTH);
   };
   const effectiveLeftWidth = Math.max(columnMin('left'), Math.min(leftWidth, widthMax('left')));
   const effectiveRightWidth = Math.max(columnMin('right'), Math.min(rightWidth, widthMax('right')));
-
-  // Opening 阅读注释 widens a too-narrow column once; the user can still drag
-  // it back, and that manual choice is not overridden while the tab stays open.
-  useEffect(() => {
-    if (rightMenu !== 'notes' || rightCollapsed) {
-      notesAutoWidened.current = false;
+  const persistRightWidth = (menu: RightMenu, width: number) => {
+    try { window.localStorage.setItem(`library.rightWidth.${menu}`, String(width)); } catch { /* blocked storage */ }
+  };
+  const resetColumnWidth = (side: 'left' | 'right') => {
+    if (side === 'left') {
+      setLeftWidth(LEFT_COLUMN_DEFAULT_WIDTH);
+      try { window.localStorage.setItem('library.leftWidth', String(LEFT_COLUMN_DEFAULT_WIDTH)); } catch { /* blocked storage */ }
       return;
     }
-    if (notesAutoWidened.current) return;
-    notesAutoWidened.current = true;
-    setRightWidth((current) => Math.max(current, Math.min(NOTES_MIN_COLUMN_WIDTH, widthMax('right'))));
-  }, [rightMenu, rightCollapsed, viewportWidth, leftCollapsed, leftWidth]);
+    const width = RIGHT_MENU_DEFAULT_WIDTH[rightMenu];
+    setRightWidth(width);
+    persistRightWidth(rightMenu, width);
+  };
 
   const activeBase = bases.find((base) => base.id === baseID);
   const selectedIsPDF = selected?.contentType === 'application/pdf';
@@ -519,7 +544,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   function startResize(side: 'left' | 'right', event: React.PointerEvent<HTMLDivElement>) {
     if (event.button !== 0) return;
     event.preventDefault();
-    const drag = { side, startX: event.clientX, startWidth: side === 'left' ? leftWidth : rightWidth };
+    const drag = { side, startX: event.clientX, startWidth: side === 'left' ? leftWidth : rightWidth, menu: rightMenu };
     resizeDrag.current = drag;
     setResizing(true);
     const max = widthMax(side);
@@ -530,8 +555,8 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
         setLeftWidth(next);
         window.localStorage.setItem('library.leftWidth', String(next));
       } else {
-        setRightWidth(next);
-        window.localStorage.setItem('library.rightWidth', String(next));
+        setRightWidths((current) => ({ ...current, [drag.menu]: next }));
+        persistRightWidth(drag.menu, next);
       }
     };
     const onUp = () => {
@@ -805,15 +830,17 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
   const collapsedClass = `${leftCollapsed ? ' left-collapsed' : ''}${rightCollapsed ? ' right-collapsed' : ''}`;
 
   const leftColumnBody = <>
-    <div className="library-resizer" role="separator" aria-orientation="vertical" title="拖动调整左栏宽度"
-      onPointerDown={event => startResize('left', event)} />
-    <div className="library-menu-bar">
-      <a className="library-back-link" href="#">返回论文管理端</a>
+    <div className="library-resizer" role="separator" aria-orientation="vertical" title="拖动调整左栏宽度，双击恢复默认"
+      onPointerDown={event => startResize('left', event)} onDoubleClick={() => resetColumnWidth('left')} />
+    <div className="library-column-head">
+      <a className="library-back-link" href="#" title="返回论文管理端" aria-label="返回论文管理端">←</a>
+      <nav className="library-menu" role="tablist" aria-label="左侧功能菜单">
+        {LEFT_MENUS.map((menu) => <button className={leftMenu === menu ? 'active' : ''} type="button" role="tab"
+          aria-selected={leftMenu === menu} aria-label={LEFT_MENU_LABELS[menu]} title={LEFT_MENU_LABELS[menu]}
+          key={menu} onClick={() => setLeftMenu(menu)}>{LEFT_MENU_SHORT_LABELS[menu]}</button>)}
+      </nav>
       <button className="library-collapse" type="button" onClick={() => setLeftCollapsed(true)} aria-expanded="true" aria-controls="library-left-column" title="收起左栏">«</button>
     </div>
-    <nav className="library-menu" role="tablist" aria-label="左侧功能菜单">
-      {LEFT_MENUS.map((menu) => <button className={leftMenu === menu ? 'active' : ''} type="button" role="tab" aria-selected={leftMenu === menu} key={menu} onClick={() => setLeftMenu(menu)}>{LEFT_MENU_LABELS[menu]}</button>)}
-    </nav>
     <input ref={fileInput} className="library-folder-input" type="file" accept="application/pdf" multiple onChange={onLocalInput} />
     <input ref={folderInput} className="library-folder-input" type="file" multiple onChange={onLocalInput}
       {...({ webkitdirectory: 'true', directory: 'true' } as Record<string, string>)} />
@@ -922,21 +949,31 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
     </div>
   </>;
 
+  // The note panel is reused by the collapsed rail: keeping it mounted while
+  // the notes tab is active preserves its evidence targets, so the PDF keeps
+  // its note highlights even when the right column is folded away.
+  const notePanel = localMode || selected
+    ? <ReadingNotePanel
+      documentId={localMode ? undefined : selected?.id}
+      insertion={noteInsertion}
+      onInsertionConsumed={consumeNoteInsertion}
+      onNavigateEvidence={navigateNoteEvidence}
+      onEvidenceTargetsChange={setNoteEvidenceTargets}
+      onMessage={setMessage}
+    />
+    : <p className="hint">选择论文后显示阅读注释。</p>;
+
   const rightColumnBody = <>
-    <div className="library-resizer" role="separator" aria-orientation="vertical" title="拖动调整右栏宽度"
-      onPointerDown={event => startResize('right', event)} />
-    <div className="library-menu-bar">
-      {!localMode && selected?.doi && <button className="library-export" type="button"
-        title="通过 doi.org 获取当前论文的引文格式"
-        onClick={() => setExportCitation({
-          doi: selected.doi ?? '',
-          title: documentTitle(selected, metadata),
-        })}>引文格式</button>}
+    <div className="library-resizer" role="separator" aria-orientation="vertical" title="拖动调整右栏宽度，双击恢复当前标签的默认宽度"
+      onPointerDown={event => startResize('right', event)} onDoubleClick={() => resetColumnWidth('right')} />
+    <div className="library-column-head">
+      <nav className="library-menu" role="tablist" aria-label="右侧功能菜单">
+        {RIGHT_MENUS.map((menu) => <button className={rightMenu === menu ? 'active' : ''} type="button" role="tab"
+          aria-selected={rightMenu === menu} aria-label={RIGHT_MENU_LABELS[menu]} title={RIGHT_MENU_LABELS[menu]}
+          key={menu} onClick={() => setRightMenu(menu)}>{RIGHT_MENU_SHORT_LABELS[menu]}</button>)}
+      </nav>
       <button className="library-collapse" type="button" onClick={() => setRightCollapsed(true)} aria-expanded="true" aria-controls="library-right-column" title="收起右栏">»</button>
     </div>
-    <nav className="library-menu" role="tablist" aria-label="右侧功能菜单">
-      {RIGHT_MENUS.map((menu) => <button className={rightMenu === menu ? 'active' : ''} type="button" role="tab" aria-selected={rightMenu === menu} key={menu} onClick={() => setRightMenu(menu)}>{RIGHT_MENU_LABELS[menu]}</button>)}
-    </nav>
     <div className="library-detail">
       {rightMenu === 'info' && <section className="library-panel library-panel-info" aria-label="论文信息">
         {localMode ? <p className="hint">本地论文没有关联信息。</p> : selected ? <>
@@ -947,6 +984,12 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
             <dt>来源</dt><dd>{metadata?.sourceName || '未设置'}{metadata?.sourceUrl && <> · <a href={metadata.sourceUrl} target="_blank" rel="noreferrer">打开来源</a></>}</dd>
             <dt>发表信息</dt><dd>{[metadata?.venue, metadata?.publishedAt?.slice(0, 10), metadata?.volume, metadata?.issue, metadata?.pages].filter(Boolean).join(' · ') || '未设置'}</dd>
           </dl>
+          {selected.doi && <button className="library-export library-info-citation" type="button"
+            title="通过 doi.org 获取当前论文的引文格式"
+            onClick={() => setExportCitation({
+              doi: selected.doi ?? '',
+              title: documentTitle(selected, metadata),
+            })}>引文格式</button>}
         </> : <p className="hint">选择论文后显示论文信息。</p>}
       </section>}
       {rightMenu === 'citations' && <section className="library-panel library-panel-citations" aria-label="引用信息">
@@ -1069,16 +1112,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       {/* Kept mounted while another tab is active so switching between panels
           does not discard unsaved note drafts or the current translations. */}
       <div className="library-panel-slot" hidden={rightMenu !== 'notes'}>
-        {localMode || selected
-          ? <ReadingNotePanel
-            documentId={localMode ? undefined : selected?.id}
-            insertion={noteInsertion}
-            onInsertionConsumed={consumeNoteInsertion}
-            onNavigateEvidence={navigateNoteEvidence}
-            onEvidenceTargetsChange={setNoteEvidenceTargets}
-            onMessage={setMessage}
-          />
-          : <p className="hint">选择论文后显示阅读注释。</p>}
+        {notePanel}
       </div>
       <div className="library-panel-slot" hidden={rightMenu !== 'translation'}>
         <TranslationPanel request={translationRequest} onTranslationResult={setTranslationPreview} />
@@ -1114,7 +1148,7 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
           : !selected
             ? <div className="library-empty"><p>从左侧论文目录选择一篇论文开始阅读。</p></div>
             : selectedIsPDF
-              ? <PdfReader document={selected} citations={citations} onCitationLinks={filterCitationsFromPDF} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} translationPreview={translationPreview} onMessage={setMessage} onInsertEvidence={requestEvidenceInsertion} evidenceTargets={noteEvidenceTargets} evidenceJump={noteEvidenceJump} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
+              ? <PdfReader document={selected} citations={citations} onCitationLinks={filterCitationsFromPDF} onTranslate={requestTranslation} onTranslationSource={previewTranslationSource} translationPreview={translationPreview} onMessage={setMessage} onInsertEvidence={requestEvidenceInsertion} evidenceTargets={rightMenu === 'notes' ? noteEvidenceTargets : []} evidenceJump={noteEvidenceJump} outlinePlacement="external" outlineTarget={leftMenu === 'outline' ? outlineSlot : null} modeRail />
               : <div className="library-empty"><p>该论文不是 PDF，无法在阅读库中预览。</p></div>}
       </Suspense>
       {message && <p className="library-message">{message}</p>}
@@ -1124,9 +1158,12 @@ export function PaperLibraryPage({ initialBaseID, initialDocumentID }: { initial
       {rightCollapsed ? null : rightColumnBody}
     </aside>
     {/* Keep the translation engine mounted while the right column is folded
-        away; the popover can then translate without expanding the column. */}
+        away; the popover can then translate without expanding the column. The
+        notes tab stays mounted for the same reason, so its PDF evidence
+        overlays remain visible while the reader gets the extra width. */}
     {rightCollapsed && <div hidden>
       <TranslationPanel request={translationRequest} onTranslationResult={setTranslationPreview} />
+      {rightMenu === 'notes' && notePanel}
     </div>}
 
     {citationPaperInfoOpen && <div className="citation-detail-backdrop" role="presentation" onMouseDown={() => setCitationPaperInfoOpen(false)}>

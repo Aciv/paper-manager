@@ -25,7 +25,10 @@ import (
 
 const (
 	documentReadingStructureSchemaVersion = 6
-	documentStructureCompileTimeout       = 30 * time.Second
+	// Diagnostics are cached with the structure. Bump this when their meaning
+	// changes so old caches do not keep a stale explanation.
+	documentStructureDiagnosticsVersion = 1
+	documentStructureCompileTimeout     = 30 * time.Second
 )
 
 var ErrDocumentStructureTooLarge = errors.New("document structure exceeds response limit")
@@ -104,12 +107,17 @@ func (s *documentStructureService) loadDocumentReadingStructure(ctx context.Cont
 	if err != nil {
 		return types.DocumentReadingStructure{}, err
 	}
-	fingerprint := structureFingerprint(document.FileSHA256, manifest.RecognitionGeneration, outline.SchemaVersion)
+	fingerprint := structureFingerprint(document.FileSHA256, manifest.RecognitionGeneration,
+		outline.SchemaVersion, documentStructureDiagnosticsVersion, document.MarkdownStatus)
 	if cached, ok := s.readCache(documentID, fingerprint); ok {
 		return cached, nil
 	}
 	diagnostics := append([]string(nil), outline.Diagnostics...)
-	if outline.Source == types.DocumentOutlineUnavailable {
+	// "Recognize the document" is only true while the markdown stage has not
+	// succeeded. A legacy document can have a successful recognition but no
+	// persisted outline; in that case the reader may still use its native PDF
+	// outline, so the misleading hint must not be emitted.
+	if outline.Source == types.DocumentOutlineUnavailable && document.MarkdownStatus != types.DocumentStageSucceeded {
 		diagnostics = append(diagnostics, "recognize_document_to_create_outline")
 	}
 	structure := types.DocumentReadingStructure{
@@ -135,8 +143,9 @@ func (s *documentStructureService) loadDocumentReadingStructure(ctx context.Cont
 	return structure, nil
 }
 
-func structureFingerprint(fileSHA string, generation int64, outlineSchema int) string {
-	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d:%d", strings.ToLower(fileSHA), generation, outlineSchema, documentReadingStructureSchemaVersion)))
+func structureFingerprint(fileSHA string, generation int64, outlineSchema, diagnosticsVersion int, markdownStatus types.DocumentStageStatus) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d:%d:%d:%s",
+		strings.ToLower(fileSHA), generation, outlineSchema, documentReadingStructureSchemaVersion, diagnosticsVersion, markdownStatus)))
 	return hex.EncodeToString(sum[:])
 }
 

@@ -101,6 +101,48 @@ func (r *blockingStructureRepository) GetMarkdown(ctx context.Context, documentI
 	}
 }
 
+func TestDocumentStructureOmitsRecognitionHintAfterSuccessfulMarkdown(t *testing.T) {
+	documentID := uuid.New()
+	outlineJSON, err := types.LegacyDocumentOutline().JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, FileSHA256: "abc", SourceState: types.DocumentSourceAvailable,
+			MarkdownStatus: types.DocumentStageSucceeded},
+		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/current.md",
+			DocumentOutline: outlineJSON, RecognitionGeneration: 1},
+	}
+	service := NewDocumentStructureService(config.Config{DocumentStructureCacheDir: t.TempDir(),
+		DocumentStructureCacheEntries: 2, DocumentStructureCacheMaxBytes: 1 << 20}, repository)
+
+	structure, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil {
+		t.Fatalf("structure read: %v", err)
+	}
+	for _, diagnostic := range structure.Diagnostics {
+		if diagnostic == "recognize_document_to_create_outline" {
+			t.Fatalf("successful markdown still produced a recognition hint: %#v", structure.Diagnostics)
+		}
+	}
+
+	repository.document.MarkdownStatus = types.DocumentStageRunning
+	repository.markdown.RecognitionGeneration = 2
+	running, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil {
+		t.Fatalf("running structure read: %v", err)
+	}
+	found := false
+	for _, diagnostic := range running.Diagnostics {
+		if diagnostic == "recognize_document_to_create_outline" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unfinished markdown should keep the recognition hint: %#v", running.Diagnostics)
+	}
+}
+
 func TestDocumentStructureSingleflightKeepsCompileAfterFirstCallerCancels(t *testing.T) {
 	documentID := uuid.New()
 	outline, _ := (types.DocumentOutline{SchemaVersion: 1, Source: types.DocumentOutlineNone,

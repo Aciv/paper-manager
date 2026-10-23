@@ -151,6 +151,19 @@ function outlineSourceLabel(source?: DocumentOutlineSource): string {
 
 // The API keeps low-level diagnostic codes for agents/debugging. The reader
 // shows only actionable explanations and hides normal fallback details.
+// These diagnostics explain why a source outline is missing. They contradict
+// the UI when a directory is actually displayed, for example because PDF.js
+// supplied the native PDF outline as a fallback.
+const OUTLINE_ABSENCE_DIAGNOSTICS = new Set([
+  'recognize_document_to_create_outline',
+  'pdf_outline_read_failed',
+  'pdf_outline_invalid_item',
+  'pdf_outline_invalid_destination',
+  'pdf_outline_wholly_unusable',
+  'markdown_headings_missing',
+  'outline_unavailable',
+]);
+
 function outlineDiagnosticMessage(code: string): string | undefined {
   switch (code) {
     case 'pdf_outline_missing':
@@ -1503,8 +1516,39 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     } else if (target.rects.length === 0 && target.blockId) {
       onMessage(`已按第 ${target.page} 页定位；Block hint 仅作参考，区域以当前解析结果为准。`);
     }
-    const timer = window.setTimeout(() => setFocusedEvidenceKey(undefined), 3200);
-    return () => window.clearTimeout(timer);
+    // pdf.js' scrollPageIntoView only brings the page into view. Align the
+    // rendered evidence rectangle near the top of the reader so a note link
+    // lands on the cited passage, not merely somewhere on the page. Waiting for
+    // the rendered region (rather than using the link's rects) also handles
+    // evidence links that carry only a Block hint.
+    let timer = 0;
+    let cancelled = false;
+    const alignEvidenceTop = () => {
+      if (cancelled) return;
+      const scroll = scrollRef.current;
+      const pageDiv = viewerRef.current?.getPageView(target.page - 1)?.div as HTMLElement | undefined;
+      const regions = pageDiv?.querySelectorAll<HTMLElement>('.pdf-evidence-region.focused');
+      if (scroll && regions && regions.length > 0) {
+        let top = Number.POSITIVE_INFINITY;
+        regions.forEach((element) => {
+          const rect = element.getBoundingClientRect();
+          if (rect.height > 0) top = Math.min(top, rect.top);
+        });
+        if (Number.isFinite(top)) {
+          const delta = top - scroll.getBoundingClientRect().top - 24;
+          if (Math.abs(delta) > 1) scroll.scrollTop += delta;
+          return;
+        }
+      }
+      timer = window.setTimeout(alignEvidenceTop, 60);
+    };
+    timer = window.setTimeout(alignEvidenceTop, 0);
+    const focusTimer = window.setTimeout(() => setFocusedEvidenceKey(undefined), 3200);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      window.clearTimeout(focusTimer);
+    };
   }, [documentId, evidenceJump?.id, onMessage, rememberPosition]);
 
   function resetPickedBlocks() {
@@ -1987,6 +2031,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     : nativeOutline.length > 0 ? 'pdf_outline' : sourceStructure?.outline.source;
   const outlineDiagnostics = Array.from(new Set(
     [...(sourceStructure?.diagnostics ?? []), ...(sourceStructure?.outline.diagnostics ?? [])]
+      .filter((code) => outline.length === 0 || !OUTLINE_ABSENCE_DIAGNOSTICS.has(code))
       .map(outlineDiagnosticMessage)
       .filter((message): message is string => Boolean(message)),
   ));

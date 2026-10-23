@@ -11,6 +11,11 @@ exists, use the existing read tools and assemble the result in the host.
 
 ## Retrieval ladder
 
+First define the comparison question and dimensions. A broad request may use
+task, mechanism, evidence and deployment conditions as defaults; state the scope.
+Use `base_list_documents` for actual membership and `library_get_many` for bounded
+metadata batches rather than calling library_get once per member.
+
 1. **L0 — membership and metadata**
    - list Base members;
    - read title, authors, year, venue, DOI, tags, abstract;
@@ -32,6 +37,16 @@ exists, use the existing read tools and assemble the result in the host.
    - do not use raw PDFs unless the structured path cannot answer.
 
 ## Output
+
+Before ranking results, check task/input/output alignment, dataset and split,
+evaluation protocol, metric unit/direction, training data, model size, external
+tools and compute budget. Distinguish direct controlled comparisons from indirect
+cross-paper observations. If conditions differ, explain trade-offs instead of
+ranking raw numbers. Preserve these conditions in normal Markdown, not a new schema.
+
+Use explicit document UUID evidence links in a Base summary; `self` has no unique
+document context there. An existing note's conclusion still needs source checks
+when it drives a material comparison.
 
 Produce transient Markdown with:
 

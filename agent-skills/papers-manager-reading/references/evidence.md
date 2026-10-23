@@ -33,6 +33,10 @@ comparison. A single-paper note normally uses `self`.
   - `x1 = bboxX1 / pageWidth`
   - `y1 = bboxY1 / pageHeight`
 - Validate the final link with `papers_manager_evidence_validate` before writing it.
+- Reuse an identical validated target within the same reading run; do not
+  revalidate it for each mention. Recheck stale targets after recognition changes.
+- Validation checks the target, not whether the source supports the claim.
+  Read the source context; prioritize numbers, comparisons, figures and formulas.
 
 Do not guess page numbers from section numbers, and do not fabricate a Block
 UUID. If precise coordinates are unavailable, a page-only link is valid and
@@ -56,6 +60,17 @@ Place evidence next to the claim it supports:
   `对应原文 §3，pp.4–6`, but this does not replace body links.
 
 ## Missing evidence
+
+Distinguish these states next to the affected claim:
+
+- **未核验**: this reading did not inspect the relevant material.
+- **读取受限**: parsing or access failed; try a page image when useful.
+- **未发现报告**: relevant source sections and necessary appendices were checked
+  without finding the information; name the checked scope.
+
+Do not infer absence from an unread section or a missing Block. Separate author
+claims from reader interpretation and further inference when they could be confused.
+Use a separate gap section only when there is a useful follow-up list.
 
 When a claim is useful but cannot be tied to the source, mark it explicitly:
 

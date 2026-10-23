@@ -14,7 +14,7 @@ capabilities to the reading workflow.
 | `papers_manager_document_read_page_image` | Render a full page or normalized page bbox as PNG (synchronous, not a task). |
 | `papers_manager_reading_note_outline` | Read note revision, section tree, and parsed section descriptions. |
 | `papers_manager_reading_note_read_section` | Read one note section body. |
-| `papers_manager_reading_note_create` | Create an absent note only after user confirmation. |
+| `papers_manager_reading_note_create` | Create an absent note when the user requests generation/saving; no repeated confirmation. |
 | `papers_manager_reading_note_apply_edits` | Apply revision-fenced semantic edits (default). |
 | `papers_manager_reading_note_replace` | Replace the whole note only when explicitly requested. |
 | `papers_manager_reading_note_replace_section` | Replace one whole section; preserves the heading guard. |

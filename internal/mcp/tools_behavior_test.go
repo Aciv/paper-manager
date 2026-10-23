@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -325,16 +324,8 @@ func TestPageImageToolEnforcesMCPImageLimit(t *testing.T) {
 	}
 }
 
-func TestManifestToolsHaveDispatchCases(t *testing.T) {
-	source, err := os.ReadFile("server.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	matches := regexp.MustCompile(`case "(papers_manager_[^"]+)"`).FindAllStringSubmatch(string(source), -1)
-	cases := make(map[string]struct{}, len(matches))
-	for _, match := range matches {
-		cases[match[1]] = struct{}{}
-	}
+func TestManifestToolsHaveRegisteredHandlers(t *testing.T) {
+	server := newTestServer(t)
 	var manifest struct {
 		Tools []struct {
 			Name string `json:"name"`
@@ -344,12 +335,12 @@ func TestManifestToolsHaveDispatchCases(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range manifest.Tools {
-		if _, ok := cases[tool.Name]; !ok {
-			t.Errorf("manifest tool %q has no dispatch case", tool.Name)
+		if registered, ok := server.registry[tool.Name]; !ok || registered.handler == nil || registered.schema == nil {
+			t.Errorf("manifest tool %q has no validated handler", tool.Name)
 		}
 	}
-	if len(cases) != len(manifest.Tools) {
-		t.Errorf("dispatch cases = %d, manifest tools = %d", len(cases), len(manifest.Tools))
+	if len(server.registry) != len(manifest.Tools) {
+		t.Errorf("registered tools = %d, manifest tools = %d", len(server.registry), len(manifest.Tools))
 	}
 }
 

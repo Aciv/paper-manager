@@ -24,6 +24,8 @@ import {
 } from './noteEdits';
 import { parseNoteSectionMeta } from './noteSectionMeta.ts';
 import { renderReadingNoteMarkdown } from './readingNotePreview';
+import { ReadingNoteChapter } from './ReadingNoteChapter';
+import { buildNoteTree, getReadingChapter, type NoteTreeNode } from './noteReadingTree';
 
 export type NoteInsertionRequest = { id: string; seed: EvidenceSeed };
 
@@ -57,6 +59,13 @@ const NOTE_ZOOM_MAX = 2.5;
 const NOTE_ZOOM_STEP = 0.1;
 const NOTE_PREVIEW_BASE_PX = 15;
 const NOTE_ZOOM_STORAGE_KEY = 'library.noteZoom';
+// Section directory: a full-height splitter on the left of the content, or an
+// overlay drawer when the workbench itself is too narrow for two panes.
+const NOTES_SIDEBAR_DEFAULT = 240;
+const NOTES_SIDEBAR_MIN = 180;
+const NOTES_SIDEBAR_MAX = 420;
+const NOTES_SIDEBAR_STORAGE_KEY = 'library.notesSidebarWidth';
+const NOTES_DRAWER_BREAKPOINT = 560;
 
 function clampNoteZoom(value: number): number {
   return Math.round(Math.min(NOTE_ZOOM_MAX, Math.max(NOTE_ZOOM_MIN, value)) * 100) / 100;
@@ -100,6 +109,15 @@ function sectionBody(markdown: string, entry: ReadingNoteSectionEntry): string {
   return splitSectionBody(markdown, entry.level).body;
 }
 
+function findNoteNodePath(nodes: NoteTreeNode[], id: string): NoteTreeNode[] | undefined {
+  for (const node of nodes) {
+    if (node.entry.id === id) return [node];
+    const childPath = findNoteNodePath(node.children, id);
+    if (childPath) return [node, ...childPath];
+  }
+  return undefined;
+}
+
 function newSectionMarkdown(level: number, title: string, body: string): string {
   return `${'#'.repeat(level)} ${title.trim()}\n${body}`;
 }
@@ -132,6 +150,8 @@ export function ReadingNotePanel({
   const [blankDraft, setBlankDraft] = useState('');
   const [pendingEvidence, setPendingEvidence] = useState<EvidenceSeed>();
   const [viewMode, setViewMode] = useState<'read' | 'edit'>('read');
+  const [foldedSections, setFoldedSections] = useState<Set<string>>(new Set());
+  const [readingNavigation, setReadingNavigation] = useState(0);
   const [directoryOpen, setDirectoryOpen] = useState(() => {
     try {
       return window.localStorage.getItem('library.notesDirectory') !== 'closed';
@@ -154,11 +174,30 @@ export function ReadingNotePanel({
       return 1;
     }
   });
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [notesSidebarWidth, setNotesSidebarWidth] = useState(() => {
+    try {
+      const stored = Number(window.localStorage.getItem(NOTES_SIDEBAR_STORAGE_KEY));
+      return stored >= NOTES_SIDEBAR_MIN && stored <= NOTES_SIDEBAR_MAX ? stored : NOTES_SIDEBAR_DEFAULT;
+    } catch {
+      return NOTES_SIDEBAR_DEFAULT;
+    }
+  });
+  // The section currently under the top edge of the continuous chapter reader.
+  // It drives the breadcrumb and directory highlight without changing selection.
+  const [visibleSectionId, setVisibleSectionId] = useState<string>();
+  const [actionsOpen, setActionsOpen] = useState(false);
   const previewWheelCleanup = useRef<(() => void) | undefined>(undefined);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const noteFileInput = useRef<HTMLInputElement>(null);
   const sectionFileInput = useRef<HTMLInputElement>(null);
+  const workspaceRef = useRef<HTMLDivElement | null>(null);
+  const directoryRef = useRef<HTMLElement | null>(null);
+  const directoryRows = useRef(new Map<string, HTMLDivElement>());
+  const actionsRef = useRef<HTMLDivElement | null>(null);
+  const sidebarResize = useRef<{ startX: number; startWidth: number; max: number } | null>(null);
   const processedInsertion = useRef('');
   const noteRef = useRef<DocumentReadingNote | undefined>(note);
   noteRef.current = note;
@@ -168,7 +207,124 @@ export function ReadingNotePanel({
     [note, activeSectionId],
   );
   const activeCache = activeEntry ? sections[activeEntry.id] : undefined;
+  const directoryTree = useMemo(() => buildNoteTree(note?.directory.sections ?? []), [note?.directory]);
+  const chapterRootId = getReadingChapter(note?.directory.sections ?? [], activeSectionId)[0]?.id;
+  const readingChapter = useMemo(
+    () => getReadingChapter(note?.directory.sections ?? [], chapterRootId),
+    [note?.directory, chapterRootId],
+  );
+  const workspaceNarrow = workspaceWidth > 0 && workspaceWidth < NOTES_DRAWER_BREAKPOINT;
+  const notesSidebarMax = workspaceWidth > 0
+    ? Math.max(NOTES_SIDEBAR_MIN, Math.min(NOTES_SIDEBAR_MAX, workspaceWidth - 260))
+    : NOTES_SIDEBAR_MAX;
+  const effectiveNotesSidebarWidth = Math.min(notesSidebarWidth, notesSidebarMax);
+  // In read view the directory follows the continuous chapter reader; in edit
+  // view it follows the explicitly selected section.
+  const currentSectionId = viewMode === 'read' ? (visibleSectionId ?? activeSectionId) : activeSectionId;
+  const currentEntry = note?.directory.sections.find((entry) => entry.id === currentSectionId);
+  const chapterRoots = directoryTree.filter((node) => node.entry.level > 0);
+  const chapterIndex = chapterRoots.findIndex((node) => node.entry.id === chapterRootId);
+  const chapterPosition = chapterIndex >= 0 && chapterRoots.length > 1
+    ? `第 ${chapterIndex + 1} / ${chapterRoots.length} 章`
+    : `共 ${readingChapter.length} 节`;
+  const foldableSections = useMemo(() => {
+    const foldable = new Set<string>();
+    const walk = (nodes: NoteTreeNode[]) => nodes.forEach((node) => {
+      if (node.children.length > 0) foldable.add(node.entry.id);
+      walk(node.children);
+    });
+    walk(directoryTree);
+    return foldable;
+  }, [directoryTree]);
+  const onVisibleSectionChange = useCallback((sectionId: string) => setVisibleSectionId(sectionId), []);
   const activeSavedBody = activeEntry && activeCache ? sectionBody(activeCache.markdown, activeEntry) : '';
+
+  // Follow the workbench width so directory/content switch between side-by-side
+  // and an overlay drawer instead of stacking into a top/bottom split.
+  useEffect(() => {
+    const element = workspaceRef.current;
+    if (!element) {
+      setWorkspaceWidth(0);
+      return;
+    }
+    const observer = new ResizeObserver((entries) => {
+      setWorkspaceWidth(entries[0]?.contentRect.width ?? element.clientWidth);
+    });
+    observer.observe(element);
+    setWorkspaceWidth(element.clientWidth);
+    return () => observer.disconnect();
+  }, [note?.revision, note?.directory.sections.length]);
+
+  useEffect(() => {
+    if (!workspaceNarrow) setDrawerOpen(false);
+  }, [workspaceNarrow]);
+
+  // Reset the breadcrumb/highlight when the selected section or chapter changes.
+  useEffect(() => {
+    setVisibleSectionId(activeSectionId);
+  }, [activeSectionId, chapterRootId, documentId]);
+
+  // Reading can land on a folded grandchild; open its ancestor path so the
+  // highlighted directory row is actually visible.
+  useEffect(() => {
+    if (viewMode !== 'read' || !currentSectionId) return;
+    const path = findNoteNodePath(directoryTree, currentSectionId);
+    if (!path || path.length < 2) return;
+    setFoldedSections((current) => {
+      let next: Set<string> | undefined;
+      for (const node of path.slice(0, -1)) {
+        if (!current.has(node.entry.id)) continue;
+        next ??= new Set(current);
+        next.delete(node.entry.id);
+      }
+      return next ?? current;
+    });
+  }, [currentSectionId, viewMode, directoryTree]);
+
+  // Chapter-first accordion: the active chapter opens, the other chapters fold.
+  // The key is document + chapter, so saving a section does not reinitialize
+  // the tree or discard the reader's manual expansions.
+  const appliedChapterFold = useRef('');
+  useEffect(() => {
+    if (!note || !chapterRootId) return;
+    const key = `${documentId ?? ''}:${chapterRootId}`;
+    if (appliedChapterFold.current === key) return;
+    appliedChapterFold.current = key;
+    const next = new Set(foldableSections);
+    next.delete(chapterRootId);
+    for (const node of directoryTree) {
+      if (node.entry.id !== chapterRootId && node.children.length > 0) next.add(node.entry.id);
+    }
+    setFoldedSections(next);
+  }, [note, documentId, chapterRootId, foldableSections, directoryTree]);
+
+  // Keep the highlighted directory row visible while the chapter body scrolls.
+  useEffect(() => {
+    const container = directoryRef.current;
+    const row = currentSectionId ? directoryRows.current.get(currentSectionId) : undefined;
+    if (!container || !row) return;
+    const containerRect = container.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    if (rowRect.top < containerRect.top) container.scrollTop += rowRect.top - containerRect.top - 4;
+    else if (rowRect.bottom > containerRect.bottom) container.scrollTop += rowRect.bottom - containerRect.bottom + 4;
+  }, [currentSectionId, sidebarMode, directoryOpen, drawerOpen, foldedSections]);
+
+  useEffect(() => {
+    if (!actionsOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!actionsRef.current?.contains(event.target as Node)) setActionsOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setActionsOpen(false);
+    };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [actionsOpen]);
+
   const dirty = Boolean(activeEntry && activeCache && draft !== activeSavedBody);
   const activeEvidence = useMemo(
     () => parseEvidenceMarkdown(activeCache?.markdown ?? ''),
@@ -237,6 +393,7 @@ export function ReadingNotePanel({
     setAddOpen(false);
     setPendingEvidence(undefined);
     setViewMode('read');
+    setFoldedSections(new Set());
     if (!documentId) return;
     let active = true;
     setManifestLoading(true);
@@ -322,6 +479,7 @@ export function ReadingNotePanel({
   // other sections stay available for fast switching but never mark the PDF
   // until the user selects them. The reader still draws only visible pages.
   useEffect(() => {
+    if (viewMode === 'read' && readingChapter.length > 0) return;
     const sectionId = activeSectionId;
     const active = sectionId ? sections[sectionId] : undefined;
     if (!sectionId || !active) {
@@ -341,7 +499,7 @@ export function ReadingNotePanel({
     });
     onEvidenceTargetsChange(targets);
     return () => onEvidenceTargetsChange([]);
-  }, [activeSectionId, sections, onEvidenceTargetsChange]);
+  }, [activeSectionId, sections, onEvidenceTargetsChange, viewMode, readingChapter]);
 
   // Remember the reading scale per device. The inline font size below is the
   // only thing that changes, so the note reflows instead of being stretched.
@@ -442,6 +600,64 @@ export function ReadingNotePanel({
     }
   }
 
+  function expandCurrentChapter() {
+    setFoldedSections((current) => {
+      const next = new Set(current);
+      const open = (nodes: NoteTreeNode[]) => nodes.forEach((node) => {
+        next.delete(node.entry.id);
+        open(node.children);
+      });
+      const chapter = directoryTree.find((node) => node.entry.id === chapterRootId);
+      if (chapter) open([chapter]);
+      else next.clear();
+      return next;
+    });
+  }
+
+  function foldAllSections() {
+    setFoldedSections(new Set(foldableSections));
+  }
+
+  function selectFromDirectory(sectionId: string) {
+    void selectSection(sectionId).finally(() => {
+      if (workspaceNarrow) setDrawerOpen(false);
+    });
+  }
+
+  function resetSidebarWidth() {
+    setNotesSidebarWidth(NOTES_SIDEBAR_DEFAULT);
+    try { window.localStorage.setItem(NOTES_SIDEBAR_STORAGE_KEY, String(NOTES_SIDEBAR_DEFAULT)); } catch { /* blocked storage */ }
+  }
+
+  function startSidebarResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    const element = workspaceRef.current;
+    if (!element) return;
+    event.preventDefault();
+    const max = Math.max(NOTES_SIDEBAR_MIN, Math.min(NOTES_SIDEBAR_MAX, element.clientWidth - 260));
+    sidebarResize.current = {
+      startX: event.clientX,
+      startWidth: Math.min(notesSidebarWidth, max),
+      max,
+    };
+    const onMove = (moveEvent: PointerEvent) => {
+      const drag = sidebarResize.current;
+      if (!drag) return;
+      const next = Math.round(Math.min(drag.max, Math.max(NOTES_SIDEBAR_MIN, drag.startWidth + moveEvent.clientX - drag.startX)));
+      setNotesSidebarWidth(next);
+      try { window.localStorage.setItem(NOTES_SIDEBAR_STORAGE_KEY, String(next)); } catch { /* blocked storage */ }
+    };
+    const onUp = () => {
+      sidebarResize.current = null;
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
+  }
+
   // The read view emits evidence links as buttons (never anchors), so a click
   // can resolve the versioned URL and jump the PDF without leaving the note.
   function handlePreviewClick(event: React.MouseEvent<HTMLDivElement>) {
@@ -522,6 +738,7 @@ export function ReadingNotePanel({
   }
 
   async function selectSection(sectionId: string) {
+    setReadingNavigation((value) => value + 1);
     if (sectionId === activeSectionId || saving) return;
     if (dirty && !(await saveActive())) return;
     setStatus('');
@@ -905,7 +1122,7 @@ export function ReadingNotePanel({
     <button type="button" aria-pressed={viewMode === 'read'}
       className={viewMode === 'read' ? 'active' : ''}
       title="只读预览，证据链接可直接定位 PDF"
-      onClick={() => setViewMode('read')}>阅读</button>
+      onClick={() => { void (async () => { if (!dirty || await saveActive()) setViewMode('read'); })(); }}>阅读</button>
     <button type="button" aria-pressed={viewMode === 'edit'}
       className={viewMode === 'edit' ? 'active' : ''}
       title="编辑 Markdown"
@@ -918,7 +1135,123 @@ export function ReadingNotePanel({
       aria-label={`阅读字号 ${Math.round(previewZoom * 100)}%，点击恢复 100%`}
       onClick={resetPreviewZoom}>{Math.round(previewZoom * 100)}%</button>
     : null;
-  const headActions = <div className="reading-note-head-actions">{zoomControl}{viewTabs}</div>;
+  const drawerToggle = workspaceNarrow
+    ? <button type="button" className="reading-note-drawer-toggle" aria-expanded={drawerOpen}
+      title={drawerOpen ? '关闭目录与证据' : '打开目录与证据'}
+      onClick={() => setDrawerOpen((open) => !open)}>目录</button>
+    : null;
+  // Whole-note actions are rare compared with reading/editing, so they live in
+  // a compact overflow menu instead of a permanent toolbar row.
+  const noteActions = note ? <div className="reading-note-overflow" ref={actionsRef}>
+    <button type="button" className="reading-note-overflow-trigger" aria-label="更多笔记操作"
+      aria-haspopup="menu" aria-expanded={actionsOpen}
+      onClick={() => setActionsOpen((open) => !open)}>⋯</button>
+    {actionsOpen && <div className="reading-note-overflow-menu" role="menu" aria-label="整篇笔记操作">
+      <button type="button" role="menuitem" disabled={saving}
+        onClick={() => { setActionsOpen(false); noteFileInput.current?.click(); }}>上传整篇 .md</button>
+      <button type="button" role="menuitem" disabled={saving}
+        onClick={() => { setActionsOpen(false); void openEditor('import'); }}>导入并替换</button>
+      <button type="button" role="menuitem" disabled={saving}
+        onClick={() => { setActionsOpen(false); void exportNote(); }}>导出</button>
+      <button type="button" role="menuitem" className="reading-note-overflow-danger" disabled={saving}
+        onClick={() => { setActionsOpen(false); void deleteNote(); }}>删除笔记</button>
+    </div>}
+  </div> : null;
+  const headActions = <div className="reading-note-head-actions">{drawerToggle}{zoomControl}{viewTabs}{noteActions}</div>;
+
+  function renderDirectory(nodes: NoteTreeNode[], depth = 0) {
+    return <ul className="reading-note-tree-list">{nodes.map(({ entry, number, children }) => {
+      const folded = foldedSections.has(entry.id);
+      const chapter = depth === 0;
+      const highlighted = entry.id === currentSectionId;
+      return <li key={entry.id} className={`reading-note-tree-node level-${entry.level}${chapter ? ' chapter' : ''}`}>
+        <div className={`reading-note-tree-row${highlighted ? ' active' : ''}${entry.id === chapterRootId ? ' current-chapter' : ''}`}
+          ref={(node) => { if (node) directoryRows.current.set(entry.id, node); else directoryRows.current.delete(entry.id); }}>
+          {children.length > 0 ? <button type="button" className="reading-note-tree-toggle"
+            aria-label={`${folded ? '展开' : '折叠'}${sectionLabel(entry)}`} aria-expanded={!folded}
+            onClick={() => setFoldedSections((current) => {
+              const next = new Set(current);
+              if (next.has(entry.id)) next.delete(entry.id); else next.add(entry.id);
+              return next;
+            })}>
+            <svg className={`reading-note-tree-chevron${folded ? '' : ' expanded'}`} viewBox="0 0 12 12" aria-hidden="true">
+              <path d="M4.25 2.5 7.75 6l-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button> : <span className="reading-note-tree-spacer" />}
+          <button type="button" className="reading-note-tree-select" aria-current={highlighted ? 'location' : undefined}
+            disabled={saving} onClick={() => selectFromDirectory(entry.id)} title={sectionLabel(entry)}>
+            {!chapter && <span className="reading-note-tree-number">{number}</span>}
+            <span className="reading-note-section-title">{sectionLabel(entry)}</span>
+            {entry.id === activeSectionId && dirty && <span className="reading-note-dirty">●</span>}
+          </button>
+        </div>
+        {children.length > 0 && !folded && renderDirectory(children, depth + 1)}
+      </li>;
+    })}</ul>;
+  }
+
+  function renderSidebar(mode: 'open' | 'collapsed' | 'drawer') {
+    if (mode === 'collapsed') {
+      return <aside className="reading-note-sidebar collapsed" aria-label="笔记侧边栏">
+        <button className="reading-note-sidebar-rail" type="button" aria-expanded="false"
+          title={`展开侧边栏（${sidebarMode === 'evidence' ? '证据' : '目录'}）`}
+          aria-label={`展开侧边栏（${sidebarMode === 'evidence' ? '证据' : '目录'}）`} onClick={toggleDirectory}>
+          <span aria-hidden="true">›</span>
+          <span className="reading-note-sidebar-rail-label">{sidebarMode === 'evidence' ? '证据' : '目录'}</span>
+        </button>
+      </aside>;
+    }
+    return <aside className={`reading-note-sidebar${mode === 'drawer' ? ' drawer' : ''}`} aria-label="笔记侧边栏"
+      style={mode === 'open' ? { width: effectiveNotesSidebarWidth } : undefined}>
+      <div className="reading-note-sidebar-head">
+        <div className="reading-note-sidebar-tabs" role="group" aria-label="侧边栏内容">
+          <button type="button" aria-pressed={sidebarMode === 'directory'}
+            className={sidebarMode === 'directory' ? 'active' : ''}
+            title="笔记 section 目录"
+            onClick={() => chooseSidebarMode('directory')}>目录</button>
+          <button type="button" aria-pressed={sidebarMode === 'evidence'}
+            className={sidebarMode === 'evidence' ? 'active' : ''}
+            title="当前 section 的证据定位"
+            onClick={() => chooseSidebarMode('evidence')}>
+            证据{activeEvidence.links.length > 0 ? ` ${activeEvidence.links.length}` : ''}
+          </button>
+        </div>
+        <button className="reading-note-sidebar-collapse" type="button" aria-expanded="true"
+          title={mode === 'drawer' ? '关闭目录' : '收起侧边栏'} aria-label={mode === 'drawer' ? '关闭目录' : '收起侧边栏'}
+          onClick={mode === 'drawer' ? () => setDrawerOpen(false) : toggleDirectory}>{mode === 'drawer' ? '×' : '‹'}</button>
+      </div>
+      {sidebarMode === 'directory' ? <>
+        <div className="reading-note-tree-actions">
+          <span>{note?.directory.sections.length ?? 0} 节</span>
+          <button type="button" onClick={expandCurrentChapter}>展开本章</button>
+          <button type="button" onClick={foldAllSections}>折叠全部</button>
+        </div>
+        <nav className="reading-note-directory" aria-label="笔记 section 目录" ref={directoryRef}>{renderDirectory(directoryTree)}</nav>
+      </> : <div className="reading-note-evidence-pane">
+        {!activeEntry
+          ? <p className="hint">选择一个 section 查看证据链接。</p>
+          : activeEvidence.links.length === 0 && activeEvidence.diagnostics.length === 0
+            ? <p className="hint">当前 section 没有证据链接。在 PDF 中选择内容后点「插入证据」。</p>
+            : <>
+              {activeEvidence.links.length > 0 && <ol className="reading-note-evidence-list">
+                {activeEvidence.links.map((link, index) => {
+                  const target = link.target;
+                  const external = target?.documentId && target.documentId !== documentId;
+                  return <li key={`${link.href}-${index}`}>
+                    <span title={link.text}>{target ? `第 ${target.page} 页` : '无效链接'}</span>
+                    {target && !external
+                      ? <button type="button" aria-label={`定位第 ${target.page} 页`}
+                        onClick={() => { onNavigateEvidence(target); if (workspaceNarrow) setDrawerOpen(false); }}>定位</button>
+                      : <span className="reading-note-diagnostic">{external ? '指向其他文档' : '无法定位'}</span>}
+                    {link.diagnostics.map((diagnostic) => <span className="reading-note-diagnostic" key={diagnostic}>{diagnostic}</span>)}
+                  </li>;
+                })}
+              </ol>}
+              {activeEvidence.diagnostics.map((diagnostic) => <p className="reading-note-diagnostic" key={diagnostic}>{diagnostic}</p>)}
+            </>}
+      </div>}
+    </aside>;
+  }
 
   return <section className="library-panel library-panel-notes" aria-label="阅读注释">
     <input ref={noteFileInput} type="file" accept=".md,text/markdown,text/plain" hidden
@@ -933,21 +1266,6 @@ export function ReadingNotePanel({
         event.target.value = '';
         if (file) void uploadSectionNote(file);
       }} />
-    <div className="reading-note-toolbar">
-      <div className="reading-note-title">
-        <strong>阅读注释</strong>
-      </div>
-      <div className="reading-note-toolbar-actions" role="group" aria-label="整篇笔记操作">
-        {note && <button type="button" disabled={saving} title="上传整篇 Markdown 并替换当前笔记"
-          onClick={() => noteFileInput.current?.click()}>上传 .md</button>}
-        {note && <button type="button" disabled={saving} title="编辑并替换整篇笔记"
-          onClick={() => void openEditor('import')}>导入</button>}
-        {note && <button type="button" disabled={saving} title="下载整篇 Markdown" onClick={() => void exportNote()}>导出</button>}
-        {note && <button className="reading-note-danger" type="button" disabled={saving} title="删除整份阅读笔记"
-          onClick={() => void deleteNote()}>删除</button>}
-      </div>
-    </div>
-
     {!documentId ? <p className="hint">本地打开的 PDF 没有阅读笔记；先导入到论文库后即可使用。</p>
       : manifestLoading ? <p className="hint">正在读取阅读笔记…</p>
       : manifestError ? <p className="reading-note-error">{manifestError}</p>
@@ -1011,74 +1329,29 @@ export function ReadingNotePanel({
           </>}
       </div>
       : <>
-        <div className="reading-note-workspace">
-          <aside className={`reading-note-sidebar${directoryOpen ? '' : ' collapsed'}`} aria-label="笔记侧边栏">
-            {directoryOpen ? <>
-              <div className="reading-note-sidebar-head">
-                <div className="reading-note-sidebar-tabs" role="group" aria-label="侧边栏内容">
-                  <button type="button" aria-pressed={sidebarMode === 'directory'}
-                    className={sidebarMode === 'directory' ? 'active' : ''}
-                    title="笔记 section 目录"
-                    onClick={() => chooseSidebarMode('directory')}>目录</button>
-                  <button type="button" aria-pressed={sidebarMode === 'evidence'}
-                    className={sidebarMode === 'evidence' ? 'active' : ''}
-                    title="当前 section 的证据定位"
-                    onClick={() => chooseSidebarMode('evidence')}>
-                    证据{activeEvidence.links.length > 0 ? ` ${activeEvidence.links.length}` : ''}
-                  </button>
-                </div>
-                <button className="reading-note-sidebar-collapse" type="button" aria-expanded="true"
-                  title="收起侧边栏" aria-label="收起侧边栏" onClick={toggleDirectory}>‹</button>
-              </div>
-              {sidebarMode === 'directory' ? <div className="reading-note-directory" role="tree" aria-label="笔记 section 目录">
-                {note.directory.sections.map((entry) => <button
-                  key={entry.id}
-                  type="button"
-                  role="treeitem"
-                  aria-selected={entry.id === activeSectionId}
-                  className={entry.id === activeSectionId ? 'active' : ''}
-                  style={{ paddingLeft: `${5 + entry.level * 10}px` }}
-                  disabled={saving || Boolean(sectionLoading)}
-                  onClick={() => void selectSection(entry.id)}
-                  title={sectionLabel(entry)}
-                >
-                  <span className="reading-note-section-title">{sectionLabel(entry)}</span>
-                  {entry.id === activeSectionId && dirty && <span className="reading-note-dirty" title="有未保存修改">●</span>}
-                </button>)}
-              </div> : <div className="reading-note-evidence-pane">
-                {!activeEntry
-                  ? <p className="hint">选择一个 section 查看证据链接。</p>
-                  : activeEvidence.links.length === 0 && activeEvidence.diagnostics.length === 0
-                    ? <p className="hint">当前 section 没有证据链接。在 PDF 中选择内容后点「插入证据」。</p>
-                    : <>
-                      {activeEvidence.links.length > 0 && <ol className="reading-note-evidence-list">
-                        {activeEvidence.links.map((link, index) => {
-                          const target = link.target;
-                          const external = target?.documentId && target.documentId !== documentId;
-                          return <li key={`${link.href}-${index}`}>
-                            <span title={link.text}>{target ? `第 ${target.page} 页` : '无效链接'}</span>
-                            {target && !external
-                              ? <button type="button" aria-label={`定位第 ${target.page} 页`} onClick={() => onNavigateEvidence(target)}>定位</button>
-                              : <span className="reading-note-diagnostic">{external ? '指向其他文档' : '无法定位'}</span>}
-                            {link.diagnostics.map((diagnostic) => <span className="reading-note-diagnostic" key={diagnostic}>{diagnostic}</span>)}
-                          </li>;
-                        })}
-                      </ol>}
-                      {activeEvidence.diagnostics.map((diagnostic) => <p className="reading-note-diagnostic" key={diagnostic}>{diagnostic}</p>)}
-                    </>}
-              </div>}
-            </> : <button className="reading-note-sidebar-rail" type="button" aria-expanded="false"
-              title={`展开侧边栏（${sidebarMode === 'evidence' ? '证据' : '目录'}）`}
-              aria-label={`展开侧边栏（${sidebarMode === 'evidence' ? '证据' : '目录'}）`} onClick={toggleDirectory}>
-              <span aria-hidden="true">›</span>
-              <span className="reading-note-sidebar-rail-label">{sidebarMode === 'evidence' ? '证据' : '目录'}</span>
-            </button>}
-          </aside>
+        <div className={`reading-note-workspace${workspaceNarrow ? ' narrow' : ''}`} ref={workspaceRef}>
+          {workspaceNarrow
+            ? drawerOpen && <>
+              <div className="reading-note-drawer-backdrop" role="presentation" onClick={() => setDrawerOpen(false)} />
+              {renderSidebar('drawer')}
+            </>
+            : <>
+              {renderSidebar(directoryOpen ? 'open' : 'collapsed')}
+              {directoryOpen && <div className="reading-note-splitter" role="separator" aria-orientation="vertical"
+                title="拖动调整目录宽度，双击恢复默认"
+                onPointerDown={startSidebarResize} onDoubleClick={resetSidebarWidth} />}
+            </>}
           <div className="reading-note-content">
             {activeEntry && <div className="reading-note-section-head">
               <div className="reading-note-section-meta">
-                <strong>{editorHeading}</strong>
-                {activeSectionMeta.meta.description && <span className="reading-note-section-description">{activeSectionMeta.meta.description}</span>}
+                <strong title={viewMode === 'read' ? (readingChapter[0] ? sectionLabel(readingChapter[0]) : '') : editorHeading}>
+                  {viewMode === 'read' ? (readingChapter[0] ? sectionLabel(readingChapter[0]) : '') : editorHeading}
+                </strong>
+                {viewMode === 'read'
+                  ? currentEntry && currentEntry.id !== chapterRootId
+                    ? <span className="reading-note-breadcrumb">{sectionLabel(currentEntry)}</span>
+                    : <span className="reading-note-breadcrumb">{chapterPosition}</span>
+                  : activeSectionMeta.meta.description && <span className="reading-note-section-description">{activeSectionMeta.meta.description}</span>}
               </div>
               {headActions}
             </div>}
@@ -1099,7 +1372,13 @@ export function ReadingNotePanel({
                 <button type="button" disabled={saving} onClick={() => setAddOpen(false)}>取消</button>
               </div>
             </div>}
-            {sectionLoading === activeSectionId ? <p className="hint">正在读取 section…</p>
+            {viewMode === 'read' && documentId && readingChapter.length > 0
+              ? <ReadingNoteChapter key={`${documentId}:${chapterRootId}:${note.revision}`}
+                documentId={documentId} entries={readingChapter} selectedId={activeSectionId} navigation={readingNavigation}
+                fontSize={NOTE_PREVIEW_BASE_PX * previewZoom} attachZoom={attachPreviewZoom}
+                onClick={handlePreviewClick} onEvidenceTargetsChange={onEvidenceTargetsChange}
+                onVisibleSectionChange={onVisibleSectionChange} />
+              : sectionLoading === activeSectionId ? <p className="hint">正在读取 section…</p>
               : activeEntry ? <>
                 {viewMode === 'edit' ? <>
                   <textarea

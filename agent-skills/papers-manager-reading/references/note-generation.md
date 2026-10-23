@@ -1,193 +1,51 @@
-# Note generation
+# 笔记写入流程
 
-## Structure policy
+内容和模板统一见 [notes-standard.md](notes-standard.md)，证据统一见 [evidence.md](evidence.md)。本文件只规定发布、增量编辑和 metadata。
 
-Use the template and mode rules in [notes-standard.md](notes-standard.md).
-Default to the standard analysis-first structure:
+## 先阅读，再发布
 
-```markdown
-# 论文概览
-# 问题与动机
-# 方法与关键设计
-# 实验设置与结果
-# 局限与风险
-# 开放问题
-# 证据缺口
-```
+1. 读取现有笔记目录、revision 和 source outline，确定创建还是增量更新。
+2. 阅读所需来源，整理主张、成立条件和证据，形成可独立阅读的内容。
+3. 生成章节 description，检查证据和实际覆盖范围。
+4. 不存在笔记时，用 reading_note_create 和 expected_revision=0 创建。用户的生成/保存请求已构成授权，没有写入请求则只回答。
+5. 已有笔记先读取受影响章节，再携带已读取快照的 revision 写入。
+6. 检查结果的 revision、changed/deleted sections，按需回读确认最终内容。
 
-For a brief note, merge setup/results and omit the separate gap section only when
-the user explicitly asks for brevity. For a deep note, split method, setup,
-results, and ablations.
+不要先创建空模板再开始阅读。长任务可逐节发布，但每次必须保存有内容、有依据的完整章节，并说明尚未覆盖部分。中途失败只报告已保存内容。
+目标更新保留无关内容，完整扩展可新增缺失分析，整篇替换需明确授权。
 
-Do not copy the paper's complete outline into note headings. The source outline
-already describes the paper and can change after re-recognition; the note is a
-separate analysis artifact.
+## Section 与编辑
 
-For a long paper or an explicit user request, support an optional walkthrough:
+每节为一个 H1–H3 标题及正文，正文编辑不能新增 H1–H3 标题。
+结构新增使用 addSection，整节替换使用 replaceSection，正文编辑使用 replaceRange / replaceText / insertAt / appendText。
 
-```markdown
-# 逐节笔记
-## Introduction
-## Method
-## Experiments
-## Limitations
-```
+整篇首次创建可提交带 H1/H2/H3 的完整 Markdown，由服务端拆分目录和章节文件。
+增量扩充方法/结果时，每个 H2/H3 都用 addSection 创建真实子节，并按 schema
+提供 parent_id 和必要的 after_id；不要把多个子标题塞进父节正文或 replaceSection。
+先读取目录确定父节与顺序，创建子节后以工具返回的 ID 为准。
+父节仅保留总览，已有细节若移动到子节，应在同批允许的操作中或子节成功保存后
+清理对应重复段落；失败时保留原内容，不能先删除尚未成功迁移的信息。
 
-Keep it bounded to major source sections, not every heading. Record the source
-mapping in each section description.
-
-Always preserve an existing note's structure during a targeted update. Do not
-reorder, rename, or rewrite unrelated sections. When the user asks to expand or
-complete an existing note, add the missing analysis sections and enrich the
-existing ones instead of treating the current short structure as final.
-
-## Depth standard
-
-A complete reading note is analysis, not a shortened abstract. Unless the user
-explicitly asks for a brief note, cover:
-
-- the problem and why it matters;
-- the paper's contributions and how they differ from prior approaches;
-- the method: components, equations/mechanisms, inputs/outputs, and design
-  choices;
-- training/evaluation setup: datasets, baselines, hyperparameters, hardware, or
-  other reproducibility facts;
-- quantitative results and ablations, including important comparisons;
-- limitations, assumptions, open questions, or inconsistencies.
-
-Use specific facts, numbers, mechanisms, and comparisons. A section with one
-generic paragraph is usually too shallow for a full note. Keep sections bounded
-and readable; do not compensate for vagueness by copying paper text.
-
-Key claims should carry evidence links when the source location is available.
-If the note cannot locate a claim, write an explicit evidence gap rather than
-inventing precision.
-
-## Rendering constraints
-
-The current web reader supports headings, paragraphs, bullet/numbered lists,
-blockquotes, fenced code, inline code, bold/italic, and links. It does not render
-pipe tables, raw HTML, or inline LaTeX yet. Generated notes should therefore:
-
-- use short paragraphs and bullets;
-- use `**标签**：内容` lead-ins for dense facts;
-- link formulas by page/Block/rectangle instead of guessing LaTeX;
-- avoid pipe tables, raw HTML, and note-body images until supported;
-- keep one section focused on one question.
-
-## Section shape
-
-Each note section is one H1-H3 heading plus body content. The heading level is
-part of the section identity. Body edits must not introduce another H1-H3
-heading.
-
-Write with semantic edits:
-
-- `addSection` for a new section;
-- `replaceSection` for a complete section replacement;
-- `replaceRange` / `replaceText` / `insertAt` / `appendText` for body changes.
-
-Edit fields are op-specific: `replaceText` uses `old_text` + `new_text`;
-`replaceRange`, `insertAt`, `appendText`, `replaceSection`, and `addSection`
-use `content`. Do not put append/insert text in `new_text`.
-
-Do not simulate structure changes by typing headings into the body.
+replaceText 使用 old_text、new_text；其余上述写内容操作使用 content。
+参数以 MCP schema 为准，不用 HTTP camelCase 参数。
+409/REVISION_CONFLICT 时重读受影响内容并重新规划，不重放旧操作。
 
 ## Section metadata
 
-An optional description can be placed immediately after the heading:
+标题之后、正文之前可含以下块，允许空行：
 
 ```markdown
-# 方法
+# 方法如何工作
 
 <!-- papers-manager:section-meta v=1
-{"description":"对应原文 §3，pp.4–6；概括模型结构和训练目标。"}
+{"description":"解释倒残差与线性瓶颈的结构和信息保留机制；对应原文 §3。"}
 -->
 
 正文……
 ```
 
-Rules:
-
-- version 1 currently supports only `description`;
-- description is one paragraph, at most 512 Unicode code points;
-- it is navigation metadata, not evidence and not a copy of the body;
-- it is stored inside section Markdown; the backend does not parse it;
-- consumers parse it, strip it from previews, and may derive an outline;
-- do not fabricate a description when the section has not been read.
-
-Useful description content:
-
-- the source section/page range;
-- what question this section answers;
-- what is intentionally out of scope.
-
-Bad description content:
-
-- the full section body;
-- unsupported claims;
-- a list of evidence links that belong in the body.
-
-## Formula references
-
-Do not treat the current Markdown's formula text as LaTeX. Prefer a link to the
-source formula location over a guessed transcription:
-
-```markdown
-- [公式 (1) — p.4](papers-manager://self/evidence?v=1&page=4&rect=0.12,0.35,0.86,0.48)
-  缩放点积注意力；说明变量、缩放原因和它在模型中的作用。
-```
-
-Use a Block UUID when available; otherwise use a normalized page rectangle. If
-the formula cannot be located, write an explicit formula gap. See
-[formula-source.md](formula-source.md).
-
-## Where source references go
-
-Place references at three levels:
-
-1. **Claim level**: a `papers-manager://` evidence link next to the claim.
-2. **Section level**: a short source mapping in `section-meta.description`.
-3. **Note/paper level**: cite the paper title/DOI once in the summary.
-
-Do not create a separate evidence table or bibliography dump in the note.
-
-If a claim cannot be located in the source, keep the claim only when it is
-useful as an open question, and mark it:
-
-```markdown
-> 证据缺口：论文没有给出可定位的页码或 Block。
-```
-
-## Create vs update
-
-Creating a note:
-
-- only when the user asks, or when an explicit generation request is confirmed;
-- use `papers_manager_reading_note_create` with `expected_revision=0`;
-- write a bounded first version, not the entire paper.
-
-Updating a note:
-
-- read the manifest first and capture `expected_revision`;
-- read only the target section(s);
-- apply edits with the captured revision;
-- 409 means the note changed: reload and re-plan, never retry blindly;
-- verify the returned revision and changed section IDs.
-
-## Example
-
-```markdown
-# 方法
-
-<!-- papers-manager:section-meta v=1
-{"description":"对应原文 §3，pp.4–6；说明模型结构和训练目标。"}
--->
-
-模型由编码器和解码器组成，训练目标是最小化重构误差。
-[第 5 页](papers-manager://self/evidence?v=1&page=5&rect=0.12,0.25,0.86,0.48)
-
-作者没有报告训练数据的去重方式。
-
-> 证据缺口：数据预处理细节在当前 section 中没有可定位位置。
-```
+- v1 只有 description，单段文本，不超过 512 Unicode code points。
+- JSON 中的 --> 必须转义；metadata 属于章节 Markdown，存储层不解析。
+- description 根据已读来源和已写正文生成，不含正文副本或证据列表。
+- 修改正文后同步检查，避免目录描述与正文冲突。
+- MCP/前端解析派生目录；描述未加载或缺失不代表章节无相关内容。

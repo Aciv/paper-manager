@@ -81,18 +81,21 @@
 .library-column-left { border-right: 1px solid var(--pl-border); }
 .library-column-right { border-left: 1px solid var(--pl-border); }
 
-.library-menu-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 10px 12px 0; }
-.library-back-link { font-size: 12px; text-decoration: none; white-space: nowrap; }
+/* One compact header row per side column: navigation on the left, fold button
+   on the right. The old separate title bar is gone so the panel starts sooner. */
+.library-column-head { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; min-width: 0; padding: 5px 8px 0 10px; border-bottom: 1px solid var(--pl-border); }
+.library-back-link { flex: 0 0 auto; padding: 0 2px; color: var(--pl-faint); font-size: 14px; line-height: 1; text-decoration: none; white-space: nowrap; }
 .library-back-link:hover { color: #fff; }
 .library-collapse, .library-export { padding: 3px 9px; color: var(--pl-dim); font-size: 12px; line-height: 1.3; }
-.library-collapse { margin-left: auto; }
+.library-collapse { flex: 0 0 auto; }
 .library-collapse:hover:not(:disabled), .library-export:hover:not(:disabled) { color: #fff; }
+.library-info-citation { width: 100%; margin-top: 4px; }
 
-/* Selectable function menus: the top block picks which detail panel shows. */
-/* Underline tabs: plain text, a hairline under the row, and a short indicator
-   on the selected function. */
-.paper-library .library-menu { display: flex; gap: 18px; padding: 0 12px; border-bottom: 1px solid var(--pl-border); }
-.paper-library .library-menu button { padding: 9px 1px 8px; border: 0; border-radius: 0; background: transparent; color: var(--pl-faint); font-size: 13px; font-weight: 600; }
+/* Function tabs share the header row. Short labels keep four of them on one
+   line; the full name lives in aria-label/title. */
+.paper-library .library-menu { display: flex; flex: 1 1 auto; gap: 13px; min-width: 0; padding: 0; overflow-x: auto; border-bottom: 0; scrollbar-width: none; }
+.paper-library .library-menu::-webkit-scrollbar { display: none; }
+.paper-library .library-menu button { flex: 0 0 auto; padding: 7px 0 8px; border: 0; border-radius: 0; background: transparent; color: var(--pl-faint); font-size: 12.5px; font-weight: 600; white-space: nowrap; }
 .paper-library .library-menu button:hover:not(:disabled) { border: 0; background: transparent; color: var(--pl-dim); }
 .paper-library .library-menu button.active { border: 0; background: transparent; color: #fff; box-shadow: inset 0 -2px 0 #cfd4dc; }
 .library-detail { display: flex; flex: 1 1 auto; flex-direction: column; min-height: 0; }
@@ -108,12 +111,7 @@
 /* Reading notes: a collapsible section sidebar, separate read/edit views,
    and evidence links. The panel stays mounted while another tab is active, so
    switching tabs does not discard an unsaved draft. */
-.library-panel-notes { position: relative; overflow: hidden; gap: 7px; }
-.reading-note-toolbar { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; padding-bottom: 6px; border-bottom: 1px solid var(--pl-border); }
-.reading-note-title { display: flex; align-items: baseline; gap: 7px; margin-right: auto; color: var(--pl-text); }
-.reading-note-title strong { font-size: 13px; }
-.reading-note-toolbar-actions { display: flex; gap: 3px; flex-wrap: wrap; justify-content: flex-end; }
-.paper-library .reading-note-toolbar-actions button { padding: 3px 7px; font-size: 11px; }
+.library-panel-notes { position: relative; overflow: hidden; gap: 5px; }
 .paper-library .reading-note-danger { color: var(--pl-faint); }
 .paper-library .reading-note-danger:hover:not(:disabled) { border-color: #6d3a3e; background: var(--pl-danger-bg); color: var(--pl-danger); }
 
@@ -140,10 +138,15 @@
 .reading-note-blank-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
 .reading-note-blank .reading-note-body { flex: 1 1 auto; }
 
-/* Section directory: a real sidebar that collapses to a slim rail. */
-.reading-note-workspace { display: flex; flex: 1 1 auto; gap: 8px; min-height: 0; }
-.reading-note-sidebar { display: flex; flex: 0 0 138px; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--pl-border); border-radius: 8px; background: var(--pl-surface-2); }
-.reading-note-sidebar.collapsed { flex-basis: 28px; }
+/* Section directory: a full-height splitter beside the content. When the
+   workbench is too narrow it becomes an overlay drawer instead of stacking
+   above the content (which used to leave both panes cramped). */
+.reading-note-workspace { position: relative; display: flex; flex: 1 1 auto; gap: 0; min-height: 0; }
+.reading-note-sidebar { display: flex; flex: 0 0 auto; min-width: 180px; flex-direction: column; min-height: 0; overflow: hidden; border: 1px solid var(--pl-border); border-radius: 8px; background: var(--pl-surface-2); }
+.reading-note-sidebar.collapsed { width: 28px; min-width: 28px; margin-right: 8px; }
+.reading-note-splitter { position: relative; flex: 0 0 9px; cursor: col-resize; touch-action: none; }
+.reading-note-splitter::after { content: ""; position: absolute; top: 8px; bottom: 8px; left: 4px; width: 1px; border-radius: 1px; background: var(--pl-border); }
+.reading-note-splitter:hover::after, .reading-note-splitter:active::after { background: var(--pl-border-3); }
 .reading-note-sidebar-head { display: flex; align-items: center; gap: 2px; padding: 4px; border-bottom: 1px solid var(--pl-border); }
 .reading-note-sidebar-tabs { display: flex; flex: 1 1 auto; gap: 2px; min-width: 0; }
 .paper-library .reading-note-sidebar-tabs button { flex: 1 1 0; min-width: 0; padding: 3px 4px; border: 0; border-radius: 4px; background: transparent; color: var(--pl-faint); font-size: 10.5px; line-height: 1.4; }
@@ -152,23 +155,58 @@
 .paper-library .reading-note-sidebar-collapse { flex: 0 0 auto; width: 20px; height: 20px; padding: 0; border: 0; background: transparent; color: var(--pl-faint); font-size: 14px; line-height: 1; }
 .paper-library .reading-note-sidebar-collapse:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
 .reading-note-directory { display: flex; flex: 1 1 auto; flex-direction: column; gap: 1px; min-height: 0; overflow: auto; padding: 4px; }
-.paper-library .reading-note-directory button { display: flex; align-items: center; justify-content: space-between; gap: 4px; width: 100%; padding: 6px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--pl-dim); font-size: 12.5px; line-height: 1.5; text-align: left; }
+.paper-library .reading-note-directory button { display: flex; align-items: center; justify-content: space-between; gap: 4px; width: 100%; padding: 6px; border: 0; border-radius: 5px; background: transparent; color: var(--pl-dim); font-size: 12.5px; line-height: 1.5; text-align: left; }
 .paper-library .reading-note-directory button:hover:not(:disabled) { background: var(--pl-surface-3); color: var(--pl-text); }
 .paper-library .reading-note-directory button.active { background: var(--pl-surface-3); color: #fff; }
-.reading-note-section-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.reading-note-section-title { display: -webkit-box; flex: 1 1 auto; min-width: 0; overflow: hidden; white-space: normal; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+.reading-note-tree-list { list-style: none; margin: 0; padding: 0; }
+.reading-note-tree-node > .reading-note-tree-list { margin-left: 10px; padding-left: 8px; border-left: 1px solid var(--pl-border-3); }
+.reading-note-tree-node.chapter { margin-top: 8px; }
+.reading-note-tree-node.chapter:first-child { margin-top: 0; }
+.reading-note-tree-node.chapter > .reading-note-tree-row { font-weight: 650; }
+.reading-note-tree-node.chapter > .reading-note-tree-row .reading-note-tree-select { font-size: 13px; }
+.reading-note-tree-node:not(.chapter) > .reading-note-tree-row .reading-note-tree-select { font-size: 12px; }
+.reading-note-tree-row { display: flex; align-items: flex-start; border-radius: 5px; }
+.reading-note-tree-row.active { background: var(--pl-surface-3); box-shadow: inset 2px 0 #8bb6eb; }
+.reading-note-tree-row.current-chapter > .reading-note-tree-select { color: #d4e6ff; }
+.paper-library .reading-note-directory .reading-note-tree-toggle { display: grid; place-items: center; align-self: stretch; width: 22px; flex: 0 0 22px; padding: 0; line-height: 1; }
+.reading-note-tree-chevron { width: 12px; height: 12px; transition: transform .16s ease; transform: rotate(0deg); }
+.reading-note-tree-chevron.expanded { transform: rotate(90deg); }
+.reading-note-tree-spacer { width: 22px; flex: 0 0 22px; }
+.paper-library .reading-note-directory .reading-note-tree-select { flex: 1; min-width: 0; align-items: baseline; justify-content: flex-start; padding: 6px 6px 6px 0; gap: 6px; }
+.reading-note-tree-number { flex: 0 0 auto; color: var(--pl-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.reading-note-tree-actions { display: flex; align-items: center; gap: 5px; padding: 6px; border-bottom: 1px solid var(--pl-border); color: var(--pl-faint); font-size: 11px; }
+.reading-note-tree-actions > span { margin-right: auto; }
+.paper-library .reading-note-tree-actions button { padding: 3px 4px; font-size: 11px; border: 0; background: transparent; }
 .reading-note-dirty { color: #f0c674; font-size: 9px; line-height: 1; }
 .paper-library .reading-note-sidebar-rail { display: flex; flex: 1 1 auto; flex-direction: column; align-items: center; gap: 8px; width: 100%; height: 100%; padding: 7px 0; border: 0; border-radius: 0; background: transparent; color: var(--pl-faint); font-size: 14px; }
 .paper-library .reading-note-sidebar-rail:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
 .reading-note-sidebar-rail-label { writing-mode: vertical-rl; font-size: 9.5px; letter-spacing: .12em; text-orientation: upright; }
 
+/* Narrow workbench: the directory overlays the content instead of pushing it
+   into a second row. The content keeps the full width for reading. */
+.reading-note-workspace.narrow .reading-note-sidebar.drawer { position: absolute; z-index: 25; inset: 0 auto 0 0; width: min(82%, 300px); min-width: 0; max-width: none; box-shadow: 0 18px 42px rgb(0 0 0 / 62%); }
+.reading-note-drawer-backdrop { position: absolute; z-index: 20; inset: 0; background: rgb(0 0 0 / 45%); }
+
 /* Content column: section header, editable body, read-only preview. */
 .reading-note-content { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
-.reading-note-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 6px; }
-.reading-note-section-meta { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
-.reading-note-section-meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pl-text); font-size: 14px; line-height: 1.35; }
+.reading-note-section-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 6px; }
+.reading-note-section-meta { display: flex; flex: 1 1 170px; flex-direction: column; gap: 2px; min-width: 0; }
+.reading-note-section-meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--pl-text); font-size: 13.5px; line-height: 1.35; }
 .reading-note-section-meta span { color: var(--pl-faint); font-size: 11.5px; line-height: 1.5; }
+.reading-note-breadcrumb { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .reading-note-section-description { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; color: var(--pl-dim); font-size: 11.5px; line-height: 1.55; white-space: normal; overflow-wrap: anywhere; }
-.reading-note-head-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 4px; }
+.reading-note-head-actions { display: flex; flex: 0 0 auto; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 4px; margin-left: auto; }
+.paper-library .reading-note-drawer-toggle { padding: 2px 7px; border: 0; border-radius: 5px; background: transparent; color: var(--pl-dim); font-size: 10.5px; line-height: 1.4; }
+.paper-library .reading-note-drawer-toggle:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
+.reading-note-overflow { position: relative; }
+.paper-library .reading-note-overflow-trigger { width: 22px; padding: 2px 0; border: 0; border-radius: 5px; background: transparent; color: var(--pl-faint); font-size: 15px; line-height: 1.2; }
+.paper-library .reading-note-overflow-trigger:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
+.reading-note-overflow-menu { position: absolute; z-index: 35; top: calc(100% + 5px); right: 0; display: grid; gap: 2px; min-width: 148px; padding: 4px; border: 1px solid var(--pl-border-2); border-radius: 7px; background: var(--pl-surface-2); box-shadow: 0 12px 30px rgb(0 0 0 / 60%); }
+.paper-library .reading-note-overflow-menu button { padding: 6px 8px; border: 0; border-radius: 4px; background: transparent; color: var(--pl-text); font-size: 11.5px; text-align: left; }
+.paper-library .reading-note-overflow-menu button:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: #fff; }
+.paper-library .reading-note-overflow-menu .reading-note-overflow-danger { color: var(--pl-danger); }
+.paper-library .reading-note-overflow-menu .reading-note-overflow-danger:hover:not(:disabled) { background: var(--pl-danger-bg); }
 .paper-library .reading-note-zoom { padding: 2px 6px; border: 0; border-radius: 5px; background: transparent; color: var(--pl-faint); font-size: 10.5px; font-variant-numeric: tabular-nums; line-height: 1.4; }
 .paper-library .reading-note-zoom:hover:not(:disabled) { border: 0; background: var(--pl-surface-3); color: var(--pl-text); }
 .reading-note-view-tabs { display: flex; flex: 0 0 auto; gap: 2px; padding: 2px; border: 1px solid var(--pl-border); border-radius: 6px; background: var(--pl-bg); }
@@ -196,7 +234,7 @@
    the inline base font size; headings and code use em so they scale with it. */
 .reading-note-preview, .reading-note-preview-empty { flex: 1 1 auto; min-height: 130px; border: 1px solid var(--pl-border-2); border-radius: 7px; background: var(--pl-bg); }
 .reading-note-preview {
-  padding: 18px 20px 28px;
+  padding: 8px 12px 16px;
   overflow: auto;
   color: var(--pl-text);
   font-family: 'Manrope Variable', 'Noto Sans SC Variable', ui-sans-serif, system-ui, -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
@@ -207,9 +245,17 @@
   scrollbar-gutter: stable;
 }
 .reading-note-preview-empty { display: grid; place-items: center; padding: 16px; color: var(--pl-faint); font-size: 12.5px; line-height: 1.6; text-align: center; }
-.reading-note-preview > * { max-width: 74ch; margin-inline: auto; }
 .reading-note-preview > :first-child { margin-top: 0; }
 .reading-note-preview > :last-child { margin-bottom: 0; }
+/* The preview is a user-sized reading surface: let text use its full width
+   instead of reserving large symmetric side margins for a 74ch cap. */
+.reading-note-chapter { min-height: 0; overflow-anchor: none; }
+.reading-note-chapter-section { scroll-margin-top: 16px; padding: 2px 0 14px; }
+.reading-note-chapter-section + .reading-note-chapter-section { border-top: 1px solid var(--pl-border); padding-top: 14px; }
+.reading-note-chapter-section > :first-child,
+.reading-note-chapter-section > div > :first-child { margin-top: 0; }
+.reading-note-chapter-section.level-3 { margin-left: 12px; }
+.reading-note-load-progress { margin: 0 0 8px; color: var(--pl-faint); font-size: 12px; }
 .reading-note-preview h1, .reading-note-preview h2, .reading-note-preview h3,
 .reading-note-preview h4, .reading-note-preview h5, .reading-note-preview h6 { margin: 1.35em auto .55em; color: #f3f5f8; font-weight: 650; line-height: 1.4; letter-spacing: -.005em; }
 .reading-note-preview h1 { padding-bottom: .35em; border-bottom: 1px solid var(--pl-border); font-size: 1.45em; }
@@ -518,11 +564,10 @@
   .paper-library-main { height: 100dvh; padding: calc(8px + env(safe-area-inset-top, 0px)) calc(8px + env(safe-area-inset-right, 0px)) calc(8px + env(safe-area-inset-bottom, 0px)) calc(8px + env(safe-area-inset-left, 0px)); }
   .paper-library .pdf-viewer-panel { height: 100%; }
   .library-document-list > button { padding: 11px 10px; }
-  .reading-note-sidebar { flex-basis: 118px; }
 }
 
 @media (max-width: 640px) {
-  .library-menu-bar, .library-menu, .library-panel { padding: 10px; }
+  .library-column-head, .library-panel { padding: 10px; }
   .paper-library-main { padding: 12px; }
   .library-info-list { grid-template-columns: 1fr; gap: 4px; }
   .library-info-list dd { margin-bottom: 8px; }

@@ -1,113 +1,139 @@
-# Reading-note standard
+# 阅读笔记标准
 
-This is the default output standard for `papers-manager-reading`. It is a
-content and presentation contract for the Agent; the backend still permits any
-valid H1-H3 section Markdown.
+笔记服务于单篇速读和后续跨论文检索，不是固定格式的审稿报告。这是生成约定，不增加数据库字段，也不要求重排已有笔记。
 
-## Modes
+具体展开程度参照 [Attention Is All You Need 精修实例](worked-example.md)。
+学习独立子节、机制解释与实验口径，不要求其他论文复制同样的目录。
 
-- **brief**: only when the user explicitly asks for a short note. Keep 4-5
-  sections and focus on the thesis, method, main result, and one limitation.
-- **standard**: the default for a normal paper. Use 6-8 sections.
-- **deep**: use when the user asks for a full analysis or the paper is central to
-  the task. Split setup, results, ablations, and evidence gaps into separate
-  sections.
+## 深度与形状
 
-## Standard template
+- brief：用户要求快速了解时，聚焦问题、办法、代表结果和边界，不设最低章节数。
+- standard：普通生成请求默认采用；概览简短，方法与结果充分展开到可独立检索的子节，不把“速读”理解为全篇压缩。
+- deep：完整分析/复现等请求，展开关键机制、设置、消融和必要附录。
+
+章节数由内容决定。下面四块是默认骨架，标题可具体化，允许合并或增加 H2/H3。不要为填模板生成空章节、泛泛开放问题或单独的“证据缺口”章节。
 
 ```markdown
-# 论文概览
+# 快速理解
 
-**论文**：标题、作者、venue、DOI（有则写）
-**阅读范围**：Abstract、§3、§4.2、pp.4–8
-**一句话结论**：用 1-2 句说明论文解决了什么，结论是什么。
-**关键贡献**
-- ……
-- ……
+**一句话**：解决的问题、关键办法和得到的结论。
+**核心变化**：相较已有方案具体改变了什么。
+**主要证据**：代表性结果及成立条件，链接到来源。
+**适用边界**：哪些条件下适用，哪些条件下尚未证明。
+**阅读范围**：实际阅读的正文/附录与尚未核验部分。
 
-# 问题与动机
+# 方法如何工作
 
-说明问题、已有方法的限制，以及论文为什么需要新的方案。
+写简短的整体流程和子节之间的关系。
 
-# 方法与关键设计
+## 任务定义与输入输出
 
-**核心思路**
-……
+问题对象、输入形式、输出和关键假设。
 
-**关键设计**
-- ……
+## 核心机制（用论文中的具体机制命名）
 
-**公式引用**
-- [公式 (1) — p.4](papers-manager://self/evidence?v=1&page=4&rect=0.12,0.35,0.86,0.48)
-  说明公式表达的关系、变量含义和设计作用；公式本体保留在 PDF。
+解释处理步骤、信息如何流动、判定或优化依据，以及设计原因。
+多个主要机制分别建 H2；同一机制的关键分支或实现细节可建 H3。
 
-# 实验设置与结果
+## 实现与运行条件
 
-**设置**
-- 数据集、baseline、metric、训练/推理配置
+支撑复现或使用判断的模型、参数、资源、停止条件及训练/推理差异。
 
-**主要结果**
-- ……
+# 证据与结果
 
-**消融与分析**
-- ……
+写主要结论和各项实验之间的关系。
 
-# 局限与风险
+## 数据与评测协议
 
-- 作者承认的限制
-- 你认为存在的威胁、未覆盖场景或证据不足
-- 需要区分的“论文没有证明”与“结果错误”
+数据来源、规模与划分、基线、指标单位/方向、评价对象和实验控制条件。
 
-# 开放问题
+## 主结果（按任务或研究问题具体命名）
 
-- ……
+具体数值、比较对象和条件、结果说明什么，以及不能说明什么。
 
-# 证据缺口
+## 消融与机制验证
 
-> 证据缺口：……
+改动了什么、保持什么不变、结果如何变化，以及是否支持设计解释。
+
+## 成本、泛化与失败案例
+
+按实际材料拆成独立 H2/H3，区分实测和估算，解释适用边界。
+
+# 局限与使用判断
+
+区分作者报告的限制与读者推断，说明采用或复现需要的条件。
+未核验或读取受限的问题放在相关结论附近。
 ```
 
-For a deep note, split “实验设置与结果” into `# 实验设置`, `# 结果与分析`,
-and `# 消融与失败案例`.
+快速理解应可独立阅读；后续章节补充机制和条件，避免重复结论。论文标题/DOI 最多集中写一次，元数据异常时不要复制错误身份。
 
-## Section content requirements
+## 方法与结果的展开要求
 
-- **论文概览** must contain a one-sentence conclusion, reading scope, and
-  contributions; do not merely restate the abstract.
-- **问题与动机** explains why prior approaches are insufficient.
-- **方法与关键设计** explains mechanisms, inputs/outputs, and design choices;
-  formula references are links, not guessed LaTeX.
-- **实验设置与结果** includes datasets, baselines, metrics, concrete numbers,
-  and important ablations.
-- **局限与风险** distinguishes acknowledged limitations from the reviewer's
-  own concerns.
-- **开放问题** contains actionable follow-ups, not rhetorical filler.
-- Every important claim should carry an evidence link or be listed in
-  **证据缺口**.
+上面的子节是内容覆盖提示，不是必须照抄的标题清单；没有对应材料的栏目不建空壳。
+standard 模式也要解释论文主要机制和主要结果，不能把细节一概留给 deep 模式。
 
-## Presentation rules
+- **方法**：每个关键组件解释解决的子问题、接收什么、如何处理、产出什么、
+  怎样连接其他组件。继续说明关键规则/目标、为什么这样设计，以及原文给出的
+  参数或假设。不能仅列组件名称或用一句话概括每个步骤。
+- **结果**：每个主要实验围绕研究问题组织，保留设置、关键数值、对照条件和
+  解释。有总体结果与分组结果时说明差异；有消融时解释机制贡献，不只抄数字。
+- **分点**：子节内部用列表区分输入、步骤、设置、观察等并列信息；设计原因、
+  因果解释和结果含义用连贯段落。增加内容应来自补读与分析，不靠重复和扩写套话。
+- **证据**：链接紧邻支持的具体内容，独立子节带自身来源，不要求读者回父节
+  找证据。来源不足就标明未核验/读取受限，不补猜细节。
 
-The current web reader supports headings, paragraphs, bullet/numbered lists,
-blockquotes, fenced code, inline code, bold/italic, and links. It does not yet
-render pipe tables, raw HTML, or LaTeX. Until those renderers exist:
+## 目录粒度与独立读取
 
-- use short paragraphs (typically 2-5 lines);
-- use `**标签**：内容` lead-ins for dense facts;
-- use bullets for contributions, setup, results, and limitations;
-- do not generate pipe tables or raw HTML;
-- do not generate `$...$`/`$$...$$` formulas; link the source region instead;
-- do not use images in the note body;
-- keep one section focused on one question.
+H1 是主题入口，H2 是可独立查询的问题或机制，H3 用于确有独立内容的下一层。
+普通 bullet、粗体标签和 H4 不会成为服务端 H1–H3 目录中的独立 section。
+例如 ReFLAIR 的方法可以分为“Widget 抽取与可见性判定”“功能抽取与等价匹配”
+“滚动、展开与停止条件”；结果可以分为“数据与人工标注”“主结果与基线口径”
+“页面探索消融”“运行成本与并行估算”“跨模型和视口泛化”。标题随实际内容调整。
 
-These are constraints on generated content, not a new database schema.
+每个实质子节写自己的 description 和必要上下文，使 Agent 只读取该节也能理解。
+父节保留总体关系与概述，不复制所有子节正文；子节不依赖“如上所述”才能读懂。
+用户要求增强已有方法/结果时，可以在对应父节下新增子节并整理受影响内容，
+保留无关章节。写入方式见 [note-generation.md](note-generation.md)。
 
-## Quality checklist
+## 按论文类型调整
 
-- Does the overview state the paper's thesis, not just its topic?
-- Are the contributions concrete and differentiated from prior work?
-- Does the method explain how it works, including key design choices?
-- Are experiment settings and numbers specific enough to check?
-- Are limitations and open questions genuinely about this paper?
-- Are claims evidence-linked or explicitly marked as gaps?
-- Is the note analysis rather than copied or paraphrased paper prose?
-- Would a reader know what to read next in the PDF?
+- 方法/系统：输入输出、组件、设计取舍、效果与资源代价。
+- 理论：问题、假设、主要结论、证明思路和适用条件，不硬填训练或实验栏。
+- 数据集/benchmark：构建与划分、覆盖范围、标注/评测协议、偏差和使用限制。
+- 综述：组织维度、路线差异、证据覆盖和未解决问题，不虚构单一方法或实验。
+
+## 用于检索的 description
+
+生成的实质章节宜带 description：具体机制/结论 + 讨论范围 + 可选原文位置。
+先写正文再概括，只用正文支持的信息，更新正文时同步检查。
+
+弱：对应 §3，介绍方法。
+好：解释倒残差与线性瓶颈如何减少计算，并讨论低维非线性的信息损失；对应 §3。
+
+这是筛选摘要，不是独立证据。格式与 512 code point 上限见 [note-generation.md](note-generation.md)。
+
+## 事实与未知
+
+在可能混淆时明确标记“作者报告”“我的解释”“进一步推断”。
+未知状态与证据校验统一遵循 [evidence.md](evidence.md)。
+不能把“本次没读”写成“论文没有报告”，也不能把不同协议下的数值直接排名。
+对检测任务先明确阳性对象：未找到正常内容可能造成缺陷误报，不能混称漏检。
+涉及成本、延迟或改进幅度时区分实测、作者估算和读者推断；未测量的基线成本
+不能写成“近零”。百分比变化与百分点只有在基数和口径明确时才转换。
+
+## 排版
+
+当前阅读器支持短段落、列表、引用、代码、强调和链接；不生成 pipe table、raw HTML、正文图片或 LaTeX。
+section-meta 是协议允许的隐藏注释，不是展示 HTML。
+公式链接到 PDF 并解释变量和设计含义，详见 [formula-source.md](formula-source.md)。
+每节围绕一个问题，列表用于并列事实，机制和因果用连贯段落解释。
+
+## 发布前检查
+
+- 快速入口是否说明问题、机制、主要证据和边界？
+- 方法是否解释每个主要组件的输入、处理、输出、连接关系与设计原因？
+- 方法与结果能否通过目录直接定位到具体机制/实验，而不必读取整个大节？
+- 主要实验是否保留设置、数值、对照、解释和边界，而不只是结果摘要？
+- 数字是否带比较条件，来源是否实际支持主张？
+- 阅读范围、未知和推断是否诚实，description 是否能筛选相关章节？
+- 是否有重复、空壳或不适用的模板栏目？

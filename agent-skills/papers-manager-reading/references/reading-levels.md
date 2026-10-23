@@ -1,5 +1,10 @@
 # Reading levels
 
+These are retrieval options, not a mandatory L0-to-L4 sequence. With a known
+document and precise question, go directly to the needed source. For a complete
+note, read every section needed to cover the argument, including appendices when
+necessary; minimizing section count is not the objective.
+
 ## L0: metadata
 
 Read only enough to identify and rank the paper:
@@ -25,6 +30,8 @@ analysis. Keep them separate.
 For a note directory with descriptions, prefer the derived
 `papers_manager_reading_note_outline` result. If descriptions are unavailable, use titles and
 then read only the sections that matter.
+Check `descriptions_complete` and diagnostics: a missing description may reflect
+the adapter's read budget, not missing content or lack of relevance.
 
 ## L2: selected sections
 
@@ -73,7 +80,8 @@ Whole-document reads are the exception, not the default.
 3. Read L1 for the selected paper/Base; build a shortlist of sections.
 4. Read L2 only for the shortlist.
 5. For every important claim, decide whether it needs L3 verification.
-6. Stop when the objective is covered; do not continue reading for completeness.
+6. Stop when the requested objective is covered. For full-note generation,
+   verify coverage of problem, mechanism, supporting evidence and boundaries.
 
 Practical budgets:
 

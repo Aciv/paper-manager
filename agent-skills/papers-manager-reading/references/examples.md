@@ -1,5 +1,9 @@
 # Examples
 
+For a fully written method/results example, read
+[Attention Is All You Need](worked-example.md). The examples below describe
+tool workflows; the worked example demonstrates content depth and indexing.
+
 ## Quick understanding of one paper
 
 1. `papers_manager_library_search` or `papers_manager_library_get` to resolve the document.
@@ -20,12 +24,12 @@ User request: “给这篇论文建一份分析方法部分的笔记，并带原
 1. Resolve the document and read the source outline.
 2. Confirm that no note exists; ask before creating if the user did not
    explicitly request it.
-3. Use `papers_manager_reading_note_create` with `expected_revision=0` and a small analysis
-   skeleton. Do not mirror every paper heading.
-4. For the method section, add a section description such as
-   `对应原文 §3，pp.4–6`.
-5. Read the relevant source section and Blocks, then add claim-level evidence
-   links.
+3. Read the relevant source sections and evidence, then draft useful content.
+4. Summarize the actual mechanism and coverage in the section description;
+   optionally include source section/page mapping.
+5. Validate evidence targets, then create the readable note with
+   `papers_manager_reading_note_create` and `expected_revision=0`.
+   Do not publish an empty skeleton before reading.
 6. Verify the returned revision and report any evidence gaps.
 
 ## Update one existing section
@@ -46,7 +50,7 @@ A note section can carry:
 # 方法
 
 <!-- papers-manager:section-meta v=1
-{"description":"对应原文 §3，pp.4–6；说明模型结构和训练目标。"}
+{"description":"解释编码器与解码器如何通过重构目标学习表示，并分析该目标的适用条件；对应原文 §3。"}
 -->
 ```
 

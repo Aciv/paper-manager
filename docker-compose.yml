@@ -1,6 +1,4 @@
 
-
-
 services:
   upload-permissions:
     image: alpine:3.20

@@ -69,6 +69,36 @@ function statusLabel(value: string): string {
   return DOCUMENT_STATUS_LABELS[value] ?? value;
 }
 
+// The list's dot reflects PDF parsing, not just source availability: green only
+// after the markdown stage succeeds. The selected document's live processing
+// view is preferred so its row updates during polling.
+function documentListStatus(
+  item: Document,
+  selectedID: string | undefined,
+  selectedMarkdown: DocumentStageStatus | undefined,
+): { className: string; label: string; title: string } {
+  if (item.sourceState !== 'available') {
+    return { className: `status-${item.sourceState}`, label: statusLabel(item.sourceState), title: '' };
+  }
+  const markdown = selectedID === item.id && selectedMarkdown ? selectedMarkdown : item.markdownStatus;
+  switch (markdown) {
+    case 'queued':
+    case 'running':
+      return { className: 'status-processing', label: '解析中', title: '正在解析 PDF' };
+    case 'failed':
+      return { className: 'status-failed', label: '解析失败', title: '解析失败，可在详情中重新解析' };
+    case 'cancelled':
+      return { className: 'status-cancelled', label: '已取消', title: '解析已取消' };
+    case 'succeeded':
+    case 'skipped':
+      return { className: 'status-ready', label: '可用', title: '解析完成，可在阅读库中打开' };
+    case 'not_started':
+      return { className: 'status-uploaded', label: '待解析', title: '等待解析' };
+    default:
+      return { className: `status-${item.sourceState}`, label: statusLabel(item.sourceState), title: '' };
+  }
+}
+
 function referenceDownloadStatusLabel(reference: PaperReference): string {
   if (reference.citedDocumentId) return '已获取文档';
   if (reference.downloadErrorMessage) return `下载失败：${reference.downloadErrorMessage}`;
@@ -239,6 +269,13 @@ function App() {
   const referenceCatalogActive = ['queued', 'running'].includes(stageState('reference_lookup')?.status ?? 'not_started');
   const markdownState = stageState('markdown');
 	const documentStatus = processing?.sourceState === 'deleting' ? 'deleting' : processing?.sourceState === 'merged' ? 'merged' : pipelineActive ? 'processing' : markdownState?.status === 'failed' ? 'failed' : markdownState?.status === 'cancelled' ? 'cancelled' : markdownState?.status === 'succeeded' ? 'ready' : selected?.sourceState ?? 'available';
+  // Refresh the visible page quietly while any row is still parsing, so its
+  // dot changes without the user pressing 刷新. Non-selected rows are not
+  // covered by the selected document's processing poll.
+  const listMarkdownActive = page.items.some((item) => {
+    const status = item.id === selected?.id && markdownState ? markdownState.status : item.markdownStatus;
+    return status === 'queued' || status === 'running';
+  });
   const remoteURLs = useMemo(() => remoteURL.split(/\r?\n/).map((value) => value.trim()).filter(Boolean), [remoteURL]);
   const citationCounts = useMemo(() => citationFilterCounts(citations), [citations]);
   const visibleCitations = useMemo(
@@ -292,8 +329,8 @@ function App() {
     setProcessingPollRevision((value) => value + 1);
   }
 
-  async function load(nextFilters = filters, baseID = baseFilterID) {
-    setBusy(true);
+  async function load(nextFilters = filters, baseID = baseFilterID, silent = false) {
+    if (!silent) setBusy(true);
     try {
       // A selected Base scopes the list to its members (same API the reading
       // library uses); otherwise it is a plain document search.
@@ -303,11 +340,11 @@ function App() {
       setFilters({ ...nextFilters, page: result.page });
       setPage(result);
       setSelected((current) => result.items.find((item) => item.id === current?.id) ?? current);
-      setMessage(`已加载第 ${result.page} 页，共 ${result.total} 个文档。`);
+      if (!silent) setMessage(`已加载第 ${result.page} 页，共 ${result.total} 个文档。`);
     } catch (error) {
-      setMessage(error instanceof Error ? `查询失败：${error.message}` : '查询失败。');
+      if (!silent) setMessage(error instanceof Error ? `查询失败：${error.message}` : '查询失败。');
     } finally {
-      setBusy(false);
+      if (!silent) setBusy(false);
     }
   }
 
@@ -322,6 +359,14 @@ function App() {
   }
 
   useEffect(() => { void load({ page: 1 }); void loadBases(); }, []);
+
+  useEffect(() => {
+    if (!listMarkdownActive || busy) return;
+    const timer = window.setTimeout(() => {
+      void load({ ...filters, page: page.page }, baseFilterID, true);
+    }, 6000);
+    return () => window.clearTimeout(timer);
+  }, [listMarkdownActive, page.items, page.page, busy]);
 
   useEffect(() => {
     const contextRequestID = citationContextRequest.current + 1;
@@ -1163,9 +1208,12 @@ function App() {
           </div>
         </div>
           <div className="document-list">
-            {page.items.length === 0 ? <p className="empty-list">没有匹配的文档。</p> : page.items.map((item) => <button type="button" key={item.id} className={selected?.id === item.id ? 'document-row active' : 'document-row'} onClick={() => setSelected(item)}>
-			  <span className="filename">{documentLabel(item)}</span><span className={`status status-${item.sourceState}`}>{statusLabel(item.sourceState)}</span><small>{formatBytes(item.sizeBytes)} · {item.doi || '无 DOI'}</small>
-            </button>)}
+            {page.items.length === 0 ? <p className="empty-list">没有匹配的文档。</p> : page.items.map((item) => {
+              const listStatus = documentListStatus(item, selected?.id, markdownState?.status);
+              return <button type="button" key={item.id} className={selected?.id === item.id ? 'document-row active' : 'document-row'} onClick={() => setSelected(item)}>
+			  <span className="filename">{documentLabel(item)}</span><span className={`status ${listStatus.className}`} title={listStatus.title || undefined}>{listStatus.label}</span><small>{formatBytes(item.sizeBytes)} · {item.doi || '无 DOI'}</small>
+              </button>;
+            })}
           </div>
           <div className="pagination"><button type="button" disabled={busy || !hasPreviousPage} onClick={() => void load({ ...filters, page: page.page - 1 })}>上一页</button><span>{page.page} / {pageCount}</span><button type="button" disabled={busy || !hasNextPage} onClick={() => void load({ ...filters, page: page.page + 1 })}>下一页</button></div>
         </section>
