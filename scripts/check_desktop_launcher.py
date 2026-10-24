@@ -367,6 +367,17 @@ def main():
                 version_file.write_bytes(original_version)
                 report["steps"].append("explicit setup failure/retry; damaged data preserved")
                 if args.bundle:
+                    benchmark = Path(__file__).with_name("benchmark_parser_shared.py")
+                    python_path = args.bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
+                    with (output / "benchmark-console.log").open("wb") as log:
+                        subprocess.run([
+                            sys.executable, str(benchmark), "--parser-dir", str(args.bundle / "pdf_parser"),
+                            "--parser-python", str(python_path), "--engine", manifest["profile"],
+                            "--jobs", "8", "--mixed-jobs", "20", "--idle-seconds", "15",
+                            "--output", str(output / "parser-benchmark.json"),
+                        ], env={**os.environ, "PATH": launcher_env["PATH"], "PYTHONDONTWRITEBYTECODE": "1"},
+                            stdout=log, stderr=log, check=True, timeout=300)
+                    report["steps"].append("bundle c1/c4 and 20 mixed tasks: single workers, RSS and idle retirement")
                     verify(args.bundle)
                 report["status"] = "passed"
             finally:

@@ -28,11 +28,12 @@ import psutil
 
 ROOT = Path(__file__).resolve().parents[1]
 PARSER = ROOT / "pdf_parser"
-sys.path.insert(0, str(PARSER))
-
 import grpc
-import document_parser_pb2 as pb
-import document_parser_pb2_grpc as rpc
+
+# Filled after parsing --parser-dir so a downloaded harness never imports the
+# source checkout's generated contract accidentally.
+pb = None
+rpc = None
 
 
 def percentile(values: list[float], fraction: float) -> float:
@@ -342,6 +343,7 @@ def aggregate(reports: list[dict]) -> dict:
 
 
 def main() -> int:
+    global pb, rpc
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--parser-dir", type=Path, default=PARSER)
@@ -373,6 +375,10 @@ def main() -> int:
         args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         print(f"{report['status']}: {args.output}", flush=True)
         return int(bool(report["regressions"]))
+    sys.path.insert(0, str(args.parser_dir))
+    import document_parser_pb2 as pb_module
+    import document_parser_pb2_grpc as rpc_module
+    pb, rpc = pb_module, rpc_module
     report = {"schema_version": 1, "status": "running", "cases": []}
     exit_code = 0
     try:
