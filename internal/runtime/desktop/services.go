@@ -2,7 +2,12 @@ package desktop
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
 	"path/filepath"
+	"strings"
 )
 
 func closeInput(c *child, _ context.Context) {
@@ -65,4 +70,42 @@ func (r *Runtime) apiEnv() []string {
 		"GIN_MODE":                     "release",
 		"AUTO_MIGRATE":                 "true",
 	})
+}
+
+// MCP starts only after the API listener is acquired. Proving its private
+// credential works prevents another HTTP service's /health from masquerading
+// as our API while the owned process is still retrying a contested bind.
+func (r *Runtime) mcpReady(ctx context.Context, client *http.Client) error {
+	const initialize = `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{` +
+		`"protocolVersion":"2025-03-26","capabilities":{},` +
+		`"clientInfo":{"name":"launcher","version":"1"}}}`
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodPost, r.Snapshot().MCPURL, strings.NewReader(initialize),
+	)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Authorization", "Bearer "+r.cfg.MCPToken)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("Accept", "application/json, text/event-stream")
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("owned MCP readiness returned %d", response.StatusCode)
+	}
+	var result struct {
+		Result struct {
+			ServerInfo json.RawMessage `json:"serverInfo"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&result); err != nil {
+		return fmt.Errorf("invalid MCP readiness response")
+	}
+	if len(result.Result.ServerInfo) == 0 {
+		return fmt.Errorf("MCP readiness response has no server info")
+	}
+	return nil
 }

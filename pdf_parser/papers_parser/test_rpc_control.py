@@ -148,6 +148,15 @@ class ServerBootstrapTest(unittest.TestCase):
             signal.signal(signal.SIGTERM, previous_term)
             signal.signal(signal.SIGINT, previous_int)
 
+    def test_launcher_parser_uses_exclusive_port(self) -> None:
+        args = SimpleNamespace(
+            max_workers=4, max_concurrent_rpcs=3, grpc_max_message_size=12345
+        )
+        with mock.patch.dict("os.environ", {"PAPERS_PARENT_STDIN": "1"}):
+            with mock.patch.object(server_module.grpc, "server") as grpc_server:
+                server_module._create_server(args)
+        self.assertIn(("grpc.so_reuseport", 0), grpc_server.call_args.kwargs["options"])
+
     def test_launcher_parent_eof_requests_graceful_shutdown(self) -> None:
         previous_term = signal.getsignal(signal.SIGTERM)
         previous_int = signal.getsignal(signal.SIGINT)

@@ -781,12 +781,17 @@ def main() -> None:
 
 def _create_server(args) -> grpc.Server:
     """Build the gRPC server with bounded external concurrency."""
+    options = [
+        ("grpc.max_receive_message_length", args.grpc_max_message_size),
+        ("grpc.max_send_message_length", args.grpc_max_message_size),
+    ]
+    if os.getenv("PAPERS_PARENT_STDIN") == "1":
+        # A private Launcher instance must fail on a competing bind, rather
+        # than sharing a gRPC port with another process via SO_REUSEPORT.
+        options.append(("grpc.so_reuseport", 0))
     return grpc.server(
         futures.ThreadPoolExecutor(max_workers=args.max_workers),
-        options=[
-            ("grpc.max_receive_message_length", args.grpc_max_message_size),
-            ("grpc.max_send_message_length", args.grpc_max_message_size),
-        ],
+        options=options,
         maximum_concurrent_rpcs=args.max_concurrent_rpcs,
     )
 

@@ -357,10 +357,16 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		if resp.StatusCode != 200 {
 			return fmt.Errorf("health returned %d", resp.StatusCode)
 		}
-		return nil
+		return r.mcpReady(check, client)
 	}); err != nil {
 		fail(fmt.Errorf("API readiness failed; see api.log: %w", err))
 		return
+	}
+	for _, entry := range owned {
+		if !entry.process.alive() {
+			fail(fmt.Errorf("%s exited during startup; see %s.log", entry.name, entry.name))
+			return
+		}
 	}
 	r.setService("api", "ready")
 	r.setState("ready", "")

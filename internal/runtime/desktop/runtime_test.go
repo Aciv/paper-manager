@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -209,6 +210,34 @@ func TestLauncherEnvironmentContract(t *testing.T) {
 	t.Setenv("LAUNCHER_PYTHON", "relative/python")
 	if _, err := ApplyEnvironment(cfg); err == nil {
 		t.Fatal("cwd-dependent runtime path accepted")
+	}
+}
+
+func TestMCPReadinessRejectsUnrelatedHTTPService(t *testing.T) {
+	cfg := testConfig(t)
+	app := New(cfg)
+	for _, tc := range []struct {
+		body string
+		code int
+		want bool
+	}{
+		{`{"status":"ok"}`, 200, false},
+		{`{"error":"unauthorized"}`, 401, false},
+		{`{"result":{"serverInfo":{"name":"papers-manager"}}}`, 200, true},
+	} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+			if request.Header.Get("Authorization") != "Bearer "+cfg.MCPToken {
+				t.Error("MCP readiness did not use this instance's credential")
+			}
+			w.WriteHeader(tc.code)
+			_, _ = io.WriteString(w, tc.body)
+		}))
+		app.state.MCPURL = server.URL
+		err := app.mcpReady(context.Background(), server.Client())
+		server.Close()
+		if (err == nil) != tc.want {
+			t.Errorf("response %s: %v", tc.body, err)
+		}
 	}
 }
 
