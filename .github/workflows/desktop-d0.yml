@@ -37,6 +37,7 @@ jobs:
       PARSER_LAYOUT_THREADS: '2'
       MALLOC_ARENA_MAX: '2'
       PYTHONUNBUFFERED: '1'
+      LOG_PATH: ${{ github.workspace }}/tmp/desktop-d0/python-tests.log
     defaults:
       run:
         shell: bash
@@ -108,7 +109,7 @@ jobs:
         if: always()
         # CI has no git-ignored CRF weights. This is a rules-engine smoke
         # baseline only; local hybrid/model baseline remains a D1 gate.
-        run: python scripts/benchmark_parser_shared.py --engine rules --jobs 8 --idle-seconds 15 --output tmp/desktop-d0/shared.json
+        run: python scripts/benchmark_parser_shared.py --engine rules --jobs 8 --mixed-jobs 20 --idle-seconds 15 --output tmp/desktop-d0/shared.json
       - name: Private PostgreSQL initialize, persist, restart, stop
         if: always()
         # Tests native binaries, not a self-contained redistributable install.

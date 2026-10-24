@@ -18,6 +18,7 @@ import threading
 
 TOKEN_ENV = "PAPERS_PARSER_WORKER_TOKEN"
 PARENT_ENV = "PAPERS_PARSER_OWNED_WORKER"
+_TCP = os.name == "nt"
 
 
 def await_parent() -> None:
@@ -96,17 +97,17 @@ def start_process(command: list[str], *, env: dict, cwd: str) -> subprocess.Pope
 
 
 def listen(path: Path, backlog: int) -> socket.socket:
-    listener = socket.socket(socket.AF_INET if os.name == "nt" else socket.AF_UNIX,
+    listener = socket.socket(socket.AF_INET if _TCP else socket.AF_UNIX,
                              socket.SOCK_STREAM)
     try:
-        if os.name == "nt":
+        if _TCP:
             listener.bind(("127.0.0.1", 0))
         else:
             path.unlink(missing_ok=True)
             listener.bind(str(path))
             os.chmod(path, 0o600)
         listener.listen(backlog)
-        if os.name == "nt":
+        if _TCP:
             # Publish only after listen succeeds; parent retries partial reads.
             path.write_text(json.dumps({"port": listener.getsockname()[1]}), encoding="utf-8")
         return listener
@@ -116,11 +117,11 @@ def listen(path: Path, backlog: int) -> socket.socket:
 
 
 def connect(path: Path, token: str, timeout: float = 0.5) -> socket.socket:
-    connection = socket.socket(socket.AF_INET if os.name == "nt" else socket.AF_UNIX,
+    connection = socket.socket(socket.AF_INET if _TCP else socket.AF_UNIX,
                                socket.SOCK_STREAM)
     connection.settimeout(timeout)
     try:
-        if os.name == "nt":
+        if _TCP:
             try:
                 port = int(json.loads(path.read_text(encoding="utf-8"))["port"])
             except (OSError, ValueError, KeyError) as exc:
@@ -139,7 +140,7 @@ def connect(path: Path, token: str, timeout: float = 0.5) -> socket.socket:
 
 
 def authenticate(connection: socket.socket) -> bool:
-    if os.name != "nt":
+    if not _TCP:
         return True
     connection.settimeout(0.5)
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

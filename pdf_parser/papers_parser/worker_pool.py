@@ -103,12 +103,13 @@ class WorkerHandle:
             if not self.alive:
                 raise WorkerUnavailable("worker is not running")
             try:
-                write_frame(self.connection, method, payload)
+                deadline = time.monotonic() + timeout
+                write_frame(self.connection, method, payload, deadline=deadline, cancel_check=cancel_check)
                 status, response = read_frame(
                     self.connection,
                     max_payload_bytes=self.max_payload_bytes,
                     cancel_check=cancel_check,
-                    deadline=time.monotonic() + timeout,
+                    deadline=deadline,
                     clock=time.monotonic,
                 )
             except WorkerCancelled as exc:
@@ -414,12 +415,13 @@ class SharedWorkerHandle:
         try:
             try:
                 connection = connect(self.socket_path, getattr(self, "token", ""))
-                write_frame(connection, method, payload)
+                deadline = time.monotonic() + timeout
+                write_frame(connection, method, payload, deadline=deadline, cancel_check=cancel_check)
                 status, response = read_frame(
                     connection,
                     max_payload_bytes=self.max_payload_bytes,
                     cancel_check=cancel_check,
-                    deadline=time.monotonic() + timeout,
+                    deadline=deadline,
                     clock=time.monotonic,
                 )
             except WorkerCancelled as exc:
@@ -500,6 +502,13 @@ class SharedWorkerPool:
                 timeout=timeout,
             )
         except WorkerUnavailable:
+            # EOF can arrive just before Windows publishes the process exit
+            # code. Reap that transition before deciding whether to reuse it.
+            if worker.alive:
+                try:
+                    worker.process.wait(timeout=0.2)
+                except subprocess.TimeoutExpired:
+                    pass
             with self._condition:
                 if self._worker is worker and not worker.alive:
                     self._retire_locked()

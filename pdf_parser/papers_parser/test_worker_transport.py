@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -27,6 +28,9 @@ def child():
     def handler(payload, context):
         if payload == b"crash":
             os._exit(17)
+        if payload == b"spawn-helper":
+            helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+            return json.dumps({"worker": os.getpid(), "helper": helper.pid}).encode()
         started = time.monotonic()
         seconds = float(payload)
         while time.monotonic() - started < seconds:
@@ -120,6 +124,99 @@ class SharedLifecycleTest(unittest.TestCase):
         with self.assertRaises(WorkerUnavailable):
             pool.call(METHOD_EXTRACT, b"3", timeout=0.1)
         self.assertEqual(self.call(pool)["pid"], initial["pid"])
+
+    def test_parent_death_cleans_worker_and_native_helper(self):
+        import psutil  # validation dependency, never imported by the server
+        endpoint = Path(self.temporary.name) / "worker.sock"
+        script = '''
+import json, os, secrets, sys, time
+from pathlib import Path
+from papers_parser.worker_transport import start_process, connect, TOKEN_ENV
+from papers_parser.worker_protocol import read_frame, write_frame, METHOD_EXTRACT
+token = secrets.token_hex(32)
+process = start_process([sys.executable, '-m', 'papers_parser.test_worker_transport',
+    '--kind', 'extract', '--shared', '--socket', sys.argv[1], '--config', 'e30=',
+    '--idle-seconds', '60', '--max-jobs', '100', '--concurrency', '4'],
+    env={**os.environ, TOKEN_ENV: token}, cwd=sys.argv[2])
+deadline = time.monotonic() + 20
+while True:
+    try:
+        connection = connect(Path(sys.argv[1]), token)
+        break
+    except OSError:
+        if time.monotonic() > deadline:
+            raise
+        time.sleep(.05)
+write_frame(connection, METHOD_EXTRACT, b'spawn-helper')
+_, result = read_frame(connection, max_payload_bytes=4096)
+connection.close()
+print(result.decode(), flush=True)
+time.sleep(60)
+'''
+        root = str(Path(__file__).resolve().parent.parent)
+        parent = subprocess.Popen([sys.executable, "-c", script, str(endpoint), root],
+                                  cwd=root, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                  text=True, env={**os.environ, "PYTHONPATH": root})
+        owned = []
+        try:
+            # communicate timeout also prevents hanging on a broken handshake.
+            def read_identity():
+                return parent.stdout.readline()
+            with concurrent.futures.ThreadPoolExecutor() as clients:
+                pending = clients.submit(read_identity)
+                try:
+                    line = pending.result(timeout=25)
+                except Exception:
+                    parent.kill()
+                    raise
+            identity = json.loads(line)
+            owned = [psutil.Process(pid) for pid in identity.values()]
+            parent.kill()
+            parent.wait(timeout=5)
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline:
+                alive = [p for p in owned if p.is_running() and p.status() != psutil.STATUS_ZOMBIE]
+                if not alive:
+                    break
+                time.sleep(.05)
+            self.assertFalse(alive, f"orphan worker/helper: {[p.pid for p in alive]}")
+        finally:
+            if parent.poll() is None:
+                parent.kill()
+            parent.communicate(timeout=5)
+            for process in owned:
+                try:
+                    if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                        process.kill()
+                except psutil.NoSuchProcess:
+                    pass
+
+
+class TCPAuthenticationTest(unittest.TestCase):
+    def test_valid_and_invalid_keys_over_real_loopback(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(transport, "_TCP", True), \
+                mock.patch.dict(os.environ, {transport.TOKEN_ENV: "a" * 64}):
+            path = Path(temporary) / "endpoint.json"
+            listener = transport.listen(path, 4)
+            self.addCleanup(listener.close)
+            listener.settimeout(3)
+            results = []
+
+            def accept():
+                for _ in range(2):
+                    connection, _ = listener.accept()
+                    with connection:
+                        results.append(transport.authenticate(connection))
+
+            with concurrent.futures.ThreadPoolExecutor() as clients:
+                future = clients.submit(accept)
+                with self.assertRaises(OSError):
+                    transport.connect(path, "b" * 64)
+                transport.connect(path, "a" * 64).close()
+                future.result(timeout=5)
+            self.assertEqual(results, [False, True])
+            self.assertNotIn("a" * 64, path.read_text())
 
 
 if __name__ == "__main__":

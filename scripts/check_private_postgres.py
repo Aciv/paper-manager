@@ -18,6 +18,26 @@ import tempfile
 from pathlib import Path
 
 
+def native_cluster_path(path: Path) -> Path:
+    """EDB Windows CLI uses ANSI argv; retain Unicode roots through 8.3 aliases.
+
+    This probe records the alias requirement. It does not claim the binaries
+    accept arbitrary UTF-8 argv or that every volume enables short names.
+    """
+    if os.name != "nt" or str(path).isascii():
+        return path
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+    kernel.GetShortPathNameW.restype = wintypes.DWORD
+    result = ctypes.create_unicode_buffer(32768)
+    size = kernel.GetShortPathNameW(str(path), result, len(result))
+    if not size or size >= len(result) or not result.value.isascii():
+        raise RuntimeError("PostgreSQL requires an ANSI-compatible path; this volume has no usable short path")
+    return Path(result.value)
+
+
 def probe(bin_dir: Path, output: Path) -> int:
     suffix = ".exe" if os.name == "nt" else ""
     binaries = {name: bin_dir.resolve() / (name + suffix) for name in ("initdb", "pg_ctl", "psql")}
@@ -29,7 +49,8 @@ def probe(bin_dir: Path, output: Path) -> int:
         if any(not path.is_file() for path in binaries.values()):
             raise FileNotFoundError(f"missing PostgreSQL binaries in {bin_dir}")
         with tempfile.TemporaryDirectory(prefix="pm postgres 验证 ") as temporary:
-            root = Path(temporary)
+            root = native_cluster_path(Path(temporary))
+            report["path_mode"] = "Windows short alias" if str(root) != temporary else "native path"
             data = root / "data"
             password = root / "password"
             secret = secrets.token_hex(24)
