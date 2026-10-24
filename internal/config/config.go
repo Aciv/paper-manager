@@ -84,6 +84,8 @@ const (
 // Config contains the infrastructure options selected at process startup.
 type Config struct {
 	HTTPAddress string
+	// Empty keeps the development/API-only routing unchanged.
+	WebDistDirectory string
 	// HTTP timeouts bound slow clients. Uploads and content downloads need a
 	// generous read/write budget; idle keep-alive connections do not.
 	HTTPReadTimeout     time.Duration
@@ -505,6 +507,7 @@ func Load() (Config, error) {
 	}
 	return Config{
 		HTTPAddress:                                 env("HTTP_ADDR", "127.0.0.1:8080"),
+		WebDistDirectory:                            env("WEB_DIST_DIR", ""),
 		HTTPReadTimeout:                             httpReadTimeout,
 		HTTPWriteTimeout:                            httpWriteTimeout,
 		HTTPIdleTimeout:                             httpIdleTimeout,

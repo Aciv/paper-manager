@@ -801,6 +801,19 @@ def _install_shutdown_handlers() -> threading.Event:
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
+    if os.getenv("PAPERS_PARENT_STDIN") == "1":
+        def watch_parent() -> None:
+            # The lightweight server owns this pipe; workers keep their existing
+            # transport/ownership scheme. No NumPy import occurs in this process.
+            try:
+                while os.read(0, 1):
+                    pass
+            finally:
+                stop_requested.set()
+
+        threading.Thread(
+            target=watch_parent, name="launcher-parent-watch", daemon=True
+        ).start()
     return stop_requested
 
 

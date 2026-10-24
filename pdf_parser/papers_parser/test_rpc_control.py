@@ -148,6 +148,18 @@ class ServerBootstrapTest(unittest.TestCase):
             signal.signal(signal.SIGTERM, previous_term)
             signal.signal(signal.SIGINT, previous_int)
 
+    def test_launcher_parent_eof_requests_graceful_shutdown(self) -> None:
+        previous_term = signal.getsignal(signal.SIGTERM)
+        previous_int = signal.getsignal(signal.SIGINT)
+        try:
+            with mock.patch.dict("os.environ", {"PAPERS_PARENT_STDIN": "1"}):
+                with mock.patch.object(server_module.os, "read", return_value=b""):
+                    requested = server_module._install_shutdown_handlers()
+                    self.assertTrue(requested.wait(timeout=2))
+        finally:
+            signal.signal(signal.SIGTERM, previous_term)
+            signal.signal(signal.SIGINT, previous_int)
+
     def test_max_concurrent_rpcs_rejects_excess_requests(self) -> None:
         args = SimpleNamespace(
             max_workers=2,

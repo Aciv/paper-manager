@@ -1,0 +1,31 @@
+# Copy beside the Launcher binary as .launcher_env, or use --env-file PATH.
+# The normal server's .env is not read. Existing LAUNCHER_* process variables win.
+# Paths must be absolute. Leave settings unset to keep saved/bundle defaults.
+# No passwords/tokens belong here; Launcher generates private runtime.json.
+
+# LAUNCHER_DATA_DIR=/home/your-user/.local/share/papers-manager
+# LAUNCHER_INSTALL_DIR=/opt/papers-manager
+# LAUNCHER_SERVER=/opt/papers-manager/server
+# LAUNCHER_PYTHON=/opt/papers-manager/python/bin/python3
+# LAUNCHER_PARSER_DIR=/opt/papers-manager/pdf_parser
+# LAUNCHER_POSTGRES_BIN=/opt/papers-manager/postgres/bin
+# LAUNCHER_REDIS=/opt/papers-manager/redis/redis-server
+# LAUNCHER_WEB_DIR=/opt/papers-manager/web
+
+# Windows paths: use single quotes and forward slashes to avoid escape sequences.
+# LAUNCHER_DATA_DIR='C:/Users/your-user/AppData/Local/papers-manager'
+# LAUNCHER_PYTHON='C:/Program Files/papers-manager/python/python.exe'
+
+# Omit ports for automatic first selection; chosen ports remain stable on restart.
+# An occupied saved port causes a visible error, never an automatic takeover.
+# LAUNCHER_MANAGEMENT_PORT=18081
+# LAUNCHER_HTTP_PORT=18080
+# LAUNCHER_MCP_PORT=18090
+# LAUNCHER_POSTGRES_PORT=15432
+# LAUNCHER_REDIS_PORT=16379
+# LAUNCHER_PARSER_PORT=15051
+
+LAUNCHER_OPEN_BROWSER=true
+LAUNCHER_STARTUP_TIMEOUT=90s
+LAUNCHER_STOP_TIMEOUT=75s
+LAUNCHER_EXTRACTION_ENGINE=hybrid
