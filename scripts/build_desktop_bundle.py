@@ -138,7 +138,13 @@ def assemble(args):
         copy_notices(bundle / "python", notices / "python")
         if os.name == "nt":
             extract(archives["postgres_windows"], work / "pg")
-            shutil.copytree(work / "pg/pgsql", bundle / "postgres")
+            pg = work / "pg/pgsql"
+            # The EDB ZIP also contains pgAdmin/Electron, another Python and
+            # StackBuilder. Ship only database runtime directories.
+            for directory in ("bin", "lib", "share"):
+                shutil.copytree(pg / directory, bundle / "postgres" / directory)
+            for name in ("server_license.txt", "commandlinetools_3rd_party_licenses.txt"):
+                shutil.copy2(pg / name, notices / ("PostgreSQL-" + name))
             extract(archives["redis_windows"], work / "redis")
             redis_binary = next((work / "redis").rglob("redis-server.exe"))
             (bundle / "redis").mkdir()

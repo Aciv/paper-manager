@@ -23,6 +23,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: desktop-internal-${{ github.ref }}
+  cancel-in-progress: true
+
 # No public release action. All artifacts are private validation candidates,
 # with short retention. Only explicitly authorized small CRF weights are committed.
 jobs:
@@ -67,7 +71,7 @@ jobs:
           with tarfile.open(root / 'desktop.tar.gz', 'w:gz') as archive:
               archive.add(root / 'desktop-bundle', arcname='bundle')
               for name in ('check_desktop_launcher.py', 'desktop_bundle.py', 'check_windows_desktop_user.ps1',
-                           'benchmark_parser_shared.py'):
+                           'benchmark_parser_shared.py', 'check_desktop_setup_failures.py'):
                   archive.add(pathlib.Path('scripts') / name, arcname='validation/' + name)
       - uses: actions/upload-artifact@v4
         with:

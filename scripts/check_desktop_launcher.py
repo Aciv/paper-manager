@@ -367,6 +367,12 @@ def main():
                 version_file.write_bytes(original_version)
                 report["steps"].append("explicit setup failure/retry; damaged data preserved")
                 if args.bundle:
+                    setup_probe = Path(__file__).with_name("check_desktop_setup_failures.py")
+                    subprocess.run([sys.executable, str(setup_probe), "--bundle", str(args.bundle),
+                                    "--output", str(output / "setup-failures.json")],
+                                   env={**os.environ, "PATH": launcher_env["PATH"]},
+                                   check=True, capture_output=True, timeout=180)
+                    report["steps"].append("real setup filesystem failures and explicit retry")
                     benchmark = Path(__file__).with_name("benchmark_parser_shared.py")
                     python_path = args.bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
                     with (output / "benchmark-console.log").open("wb") as log:
