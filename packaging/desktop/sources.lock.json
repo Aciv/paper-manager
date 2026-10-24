@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "distribution": "internal-validation-only",
+  "python": {
+    "linux-x86_64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+      "sha256": "6d7521138fd33afddc1ccd08abb007d9a2829e38117c2576f9efdc0ec73ce772"
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-x86_64-pc-windows-msvc-install_only_stripped.tar.gz",
+      "sha256": "aac5d331fc3307343f95928fdbea4583f0d53973d08c7e1d081884fbd229a0e1"
+    },
+    "macos-arm64": {
+      "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20261021/cpython-3.12.15%2B20261021-aarch64-apple-darwin-install_only_stripped.tar.gz",
+      "sha256": "7b8d00b751db21cea87dc551a8f8165147c5fbc5251d5537d7e5497dde00a219"
+    }
+  },
+  "postgres_source": {
+    "url": "https://ftp.postgresql.org/pub/source/v17.11/postgresql-17.11.tar.bz2",
+    "sha256": "dd27f2b3c59e73ed14aa3324901242bf69a032a6347805f274e6260322d42979"
+  },
+  "postgres_windows": {
+    "url": "https://get.enterprisedb.com/postgresql/postgresql-17.11-1-windows-x64-binaries.zip",
+    "sha256": "6eabdf00d2893713b75db4336a23c3fdf505f056e217ec6e2e95d901750cfea3"
+  },
+  "redis_source": {
+    "url": "https://download.redis.io/releases/redis-7.4.11.tar.gz",
+    "sha256": "3c266ece0abd54ed3b1c912c6eb86b7508cf382cb690ee6649d3843f018f6357"
+  },
+  "redis_windows": {
+    "url": "https://github.com/redis-windows/redis-windows/releases/download/7.4.11/Redis-7.4.11-Windows-x64-cygwin-with-Service.zip",
+    "sha256": "2289eca02c25e96a918812c3b05083c3a8bc9440f1b268cc48e14bd93ed2acb0"
+  }
+}

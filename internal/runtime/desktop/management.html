@@ -19,6 +19,7 @@
       </section>
       <div class="actions">
         <a id="open" target="_blank" rel="noreferrer" hidden>打开论文库 ↗</a>
+        <button data-action="initialize">首次配置 / 重试配置</button>
         <button data-action="start">启动 / 重试</button>
         <button data-action="stop">停止服务</button>
         <button data-action="quit">退出 Launcher</button>
@@ -34,9 +35,10 @@
         <label for="log-service">服务</label>
         <select id="log-service">
           <option>api</option><option>parser</option><option>postgres</option>
-          <option>redis</option><option>initdb</option>
+          <option>redis</option>
         </select>
         <button id="refresh-log">刷新</button>
+        <button id="initialization-log">查看初始化日志</button>
         <pre id="logs">可查看最近 64 KiB 日志。</pre>
       </section>
     </main>

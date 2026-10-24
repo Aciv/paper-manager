@@ -138,7 +138,7 @@ func TestManagementBoundariesAndFailureVisibility(t *testing.T) {
 			t.Errorf("%s %s: %d, want %d", tc.method, tc.path, result.Code, tc.want)
 		}
 	}
-	if app.Snapshot().State != "stopped" {
+	if app.Snapshot().State != "setup_required" {
 		t.Fatal("idempotent stop changed completed state")
 	}
 	if !app.Start() {
@@ -149,11 +149,11 @@ func TestManagementBoundariesAndFailureVisibility(t *testing.T) {
 	if err := app.Wait(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if state := app.Snapshot(); state.State != "failed" || state.Error == "" {
+	if state := app.Snapshot(); (state.State != "failed" && state.State != "setup_required") || state.Error == "" {
 		t.Fatalf("missing runtime failure not visible: %+v", state)
 	}
 	result := request("GET", "/status", address(cfg.Ports.Manager), "")
-	if result.Code != 200 || !strings.Contains(result.Body.String(), "failed") {
+	if result.Code != 200 || (!strings.Contains(result.Body.String(), "failed") && !strings.Contains(result.Body.String(), "setup_required")) {
 		t.Fatal("management page unavailable after service failure")
 	}
 	if strings.Contains(request("GET", "/", address(cfg.Ports.Manager), "").Body.String(), cfg.MCPToken) {
@@ -327,5 +327,48 @@ func TestRuntimeProcessHelper(t *testing.T) {
 			os.Exit(5)
 		}
 		connection.Close()
+	}
+}
+
+func TestNormalStartupNeverInitializesPostgres(t *testing.T) {
+	cfg := testConfig(t)
+	app := New(cfg)
+	if app.Snapshot().Initialized || app.Snapshot().State != "setup_required" {
+		t.Fatal("new install did not request explicit setup")
+	}
+	if _, err := app.preparePostgres(context.Background()); err == nil {
+		t.Fatal("startup created a database without explicit setup")
+	}
+	if _, err := os.Stat(filepath.Join(cfg.DataDir, "postgres")); !os.IsNotExist(err) {
+		t.Fatal("normal startup modified the database directory")
+	}
+}
+
+func TestInitializationMarkerAndOwnershipValidation(t *testing.T) {
+	cfg := testConfig(t)
+	app := New(cfg)
+	marker := filepath.Join(cfg.DataDir, "initialized.json")
+	if err := os.WriteFile(marker, []byte(`{"version":1,"identity":"foreign"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.checkInitialization(); err == nil {
+		t.Fatal("foreign initialization marker accepted")
+	}
+	data, _ := json.Marshal(app.initializationRecord())
+	if err := os.WriteFile(marker, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.requireInitialized(context.Background()); err == nil {
+		t.Fatal("marker hid a missing database")
+	}
+	directory := filepath.Join(cfg.DataDir, "postgres")
+	if err := os.Mkdir(directory, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkIdentity(directory, cfg.DatabasePassword); err == nil {
+		t.Fatal("missing identity accepted")
+	}
+	if _, err := os.Stat(filepath.Join(directory, ".papers-manager-instance")); !os.IsNotExist(err) {
+		t.Fatal("validation created an ownership claim")
 	}
 }

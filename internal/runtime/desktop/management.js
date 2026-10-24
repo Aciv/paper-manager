@@ -1,5 +1,6 @@
 const element = (id) => document.getElementById(id);
 const states = {
+  setup_required: '需要首次配置',
   initializing: '正在初始化',
   starting: '正在启动',
   ready: '服务已就绪',
@@ -37,7 +38,10 @@ async function refresh() {
     element('open').href = status.app_url;
     element('mcp-address').textContent = status.mcp_url;
     document.querySelector('[data-action="start"]').disabled =
-      !['stopped', 'failed'].includes(status.state);
+      !status.initialized || !['stopped', 'failed'].includes(status.state);
+    document.querySelector('[data-action="initialize"]').hidden = status.initialized;
+    document.querySelector('[data-action="initialize"]').disabled =
+      !['setup_required', 'stopped', 'failed'].includes(status.state);
   } catch (error) {
     showError(error);
   }
@@ -76,3 +80,12 @@ element('copy-mcp').addEventListener('click', async () => {
 
 setInterval(refresh, 1500);
 refresh();
+
+element('initialization-log').addEventListener('click', async () => {
+  try {
+    const result = await request('/initialization-log');
+    element('logs').textContent = result.text;
+  } catch (error) {
+    showError(error);
+  }
+});

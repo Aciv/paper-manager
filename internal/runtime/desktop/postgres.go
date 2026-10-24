@@ -30,12 +30,19 @@ func (r *Runtime) dsn() string {
 }
 
 func (r *Runtime) preparePostgres(ctx context.Context) (string, error) {
+	return r.postgresData(ctx, false)
+}
+
+func (r *Runtime) postgresData(ctx context.Context, initialize bool) (string, error) {
 	root, err := nativePath(r.cfg.DataDir)
 	if err != nil {
 		return "", err
 	}
 	data := filepath.Join(root, "postgres")
 	if _, err = os.Stat(data); os.IsNotExist(err) {
+		if !initialize {
+			return "", fmt.Errorf("private PostgreSQL is not initialized; run first-time setup")
+		}
 		// Initialize in a disposable sibling. Failed initdb never turns a partial
 		// cluster into an apparently valid existing cluster on retry.
 		temp, e := os.MkdirTemp(root, ".postgres-init-")
@@ -79,7 +86,13 @@ func (r *Runtime) preparePostgres(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("existing PostgreSQL directory is incomplete or not version 17; " +
 			"restore/upgrade explicitly; data was preserved")
 	}
-	if err := ensureIdentity(data, r.cfg.DatabasePassword); err != nil {
+	for _, name := range []string{"global/pg_control", "postgresql.conf", "pg_hba.conf"} {
+		info, err := os.Stat(filepath.Join(data, filepath.FromSlash(name)))
+		if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+			return "", fmt.Errorf("existing PostgreSQL cluster is incomplete; data preserved")
+		}
+	}
+	if err := checkIdentity(data, r.cfg.DatabasePassword); err != nil {
 		return "", fmt.Errorf("private PostgreSQL directory: %w", err)
 	}
 	if _, err = os.Stat(filepath.Join(data, "postmaster.pid")); err == nil {
@@ -114,4 +127,17 @@ func ensureIdentity(directory, credential string) error {
 		return fmt.Errorf("existing directory has no ownership marker; refusing to adopt it")
 	}
 	return os.WriteFile(path, []byte(want), 0600)
+}
+
+// checkIdentity validates without creating an ownership claim during startup.
+func checkIdentity(directory, credential string) error {
+	data, err := os.ReadFile(filepath.Join(directory, ".papers-manager-instance"))
+	if err != nil {
+		return fmt.Errorf("ownership marker unavailable; data preserved: %w", err)
+	}
+	want := fmt.Sprintf("%x\n", sha256.Sum256([]byte(credential)))
+	if string(data) != want {
+		return fmt.Errorf("directory belongs to a different instance; data preserved")
+	}
+	return nil
 }

@@ -2,6 +2,7 @@ package desktop
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -23,11 +24,12 @@ import (
 )
 
 type Snapshot struct {
-	State    string            `json:"state"`
-	Error    string            `json:"error,omitempty"`
-	Services map[string]string `json:"services"`
-	AppURL   string            `json:"app_url"`
-	MCPURL   string            `json:"mcp_url"`
+	Initialized bool              `json:"initialized"`
+	State       string            `json:"state"`
+	Error       string            `json:"error,omitempty"`
+	Services    map[string]string `json:"services"`
+	AppURL      string            `json:"app_url"`
+	MCPURL      string            `json:"mcp_url"`
 }
 
 type managed struct {
@@ -49,7 +51,7 @@ type Runtime struct {
 func New(cfg Config) *Runtime {
 	done := make(chan struct{})
 	close(done)
-	return &Runtime{
+	r := &Runtime{
 		cfg: cfg,
 		state: Snapshot{
 			State: "stopped", Services: map[string]string{},
@@ -58,6 +60,12 @@ func New(cfg Config) *Runtime {
 		},
 		cycleDone: done, quit: make(chan struct{}),
 	}
+	if err := r.checkInitialization(); err == nil {
+		r.state.Initialized = true
+	} else if errors.Is(err, errSetupRequired) {
+		r.state.State = "setup_required"
+	}
+	return r
 }
 func (r *Runtime) Snapshot() Snapshot {
 	r.mu.Lock()
@@ -84,6 +92,16 @@ func (r *Runtime) setService(name, state string) {
 // Start never attaches to an existing service. Failed cycles need an explicit
 // retry; there is no automatic crash/restart loop.
 func (r *Runtime) Start() bool {
+	return r.begin(false)
+}
+
+// Initialize performs explicit first-time setup without starting services.
+// The same serialized operation is used by installers and the management page.
+func (r *Runtime) Initialize() bool {
+	return r.begin(true)
+}
+
+func (r *Runtime) begin(initialize bool) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	select {
@@ -99,10 +117,17 @@ func (r *Runtime) Start() bool {
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
 	r.cycleDone = make(chan struct{})
-	r.state.State = "initializing"
+	r.state.State = "starting"
+	if initialize {
+		r.state.State = "initializing"
+	}
 	r.state.Error = ""
 	r.state.Services = map[string]string{}
-	go r.run(ctx, r.cycleDone)
+	if initialize {
+		go r.initialize(ctx, r.cycleDone)
+	} else {
+		go r.run(ctx, r.cycleDone)
+	}
 	return true
 }
 func (r *Runtime) Stop() {
@@ -152,7 +177,9 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		for _, closeResource := range release {
 			closeResource()
 		}
-		if failure != nil {
+		if errors.Is(failure, errSetupRequired) {
+			r.setState("setup_required", failure.Error())
+		} else if failure != nil {
 			r.setState("failed", failure.Error())
 			logger.Error(context.Background(), "local runtime failed", "error", r.cfg.redact(failure.Error()))
 		} else {
@@ -174,26 +201,13 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		fail(err)
 		return
 	}
-	directories := []string{
-		"logs", "redis", "uploads", filepath.Join("cache", "tmp"), "recognition-output", "work",
+	if err := r.requireInitialized(startup); err != nil {
+		fail(err)
+		return
 	}
-	for _, name := range directories {
-		if err := os.MkdirAll(filepath.Join(r.cfg.DataDir, name), 0700); err != nil {
-			fail(err)
-			return
-		}
-	}
-	files := []string{
-		r.cfg.Server, r.cfg.Python, r.cfg.Redis,
-		filepath.Join(r.cfg.ParserDir, "papers_parser", "server.py"),
-		filepath.Join(r.cfg.WebDir, "index.html"),
-		r.pgBinary("initdb"), r.pgBinary("postgres"), r.pgBinary("pg_ctl"),
-	}
-	for _, path := range files {
-		if info, err := os.Stat(path); err != nil || info.IsDir() {
-			fail(fmt.Errorf("missing runtime file %s; configure runtime.json or install the complete bundle", path))
-			return
-		}
+	if err := r.validateFiles(); err != nil {
+		fail(err)
+		return
 	}
 	// Hold all ports until the corresponding process starts. Releasing a socket
 	// is not atomic handoff to these binaries: bind/readiness failures still fail
@@ -221,7 +235,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		fail(err)
 		return
 	}
-	if err := ensureIdentity(filepath.Join(r.cfg.DataDir, "redis"), r.cfg.RedisPassword); err != nil {
+	if err := checkIdentity(filepath.Join(r.cfg.DataDir, "redis"), r.cfg.RedisPassword); err != nil {
 		fail(fmt.Errorf("private Redis directory: %w", err))
 		return
 	}

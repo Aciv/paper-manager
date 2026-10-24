@@ -39,6 +39,7 @@ func run() error {
 	}
 	root := flag.String("data-dir", defaultRoot, "private writable application directory")
 	install := flag.String("install-dir", filepath.Dir(executable), "read-only runtime bundle directory")
+	initialize := flag.Bool("initialize", false, "perform explicit first-time setup and exit")
 	configure := flag.Bool("configure", false, "create/validate runtime.json and exit")
 	browser := flag.Bool("open-browser", true, "open the independent management page")
 	envFile := flag.String("env-file", filepath.Join(filepath.Dir(executable), ".launcher_env"),
@@ -88,6 +89,24 @@ func run() error {
 		return nil
 	}
 	app := desktop.New(cfg)
+	if *initialize {
+		app.Initialize()
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		if err := app.Wait(ctx); err != nil {
+			app.Stop()
+			drain, stop := context.WithTimeout(context.Background(), cfg.StopTimeout)
+			defer stop()
+			_ = app.Wait(drain)
+			return err
+		}
+		state := app.Snapshot()
+		if !state.Initialized || state.State == "failed" {
+			return fmt.Errorf("initialization failed: %s", state.Error)
+		}
+		fmt.Println("Initialization completed; services have not been started.")
+		return nil
+	}
 	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Ports.Manager))
 	if err != nil {
 		return fmt.Errorf("management port occupied; see runtime.json: %w", err)

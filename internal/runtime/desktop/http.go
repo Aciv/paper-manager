@@ -64,7 +64,7 @@ func (r *Runtime) Handler() http.Handler {
 		case req.Method == http.MethodGet && req.URL.Path == "/logs":
 			name := req.URL.Query().Get("service")
 			switch name {
-			case "api", "parser", "postgres", "redis", "initdb":
+			case "api", "parser", "postgres", "redis":
 			default:
 				http.Error(w, "unknown service", http.StatusBadRequest)
 				return
@@ -75,6 +75,19 @@ func (r *Runtime) Handler() http.Handler {
 				return
 			}
 			_ = json.NewEncoder(w).Encode(map[string]string{"text": content})
+		case req.Method == http.MethodGet && req.URL.Path == "/initialization-log":
+			content, err := r.logTail("initdb")
+			if err != nil {
+				http.Error(w, "initialization log unavailable", http.StatusNotFound)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(map[string]string{"text": content})
+		case req.Method == http.MethodPost && req.URL.Path == "/initialize":
+			if !r.Initialize() {
+				http.Error(w, "another operation is running or launcher is exiting", http.StatusConflict)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
 		case req.Method == http.MethodPost && req.URL.Path == "/start":
 			if !r.Start() {
 				http.Error(w, "services are already running or stopping", http.StatusConflict)

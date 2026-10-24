@@ -1,5 +1,10 @@
 # CI-only: run the entire D2 stack as an ordinary Windows account.
-param([Parameter(Mandatory = $true)][string]$RedisServer)
+param(
+    [string]$RedisServer,
+    [string]$Bundle,
+    [string]$Harness,
+    [string]$OutputDirectory
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
     throw 'Run only in an ephemeral GitHub Actions Windows runner'
@@ -9,9 +14,9 @@ $password = ConvertTo-SecureString ('Pm!' + [guid]::NewGuid().ToString('N')) -As
 $credential = [pscredential]::new("$env:COMPUTERNAME\$account", $password)
 $root = Join-Path $env:PUBLIC $account
 $repo = $env:GITHUB_WORKSPACE
-$output = Join-Path $repo 'tmp/desktop-d0/launcher'
+$output = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repo 'tmp/desktop-d0/launcher' }
 $python = (Get-Command python).Source
-$bin = Split-Path (Get-Command pg_ctl).Source
+if (-not $Bundle) { $bin = Split-Path (Get-Command pg_ctl).Source }
 try {
     New-LocalUser -Name $account -Password $password -AccountNeverExpires | Out-Null
     $members = Get-LocalGroupMember -SID 'S-1-5-32-545'
@@ -31,16 +36,25 @@ try {
         "$env:COMPUTERNAME\$account", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     $acl.AddAccessRule($rule)
     Set-Acl $root $acl
-    $arguments = @(
-        ('"' + (Join-Path $repo 'scripts/check_desktop_launcher.py') + '"'),
-        '--repository', ('"' + $repo + '"'),
-        '--launcher', ('"' + (Join-Path $repo 'tmp/desktop-d0/bin/launcher.exe') + '"'),
-        '--server', ('"' + (Join-Path $repo 'tmp/desktop-d0/bin/server.exe') + '"'),
-        '--postgres-bin', ('"' + $bin + '"'),
-        '--redis-server', ('"' + $RedisServer + '"'),
-        '--output-dir', ('"' + (Join-Path $root 'result') + '"'),
-        '--temp-root', ('"' + $root + '"')
-    )
+    if ($Bundle) {
+        $arguments = @(
+            ('"' + (Join-Path $Harness 'check_desktop_launcher.py') + '"'),
+            '--bundle', ('"' + $Bundle + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'result') + '"'),
+            '--temp-root', ('"' + $root + '"')
+        )
+    } else {
+        $arguments = @(
+            ('"' + (Join-Path $repo 'scripts/check_desktop_launcher.py') + '"'),
+            '--repository', ('"' + $repo + '"'),
+            '--launcher', ('"' + (Join-Path $repo 'tmp/desktop-d0/bin/launcher.exe') + '"'),
+            '--server', ('"' + (Join-Path $repo 'tmp/desktop-d0/bin/server.exe') + '"'),
+            '--postgres-bin', ('"' + $bin + '"'),
+            '--redis-server', ('"' + $RedisServer + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'result') + '"'),
+            '--temp-root', ('"' + $root + '"')
+        )
+    }
     $process = Start-Process -FilePath $python -ArgumentList $arguments -Credential $credential `
         -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
         -RedirectStandardOutput (Join-Path $root 'stdout.log') `

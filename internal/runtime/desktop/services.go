@@ -19,6 +19,11 @@ func (r *Runtime) serviceEnv(values map[string]string) []string {
 		values = map[string]string{}
 	}
 	temporary := filepath.Join(r.cfg.DataDir, "cache", "tmp")
+	// PostgreSQL tools may link private libpq. Never resolve it from a
+	// developer's database installation after the bundle has been relocated.
+	privateLibraries := filepath.Join(r.cfg.PostgresBin, "..", "lib")
+	values["LD_LIBRARY_PATH"] = privateLibraries
+	values["DYLD_LIBRARY_PATH"] = privateLibraries
 	values["TEMP"] = temporary
 	values["TMP"] = temporary
 	values["TMPDIR"] = temporary
