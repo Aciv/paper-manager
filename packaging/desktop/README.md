@@ -230,7 +230,7 @@ D1 必须在同一机器/解释器/库/模型/线程配置/输入下比较，至
     .venv/bin/python -m unittest discover -s scripts -p test_desktop_validation.py
     go test ./...
     go build ./...
-    cd web && npm run build && npm run test:reading-note
+    (cd web && npm run build && npm run test:reading-note)
     .venv/bin/python scripts/benchmark_parser_shared.py --jobs 8 --output tmp/desktop-d0/after.json
     .venv/bin/python scripts/run_desktop_integration.py --redis-server <owned-native-redis-server> --output-dir tmp/desktop-d0/native
 
