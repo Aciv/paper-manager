@@ -214,8 +214,21 @@ time.sleep(60)
             parent.kill()
             parent.wait(timeout=5)
             deadline = time.monotonic() + 8
+
+            def still_running():
+                alive = []
+                for process in owned:
+                    try:
+                        if process.is_running() and process.status() != psutil.STATUS_ZOMBIE:
+                            alive.append(process)
+                    except psutil.NoSuchProcess:
+                        # Job Object cleanup can complete between the two
+                        # observations. Disappearance is the expected result.
+                        pass
+                return alive
+
             while time.monotonic() < deadline:
-                alive = [p for p in owned if p.is_running() and p.status() != psutil.STATUS_ZOMBIE]
+                alive = still_running()
                 if not alive:
                     break
                 time.sleep(.05)
