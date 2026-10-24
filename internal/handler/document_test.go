@@ -509,8 +509,12 @@ func TestUploadRouteReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
 		!strings.Contains(response.Body.String(), `"retryable":true`) {
 		t.Fatalf("response must expose retryable created document: %s", response.Body.String())
 	}
-	if _, err := storage.Open(context.Background(), documents.document.StorageKey); err != nil {
+	reader, err := storage.Open(context.Background(), documents.document.StorageKey)
+	if err != nil {
 		t.Fatalf("stored source must remain available for retry: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stored file: %v", err)
 	}
 	retryRequest := httptest.NewRequest(http.MethodPost, "/api/document/"+documents.document.ID.String()+"/retry", nil)
 	retryResponse := httptest.NewRecorder()

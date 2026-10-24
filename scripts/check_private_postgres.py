@@ -12,6 +12,7 @@ import os
 import platform
 import secrets
 import socket
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -87,7 +88,7 @@ def probe(bin_dir: Path, output: Path) -> int:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bin-dir", type=Path, required=True)
+    parser.add_argument("--bin-dir", type=Path, default=Path(shutil.which("pg_ctl") or "/missing/pg_ctl").parent)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
     raise SystemExit(probe(args.bin_dir, args.output))

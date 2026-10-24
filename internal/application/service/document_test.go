@@ -875,8 +875,12 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	if block.DocumentID != documentID || block.Location == nil || block.Location.PageNumber == nil || *block.Location.PageNumber != 1 {
 		t.Fatalf("persisted block = %+v", block)
 	}
-	if _, err := storage.Open(context.Background(), repo.markdown.StorageKey); err != nil {
+	reader, err := storage.Open(context.Background(), repo.markdown.StorageKey)
+	if err != nil {
 		t.Fatalf("stored markdown is missing: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stored file: %v", err)
 	}
 	if !strings.HasPrefix(repo.markdown.StorageKey, "markdown/") {
 		t.Fatalf("markdown storage key = %q, want markdown/ prefix", repo.markdown.StorageKey)
@@ -927,8 +931,12 @@ func TestProcessDocumentStoresRenderedImageBlock(t *testing.T) {
 	if want := "/api/document/" + documentID.String() + "/blocks/" + repo.blocks[0].ID.String() + "/image"; repo.blocks[0].URL != want {
 		t.Fatalf("block URL = %q, want %q", repo.blocks[0].URL, want)
 	}
-	if _, err := storage.Open(context.Background(), repo.blocks[0].AssetKey); err != nil {
+	reader, err := storage.Open(context.Background(), repo.blocks[0].AssetKey)
+	if err != nil {
 		t.Fatalf("stored image is missing: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stored file: %v", err)
 	}
 }
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import secrets
 import shutil
 import socket
 import signal
@@ -27,6 +28,8 @@ from papers_parser.worker_protocol import (
 )
 
 LOG = get_logger(__name__)
+
+from papers_parser.worker_transport import TOKEN_ENV, connect, start_process, stop_process
 
 
 class WorkerUnavailable(Exception):
@@ -145,19 +148,7 @@ class WorkerHandle:
             self.connection.close()
         except OSError:
             pass
-        try:
-            if self.process.poll() is None:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                    try:
-                        self.process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        pass
-        except (ProcessLookupError, PermissionError):
-            pass
+        stop_process(self.process)
         try:
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         except OSError:
@@ -286,14 +277,11 @@ class WorkerPool:
         ]
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            close_fds=True,
-            start_new_session=True,
-            env=env,
-        )
+        token = secrets.token_hex(32)
+        env[TOKEN_ENV] = token
+        parser_root = str(Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [parser_root, env.get("PYTHONPATH", "")]))
+        process = start_process(command, env=env, cwd=parser_root)
         threading.Thread(
             target=self._drain_worker_output,
             args=(process, self.config.kind),
@@ -307,9 +295,7 @@ class WorkerPool:
                 if process.poll() is not None:
                     raise WorkerUnavailable("parser worker exited during startup")
                 try:
-                    connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    connection.settimeout(0.5)
-                    connection.connect(str(socket_path))
+                    connection = connect(socket_path, token)
                     connection.settimeout(0.5)
                     break
                 except OSError:
@@ -320,15 +306,7 @@ class WorkerPool:
             if connection is None:
                 raise WorkerUnavailable("parser worker startup timed out")
         except Exception:
-            try:
-                if process.poll() is None:
-                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                    process.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            stop_process(process)
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
         return WorkerHandle(
@@ -432,11 +410,10 @@ class SharedWorkerHandle:
         cancel_check: Callable[[], bool] | None,
         timeout: float,
     ) -> bytes:
-        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.settimeout(0.5)
+        connection = None
         try:
             try:
-                connection.connect(str(self.socket_path))
+                connection = connect(self.socket_path, getattr(self, "token", ""))
                 write_frame(connection, method, payload)
                 status, response = read_frame(
                     connection,
@@ -454,10 +431,8 @@ class SharedWorkerHandle:
             except (OSError, WorkerProtocolError) as exc:
                 raise WorkerUnavailable("worker connection failed") from exc
         finally:
-            try:
+            if connection is not None:
                 connection.close()
-            except OSError:
-                pass
         if status == STATUS_ERROR:
             code, message = decode_error(response)
             raise WorkerRPCError(code, message)
@@ -470,19 +445,7 @@ class SharedWorkerHandle:
         if self._closed:
             return
         self._closed = True
-        try:
-            if self.process.poll() is None:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
-                try:
-                    self.process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                    try:
-                        self.process.wait(timeout=2)
-                    except subprocess.TimeoutExpired:
-                        pass
-        except (ProcessLookupError, PermissionError):
-            pass
+        stop_process(self.process)
         try:
             shutil.rmtree(self.temp_dir, ignore_errors=True)
         except OSError:
@@ -598,6 +561,7 @@ class SharedWorkerPool:
             sys.executable,
             "-m",
             "papers_parser.worker",
+            "--shared",
             "--kind",
             self.config.kind,
             "--socket",
@@ -613,14 +577,11 @@ class SharedWorkerPool:
         ]
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            close_fds=True,
-            start_new_session=True,
-            env=env,
-        )
+        token = secrets.token_hex(32)
+        env[TOKEN_ENV] = token
+        parser_root = str(Path(__file__).resolve().parent.parent)
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [parser_root, env.get("PYTHONPATH", "")]))
+        process = start_process(command, env=env, cwd=parser_root)
         threading.Thread(
             target=WorkerPool._drain_worker_output,
             args=(process, self.config.kind),
@@ -632,30 +593,19 @@ class SharedWorkerPool:
             while time.monotonic() < deadline:
                 if process.poll() is not None:
                     raise WorkerUnavailable("parser worker exited during startup")
-                probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                probe.settimeout(0.2)
                 try:
-                    probe.connect(str(socket_path))
+                    probe = connect(socket_path, token)
                     probe.close()
                     break
                 except OSError:
-                    probe.close()
                     time.sleep(0.05)
             else:
                 raise WorkerUnavailable("parser worker startup timed out")
         except Exception:
-            try:
-                if process.poll() is None:
-                    os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-                    process.wait(timeout=5)
-            except (ProcessLookupError, subprocess.TimeoutExpired):
-                try:
-                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+            stop_process(process)
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise
-        return SharedWorkerHandle(
+        worker = SharedWorkerHandle(
             kind=self.config.kind,
             process=process,
             socket_path=socket_path,
@@ -663,6 +613,8 @@ class SharedWorkerPool:
             max_jobs=self.config.max_jobs,
             max_payload_bytes=self.config.max_payload_bytes,
         )
+        worker.token = token
+        return worker
 
     def _retire_locked(self) -> None:
         worker = self._worker

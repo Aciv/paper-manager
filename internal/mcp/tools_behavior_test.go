@@ -363,7 +363,7 @@ func TestLocalImportToolUsesConfiguredRoot(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("import failed: %s", resultText(t, result))
 	}
-	if documents.importedPath != path {
+	if !sameTestFile(documents.importedPath, path) {
 		t.Fatalf("imported path = %q, want %q", documents.importedPath, path)
 	}
 	if !strings.Contains(resultText(t, result), "paper.pdf") {
@@ -650,8 +650,8 @@ func TestBatchFileImportToolReturnsPerItemResultsAndAttachesBase(t *testing.T) {
 	if len(documents.batchPaths) != 2 {
 		t.Fatalf("batch paths = %#v", documents.batchPaths)
 	}
-	if documents.batchPaths[0] != filepath.Join(root, "a.pdf") ||
-		documents.batchPaths[1] != filepath.Join(root, "b.pdf") {
+	if !sameTestFile(documents.batchPaths[0], filepath.Join(root, "a.pdf")) ||
+		!sameTestFile(documents.batchPaths[1], filepath.Join(root, "b.pdf")) {
 		t.Fatalf("resolved paths = %#v", documents.batchPaths)
 	}
 	if len(documents.batchDOIs) != 2 || documents.batchDOIs[1] != "10.1000/b" {

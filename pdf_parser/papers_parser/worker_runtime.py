@@ -18,6 +18,7 @@ from pathlib import Path
 import grpc
 
 from logger import get_logger
+from papers_parser.worker_transport import authenticate, listen
 from papers_parser.worker_protocol import (
     STATUS_ERROR,
     STATUS_OK,
@@ -83,14 +84,15 @@ def serve_worker(
     signal.signal(signal.SIGTERM, stop_worker)
     if socket_path.exists():
         socket_path.unlink()
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(socket_path))
-    os.chmod(socket_path, 0o600)
-    listener.listen(1)
+    listener = listen(socket_path, 1)
     LOG.info("parser worker ready kind=%s socket=%s", expected_method, socket_path)
     jobs = 0
     try:
-        connection, _ = listener.accept()
+        while True:
+            connection, _ = listener.accept()
+            if authenticate(connection):
+                break
+            connection.close()
         with connection:
             connection.settimeout(0.5)
             while jobs < max_jobs:
@@ -169,17 +171,6 @@ def serve_shared_worker(
     thread, so the heavy imports/model are loaded once and shared by all
     in-flight jobs. The process exits after the idle window or max_jobs.
     """
-    if concurrency <= 1:
-        serve_worker(
-            socket_path=socket_path,
-            expected_method=expected_method,
-            handler=handler,
-            idle_seconds=idle_seconds,
-            max_jobs=max_jobs,
-            max_payload_bytes=max_payload_bytes,
-        )
-        return
-
     stop = threading.Event()
 
     def request_stop(_signum, _frame) -> None:
@@ -194,10 +185,7 @@ def serve_shared_worker(
 
     if socket_path.exists():
         socket_path.unlink()
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(socket_path))
-    os.chmod(socket_path, 0o600)
-    listener.listen(max(16, concurrency * 4))
+    listener = listen(socket_path, max(16, concurrency * 4))
     listener.settimeout(0.5)
 
     lock = threading.Lock()
@@ -205,6 +193,8 @@ def serve_shared_worker(
 
     def handle_connection(connection: socket.socket) -> None:
         try:
+            if not authenticate(connection):
+                return
             connection.settimeout(0.5)
             deadline = time.monotonic() + 60
             try:
@@ -235,7 +225,7 @@ def serve_shared_worker(
                 # for EOF without consuming response bytes.
                 while not done.is_set() and not cancelled.is_set():
                     try:
-                        readable, _, _ = select.select([connection], [], [], 0.5)
+                        readable, _, _ = select.select([connection], [], [], 0.05)
                     except (OSError, ValueError):
                         cancelled.set()
                         return

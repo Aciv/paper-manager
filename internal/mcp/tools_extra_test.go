@@ -32,7 +32,7 @@ func TestResolveLocalImportPathConfinesToRoot(t *testing.T) {
 	server := &ToolServer{cfg: config.Config{MCPLocalImportRoot: root}}
 
 	got, err := server.resolveLocalImportPath("paper.pdf")
-	if err != nil || got != inside {
+	if err != nil || !sameTestFile(got, inside) {
 		t.Fatalf("relative path = %q, err = %v", got, err)
 	}
 	if _, err := server.resolveLocalImportPath(outside); !errors.Is(err, errLocalImportForbidden) {
@@ -44,6 +44,15 @@ func TestResolveLocalImportPathConfinesToRoot(t *testing.T) {
 	if _, err := server.resolveLocalImportPath("missing.pdf"); !errors.Is(err, errInvalidToolInput) {
 		t.Fatalf("missing file error = %v, want invalid input", err)
 	}
+}
+
+func sameTestFile(left, right string) bool {
+	l, err := os.Stat(left)
+	if err != nil {
+		return false
+	}
+	r, err := os.Stat(right)
+	return err == nil && os.SameFile(l, r)
 }
 
 func TestResolveLocalImportPathDisabled(t *testing.T) {

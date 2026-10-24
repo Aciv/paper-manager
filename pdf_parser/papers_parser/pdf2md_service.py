@@ -183,7 +183,15 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         started_at = time.monotonic()
 
         def checkpoint() -> None:
-            check_rpc(context, started_at, self.rpc_max_seconds)
+            class CheckpointContext:
+                time_remaining = context.time_remaining
+                is_active = context.is_active
+
+                @staticmethod
+                def abort(code, message):
+                    raise RPCAbort(code, message)
+
+            check_rpc(CheckpointContext(), started_at, self.rpc_max_seconds)
 
         try:
             # The PDF stays in memory for every input mode. Writing content to a

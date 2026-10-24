@@ -75,7 +75,7 @@ class RenderPDFRegionTest(unittest.TestCase):
 
     def test_storage_key_cannot_escape_upload_root(self) -> None:
         root = Path(self.tempdir.name)
-        self.assertEqual(resolve_storage_source(root, "source.pdf"), self.source)
+        self.assertEqual(resolve_storage_source(root, "source.pdf"), self.source.resolve())
         with self.assertRaises(RegionRenderError):
             resolve_storage_source(root, "../source.pdf")
         with self.assertRaises(RegionRenderError):
