@@ -85,12 +85,27 @@ honest gap than a false precision.
 
 In a Base summary, every material comparison should have:
 
-- one evidence link per paper claim, or
+- one document-level library link per paper claim, optionally naming the relevant
+  note section in the link text, or
 - an explicit evidence gap for that claim.
 
-Cross-document links are allowed only when the comparison is explicitly about
-another document. Page/rectangle remains the fallback when a Block hint becomes
-stale after recognition.
+The standalone Base HTML report uses ordinary HTTP navigation links, not
+`papers-manager://` links:
+
+```text
+http://localhost:5173/#/library?doc=<document_id>
+```
+
+A report link opens the paper; it does not open a specific note section. Keep
+the section name in the link text and keep the page/section verification hint as
+plain text. Do not put a `papers-manager://` link in the report and expect it to
+navigate outside the application. When a Base conclusion is written into a
+reading note or another in-app Markdown surface, use the versioned evidence-link
+format above instead.
+
+Cross-document evidence links are allowed only when the comparison is explicitly
+about another document. Page/rectangle remains the fallback when a Block hint
+becomes stale after recognition.
 
 ## Anti-patterns
 
@@ -99,3 +114,5 @@ stale after recognition.
 - Reusing a Block UUID from an older recognition generation without checking.
 - Writing a link whose page is outside the document.
 - Putting all evidence in a separate table and leaving claims unlinked.
+- Using a `papers-manager://` link as the only navigation in a standalone HTML
+  Base report, or using a title instead of the document UUID in a library link.

@@ -1,0 +1,574 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{REPORT_TITLE}}</title>
+  <!--
+    Base summary template: neutral (default style).
+    Original style interpretation, not a reproduction of any specific site or brand.
+    Shared placeholder contract and content policy: README.md in this folder.
+    Keep the output self-contained:
+    - no scripts, remote stylesheets, remote fonts, or remote images;
+    - HTML-escape every value copied from MCP responses (& < > ");
+    - do not paste raw Markdown or raw API HTML into the report;
+    - paper links always use the document UUID:
+      http://localhost:5173/#/library?doc=<document_id>
+    - Base links use the Base UUID:
+      http://localhost:5173/#/library?base=<base_id>
+    - do not use papers-manager:// evidence links here; they only work inside
+      the application's note renderer, not in a standalone HTML file.
+    - a paper link opens the paper, not a specific note section. Put the
+      referenced note section in the visible link text instead.
+    The section headings below (核心结论/对比/分论文/证据缺口/成员状态) are only
+    a display scaffold, not a required report structure. Rename, merge, split,
+    reorder, or omit them to fit the comparison; keep the underlying information
+    discoverable somewhere in the report.
+    Replace every template placeholder before saving; no double-brace markers
+    should remain.
+  -->
+  <style>
+    :root {
+      color-scheme: light dark;
+      --page: #f3f5f7;
+      --surface: #ffffff;
+      --surface-muted: #f7f9fb;
+      --text: #17202a;
+      --muted: #5c6976;
+      --line: #d8e0e8;
+      --accent: #1a67a8;
+      --accent-soft: #e8f2fb;
+      --ok: #1d7048;
+      --ok-soft: #e8f5ed;
+      --warn: #865800;
+      --warn-soft: #fff4d6;
+      --gap: #9b3535;
+      --gap-soft: #fdecec;
+      --shadow: 0 8px 28px rgba(24, 43, 61, 0.08);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --page: #11171d;
+        --surface: #18212a;
+        --surface-muted: #1d2832;
+        --text: #e7edf3;
+        --muted: #a8b5c1;
+        --line: #30404e;
+        --accent: #78b9ee;
+        --accent-soft: #1b3448;
+        --ok: #7fd3a1;
+        --ok-soft: #173527;
+        --warn: #e7bd6a;
+        --warn-soft: #3b2e14;
+        --gap: #f0a0a0;
+        --gap-soft: #3b1e1e;
+        --shadow: none;
+      }
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC",
+        "PingFang SC", "Microsoft YaHei", sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    a {
+      color: var(--accent);
+      text-decoration-thickness: 1px;
+      text-underline-offset: 0.16em;
+    }
+
+    a:hover {
+      text-decoration-thickness: 2px;
+    }
+
+    a:focus-visible {
+      outline: 3px solid var(--accent);
+      outline-offset: 3px;
+      border-radius: 3px;
+    }
+
+    code {
+      padding: 0.1em 0.35em;
+      border-radius: 4px;
+      background: var(--surface-muted);
+      font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+      font-size: 0.88em;
+      overflow-wrap: anywhere;
+    }
+
+    .report {
+      width: min(1120px, 100%);
+      margin: 0 auto;
+      padding: 40px 24px 64px;
+    }
+
+    .report-header {
+      padding: 32px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      margin: 0 0 8px;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+    }
+
+    h1,
+    h2,
+    h3 {
+      line-height: 1.25;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      letter-spacing: -0.02em;
+      overflow-wrap: anywhere;
+    }
+
+    .lead {
+      max-width: 72ch;
+      margin: 14px 0 0;
+      color: var(--muted);
+      font-size: 1.04rem;
+    }
+
+    .metadata {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px 24px;
+      margin: 26px 0 0;
+      padding: 20px 0 0;
+      border-top: 1px solid var(--line);
+    }
+
+    .metadata div {
+      min-width: 0;
+    }
+
+    .metadata dt {
+      margin: 0 0 2px;
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .metadata dd {
+      margin: 0;
+      overflow-wrap: anywhere;
+    }
+
+    .notice {
+      margin: 22px 0 0;
+      padding: 10px 14px;
+      border-left: 3px solid var(--warn);
+      border-radius: 0 6px 6px 0;
+      background: var(--warn-soft);
+      color: var(--text);
+      font-size: 0.9rem;
+    }
+
+    .toc {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 10px;
+      margin: 22px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .toc a {
+      display: inline-block;
+      padding: 6px 11px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--surface);
+      color: var(--text);
+      font-size: 0.88rem;
+      text-decoration: none;
+    }
+
+    .toc a:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    main > section {
+      margin-top: 40px;
+      scroll-margin-top: 20px;
+    }
+
+    h2 {
+      margin: 0 0 16px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--line);
+      font-size: 1.42rem;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 1.12rem;
+    }
+
+    p {
+      margin: 0.7em 0;
+    }
+
+    ul,
+    ol {
+      margin: 0.7em 0;
+      padding-left: 1.4em;
+    }
+
+    li + li {
+      margin-top: 0.45em;
+    }
+
+    blockquote {
+      margin: 14px 0;
+      padding: 12px 16px;
+      border-left: 3px solid var(--accent);
+      border-radius: 0 8px 8px 0;
+      background: var(--accent-soft);
+    }
+
+    .section-note {
+      margin-top: -4px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--surface);
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.94rem;
+    }
+
+    caption {
+      padding: 14px 16px 0;
+      color: var(--muted);
+      text-align: left;
+      font-size: 0.88rem;
+    }
+
+    th,
+    td {
+      padding: 12px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+
+    thead th {
+      background: var(--surface-muted);
+      color: var(--muted);
+      font-size: 0.8rem;
+      letter-spacing: 0.03em;
+      white-space: nowrap;
+    }
+
+    tbody tr:last-child td,
+    tbody tr:last-child th {
+      border-bottom: 0;
+    }
+
+    .paper-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 16px;
+    }
+
+    .paper-card {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .paper-meta {
+      margin: 0 0 12px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .paper-card h3 a {
+      text-decoration: none;
+    }
+
+    .paper-card h3 a:hover {
+      text-decoration: underline;
+    }
+
+    .note-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .note-list li {
+      padding: 7px 0;
+      border-top: 1px dashed var(--line);
+    }
+
+    .note-list li:first-child {
+      border-top: 0;
+    }
+
+    .status {
+      display: inline-block;
+      padding: 1px 8px;
+      border-radius: 999px;
+      font-size: 0.76rem;
+      font-weight: 700;
+      line-height: 1.6;
+      white-space: nowrap;
+    }
+
+    .status-ok {
+      background: var(--ok-soft);
+      color: var(--ok);
+    }
+
+    .status-warn {
+      background: var(--warn-soft);
+      color: var(--warn);
+    }
+
+    .status-gap {
+      background: var(--gap-soft);
+      color: var(--gap);
+    }
+
+    .status-muted {
+      background: var(--surface-muted);
+      color: var(--muted);
+    }
+
+    .gap-list,
+    .member-list {
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .gap-list li,
+    .member-list li {
+      padding: 12px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .gap-list li:last-child,
+    .member-list li:last-child {
+      border-bottom: 0;
+    }
+
+    .gap-list strong,
+    .member-list strong {
+      margin-right: 6px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .report-footer {
+      margin-top: 44px;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 0.82rem;
+    }
+
+    @media (max-width: 760px) {
+      .report {
+        padding: 20px 14px 44px;
+      }
+
+      .report-header {
+        padding: 22px;
+      }
+
+      .metadata {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+    }
+
+    @media print {
+      :root {
+        --page: #ffffff;
+        --surface: #ffffff;
+        --surface-muted: #f5f5f5;
+        --text: #000000;
+        --muted: #444444;
+        --line: #cccccc;
+        --shadow: none;
+      }
+
+      body {
+        background: #ffffff;
+      }
+
+      .report {
+        width: 100%;
+        padding: 0;
+      }
+
+      .report-header,
+      .paper-card {
+        box-shadow: none;
+      }
+
+      .toc {
+        display: none;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      .paper-card,
+      tr {
+        break-inside: avoid;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="report">
+    <header class="report-header">
+      <p class="eyebrow">Papers Manager · Base summary</p>
+      <h1>{{BASE_NAME}}</h1>
+      <p class="lead">{{SCOPE_SUMMARY}}</p>
+
+      <dl class="metadata">
+        <div>
+          <dt>Base</dt>
+          <dd><a href="{{BASE_URL}}" target="_blank" rel="noopener noreferrer">在阅读库打开 Base</a></dd>
+        </div>
+        <div>
+          <dt>Base ID</dt>
+          <dd><code>{{BASE_ID}}</code></dd>
+        </div>
+        <div>
+          <dt>生成时间</dt>
+          <dd>{{GENERATED_AT}}</dd>
+        </div>
+        <div>
+          <dt>成员数</dt>
+          <dd>{{MEMBER_COUNT}}</dd>
+        </div>
+        <div>
+          <dt>参与比较</dt>
+          <dd>{{SELECTED_COUNT}}</dd>
+        </div>
+        <div>
+          <dt>跳过</dt>
+          <dd>{{SKIPPED_COUNT}}</dd>
+        </div>
+      </dl>
+
+      <p class="notice">这是生成时的快照。文档被删除、合并或笔记被重写后，论文链接可能失效；以当前的 Base 成员和笔记目录为准。</p>
+    </header>
+
+    <nav class="toc" aria-label="报告目录">
+      <a href="#takeaways">核心结论</a>
+      <a href="#comparison">对比</a>
+      <a href="#papers">分论文</a>
+      <a href="#gaps">证据缺口</a>
+      <a href="#members">成员状态</a>
+    </nav>
+
+    <!--
+      Display scaffold only: these headings and their order are optional.
+      Restructure the report when the comparison question calls for it.
+    -->
+    <main>
+      <section id="takeaways" aria-labelledby="takeaways-heading">
+        <h2 id="takeaways-heading">核心结论</h2>
+        <div class="prose">{{TAKEAWAYS}}</div>
+      </section>
+
+      <section id="comparison" aria-labelledby="comparison-heading">
+        <h2 id="comparison-heading">对比</h2>
+        <p class="section-note">每个结论旁的链接打开对应论文；链接文字中的节名指向该论文的相关阅读笔记节，但不会自动展开右侧注释面板。</p>
+        <div class="table-wrap">
+          <table>
+            <caption>{{COMPARISON_CAPTION}}</caption>
+            <thead>
+              <tr>
+                <th scope="col">比较维度</th>
+                {{COMPARISON_HEADER_CELLS}}
+              </tr>
+            </thead>
+            <tbody>
+              {{COMPARISON_ROWS}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="papers" aria-labelledby="papers-heading">
+        <h2 id="papers-heading">分论文</h2>
+        <div class="paper-grid">
+          {{PAPER_CARDS}}
+        </div>
+      </section>
+
+      <section id="gaps" aria-labelledby="gaps-heading">
+        <h2 id="gaps-heading">证据缺口与未覆盖</h2>
+        <ul class="gap-list">
+          {{EVIDENCE_GAPS}}
+        </ul>
+      </section>
+
+      <section id="members" aria-labelledby="members-heading">
+        <h2 id="members-heading">成员状态</h2>
+        <ul class="member-list">
+          {{MEMBER_STATUS_ROWS}}
+        </ul>
+      </section>
+    </main>
+
+    <footer class="report-footer">
+      由 papersManager 阅读技能根据 Base 成员、阅读笔记和必要的原文核验生成。未核验内容已在正文标注；报告不自动写回 Base 或阅读笔记。
+    </footer>
+  </div>
+</body>
+</html>

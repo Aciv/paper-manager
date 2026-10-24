@@ -662,7 +662,11 @@ reads; it must not duplicate persistence logic or bypass revision checks.
   for ingestion and management.
 - `papers-manager-reading` uses source reading, note, image, and evidence tools.
 - Base summary uses Base/list/get plus source/note reads until Phase 3B adds a
-  dedicated tool. Base bibliography generation is available now.
+  dedicated tool. The reading skill renders a host-side, self-contained HTML
+  report under `reports/base-summary/` with document-level library links;
+  visual style templates live in
+  `agent-skills/papers-manager-reading/references/html_template/`. Base
+  bibliography generation is available now.
 
 ## Versioning and tests
 

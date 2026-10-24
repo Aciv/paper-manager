@@ -1,0 +1,607 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{REPORT_TITLE}}</title>
+  <!--
+    Base summary template: 编辑杂志 (editorial / magazine).
+    Original style interpretation, not a reproduction of any specific site or brand.
+    Shared placeholder contract and content policy: README.md in this folder.
+    Keep the output self-contained: inline CSS only, no scripts or remote assets.
+    Escape API-derived values and replace every template placeholder before saving.
+  -->
+  <style>
+:root {
+  color-scheme: light;
+  --page: #f3f5f7;
+  --surface: #ffffff;
+  --surface-muted: #f7f9fb;
+  --text: #17202a;
+  --muted: #5c6976;
+  --line: #d8e0e8;
+  --accent: #1a67a8;
+  --accent-soft: #e8f2fb;
+  --ok: #1d7048;
+  --ok-soft: #e8f5ed;
+  --warn: #865800;
+  --warn-soft: #fff4d6;
+  --gap: #9b3535;
+  --gap-soft: #fdecec;
+  --shadow: 0 8px 28px rgba(24, 43, 61, 0.08);
+  --radius: 16px;
+  --width: 1120px;
+  --page-padding: 40px 24px 64px;
+  --section-gap: 40px;
+  --body: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --display: var(--body);
+  --mono: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text);
+  font-family: var(--body);
+  font-size: 16px;
+  line-height: 1.65;
+}
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.16em;
+}
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; border-radius: 3px; }
+code {
+  padding: 0.1em 0.35em;
+  border-radius: 4px;
+  background: var(--surface-muted);
+  font-family: var(--mono);
+  font-size: 0.88em;
+  overflow-wrap: anywhere;
+}
+.report {
+  width: min(var(--width), 100%);
+  margin: 0 auto;
+  padding: var(--page-padding);
+}
+.report-header {
+  padding: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.eyebrow {
+  margin: 0 0 8px;
+  color: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+h1, h2, h3 { line-height: 1.2; }
+h1 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: clamp(1.8rem, 4vw, 2.6rem);
+  letter-spacing: -0.02em;
+  overflow-wrap: anywhere;
+}
+.lead {
+  max-width: 72ch;
+  margin: 14px 0 0;
+  color: var(--muted);
+  font-size: 1.04rem;
+}
+.metadata {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px 24px;
+  margin: 26px 0 0;
+  padding: 20px 0 0;
+  border-top: 1px solid var(--line);
+}
+.metadata div { min-width: 0; }
+.metadata dt {
+  margin: 0 0 2px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.metadata dd { margin: 0; overflow-wrap: anywhere; }
+.notice {
+  margin: 22px 0 0;
+  padding: 10px 14px;
+  border-left: 3px solid var(--warn);
+  border-radius: 0 6px 6px 0;
+  background: var(--warn-soft);
+  font-size: 0.9rem;
+}
+.toc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 10px;
+  margin: 22px 0 0;
+  padding: 0;
+}
+.toc a {
+  display: inline-block;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.86rem;
+  text-decoration: none;
+}
+.toc a:hover { border-color: var(--accent); color: var(--accent); }
+main > section { margin-top: var(--section-gap); scroll-margin-top: 20px; }
+h2 {
+  margin: 0 0 16px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--display);
+  font-size: 1.42rem;
+}
+h3 { margin: 0 0 8px; font-size: 1.12rem; }
+p { margin: 0.7em 0; }
+ul, ol { margin: 0.7em 0; padding-left: 1.4em; }
+li + li { margin-top: 0.45em; }
+blockquote {
+  margin: 14px 0;
+  padding: 12px 16px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 8px 8px 0;
+  background: var(--accent-soft);
+}
+.section-note { margin-top: -4px; color: var(--muted); font-size: 0.9rem; }
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 0.75);
+  background: var(--surface);
+}
+table { width: 100%; border-collapse: collapse; font-size: 0.94rem; }
+caption {
+  padding: 14px 16px 0;
+  color: var(--muted);
+  text-align: left;
+  font-size: 0.88rem;
+}
+th, td {
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+thead th {
+  background: var(--surface-muted);
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+.paper-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+}
+.paper-card {
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.paper-meta { margin: 0 0 12px; color: var(--muted); font-size: 0.88rem; }
+.paper-card h3 a { text-decoration: none; }
+.paper-card h3 a:hover { text-decoration: underline; }
+.note-list { margin: 0; padding: 0; list-style: none; }
+.note-list li { padding: 7px 0; border-top: 1px dashed var(--line); }
+.note-list li:first-child { border-top: 0; }
+.status {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 999px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1.6;
+  white-space: nowrap;
+}
+.status-ok { background: var(--ok-soft); color: var(--ok); }
+.status-warn { background: var(--warn-soft); color: var(--warn); }
+.status-gap { background: var(--gap-soft); color: var(--gap); }
+.status-muted { background: var(--surface-muted); color: var(--muted); }
+.gap-list, .member-list { margin: 0; padding: 0; list-style: none; }
+.gap-list li, .member-list li {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.gap-list li:last-child, .member-list li:last-child { border-bottom: 0; }
+.gap-list strong, .member-list strong { margin-right: 6px; }
+.muted { color: var(--muted); }
+.report-footer {
+  margin-top: 44px;
+  padding-top: 18px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+@media (max-width: 760px) {
+  .report { padding: 20px 14px 44px; }
+  .report-header { padding: 22px; }
+  .metadata { grid-template-columns: 1fr 1fr; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+:root {
+  color-scheme: light;
+  --page: #f3efe6;
+  --surface: #fbf8f1;
+  --surface-muted: #f1eadf;
+  --text: #1b1814;
+  --muted: #6a6054;
+  --line: #d7cbbb;
+  --accent: #a52a2a;
+  --accent-soft: #f2e1dd;
+  --ok: #2f6b4f;
+  --ok-soft: #e5efe7;
+  --warn: #7f5600;
+  --warn-soft: #f7ecd2;
+  --gap: #9a2f2f;
+  --gap-soft: #f4dfdc;
+  --radius: 0px;
+  --shadow: none;
+  --width: 1240px;
+  --section-gap: 52px;
+  --body: Georgia, "Times New Roman", "Noto Serif SC", "Songti SC", serif;
+  --display: "Iowan Old Style", Georgia, "Noto Serif SC", "Songti SC", serif;
+  --sans: "Helvetica Neue", Arial, "Noto Sans SC", sans-serif;
+}
+body {
+  background-color: var(--page);
+  background-image: radial-gradient(rgba(27, 24, 20, 0.04) 0.6px, transparent 0.6px);
+  background-size: 5px 5px;
+}
+.report {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  grid-template-areas: "header header" "toc main" "footer footer";
+  column-gap: 48px;
+}
+.report-header {
+  grid-area: header;
+  padding: 26px 0 28px;
+  border: 0;
+  border-top: 6px solid var(--text);
+  border-bottom: 3px double var(--line);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.eyebrow {
+  font-family: var(--sans);
+  font-size: 0.7rem;
+  letter-spacing: 0.18em;
+  color: var(--accent);
+}
+h1 {
+  max-width: 18ch;
+  font-size: clamp(3rem, 7vw, 6.2rem);
+  font-weight: 700;
+  line-height: 0.94;
+  letter-spacing: -0.045em;
+}
+.lead { max-width: 62ch; font-size: 1.1rem; }
+.metadata {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0;
+  margin-top: 28px;
+  padding: 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.metadata div {
+  padding: 12px 14px;
+  border-left: 1px solid var(--line);
+}
+.metadata div:first-child { border-left: 0; }
+.metadata dt {
+  font-family: var(--sans);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+}
+.metadata dd { font-size: 0.92rem; }
+.notice {
+  margin-top: 18px;
+  padding: 4px 0 4px 14px;
+  border: 0;
+  border-left: 2px solid var(--accent);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 0.84rem;
+}
+.toc {
+  grid-area: toc;
+  position: sticky;
+  top: 24px;
+  align-self: start;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin-top: 42px;
+  padding: 0;
+  border-top: 1px solid var(--text);
+  border-bottom: 1px solid var(--text);
+}
+.toc a {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.toc a + a { border-top: 1px solid var(--line); }
+.toc a::after { content: "→"; color: var(--accent); }
+.toc a:hover { color: var(--accent); }
+main { grid-area: main; min-width: 0; }
+main > section { margin-top: var(--section-gap); }
+h2 {
+  font-size: clamp(1.8rem, 3.2vw, 2.7rem);
+  letter-spacing: -0.025em;
+  border-bottom: 1px solid var(--text);
+  padding-bottom: 8px;
+}
+.section-note { font-family: var(--sans); font-size: 0.84rem; }
+.prose > p:first-child::first-letter {
+  float: left;
+  padding: 0.04em 0.08em 0 0;
+  color: var(--accent);
+  font-size: 4.1em;
+  font-weight: 700;
+  line-height: 0.78;
+}
+blockquote {
+  padding: 4px 0 4px 16px;
+  border-left: 2px solid var(--accent);
+  border-radius: 0;
+  background: transparent;
+  font-style: italic;
+}
+.table-wrap {
+  overflow-x: auto;
+  border: 0;
+  border-top: 2px solid var(--text);
+  border-bottom: 1px solid var(--text);
+  border-radius: 0;
+  background: transparent;
+}
+table { font-family: var(--sans); font-size: 0.88rem; }
+caption { padding: 10px 0; font-family: var(--sans); }
+th, td { padding: 12px 14px; border-bottom: 1px solid var(--line); }
+thead th {
+  background: transparent;
+  color: var(--muted);
+  font-family: var(--sans);
+  font-size: 0.66rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--text);
+}
+tbody tr:nth-child(even) { background: rgba(27, 24, 20, 0.035); }
+.paper-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 28px; }
+.paper-card {
+  padding: 16px 0 0;
+  border: 0;
+  border-top: 2px solid var(--text);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.paper-meta { font-family: var(--sans); font-size: 0.78rem; }
+.note-list li { border-top: 1px dotted var(--line); }
+.status {
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 0;
+  background: transparent;
+  font-family: var(--sans);
+  font-size: 0.64rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.gap-list li, .member-list li { border-bottom: 1px solid var(--line); }
+.report-footer {
+  grid-area: footer;
+  border-top: 1px solid var(--text);
+  font-family: var(--sans);
+  font-size: 0.76rem;
+}
+@media (max-width: 960px) {
+  .report {
+    grid-template-columns: 1fr;
+    grid-template-areas: "header" "toc" "main" "footer";
+    column-gap: 0;
+  }
+  .toc {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    margin-top: 24px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .toc a { display: inline-block; padding: 5px 12px 5px 0; }
+  .toc a + a { border-top: 0; }
+  .toc a::after { content: ""; }
+  .paper-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 760px) {
+  .metadata { grid-template-columns: 1fr 1fr; }
+  .metadata div { border-left: 0; border-top: 1px solid var(--line); }
+  .metadata div:nth-child(-n+2) { border-top: 0; }
+  .metadata div:nth-child(even) { border-left: 1px solid var(--line); }
+}
+@media print {
+  .report { display: block; }
+  .metadata { grid-template-columns: repeat(3, 1fr); }
+  .metadata div { border-left: 1px solid #ccc; border-top: 0; }
+  .prose > p:first-child::first-letter { color: #000; }
+}
+
+@media print {
+  :root {
+    --page: #ffffff;
+    --surface: #ffffff;
+    --surface-muted: #f5f5f5;
+    --text: #000000;
+    --muted: #444444;
+    --line: #cccccc;
+    --shadow: none;
+  }
+  html { scroll-behavior: auto; }
+  body {
+    background: #ffffff !important;
+    background-image: none !important;
+    color: #000000;
+  }
+  .report {
+    width: 100%;
+    padding: 0;
+  }
+  .report-header, main > section, .paper-card, .table-wrap {
+    background: #ffffff !important;
+    background-image: none !important;
+    box-shadow: none !important;
+  }
+  .toc { display: none; }
+  a { color: inherit; text-decoration: none; }
+  .paper-card, tr { break-inside: avoid; }
+}
+</style>
+</head>
+<body class="theme-editorial">
+  <div class="report">
+    <header class="report-header">
+      <p class="eyebrow">Papers Manager · Editorial brief</p>
+      <h1>{{BASE_NAME}}</h1>
+      <p class="lead">{{SCOPE_SUMMARY}}</p>
+
+      <dl class="metadata">
+        <div>
+          <dt>Base</dt>
+          <dd><a href="{{BASE_URL}}" target="_blank" rel="noopener noreferrer">在阅读库打开 Base</a></dd>
+        </div>
+        <div>
+          <dt>Base ID</dt>
+          <dd><code>{{BASE_ID}}</code></dd>
+        </div>
+        <div>
+          <dt>生成时间</dt>
+          <dd>{{GENERATED_AT}}</dd>
+        </div>
+        <div>
+          <dt>成员数</dt>
+          <dd>{{MEMBER_COUNT}}</dd>
+        </div>
+        <div>
+          <dt>参与比较</dt>
+          <dd>{{SELECTED_COUNT}}</dd>
+        </div>
+        <div>
+          <dt>跳过</dt>
+          <dd>{{SKIPPED_COUNT}}</dd>
+        </div>
+      </dl>
+
+      <p class="notice">这是生成时的快照。文档被删除、合并或笔记被重写后，论文链接可能失效；以当前的 Base 成员和笔记目录为准。</p>
+    </header>
+
+    <nav class="toc" aria-label="报告目录">
+      <a href="#takeaways">核心结论</a>
+      <a href="#comparison">对比</a>
+      <a href="#papers">分论文</a>
+      <a href="#gaps">证据缺口</a>
+      <a href="#members">成员状态</a>
+    </nav>
+
+    <!--
+      Display scaffold only: these headings and their order are optional.
+      Restructure the report when the comparison question calls for it.
+    -->
+    <main>
+      <section id="takeaways" aria-labelledby="takeaways-heading">
+        <h2 id="takeaways-heading">核心结论</h2>
+        <div class="prose">{{TAKEAWAYS}}</div>
+      </section>
+
+      <section id="comparison" aria-labelledby="comparison-heading">
+        <h2 id="comparison-heading">对比</h2>
+        <p class="section-note">每个结论旁的链接打开对应论文；链接文字中的节名指向该论文的相关阅读笔记节，但不会自动展开右侧注释面板。</p>
+        <div class="table-wrap">
+          <table>
+            <caption>{{COMPARISON_CAPTION}}</caption>
+            <thead>
+              <tr>
+                <th scope="col">比较维度</th>
+                {{COMPARISON_HEADER_CELLS}}
+              </tr>
+            </thead>
+            <tbody>
+              {{COMPARISON_ROWS}}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="papers" aria-labelledby="papers-heading">
+        <h2 id="papers-heading">分论文</h2>
+        <div class="paper-grid">
+          {{PAPER_CARDS}}
+        </div>
+      </section>
+
+      <section id="gaps" aria-labelledby="gaps-heading">
+        <h2 id="gaps-heading">证据缺口与未覆盖</h2>
+        <ul class="gap-list">
+          {{EVIDENCE_GAPS}}
+        </ul>
+      </section>
+
+      <section id="members" aria-labelledby="members-heading">
+        <h2 id="members-heading">成员状态</h2>
+        <ul class="member-list">
+          {{MEMBER_STATUS_ROWS}}
+        </ul>
+      </section>
+    </main>
+
+    <footer class="report-footer">
+      由 papersManager 阅读技能根据 Base 成员、阅读笔记和必要的原文核验生成。未核验内容已在正文标注；报告不自动写回 Base 或阅读笔记。
+    </footer>
+  </div>
+</body>
+</html>

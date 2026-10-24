@@ -2,6 +2,14 @@
 .*
 !.air.toml
 
+paper_manager_plugin/
+# # Claude Code plugin manifests (the broad dotfile rule above would hide them).
+# !.claude-plugin/
+# !.claude-plugin/marketplace.json
+# !paper_manager_plugin/.claude-plugin/
+# !paper_manager_plugin/.claude-plugin/plugin.json
+# !paper_manager_plugin/.mcp.json
+
 node_modules
 dist
 *.tsbuildinfo

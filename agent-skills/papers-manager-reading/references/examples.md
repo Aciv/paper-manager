@@ -59,9 +59,27 @@ for claim-level evidence links.
 
 ## Base summary
 
-1. `papers_manager_base_list` and `papers_manager_base_get`; record member count.
+1. `papers_manager_base_list` and `papers_manager_base_get`; record the Base
+   UUID, name, and member count.
 2. Read metadata and note outlines/descriptions for a bounded member set.
 3. Select candidates; read their notes before source sections.
-4. Compare methods/results and verify key claims with page/Blocks.
-5. Return a transient Markdown summary with missing-note and evidence-gap
-   warnings. Do not persist it automatically.
+4. Compare methods/results and verify key claims with page/Blocks. Keep the
+   verification state and a page/section hint for the report.
+5. Before writing, ask which style to use unless the user already specified one:
+   `neutral` (default), `editorial`, `swiss`, `brutalist`, `cyberpunk`, or a
+   custom style in one sentence. If the user has no preference, use `neutral`.
+   For custom, build directly from the sentence; no template or placeholder
+   contract is needed. Fill one style from
+   [html_template/](html_template/README.md) and write one
+   self-contained HTML report to
+   `reports/base-summary/<base_id>-<YYYYMMDD-HHMMSS>.html`. The template's
+   section headings are a display example, not a required structure; adapt,
+   merge, or omit them. Pick exactly one style. Do not overwrite an existing
+   report. Report the path, missing-note and evidence-gap warnings, and skipped
+   members.
+6. Use document-level links only:
+   `http://localhost:5173/#/library?doc=<document_id>`. Put the referenced note
+   section in the link text, for example `《论文短标题》· 方法`; do not use
+   `papers-manager://` links in the standalone HTML and do not claim the link
+   opens a note section. Do not persist the report as a reading note or Base
+   record.

@@ -5,11 +5,15 @@ Two skills cover the current product loop:
 - `papers-manager-library` — ingestion, metadata, Bases, processing state, and
   deletion. It is deliberately thin and safety-oriented.
 - `papers-manager-reading` — hierarchical reading, sectioned note generation,
-  source mapping, evidence placement, and Base-summary workflow.
+  source mapping, evidence placement, and the Base-summary workflow.
 
 `papers-manager-base-review` is intentionally deferred until Phase 3B has a
 stable Base-analysis contract. Until then, Base summaries are composed from the
-reading skill's existing read tools; there is no hidden `base_summary` tool.
+reading skill's existing read tools and rendered as a host-side, self-contained
+HTML report under `reports/base-summary/`; paper links are document-level
+library links, not in-app note-section links. Multiple visual styles live in
+`papers-manager-reading/references/html_template/`. There is no hidden
+`base_summary` tool.
 
 ## Runtime dependency
 

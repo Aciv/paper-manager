@@ -99,7 +99,9 @@ Practical budgets:
    that look relevant. Do not fetch every note body.
 3. Read L2 notes/sections only for candidates selected for comparison.
 4. Read L3 pages/Blocks for the comparison claims that need verification.
-5. Report missing notes/outlines and skipped members explicitly.
+5. Report missing notes/outlines and skipped members explicitly, then render the
+   result as the self-contained HTML report described in
+   [Base summary](base-summary.md).
 
 If the Base is too large for a single context, process members in stages and
 retain a compact comparison table outside the model context.
