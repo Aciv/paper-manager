@@ -402,6 +402,9 @@ def main():
                     (output / log.name).write_text(text, encoding="utf-8")
     except Exception as error:
         message = f"{type(error).__name__}: {error}"
+        if isinstance(error, subprocess.CalledProcessError) and error.stderr:
+            detail = error.stderr.decode("utf-8", errors="replace") if isinstance(error.stderr, bytes) else error.stderr
+            message += "\n" + detail[-3000:]
         for key in ("database_password", "redis_password", "mcp_token"):
             if config.get(key):
                 message = message.replace(config[key], "[redacted]")

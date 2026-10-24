@@ -97,6 +97,26 @@ _DATE_LIKE_RE = re.compile(
 )
 
 
+def _open_crf_model(tagger, model_path: Path, *, platform_name: str = os.name) -> bytes | None:
+    """Keep ordinary file loading; bridge native Windows Unicode fopen errors.
+
+    Only an existing non-ASCII Windows path receives the documented in-memory
+    load. Python reads the same file without ANSI filename conversion. Invalid
+    models still fail; Unix and ASCII paths keep the existing allocation path.
+    """
+    try:
+        tagger.open(str(model_path))
+        return None
+    except OSError:
+        if platform_name != "nt" or str(model_path).isascii() or not model_path.is_file():
+            raise
+        # CRFsuite keeps a pointer into this buffer; the owner must retain it
+        # until the tagger is closed. A temporary read_bytes() is unsafe.
+        data = model_path.read_bytes()
+        tagger.open_inmemory(data)
+        return data
+
+
 class _CRF:
     """One immutable artifact plus a lock around pycrfsuite's mutable tagger."""
 
@@ -126,7 +146,7 @@ class _CRF:
         self.model_path = model_path
         self.feature_version = str(manifest["feature_version"])
         self._tagger = pycrfsuite.Tagger()
-        self._tagger.open(str(model_path))
+        self._model_bytes = _open_crf_model(self._tagger, model_path)
         self._lock = threading.Lock()
 
     def predict(self, features: Sequence[dict[str, object]]) -> tuple[list[str], list[float]]:
