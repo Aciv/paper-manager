@@ -1,0 +1,39 @@
+:root {
+  font-family: system-ui, sans-serif;
+  color: #25352f;
+  background: #f4f5f0;
+  line-height: 1.6;
+}
+body { margin: 0; }
+main { max-width: 880px; margin: 48px auto; padding: 0 24px 48px; }
+h1 { font-size: 2rem; margin: 0; }
+h2 { font-size: 1.1rem; }
+.eyebrow { font-size: .75rem; letter-spacing: .18em; color: #547666; }
+section, form {
+  margin: 24px 0;
+  padding: 24px;
+  border: 1px solid #d8dfd7;
+  border-radius: 12px;
+  background: white;
+}
+.actions { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+input { min-width: 180px; flex: 1; }
+button, input, select, a {
+  font: inherit;
+  padding: 8px 12px;
+  border: 1px solid #9bae9e;
+  border-radius: 6px;
+}
+button, a { cursor: pointer; background: #e8eee6; color: #25352f; }
+button:disabled { opacity: .5; cursor: default; }
+#error { color: #9b302d; white-space: pre-wrap; overflow-wrap: anywhere; }
+pre {
+  max-height: 380px;
+  overflow: auto;
+  padding: 16px;
+  color: #d6e5dc;
+  background: #22352d;
+  font-size: .8rem;
+}
+code { overflow-wrap: anywhere; }
+[hidden] { display: none; }

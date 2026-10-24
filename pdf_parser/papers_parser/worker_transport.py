@@ -13,7 +13,6 @@ from pathlib import Path
 import signal
 import socket
 import subprocess
-import sys
 import threading
 
 TOKEN_ENV = "PAPERS_PARSER_WORKER_TOKEN"
@@ -25,7 +24,7 @@ def await_parent() -> None:
     """Hold imports until Windows ownership is established; detect parent death."""
     if os.environ.get(PARENT_ENV) != "1":
         return
-    if sys.stdin.buffer.read(1) != b"\x01":
+    if os.read(0, 1) != b"\x01":
         raise SystemExit("worker parent handshake failed")
     if os.name == "nt":
         # Job Object ownership is established before this handshake. It also
@@ -36,7 +35,8 @@ def await_parent() -> None:
 
     def watch_parent():
         # The pipe has one writer: the owning server. EOF also covers crashes.
-        sys.stdin.buffer.read()
+        while os.read(0, 1):
+            pass
         if os.name != "nt":
             # start_process created this private session. Clear native-library
             # helpers too if the owning server died before normal cleanup.
@@ -102,18 +102,26 @@ def start_process(command: list[str], *, env: dict, cwd: str) -> subprocess.Pope
         raise
 
 
+def _uses_tcp(path: Path) -> bool:
+    # Darwin's sockaddr_un has 104 path bytes, Linux 108. Keep a portable
+    # margin and count encoded bytes, not Unicode characters. Deep private
+    # data directories must not make otherwise valid worker jobs impossible.
+    return _TCP or len(os.fsencode(path)) >= 100
+
+
 def listen(path: Path, backlog: int) -> socket.socket:
-    listener = socket.socket(socket.AF_INET if _TCP else socket.AF_UNIX,
+    tcp = _uses_tcp(path)
+    listener = socket.socket(socket.AF_INET if tcp else socket.AF_UNIX,
                              socket.SOCK_STREAM)
     try:
-        if _TCP:
+        if tcp:
             listener.bind(("127.0.0.1", 0))
         else:
             path.unlink(missing_ok=True)
             listener.bind(str(path))
             os.chmod(path, 0o600)
         listener.listen(backlog)
-        if _TCP:
+        if tcp:
             # Publish only after listen succeeds; parent retries partial reads.
             path.write_text(json.dumps({"port": listener.getsockname()[1]}), encoding="utf-8")
         return listener
@@ -123,11 +131,12 @@ def listen(path: Path, backlog: int) -> socket.socket:
 
 
 def connect(path: Path, token: str, timeout: float = 0.5) -> socket.socket:
-    connection = socket.socket(socket.AF_INET if _TCP else socket.AF_UNIX,
+    tcp = _uses_tcp(path)
+    connection = socket.socket(socket.AF_INET if tcp else socket.AF_UNIX,
                                socket.SOCK_STREAM)
     connection.settimeout(timeout)
     try:
-        if _TCP:
+        if tcp:
             try:
                 port = int(json.loads(path.read_text(encoding="utf-8"))["port"])
             except (OSError, ValueError, KeyError) as exc:
@@ -146,7 +155,7 @@ def connect(path: Path, token: str, timeout: float = 0.5) -> socket.socket:
 
 
 def authenticate(connection: socket.socket) -> bool:
-    if not _TCP:
+    if connection.family != socket.AF_INET:
         return True
     connection.settimeout(0.5)
     connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)

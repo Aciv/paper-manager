@@ -1,4 +1,4 @@
-name: Desktop D0 native validation
+name: Desktop native validation (D0-D2)
 
 on:
   workflow_dispatch:
@@ -148,6 +148,27 @@ jobs:
           npm ci --include=optional
           npm run build
           npm run test:reading-note
+      - name: Build desktop entry points
+        if: always()
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          mkdir -p tmp/desktop-d0/bin
+          go build -o "tmp/desktop-d0/bin/launcher$suffix" ./cmd/launcher
+          go build -o "tmp/desktop-d0/bin/server$suffix" ./cmd/server
+      - name: Real Launcher stack under an ordinary account
+        if: always()
+        timeout-minutes: 10
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            redis_native=$(cygpath -w "$PAPERS_TEST_REDIS_BINARY")
+            pwsh -File scripts/check_windows_desktop_user.ps1 -RedisServer "$redis_native"
+          else
+            python scripts/check_desktop_launcher.py \
+              --launcher tmp/desktop-d0/bin/launcher --server tmp/desktop-d0/bin/server \
+              --postgres-bin "$(dirname "$(command -v pg_ctl)")" \
+              --redis-server "$PAPERS_TEST_REDIS_BINARY" --output-dir tmp/desktop-d0/launcher
+          fi
       - name: Shared architecture and performance baseline
         if: always()
         # CI has no git-ignored CRF weights. This is a rules-engine smoke
@@ -169,5 +190,7 @@ jobs:
         if: always()
         with:
           name: desktop-d0-${{ matrix.runner }}-${{ matrix.architecture }}
-          path: tmp/desktop-d0/
+          path: |
+            tmp/desktop-d0/
+            !tmp/desktop-d0/bin/
           if-no-files-found: warn

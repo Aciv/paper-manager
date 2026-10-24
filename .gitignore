@@ -1,6 +1,7 @@
 # Local environment settings can contain database passwords and must not be committed.
 .*
 !.air.toml
+!.launcher_env.example
 # Cross-platform release validation must be tracked despite the dotfile rule.
 !.github/
 !.github/workflows/

@@ -4,7 +4,6 @@ from __future__ import annotations
 import concurrent.futures
 import base64
 import json
-import io
 import os
 from pathlib import Path
 import socket
@@ -15,7 +14,6 @@ import threading
 import time
 import unittest
 from unittest import mock
-from types import SimpleNamespace
 
 from papers_parser import worker_transport as transport
 from papers_parser.worker_pool import SharedWorkerPool, WorkerPool, WorkerPoolConfig, WorkerRPCError, WorkerUnavailable
@@ -112,6 +110,21 @@ class SharedLifecycleTest(unittest.TestCase):
         pool.close()
         self.assertIsNotNone(worker.process.poll())
         self.assertFalse(worker.temp_dir.exists())
+
+    def test_long_private_path_uses_one_authenticated_shared_worker(self):
+        root = Path(self.temporary.name) / ("目录" * 25)
+        root.mkdir()
+        original = tempfile.mkdtemp
+        with mock.patch.object(transport, "_TCP", False), mock.patch(
+            "papers_parser.worker_pool.tempfile.mkdtemp",
+            side_effect=lambda **kwargs: original(dir=str(root), **kwargs),
+        ):
+            pool = self.pool(worker_config={"tcp": False})
+            with concurrent.futures.ThreadPoolExecutor(max_workers=20) as clients:
+                results = list(clients.map(lambda _: self.call(pool, b"0.02"), range(20)))
+            self.assertEqual(len({result["pid"] for result in results}), 1)
+            self.assertTrue(pool._worker.socket_path.is_file())
+            pool.close()
 
     def test_one_cancel_does_not_kill_other_request(self):
         pool = self.pool()
@@ -284,14 +297,41 @@ time.sleep(60)
 
 class TCPAuthenticationTest(unittest.TestCase):
     def test_windows_parent_handshake_does_not_start_a_stdin_reader(self):
-        stream = io.BytesIO(b"\x01")
         with mock.patch.object(transport.os, "name", "nt"), \
-                mock.patch.object(transport.sys, "stdin", SimpleNamespace(buffer=stream)), \
+                mock.patch.object(transport.os, "read", return_value=b"\x01") as read, \
                 mock.patch.dict(os.environ, {transport.PARENT_ENV: "1"}), \
                 mock.patch.object(transport.threading, "Thread") as thread:
             transport.await_parent()
-        self.assertEqual(stream.tell(), 1)
+        read.assert_called_once_with(0, 1)
         thread.assert_not_called()
+
+    def test_long_unicode_path_keeps_tcp_authentication_on_unix(self):
+        with tempfile.TemporaryDirectory() as temporary, \
+                mock.patch.object(transport, "_TCP", False), \
+                mock.patch.dict(os.environ, {transport.TOKEN_ENV: "a" * 64}):
+            root = Path(temporary) / ("目录" * 25)
+            root.mkdir()
+            path = root / "worker.sock"
+            listener = transport.listen(path, 4)
+            self.addCleanup(listener.close)
+            listener.settimeout(3)
+            self.assertEqual(listener.family, socket.AF_INET)
+            results = []
+
+            def accept():
+                for _ in range(2):
+                    connection, _ = listener.accept()
+                    with connection:
+                        results.append(transport.authenticate(connection))
+
+            with concurrent.futures.ThreadPoolExecutor() as clients:
+                future = clients.submit(accept)
+                with self.assertRaises(OSError):
+                    transport.connect(path, "b" * 64)
+                transport.connect(path, "a" * 64).close()
+                future.result(timeout=5)
+            self.assertEqual(results, [False, True])
+            self.assertNotIn("a" * 64, path.read_text())
 
     def test_valid_and_invalid_keys_over_real_loopback(self):
         with tempfile.TemporaryDirectory() as temporary, \

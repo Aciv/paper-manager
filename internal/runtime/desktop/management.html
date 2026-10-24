@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Papers Manager · 本地服务</title>
+    <link rel="stylesheet" href="/management.css">
+    <script src="/management.js" defer></script>
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">PAPERS MANAGER</p>
+      <h1>本地服务</h1>
+      <p>关闭此页面不会停止应用。请使用下方按钮停止服务或退出。</p>
+      <section aria-live="polite">
+        <h2 id="state">正在读取状态</h2>
+        <p id="error" role="alert"></p>
+        <ul id="services"></ul>
+      </section>
+      <div class="actions">
+        <a id="open" target="_blank" rel="noreferrer" hidden>打开论文库 ↗</a>
+        <button data-action="start">启动 / 重试</button>
+        <button data-action="stop">停止服务</button>
+        <button data-action="quit">退出 Launcher</button>
+      </div>
+      <section>
+        <h2>MCP 连接</h2>
+        <p>地址保持稳定。复制配置后自行加入 Agent，不会覆盖已有设置。</p>
+        <code id="mcp-address"></code>
+        <button id="copy-mcp">复制 MCP 配置</button>
+      </section>
+      <section>
+        <h2>运行日志</h2>
+        <label for="log-service">服务</label>
+        <select id="log-service">
+          <option>api</option><option>parser</option><option>postgres</option>
+          <option>redis</option><option>initdb</option>
+        </select>
+        <button id="refresh-log">刷新</button>
+        <pre id="logs">可查看最近 64 KiB 日志。</pre>
+      </section>
+    </main>
+  </body>
+</html>

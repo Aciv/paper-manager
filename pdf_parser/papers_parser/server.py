@@ -781,12 +781,17 @@ def main() -> None:
 
 def _create_server(args) -> grpc.Server:
     """Build the gRPC server with bounded external concurrency."""
+    options = [
+        ("grpc.max_receive_message_length", args.grpc_max_message_size),
+        ("grpc.max_send_message_length", args.grpc_max_message_size),
+    ]
+    if os.getenv("PAPERS_PARENT_STDIN") == "1":
+        # A private Launcher instance must fail on a competing bind, rather
+        # than sharing a gRPC port with another process via SO_REUSEPORT.
+        options.append(("grpc.so_reuseport", 0))
     return grpc.server(
         futures.ThreadPoolExecutor(max_workers=args.max_workers),
-        options=[
-            ("grpc.max_receive_message_length", args.grpc_max_message_size),
-            ("grpc.max_send_message_length", args.grpc_max_message_size),
-        ],
+        options=options,
         maximum_concurrent_rpcs=args.max_concurrent_rpcs,
     )
 
@@ -801,6 +806,19 @@ def _install_shutdown_handlers() -> threading.Event:
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
+    if os.getenv("PAPERS_PARENT_STDIN") == "1":
+        def watch_parent() -> None:
+            # The lightweight server owns this pipe; workers keep their existing
+            # transport/ownership scheme. No NumPy import occurs in this process.
+            try:
+                while os.read(0, 1):
+                    pass
+            finally:
+                stop_requested.set()
+
+        threading.Thread(
+            target=watch_parent, name="launcher-parent-watch", daemon=True
+        ).start()
     return stop_requested
 
 

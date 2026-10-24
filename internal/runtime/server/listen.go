@@ -1,4 +1,4 @@
-package main
+package server
 
 import (
 	"context"
@@ -8,7 +8,7 @@ import (
 	"paperMaster/internal/logger"
 )
 
-func listenWithRetry(addr string, maxRetries int, baseDelay time.Duration) (net.Listener, error) {
+func listenWithRetry(ctx context.Context, addr string, maxRetries int, baseDelay time.Duration) (net.Listener, error) {
 	var lastErr error
 	for i := 0; i < maxRetries; i++ {
 		listener, err := net.Listen("tcp", addr)
@@ -21,8 +21,14 @@ func listenWithRetry(addr string, maxRetries int, baseDelay time.Duration) (net.
 			if delay > 3*time.Second {
 				delay = 3 * time.Second
 			}
-			logger.Warn(context.Background(), "listen address unavailable; retrying", "address", addr, "delay", delay, "attempt", i+1, "max_retries", maxRetries, "error", err)
-			time.Sleep(delay)
+			logger.Warn(ctx, "listen address unavailable; retrying",
+				"address", addr, "delay", delay, "attempt", i+1,
+				"max_retries", maxRetries, "error", err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
 		}
 	}
 	return nil, lastErr
