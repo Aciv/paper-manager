@@ -168,7 +168,7 @@ func TestAsynqNativePersistenceRedis(t *testing.T) {
 		}
 		defer func() { _ = command.Process.Kill(); _ = command.Wait() }()
 		if _, err := client.Enqueue(asynq.NewTask("crashed", nil), asynq.Queue(queue),
-			asynq.TaskID("persist-crashed"), asynq.MaxRetry(2), asynq.Retention(time.Minute)); err != nil {
+			asynq.TaskID("persist-crashed"), asynq.MaxRetry(2), asynq.Retention(10*time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 		deadline := time.Now().Add(20 * time.Second)
@@ -182,7 +182,7 @@ func TestAsynqNativePersistenceRedis(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 		}
 		for _, kind := range []string{"pending", "scheduled"} {
-			options := []asynq.Option{asynq.Queue(queue), asynq.TaskID("persist-" + kind), asynq.Retention(time.Minute)}
+			options := []asynq.Option{asynq.Queue(queue), asynq.TaskID("persist-" + kind), asynq.Retention(10 * time.Minute)}
 			if kind == "scheduled" {
 				options = append(options, asynq.ProcessIn(2*time.Second))
 			}

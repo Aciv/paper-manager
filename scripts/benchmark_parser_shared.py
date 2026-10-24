@@ -223,8 +223,14 @@ def run_case(args, concurrency: int, root: Path) -> dict:
                 started = time.perf_counter()
                 kinds = ["recognize" if index % 2 == 0 else "extract"
                          for index in range(args.mixed_jobs)]
-                with ThreadPoolExecutor(max_workers=8) as clients:
-                    latencies = list(clients.map(invoke, kinds))
+                # Match Go's separate 4+4 admission gates. A single client
+                # executor lets fast extracts turn all eight slots into
+                # recognition calls and tests overload rejection instead.
+                with ThreadPoolExecutor(max_workers=4) as recognition_clients, \
+                        ThreadPoolExecutor(max_workers=4) as extraction_clients:
+                    futures = [(recognition_clients if kind == "recognize" else extraction_clients).submit(invoke, kind)
+                               for kind in kinds]
+                    latencies = [future.result() for future in futures]
                 after_mixed = snapshot(parent)
                 current = {worker["kind"]: worker["pid"] for worker in after_mixed["workers"]}
                 if any(current.get(kind) != initial.get(kind) for kind in ("recognize", "extract")):

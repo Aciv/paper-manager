@@ -188,7 +188,7 @@ D1 必须在同一机器/解释器/库/模型/线程配置/输入下比较，至
 - Windows 真正普通账号验证脚本仅允许临时 Actions runner，创建隔离本地
   用户和私有 ACL 目录，检查 `is_admin=false`；不把 runneradmin 误作普通用户。
 
-137 项 Python 测试、9 项验证工具测试通过；Go 全量 build/test、前端 build
+Python 与验证工具测试、Go 全量 build/test、前端 build
 与34项 reading-note 测试通过。本地真实 Redis7.4.11＋临时 PostgreSQL17
 容器全量集成通过，包括8项必执行测试及 AOF/崩溃租约恢复；本地容器证据
 不能替代各系统原生数据库证据。原生 CI 结果与工件见 PR 的 Actions。
@@ -197,11 +197,13 @@ D1 必须在同一机器/解释器/库/模型/线程配置/输入下比较，至
 
 | 客户端并发 | 识别 jobs/s（前→后） | 识别 p95 秒（前→后） | 全树峰值 MiB（前→后） | 回收后父 RSS MiB |
 | --- | ---: | ---: | ---: | ---: |
-| 1 | 0.996→1.048 | 1.007→1.010 | 429.1→411.4 | 40.5 |
-| 4 | 2.277→2.493 | 2.009→1.641 | 705.2→670.6 | 40.9 |
+| 1 | 0.996→0.961 | 1.007→1.062 | 429.1→432.2 | 40.6 |
+| 4 | 2.277→2.622 | 2.009→1.732 | 705.2→627.4 | 40.9 |
 
-比较结果 shared-d1-final-median.json：regressions=[]；三个独立运行使用
-shared-d1-final-2/3/4.json，第一轮与另一负载有短暂重叠，未纳入最终比较。
+最终固定线程池比较结果 shared-d1-pool-median.json：regressions=[]；
+三个独立运行使用 shared-d1-pool-6/7/8.json，首轮与测试有短暂重叠，
+未纳入最终比较。worker 内有实际固定线程池，客户端超时后原生调用尚未
+返回时，后续请求仍不能突破物理执行预算；实际测试覆盖这个边界。
 更短的取消监视轮询降低响应等待；性能数字仅代表这个固定输入。
 
 另以本地16页/5.3MiB PDF、20个 recognize/extract 混合任务、客户端8并发、
@@ -226,8 +228,13 @@ shared-d1-final-2/3/4.json，第一轮与另一负载有短暂重叠，未纳入
 - Go：继续 D1，保留 Asynq、共享重包 worker 与内部线程并发；
   Windows Redis 候选已有用户运行证据和来源哈希匹配。
 - 最初“CI尚未运行、D1尚未修改生产实现”的结论已被本次实施 superseded。
-  Linux/macOS 已通过完整原生 run 40081950947；Windows修复和普通账号
-  PostgreSQL验收仍在 PR 上迭代，以最终具体 run 的结论为准。
+  Linux/macOS 已通过完整原生 run 40081950947；Windows普通账号 PostgreSQL
+  17.11 验收已通过（run 40083445477 的 postgres-ordinary-user.json，
+  is_admin=false）。Windows模型启动专项 run 40084025951 已通过。
+  首次 Windows 管道监视线程触发 NumPy DLL 导入死锁，已用原生堆栈定位，
+  改为仅依靠 Job Object 监视父进程，保留 Unix 管道监视：
+  https://github.com/numpy/numpy/issues/24290。
+  完整最终矩阵仍以 PR 最新具体 run 的结论为准。
 - Release no-go 仍成立：自包含解释器/数据库目录、权重分发与各依赖许可
   材料尚未验收；CI 工具链和 runner 自带安装不代表用户无需安装的发行物。
 - 无数据库 migration、API/protobuf 或公开环境变量默认值变更。
