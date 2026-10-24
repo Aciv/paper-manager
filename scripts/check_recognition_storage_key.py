@@ -49,11 +49,16 @@ def main():
                 channel = grpc.insecure_channel(address)
                 try:
                     grpc.channel_ready_future(channel).result(timeout=30)
+                    channel.close()
                     path = output / "go-recognition.jsonl"
-                    with path.open("w", encoding="utf-8") as events:
+                    # gRPC's macOS at-fork diagnostics can be emitted by the
+                    # subprocess before exec. Keep stderr out of Go's JSON
+                    # stdout; retain it separately without weakening pass gates.
+                    with path.open("w", encoding="utf-8") as events, \
+                            (output / "go-stderr.log").open("w", encoding="utf-8") as diagnostics:
                         result = subprocess.run(["go", "test", "-json", "-count=1", "./internal/application/service",
                                                  "-run", "^TestStoredPDFRecognitionParserIntegration$"],
-                                                cwd=ROOT, env=env, stdout=events, stderr=subprocess.STDOUT, timeout=180)
+                                                cwd=ROOT, env=env, stdout=events, stderr=diagnostics, timeout=180)
                     lines = path.read_text(encoding="utf-8").splitlines()
                     if result.returncode:
                         print("\n".join(lines[-80:]))
