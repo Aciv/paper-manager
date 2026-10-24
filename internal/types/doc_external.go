@@ -19,15 +19,21 @@ var ErrUnsupportedRecognitionContentType = errors.New("document recognizer does 
 // disconnected local parser consumes automatic retry attempts.
 var ErrRecognitionServiceUnavailable = errors.New("document recognition service is unavailable")
 
+// ErrRecognitionStoredSourceUnavailable allows a single lazy bytes fallback
+// when a stored source is invisible to the parser or key input is unsupported.
+// Validation, permission, parse and transport failures do not match this error.
+var ErrRecognitionStoredSourceUnavailable = errors.New("stored recognition source is unavailable")
+
 // RecognitionInputMode describes how a worker supplies a source document to
 // an external recognition service. Bytes are passed directly in-process;
-// file-path and URL modes let the service fetch the source by reference.
+// file-path, storage-key and URL modes let the service read the source by reference.
 type RecognitionInputMode string
 
 const (
-	RecognitionInputBytes    RecognitionInputMode = "bytes"
-	RecognitionInputFilePath RecognitionInputMode = "file_path"
-	RecognitionInputURL      RecognitionInputMode = "url"
+	RecognitionInputBytes      RecognitionInputMode = "bytes"
+	RecognitionInputFilePath   RecognitionInputMode = "file_path"
+	RecognitionInputURL        RecognitionInputMode = "url"
+	RecognitionInputStorageKey RecognitionInputMode = "storage_key"
 )
 
 // ErrInvalidRecognitionRequest indicates that a recognition request has no
@@ -55,6 +61,9 @@ type RecognitionRequest struct {
 	// URL is populated only for RecognitionInputURL. Callers should create a
 	// fresh, expiring URL for every processing attempt.
 	URL string `json:"url,omitempty"`
+	// SourceStorageKey is an authorized, relative FileStorage key, never a
+	// caller-supplied absolute path. Only storage_key mode populates it.
+	SourceStorageKey string `json:"source_storage_key,omitempty"`
 }
 
 // Validate checks that exactly one transport source matches InputMode. It
@@ -73,19 +82,29 @@ func (r RecognitionRequest) Validate() error {
 
 	switch r.InputMode {
 	case RecognitionInputBytes:
-		if r.FilePath != "" || r.URL != "" {
-			return fmt.Errorf("%w: bytes mode cannot include a file path or URL", ErrInvalidRecognitionRequest)
+		if r.FilePath != "" || r.URL != "" || r.SourceStorageKey != "" {
+			return fmt.Errorf("%w: bytes mode cannot include a file path, storage key or URL", ErrInvalidRecognitionRequest)
 		}
 		if int64(len(r.Content)) != r.SizeBytes {
 			return fmt.Errorf("%w: bytes length does not match size_bytes", ErrInvalidRecognitionRequest)
 		}
 	case RecognitionInputFilePath:
-		if r.Content != nil || r.URL != "" || strings.TrimSpace(r.FilePath) == "" {
+		if r.Content != nil || r.URL != "" || r.SourceStorageKey != "" || strings.TrimSpace(r.FilePath) == "" {
 			return fmt.Errorf("%w: file_path mode requires only file_path", ErrInvalidRecognitionRequest)
 		}
 	case RecognitionInputURL:
-		if r.Content != nil || r.FilePath != "" || strings.TrimSpace(r.URL) == "" {
+		if r.Content != nil || r.FilePath != "" || r.SourceStorageKey != "" || strings.TrimSpace(r.URL) == "" {
 			return fmt.Errorf("%w: url mode requires only URL", ErrInvalidRecognitionRequest)
+		}
+	case RecognitionInputStorageKey:
+		key := r.SourceStorageKey
+		if r.Content != nil || r.FilePath != "" || r.URL != "" || strings.TrimSpace(key) == "" || len(key) > 1024 || strings.ContainsAny(key, "\\:\x00") {
+			return fmt.Errorf("%w: storage_key mode requires only a relative source storage key", ErrInvalidRecognitionRequest)
+		}
+		for _, part := range strings.Split(key, "/") {
+			if part == "" || part == "." || part == ".." {
+				return fmt.Errorf("%w: source storage key contains an invalid path component", ErrInvalidRecognitionRequest)
+			}
 		}
 	default:
 		return fmt.Errorf("%w: unsupported input_mode %q", ErrInvalidRecognitionRequest, r.InputMode)

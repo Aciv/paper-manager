@@ -21,6 +21,55 @@ type builtinParserClientStub struct {
 	err      error
 }
 
+func TestBuiltinRecognizerMapsStorageKeyAndSizeWithoutContent(t *testing.T) {
+	client := &builtinParserClientStub{result: &papersv1.RecognitionResult{}}
+	recognizer := NewBuiltinRecognizerWithClient(client)
+	_, err := recognizer.Read(context.Background(), &types.RecognitionRequest{
+		DocumentID: uuid.New(), OriginalFilename: "paper.pdf", ContentType: "application/pdf",
+		InputMode: types.RecognitionInputStorageKey, SourceStorageKey: "pdf/shared.pdf", SizeBytes: 123,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !recognizer.SupportsStorageKey() || client.received.GetSourceStorageKey() != "pdf/shared.pdf" || client.received.SourceSizeBytes == nil || client.received.GetSourceSizeBytes() != 123 || client.received.GetContent() != nil {
+		t.Fatalf("request=%+v", client.received)
+	}
+}
+
+func TestBuiltinRecognizerClassifiesOnlyUnavailableStoredInputsForFallback(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		code     codes.Code
+		message  string
+		fallback bool
+	}{
+		{"missing", codes.NotFound, "stored recognition source is unavailable", true},
+		{"unsupported", codes.Unimplemented, "key unsupported", true},
+		{"legacy stub", codes.InvalidArgument, "exactly one recognition source is required", true},
+		{"invalid key", codes.InvalidArgument, "source storage key must be a relative path", false},
+		{"outside root", codes.PermissionDenied, "outside root", false},
+		{"size", codes.ResourceExhausted, "too large", false},
+		{"parse error", codes.Internal, "invalid PDF", false},
+		{"offline", codes.Unavailable, "offline", false},
+		{"cancel", codes.Canceled, "cancelled", false},
+		{"deadline", codes.DeadlineExceeded, "deadline", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			r := NewBuiltinRecognizerWithClient(&builtinParserClientStub{err: status.Error(test.code, test.message)})
+			request := &types.RecognitionRequest{DocumentID: uuid.New(), OriginalFilename: "paper.pdf", ContentType: "application/pdf", SizeBytes: 4, InputMode: types.RecognitionInputStorageKey, SourceStorageKey: "pdf/source.pdf"}
+			_, err := r.Read(context.Background(), request)
+			if errors.Is(err, types.ErrRecognitionStoredSourceUnavailable) != test.fallback {
+				t.Fatalf("key error=%v fallback=%t", err, test.fallback)
+			}
+			request.InputMode, request.SourceStorageKey, request.Content = types.RecognitionInputBytes, "", []byte("%PDF")
+			_, err = r.Read(context.Background(), request)
+			if errors.Is(err, types.ErrRecognitionStoredSourceUnavailable) {
+				t.Fatalf("bytes call must not request fallback: %v", err)
+			}
+		})
+	}
+}
+
 func TestBuiltinRecognizerClassifiesUnavailableService(t *testing.T) {
 	recognizer := NewBuiltinRecognizerWithClient(&builtinParserClientStub{
 		err: status.Error(codes.Unavailable, "connection refused"),
@@ -83,6 +132,9 @@ func TestBuiltinRecognizerMapsByteRequestAndResponse(t *testing.T) {
 	}
 	if client.received.GetDocumentId() != documentID.String() || string(client.received.GetContent()) != string(content) {
 		t.Fatalf("unexpected protobuf request: %+v", client.received)
+	}
+	if client.received.GetContentType() != "application/pdf" {
+		t.Fatalf("content type was not normalized: %q", client.received.GetContentType())
 	}
 	if string(result.Markdown) != string(markdown) || result.Metadata.PageCount != 3 || result.Metadata.MarkdownFilename != "paper.md" {
 		t.Fatalf("unexpected recognition result: %+v", result)

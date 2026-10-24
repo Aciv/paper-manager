@@ -16,3 +16,11 @@ type DocumentRecognizer interface {
 	// payload.
 	Read(ctx context.Context, request *types.RecognitionRequest) (*types.RecognitionResult, error)
 }
+
+// StorageKeyRecognizer is an optional capability of recognizers which can
+// resolve stored inputs without receiving bytes. Existing providers remain
+// bytes-only unless they explicitly opt in.
+type StorageKeyRecognizer interface {
+	DocumentRecognizer
+	SupportsStorageKey() bool
+}

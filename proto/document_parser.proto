@@ -58,7 +58,11 @@ message RecognitionRequest {
     bytes content = 4;
     string file_path = 5;
     string source_url = 6;
+    // Go-owned relative key under the parser's shared upload directory.
+    string source_storage_key = 7;
   }
+  // Optional recorded-size bound for key input, matching Go's bytes read limit.
+  optional int64 source_size_bytes = 8;
 }
 
 message RecognitionResult {

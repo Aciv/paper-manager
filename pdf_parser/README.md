@@ -20,6 +20,26 @@ resolution, canonical metadata, and all PostgreSQL writes.
 
 ## Server / worker topology
 
+Stored PDF recognition prefers `RecognitionRequest.source_storage_key`, a Go-owned
+relative key resolved beneath the parser's `UPLOAD_DIR`. Successful key input
+does not read the PDF into Go or send its bytes through gRPC/internal IPC; the
+recognition worker opens the shared file directly. `source_size_bytes` optionally
+retains the recorded-size bound in addition to the parser's global size limit.
+The Go workflow lazily reads FileStorage and retries once as bytes only when the
+shared source is missing or key input is unsupported (including older parser
+stubs). Invalid paths, permission/size/parse errors, cancellation and unavailable
+services do not trigger that fallback. Text/other bytes-only providers keep their
+existing input path. The persisted Markdown input mode reflects the actual path.
+Existing bytes, file_path and URL protobuf inputs remain supported. All parser
+copies must receive regenerated stubs; a new parser continues accepting old bytes
+clients. Source keys are internal and are not added to public HTTP/MCP inputs.
+
+Run the actual Go -> gRPC -> shared worker key/fallback smoke test from the root:
+
+```bash
+.venv/bin/python scripts/check_recognition_storage_key.py --output-dir tmp/recognition-key
+```
+
 `papers_parser.server` is intentionally lightweight. It imports only gRPC,
 protobuf, and the worker-pool runtime; it does **not** import PyMuPDF,
 PyMuPDF4LLM, ONNX Runtime, CRF, or NumPy. Heavy work runs in kind-specific

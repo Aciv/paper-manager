@@ -13,7 +13,7 @@ from pathlib import Path
 import pymupdf
 
 import document_parser_pb2
-from papers_parser.worker_pool import WorkerPool, WorkerPoolConfig
+from papers_parser.worker_pool import SharedWorkerPool, WorkerPool, WorkerPoolConfig, WorkerRPCError
 from papers_parser.worker_protocol import METHOD_EXTRACT, METHOD_RECOGNIZE, METHOD_RENDER
 
 
@@ -136,6 +136,29 @@ class WorkerPoolTest(unittest.TestCase):
         )
         self.assertTrue(response.extractor_name)
         self.assertTrue(self.wait_for_no_workers(pool), "idle extraction worker did not exit")
+
+    def test_shared_recognition_reuses_worker_for_key_and_bytes_inputs(self):
+        source = self.upload_dir / "source.pdf"
+        source.write_bytes(make_pdf())
+        pool = SharedWorkerPool(WorkerPoolConfig(
+            kind="recognize", max_workers=1, concurrency=4, idle_seconds=5,
+            max_jobs=20, queue_timeout=15, start_timeout=60,
+            max_payload_bytes=8 << 20, worker_config=worker_config(self.upload_dir)))
+        self.pools.append(pool)
+        request = document_parser_pb2.RecognitionRequest(
+            document_id=str(uuid.uuid4()), filename="source.pdf", content_type="application/pdf",
+            source_storage_key="source.pdf", source_size_bytes=source.stat().st_size)
+        result = document_parser_pb2.RecognitionResult.FromString(pool.call(METHOD_RECOGNIZE, request.SerializeToString(), timeout=30))
+        self.assertEqual(result.page_count, 1)
+        pid = pool._worker.process.pid
+        request.source_storage_key = "missing.pdf"
+        with self.assertRaises(WorkerRPCError) as raised:
+            pool.call(METHOD_RECOGNIZE, request.SerializeToString(), timeout=30)
+        self.assertEqual(raised.exception.code, "NOT_FOUND")
+        request.content = source.read_bytes()  # protobuf oneof replaces the key
+        result = document_parser_pb2.RecognitionResult.FromString(pool.call(METHOD_RECOGNIZE, request.SerializeToString(), timeout=30))
+        self.assertEqual(result.page_count, 1)
+        self.assertEqual(pool._worker.process.pid, pid)
 
 
 class ServerImportTest(unittest.TestCase):

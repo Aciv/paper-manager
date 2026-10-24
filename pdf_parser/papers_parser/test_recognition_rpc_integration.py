@@ -100,6 +100,52 @@ class RecognitionRPCIntegrationTest(unittest.TestCase):
             server.stub.Recognize(recognition_request(self.pdf), timeout=30)
         self.assertEqual(raised.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
 
+    def key_request(self, key, **kwargs):
+        return document_parser_pb2.RecognitionRequest(
+            document_id=str(uuid.uuid4()), filename="paper.pdf", content_type="application/pdf",
+            source_storage_key=key, **kwargs)
+
+    def test_storage_key_reads_saved_pdf_without_content_or_temp_file(self):
+        folder = self.upload_dir / "pdf"
+        folder.mkdir()
+        (folder / "论文 source.bin").write_bytes(self.pdf)
+        server = self.start()
+        request = self.key_request("pdf/论文 source.bin", source_size_bytes=len(self.pdf))
+        self.assertFalse(request.content)
+        with mock.patch("tempfile.mkstemp", side_effect=AssertionError("unexpected temporary PDF")):
+            result = server.stub.Recognize(request, timeout=30)
+        self.assertEqual(result.page_count, 2)
+        self.assertTrue(result.markdown)
+        self.assertTrue(result.blocks)
+
+    def test_storage_key_reports_missing_source_for_bytes_fallback(self):
+        server = self.start()
+        with self.assertRaises(grpc.RpcError) as raised:
+            server.stub.Recognize(self.key_request("pdf/missing.pdf"), timeout=30)
+        self.assertEqual(raised.exception.code(), grpc.StatusCode.NOT_FOUND)
+
+    def test_storage_key_rejects_paths_and_symlink_escape(self):
+        server = self.start()
+        for key in ("../paper.pdf", "/paper.pdf", "pdf/../paper.pdf", "pdf//paper.pdf", "pdf/./paper.pdf", "C:/paper.pdf", "pdf\\paper.pdf"):
+            with self.subTest(key=key), self.assertRaises(grpc.RpcError) as raised:
+                server.stub.Recognize(self.key_request(key), timeout=30)
+            self.assertEqual(raised.exception.code(), grpc.StatusCode.INVALID_ARGUMENT)
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside) / "outside.pdf"
+            target.write_bytes(self.pdf)
+            (self.upload_dir / "escape.pdf").symlink_to(target)
+            with self.assertRaises(grpc.RpcError) as raised:
+                server.stub.Recognize(self.key_request("escape.pdf"), timeout=30)
+            self.assertEqual(raised.exception.code(), grpc.StatusCode.PERMISSION_DENIED)
+
+    def test_storage_key_preserves_size_limits(self):
+        (self.upload_dir / "source.pdf").write_bytes(self.pdf)
+        for maximum, bound in ((len(self.pdf)-1, len(self.pdf)), (len(self.pdf)+1, len(self.pdf)-1)):
+            server = self.start(max_file_size=maximum)
+            with self.assertRaises(grpc.RpcError) as raised:
+                server.stub.Recognize(self.key_request("source.pdf", source_size_bytes=bound), timeout=30)
+            self.assertEqual(raised.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
+
     def test_page_limit_is_enforced(self) -> None:
         server = self.start(max_pages=1)
         with self.assertRaises(grpc.RpcError) as raised:

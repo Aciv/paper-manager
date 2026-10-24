@@ -9,7 +9,8 @@ import time
 import os
 import urllib.request
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+import stat
 from typing import Sequence
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -435,6 +436,33 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
         is commonly smaller than the configured upload limit.
         """
         source_type = request.WhichOneof("source")
+        if source_type == "source_storage_key":
+            key = request.source_storage_key
+            parts = key.split("/")
+            if (not key.strip() or len(key) > 1024 or "\\" in key or ":" in key or "\x00" in key
+                    or PureWindowsPath(key).drive or any(part in ("", ".", "..") for part in parts)):
+                raise RPCAbort(grpc.StatusCode.INVALID_ARGUMENT, "source storage key must be a relative path")
+            try:
+                source = self.upload_dir.joinpath(*parts).resolve()
+                if not source.is_relative_to(self.upload_dir):
+                    raise RPCAbort(grpc.StatusCode.PERMISSION_DENIED, "source storage key is outside the parser upload directory")
+                info = source.stat()
+            except FileNotFoundError as exc:
+                raise RPCAbort(grpc.StatusCode.NOT_FOUND, "stored recognition source is unavailable") from exc
+            except PermissionError as exc:
+                raise RPCAbort(grpc.StatusCode.PERMISSION_DENIED, "stored recognition source is not readable") from exc
+            except (ValueError, RuntimeError) as exc:
+                raise RPCAbort(grpc.StatusCode.INVALID_ARGUMENT, "invalid source storage key") from exc
+            if not stat.S_ISREG(info.st_mode):
+                raise RPCAbort(grpc.StatusCode.NOT_FOUND, "stored recognition source is unavailable")
+            if request.HasField("source_size_bytes"):
+                if request.source_size_bytes < 0:
+                    raise RPCAbort(grpc.StatusCode.INVALID_ARGUMENT, "source_size_bytes cannot be negative")
+                if info.st_size > request.source_size_bytes:
+                    raise RPCAbort(grpc.StatusCode.RESOURCE_EXHAUSTED, "document source exceeds recorded size")
+            self._assert_size(info.st_size)
+            return pymupdf.open(str(source), filetype="pdf")
+
         if source_type == "file_path":
             source = Path(request.file_path).resolve()
             if not source.is_relative_to(self.upload_dir) or not source.is_file():

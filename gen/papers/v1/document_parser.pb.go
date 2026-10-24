@@ -278,9 +278,12 @@ type RecognitionRequest struct {
 	//	*RecognitionRequest_Content
 	//	*RecognitionRequest_FilePath
 	//	*RecognitionRequest_SourceUrl
-	Source        isRecognitionRequest_Source `protobuf_oneof:"source"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	//	*RecognitionRequest_SourceStorageKey
+	Source isRecognitionRequest_Source `protobuf_oneof:"source"`
+	// Optional recorded-size bound for key input, matching Go's bytes read limit.
+	SourceSizeBytes *int64 `protobuf:"varint,8,opt,name=source_size_bytes,json=sourceSizeBytes,proto3,oneof" json:"source_size_bytes,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *RecognitionRequest) Reset() {
@@ -368,6 +371,22 @@ func (x *RecognitionRequest) GetSourceUrl() string {
 	return ""
 }
 
+func (x *RecognitionRequest) GetSourceStorageKey() string {
+	if x != nil {
+		if x, ok := x.Source.(*RecognitionRequest_SourceStorageKey); ok {
+			return x.SourceStorageKey
+		}
+	}
+	return ""
+}
+
+func (x *RecognitionRequest) GetSourceSizeBytes() int64 {
+	if x != nil && x.SourceSizeBytes != nil {
+		return *x.SourceSizeBytes
+	}
+	return 0
+}
+
 type isRecognitionRequest_Source interface {
 	isRecognitionRequest_Source()
 }
@@ -384,11 +403,18 @@ type RecognitionRequest_SourceUrl struct {
 	SourceUrl string `protobuf:"bytes,6,opt,name=source_url,json=sourceUrl,proto3,oneof"`
 }
 
+type RecognitionRequest_SourceStorageKey struct {
+	// Go-owned relative key under the parser's shared upload directory.
+	SourceStorageKey string `protobuf:"bytes,7,opt,name=source_storage_key,json=sourceStorageKey,proto3,oneof"`
+}
+
 func (*RecognitionRequest_Content) isRecognitionRequest_Source() {}
 
 func (*RecognitionRequest_FilePath) isRecognitionRequest_Source() {}
 
 func (*RecognitionRequest_SourceUrl) isRecognitionRequest_Source() {}
+
+func (*RecognitionRequest_SourceStorageKey) isRecognitionRequest_Source() {}
 
 type RecognitionResult struct {
 	state            protoimpl.MessageState `protogen:"open.v1"`
@@ -1505,7 +1531,7 @@ const file_document_parser_proto_rawDesc = "" +
 	"\n" +
 	"page_width\x18\x05 \x01(\x01R\tpageWidth\x12\x1f\n" +
 	"\vpage_height\x18\x06 \x01(\x01R\n" +
-	"pageHeight\"\xda\x01\n" +
+	"pageHeight\"\xd1\x02\n" +
 	"\x12RecognitionRequest\x12\x1f\n" +
 	"\vdocument_id\x18\x01 \x01(\tR\n" +
 	"documentId\x12\x1a\n" +
@@ -1514,8 +1540,11 @@ const file_document_parser_proto_rawDesc = "" +
 	"\acontent\x18\x04 \x01(\fH\x00R\acontent\x12\x1d\n" +
 	"\tfile_path\x18\x05 \x01(\tH\x00R\bfilePath\x12\x1f\n" +
 	"\n" +
-	"source_url\x18\x06 \x01(\tH\x00R\tsourceUrlB\b\n" +
-	"\x06source\"\x95\x03\n" +
+	"source_url\x18\x06 \x01(\tH\x00R\tsourceUrl\x12.\n" +
+	"\x12source_storage_key\x18\a \x01(\tH\x00R\x10sourceStorageKey\x12/\n" +
+	"\x11source_size_bytes\x18\b \x01(\x03H\x01R\x0fsourceSizeBytes\x88\x01\x01B\b\n" +
+	"\x06sourceB\x14\n" +
+	"\x12_source_size_bytes\"\x95\x03\n" +
 	"\x11RecognitionResult\x12\x1a\n" +
 	"\bmarkdown\x18\x01 \x01(\fR\bmarkdown\x12+\n" +
 	"\x11markdown_filename\x18\x02 \x01(\tR\x10markdownFilename\x12!\n" +
@@ -1706,6 +1735,7 @@ func file_document_parser_proto_init() {
 		(*RecognitionRequest_Content)(nil),
 		(*RecognitionRequest_FilePath)(nil),
 		(*RecognitionRequest_SourceUrl)(nil),
+		(*RecognitionRequest_SourceStorageKey)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

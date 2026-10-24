@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/proto"
 )
 
 // BuiltinRecognizer delegates PDF recognition to the repository's bundled
@@ -25,6 +26,8 @@ type BuiltinRecognizer struct {
 	client papersv1.DocumentParserClient
 	conn   *grpc.ClientConn
 }
+
+func (*BuiltinRecognizer) SupportsStorageKey() bool { return true }
 
 // NewBuiltinRecognizer connects the bundled Python parser client. grpc.NewClient
 // is non-blocking; Read reports unavailable servers through its returned error.
@@ -86,7 +89,7 @@ func (r *BuiltinRecognizer) Read(ctx context.Context, request *types.Recognition
 	rpcRequest := &papersv1.RecognitionRequest{
 		DocumentId:  request.DocumentID.String(),
 		Filename:    request.OriginalFilename,
-		ContentType: request.ContentType,
+		ContentType: contentType,
 	}
 	switch request.InputMode {
 	case types.RecognitionInputBytes:
@@ -95,10 +98,21 @@ func (r *BuiltinRecognizer) Read(ctx context.Context, request *types.Recognition
 		rpcRequest.Source = &papersv1.RecognitionRequest_FilePath{FilePath: request.FilePath}
 	case types.RecognitionInputURL:
 		rpcRequest.Source = &papersv1.RecognitionRequest_SourceUrl{SourceUrl: request.URL}
+	case types.RecognitionInputStorageKey:
+		rpcRequest.Source = &papersv1.RecognitionRequest_SourceStorageKey{SourceStorageKey: request.SourceStorageKey}
+		rpcRequest.SourceSizeBytes = proto.Int64(request.SizeBytes)
 	}
 
 	response, err := r.client.Recognize(ctx, rpcRequest)
 	if err != nil {
+		if request.InputMode == types.RecognitionInputStorageKey && ctx.Err() == nil {
+			code := status.Code(err)
+			// Old stubs ignore the additive oneof field and see no source.
+			legacySource := code == codes.InvalidArgument && status.Convert(err).Message() == "exactly one recognition source is required"
+			if code == codes.NotFound || code == codes.Unimplemented || legacySource {
+				return nil, fmt.Errorf("%w: %v", types.ErrRecognitionStoredSourceUnavailable, err)
+			}
+		}
 		logger.Error(ctx, "builtin document recognition call failed", "document_id", request.DocumentID, "error", err)
 		if status.Code(err) == codes.Unavailable {
 			return nil, fmt.Errorf("%w: %v", types.ErrRecognitionServiceUnavailable, err)

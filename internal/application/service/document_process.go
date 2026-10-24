@@ -49,6 +49,59 @@ func (s *documentService) RecognizeDocument(ctx context.Context, task *asynq.Tas
 	return s.recognizeDocument(ctx, payload)
 }
 
+// readStoredRecognitionSource keeps bytes loading lazy. Only a source which
+// is invisible to the parser (or an unsupported key input) permits fallback.
+func (s *documentService) readStoredRecognitionSource(ctx context.Context, document types.Document, payload types.DocumentProcessPayload) (*types.RecognitionResult, types.RecognitionInputMode, error) {
+	request := &types.RecognitionRequest{DocumentID: document.ID, OriginalFilename: document.OriginalFilename,
+		ContentType: document.ContentType, SizeBytes: document.SizeBytes}
+	check := func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		return ensureDocumentStageWork(ctx, s.repo, document.ID, payload.Stage, payload.Generation)
+	}
+	contentType := strings.ToLower(strings.TrimSpace(strings.Split(document.ContentType, ";")[0]))
+	if recognizer, ok := s.recognizer.(interfaces.StorageKeyRecognizer); ok && recognizer.SupportsStorageKey() && contentType == "application/pdf" && document.StorageKey != "" {
+		if err := check(); err != nil {
+			return nil, types.RecognitionInputStorageKey, err
+		}
+		request.InputMode, request.SourceStorageKey = types.RecognitionInputStorageKey, document.StorageKey
+		result, err := recognizer.Read(ctx, request)
+		if !errors.Is(err, types.ErrRecognitionStoredSourceUnavailable) {
+			return result, request.InputMode, err
+		}
+		logger.Warn(ctx, "stored PDF unavailable to recognizer; fall back to bytes", "document_id", document.ID, "storage_key", document.StorageKey, "error", err)
+	}
+	if err := check(); err != nil {
+		return nil, types.RecognitionInputBytes, err
+	}
+	input, err := s.storage.Open(ctx, document.StorageKey)
+	if err != nil {
+		return nil, types.RecognitionInputBytes, fmt.Errorf("open document source: %w", err)
+	}
+	if err := check(); err != nil {
+		_ = input.Close()
+		return nil, types.RecognitionInputBytes, err
+	}
+	content, readErr := io.ReadAll(io.LimitReader(input, document.SizeBytes+1))
+	closeErr := input.Close()
+	if readErr != nil {
+		return nil, types.RecognitionInputBytes, fmt.Errorf("read document source: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, types.RecognitionInputBytes, fmt.Errorf("close document source: %w", closeErr)
+	}
+	if int64(len(content)) > document.SizeBytes {
+		return nil, types.RecognitionInputBytes, fmt.Errorf("document source exceeds recorded size")
+	}
+	if err := check(); err != nil {
+		return nil, types.RecognitionInputBytes, err
+	}
+	request.InputMode, request.SourceStorageKey, request.Content, request.SizeBytes = types.RecognitionInputBytes, "", content, int64(len(content))
+	result, err := s.recognizer.Read(ctx, request)
+	return result, request.InputMode, err
+}
+
 // recognizeDocument owns only file recognition and parsed-output persistence.
 func (s *documentService) recognizeDocument(ctx context.Context, payload types.DocumentProcessPayload) (processErr error) {
 	documentID, err := uuid.Parse(strings.TrimSpace(payload.DocumentID))
@@ -107,33 +160,7 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 	}
 
 	logger.Info(ctx, "start document recognition", "document_id", document.ID, "content_type", document.ContentType)
-	input, err := s.storage.Open(ctx, document.StorageKey)
-	if err != nil {
-		return fmt.Errorf("open document source: %w", err)
-	}
-	if err := ensureDocumentStageWork(ctx, s.repo, documentID, payload.Stage, payload.Generation); err != nil {
-		return err
-	}
-	content, readErr := io.ReadAll(io.LimitReader(input, document.SizeBytes+1))
-	closeErr := input.Close()
-	if readErr != nil {
-		return fmt.Errorf("read document source: %w", readErr)
-	}
-	if closeErr != nil {
-		return fmt.Errorf("close document source: %w", closeErr)
-	}
-	if int64(len(content)) > document.SizeBytes {
-		return fmt.Errorf("document source exceeds recorded size")
-	}
-	result, err := s.recognizer.Read(ctx, &types.RecognitionRequest{
-		DocumentID:       document.ID,
-		OriginalFilename: document.OriginalFilename,
-		ContentType:      document.ContentType,
-		SizeBytes:        int64(len(content)),
-		InputMode:        types.RecognitionInputBytes,
-		Content:          content,
-	})
-
+	result, inputMode, err := s.readStoredRecognitionSource(ctx, document, payload)
 	if err != nil {
 		if errors.Is(err, types.ErrUnsupportedRecognitionContentType) {
 			return s.failUnsupportedDocumentRecognition(ctx, document.ID, err)
@@ -213,7 +240,7 @@ func (s *documentService) recognizeDocument(ctx context.Context, payload types.D
 		DocumentID: document.ID, StorageKey: storedMarkdown.Key, Filename: storedMarkdown.Filename,
 		ContentType: metadata.ContentType, SizeBytes: storedMarkdown.Size,
 		ParserName: metadata.ParserName, ParserVersion: metadata.ParserVersion,
-		InputMode: string(types.RecognitionInputBytes), Language: metadata.Language,
+		InputMode: string(inputMode), Language: metadata.Language,
 		PageCount: metadata.PageCount,
 		// metadata is a non-null JSONB column. An empty named RawMessage can be
 		// serialized by GORM as an invalid database JSON value, whereas an empty
