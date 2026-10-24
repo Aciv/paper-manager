@@ -1,0 +1,97 @@
+name: Desktop D0 native validation
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/desktop-d0.yml'
+      - 'cmd/**'
+      - 'internal/**'
+      - 'pdf_parser/**'
+      - 'scripts/*desktop*'
+      - 'scripts/*postgres*'
+      - 'scripts/benchmark_parser_shared.py'
+      - 'packaging/desktop/**'
+      - 'go.mod'
+      - 'go.sum'
+      - 'web/**'
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            architecture: x64
+          - runner: windows-2022
+            architecture: x64
+          - runner: macos-14
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    env:
+      PARSER_LAYOUT_THREADS: '2'
+      MALLOC_ARENA_MAX: '2'
+      PYTHONUNBUFFERED: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.architecture }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Resolve native parser wheels (no source-build fallback)
+        run: |
+          python -m pip install --only-binary=:all: -r pdf_parser/requirements.txt -r packaging/desktop/requirements-validation.txt
+      - name: Record dependency versions and missing model artifacts
+        if: always()
+        run: python scripts/check_desktop_dependencies.py --output tmp/desktop-d0/dependencies.json
+      - name: Validation tool regression tests
+        if: always()
+        run: python -m unittest discover -s scripts -p test_desktop_validation.py
+      - name: Go build
+        if: always()
+        run: go build ./...
+      - name: Go tests
+        if: always()
+        run: go test ./...
+      - name: Python tests (known Windows lifecycle gaps must remain visible)
+        if: always()
+        working-directory: pdf_parser
+        run: python -m unittest discover -s papers_parser -p 'test_*.py'
+      - name: Web checks
+        if: always()
+        working-directory: web
+        run: |
+          npm ci --include=optional
+          npm run build
+          npm run test:reading-note
+      - name: Shared architecture and performance baseline
+        if: always()
+        # CI has no git-ignored CRF weights. This is a rules-engine smoke
+        # baseline only; local hybrid/model baseline remains a D1 gate.
+        run: python scripts/benchmark_parser_shared.py --engine rules --jobs 8 --idle-seconds 15 --output tmp/desktop-d0/shared.json
+      - name: Probe runner PostgreSQL 17 binaries on Windows
+        if: always() && runner.os == 'Windows'
+        # Tests native binaries, not a self-contained redistributable install.
+        # A missing runner dependency fails visibly; do not fall back to a
+        # different major version or an existing Windows service.
+        run: python scripts/check_private_postgres.py --bin-dir 'C:/Program Files/PostgreSQL/17/bin' --output tmp/desktop-d0/postgres.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-d0-${{ matrix.runner }}-${{ matrix.architecture }}
+          path: tmp/desktop-d0/
+          if-no-files-found: warn

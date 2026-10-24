@@ -1,6 +1,10 @@
 # Local environment settings can contain database passwords and must not be committed.
 .*
 !.air.toml
+# Cross-platform release validation must be tracked despite the dotfile rule.
+!.github/
+!.github/workflows/
+!.github/workflows/desktop-d0.yml
 
 paper_manager_plugin/
 # # Claude Code plugin manifests (the broad dotfile rule above would hide them).

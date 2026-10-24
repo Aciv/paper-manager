@@ -1,0 +1,2 @@
+# Validation tools only; do not add these to the production parser image.
+psutil==7.0.0

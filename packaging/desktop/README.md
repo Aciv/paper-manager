@@ -1,0 +1,173 @@
+# D0：跨平台发行审计与验证
+
+日期：2026-10-24。当前结论：**可以继续保留 Asynq 和现有共享 worker 架构，
+进入 Python 平台适配；尚未满足三平台发行验收，不能称为正式支持。**
+
+## 支持矩阵和证据
+
+| 目标 | 候选 CI 基线 | 已有证据 | 待补 |
+| --- | --- | --- | --- |
+| Windows x86_64 | windows-2022、Python 3.12 | 用户报告独立 Asynq 测试在下述 Redis 包上通过 | Windows 精确版本、原始日志/测试模式；私有 PostgreSQL 普通用户生命周期；完整 Python/原生 wheel、任务取消/恢复 |
+| Linux x86_64 | ubuntu-22.04、glibc 2.35、Python 3.12 | 本机 Ubuntu 24.04/WSL2、Python 3.12.3：127 项 parser 测试及真实 shared gRPC 基线通过 | 最低基线 CI、私有数据库发行物 |
+| macOS arm64 | macos-14、Python 3.12 | 无本次运行证据 | 原生 CI、wheel、模型、私有数据库与发行物运行 |
+
+CI runner 不等于最低用户系统承诺。Windows Server runner 不证明所有
+Windows 10 安装/窗口行为。macOS runner 要在日志中确认架构。
+.github/workflows/desktop-d0.yml 已建立三平台原生检查，尚未上传/触发；
+Windows 的已知缺口会真实报失败，没有用 continue-on-error 掩盖。
+默认 CI 不带 git-ignored 权重，rules 基线不能替代本机 hybrid/CRF 验证。
+检查器会列出缺失模型；正式 CRF 发行必须使用 --require-models。
+
+## Windows Redis 候选
+
+- 本地原包：tmp/Redis-7.4.11-Windows-x64-cygwin-with-Service.zip。
+- 来源：redis-windows/redis-windows，tag 7.4.11，发布于 2026-08-18。
+- SHA-256：2289eca02c25e96a918812c3b05083c3a8bc9440f1b268cc48e14bd93ed2acb0。
+- 本地哈希与 GitHub release asset digest 相同；不是只根据文件名判断版本。
+- 用户于 2026-10-24 报告 tmp/asynq-compat-88BNlK 独立工程在 Windows 测试通过。
+  尚未收到原始日志、执行参数和 Windows build，不能推断 persistence/crash 模式都执行过。
+- 保留 Asynq v0.26.0；候选不再以 Memurai 为默认，也不启动队列替换。
+- 随包 README 说明：redis-server.exe 命令行路径采用 /cygdrive/c/...；
+  RedisService.exe 包装器提供路径转换，注明 .NET 10，但是否完全自包含尚未验证。
+  Launcher 优先评估直接启动 redis-server.exe，使用独立 cwd/data 目录，
+  不要求注册 Windows 系统服务。
+- 附带 Cygwin、OpenSSL、GCC、iconv、intl、zlib 等 DLL，不能仅打包 exe。
+  原 ZIP 没有 LICENSE/COPYING/source notices；这属于发行材料缺口。
+- 上游 README 将其推荐用于本地开发，并未承诺生产可靠性；私有桌面发行
+  必须自行验收 AOF、异常关闭恢复、路径、生命周期和安全更新。
+
+许可审计事实：Redis 7.4 为 RSALv2 或 SSPLv1，不是 Redis 7.2 的 BSD。
+Cygwin DLL 为 LGPLv3+，有链接例外；其他 DLL、服务包装器和来源源码仍需
+逐项收集材料。这是待解决的再分发检查，不是“不能使用”的法律结论。
+完整候选清单、版本与哈希见 dependencies.json；它不冒充正式发行锁文件。
+
+来源：
+- https://github.com/redis-windows/redis-windows/releases/tag/7.4.11
+- https://redis.io/legal/licenses/
+- https://cygwin.com/licensing.html
+
+## 现有代码审计与 D1 必须保留的结构
+
+1. server.py 的 _build_shared_pools 创建 recognize/extract/render 各一份
+   SharedWorkerPool；每类只持有一个 _worker，重包在 worker.py 延迟加载。
+   “单一 worker”按种类定义，不能擅自合并成所有 RPC 共用一个大进程。
+2. worker_pool.py 的 AF_UNIX、start_new_session、os.killpg/os.getpgid，
+   worker_runtime.py 的 SIGUSR1/信号处理是 Windows 适配点。
+   shared 模式已经通过每请求连接 EOF 协作取消，不能为了统一 IPC 改成
+   一个全局取消信号，导致同进程其他请求被取消。
+3. server.py 导入轻量性的已有测试必须保留。容器默认 shared，但
+   server.py 未配置时的默认执行模式仍是 worker；Launcher 必须显式选择 shared。
+   D0 不擅自修改默认模式和任务预算。
+4. 内部并发当前是每连接请求线程＋取消监视线程，并非一个可直接替换的
+   futures.ThreadPoolExecutor。worker_pool 在父进程限制每类并发数。
+   D1 要验证实际并发重叠和上限，不因“线程池”称谓假定已有固定池实现。
+5. Asynq 在 internal/router/tasks.go 使用 Server.Run，其 Windows 信号路径
+   有上游讨论；Launcher 适配时改为受控 Start/Shutdown 生命周期，
+   不修改任务类型、重试协议或 Inspector 存储。
+6. limiter 实际仍用于 catalog 和远程 PDF 下载，REDIS_ADDR 非空时用 Redis。
+   两个真实 Redis 集成测试含 Lua；任务测试通过不能自动代表 limiter 通过。
+   任务快照测试会清空专用 DB 15，禁止对用户实例运行。
+7. Go 文件存储使用 filepath/配置路径；新 Launcher 必须隔离安装目录与数据目录。
+   Python logger 默认写包内 Logs，发行时必须注入可写 LOG_PATH。
+   旧 Go pdfregion 独立脚本启动是框架接口，不能用它替代 shared 解析架构。
+8. CRF 权重约 122 MiB，存在本机但未跟踪；干净 checkout 的 hybrid 会降级，
+   不能把这种降级误当性能优化或 CRF 可用验证。三个权重的哈希已记录。
+9. parser requirements 有版本范围，ONNX/numpy 等传递依赖未锁定。
+   本次记录本机解析版本；各平台最终 wheel 哈希/锁文件在 D3 产生。
+10. 本机 PyMuPDF 元数据为 AGPL/商业双许可，pymupdf-layout 为
+    PolyForm Noncommercial/商业双许可；项目没有跟踪的顶层 LICENSE。
+    先识别发行形态与依赖条款，不能自动认定所有组件为 MIT/BSD。
+
+## 测试命令
+
+在仓库根目录用 parser Python 安装验证依赖（仅验证工具，不进生产镜像）：
+
+    .venv/bin/python -m pip install -r packaging/desktop/requirements-validation.txt
+    .venv/bin/python scripts/check_desktop_dependencies.py --require-models --redis-archive tmp/Redis-7.4.11-Windows-x64-cygwin-with-Service.zip --output tmp/desktop-d0/dependencies.json
+    .venv/bin/python -m unittest discover -s scripts -p test_desktop_validation.py
+
+Windows 用私有 python.exe 或开发 Python 替代 .venv/bin/python。
+准确的现有 parser 测试入口是在 pdf_parser 目录运行：
+
+    cd pdf_parser
+    ../.venv/bin/python -m unittest discover -s papers_parser -p 'test_*.py'
+
+根目录直接 discover 虽能加载测试，但现有 worker 子进程无法按模块找到
+papers_parser，出现三个 exited during startup 错误；正确 cwd 下 127/127 通过。
+这也是发行时必须消除 cwd 隐式依赖的证据；D0 记录，D1 适配。
+
+私有 PostgreSQL 探针（需要对应平台真实二进制，不连接用户已有实例）：
+
+    python scripts/check_private_postgres.py --bin-dir "<PostgreSQL 17 bin>" --output tmp/desktop-d0/postgres.json
+
+探针使用全新带空格/中文的临时目录，测试 initdb、认证 SQL、停止、重启、
+数据持久化和清理；普通用户运行，不注册系统服务。当前环境没有原生
+PostgreSQL 工具且为 root，尚未通过该探针；容器 SQL 查询不能替代此验收。
+Windows CI 会尝试 runner 的明确 17/bin 路径，缺失时真实失败；
+runner 管理员环境通过也不能代替非管理员安装验收。
+
+## Python 性能和内存基线（D1 前置门槛）
+
+命令：
+
+    .venv/bin/python scripts/benchmark_parser_shared.py --output tmp/desktop-d0/shared-baseline.json --jobs 8 --idle-seconds 15
+
+真实子进程运行 server --execution-mode shared；经真实 gRPC 分别调用
+Recognize、Extract、RenderPage。四页合成 PDF、DPI 144、layout threads=2，
+hybrid、本机三个权重、每类并发预算始终为 4，客户端负载分别为 1 和 4。
+每类预热后执行 8 次，分别记录冷启动、吞吐、p50/p95、父进程/全树 RSS、
+worker PID/线程数，并验证每类单进程及空闲退出后 server 仍然存活。
+基准控制器不加载 PyMuPDF/ONNX；PDF 由额外短命进程提前生成。
+
+本次 Linux/WSL2 基线（适配尚未修改，所以不是前后改善报告）：
+
+| 客户端并发 | 识别 jobs/s | 提取 jobs/s | 渲染 jobs/s | 全树采样峰值 RSS | worker 回收后 server RSS |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.994 | 1.992 | 1.989 | 444.2 MiB | 39.9 MiB |
+| 4 | 2.646 | 7.936 | 7.299 | 601.1 MiB | 40.2 MiB |
+
+随后完成三轮控制实验，汇总后的 shared-median.json 用作 D1 正式比较基线：
+
+| 客户端并发 | 识别 jobs/s | 提取 jobs/s | 渲染 jobs/s | 全树采样峰值 RSS 中位数 | 回收后 server RSS 中位数 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 0.996 | 1.991 | 1.988 | 429.1 MiB | 39.9 MiB |
+| 4 | 2.277 | 7.941 | 7.012 | 705.2 MiB | 40.3 MiB |
+
+三轮汇总仅代表稳定参数下的中心值，原始单轮范围同时保留；三个连续运行
+都未修改 parser 生产代码。并发峰值仍会变化，不能从一次采样峰值推断泄漏。
+
+峰值 RSS 是父子 RSS 求和，可能重复计算共享页，并非独占物理内存；
+只与同系统、同采样方式的基线比较。合成提取/渲染约 0.5s 的延迟包含
+现有取消监视轮询等待，不能把这组数字当真实长论文的通用性能。
+报告/日志在 tmp/desktop-d0，包含机器和解释器元信息，不进入正式安装包。
+
+D1 必须在同一机器/解释器/库/模型/线程配置/输入下比较，至少三轮取中位：
+
+    # 改动前、改动后分别执行三轮，使用不同 output 保存，以下汇总改动前结果：
+    .venv/bin/python scripts/benchmark_parser_shared.py --aggregate tmp/desktop-d0/shared-baseline.json tmp/desktop-d0/shared-verified.json tmp/desktop-d0/shared-third.json --output tmp/desktop-d0/shared-median.json
+    # after-1/2/3 同样由真实运行生成，不能复制同一报告：
+    .venv/bin/python scripts/benchmark_parser_shared.py --aggregate tmp/desktop-d0/after-1.json tmp/desktop-d0/after-2.json tmp/desktop-d0/after-3.json --baseline tmp/desktop-d0/shared-median.json --output tmp/desktop-d0/comparison.json
+
+脚本遇到输入/系统/模型/依赖指纹不同直接拒绝比较；候选门槛：
+吞吐下降 >20%、p95 增加 >25%（另留 20ms 噪声余量），或峰值 RSS
+增加 >20%（另留 16MiB）、回收后父 RSS 增加 >20%（另留 8MiB）均报失败。
+单轮失败先在安静机器重复确认，不以放宽阈值掩盖回归。
+本次未改生产代码的第二轮与第一轮比较，c4 识别 p95 从约 1.52s 到 2.02s，
+触发单轮门槛，吞吐约 2.65 到 2.27 jobs/s，内存未触发门槛。
+原始失败结果保留在 shared-verified.json；这是当前测量噪声/轮询边界的
+控制实验，不是已证实的 D1 回归。工具支持三轮中位数汇总并保留 min/max，
+不能把一轮性能告警直接归因为改动，也不能删除告警后称全部稳定。
+继续用 --pdf <合法本地PDF> --pages <页数> 和至少 20 个任务验证真实论文；
+默认 4 页输入/8 个任务不能代替长文档、混合 4+4 压力验收。
+还需验证持续高负载时无请求数倍增的重包进程，空闲后保留轻量 server。
+
+## D0 结论与剩余验收
+
+- Go：继续 D1，保留 Asynq、共享重包 worker 与内部线程并发；
+  Windows Redis 候选已有用户运行证据和来源哈希匹配。
+- Release no-go：Windows/macOS CI 尚未运行，原生 PostgreSQL普通用户测试、
+  Python 私有运行时/权重分发及许可材料未验收。D0 保持 in progress，
+  不因工具已写好就把跨平台兼容性勾成完成。
+- 本次未修改 parser 生产执行、协议、并发预算、API/schema/proto/env。
+- 下一交付：运行三系统 workflow、补原生 PostgreSQL/Windows 结果；
+  D1 再修改平台进程/IPC，并强制附上上述前后性能报告。
