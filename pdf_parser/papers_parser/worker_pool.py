@@ -281,7 +281,11 @@ class WorkerPool:
         env[TOKEN_ENV] = token
         parser_root = str(Path(__file__).resolve().parent.parent)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [parser_root, env.get("PYTHONPATH", "")]))
-        process = start_process(command, env=env, cwd=parser_root)
+        try:
+            process = start_process(command, env=env, cwd=parser_root)
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise WorkerUnavailable("parser worker could not start") from exc
         threading.Thread(
             target=self._drain_worker_output,
             args=(process, self.config.kind),
@@ -292,6 +296,8 @@ class WorkerPool:
         try:
             deadline = time.monotonic() + self.config.start_timeout
             while time.monotonic() < deadline:
+                if self._closed:
+                    raise WorkerUnavailable("worker pool closed during startup")
                 if process.poll() is not None:
                     raise WorkerUnavailable("parser worker exited during startup")
                 try:
@@ -589,7 +595,11 @@ class SharedWorkerPool:
         env[TOKEN_ENV] = token
         parser_root = str(Path(__file__).resolve().parent.parent)
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [parser_root, env.get("PYTHONPATH", "")]))
-        process = start_process(command, env=env, cwd=parser_root)
+        try:
+            process = start_process(command, env=env, cwd=parser_root)
+        except Exception as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise WorkerUnavailable("parser worker could not start") from exc
         threading.Thread(
             target=WorkerPool._drain_worker_output,
             args=(process, self.config.kind),
@@ -599,6 +609,8 @@ class SharedWorkerPool:
         try:
             deadline = time.monotonic() + self.config.start_timeout
             while time.monotonic() < deadline:
+                if self._closed:
+                    raise WorkerUnavailable("worker pool closed during startup")
                 if process.poll() is not None:
                     raise WorkerUnavailable("parser worker exited during startup")
                 try:

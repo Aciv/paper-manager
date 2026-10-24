@@ -18,7 +18,7 @@ from unittest import mock
 from types import SimpleNamespace
 
 from papers_parser import worker_transport as transport
-from papers_parser.worker_pool import SharedWorkerPool, WorkerPoolConfig, WorkerRPCError, WorkerUnavailable
+from papers_parser.worker_pool import SharedWorkerPool, WorkerPool, WorkerPoolConfig, WorkerRPCError, WorkerUnavailable
 from papers_parser.worker_protocol import METHOD_EXTRACT
 from papers_parser.worker_protocol import WorkerProtocolError, encode_frame, read_frame, write_frame
 
@@ -31,6 +31,8 @@ def child():
     config = json.loads(base64.b64decode(args.config))
     if config.get("tcp"):
         transport._TCP = True
+    if config.get("startup_delay"):
+        time.sleep(config["startup_delay"])
     trace_lock = threading.Lock()
 
     def handler(payload, context):
@@ -66,11 +68,16 @@ class SharedLifecycleTest(unittest.TestCase):
         tcp_patch.start()
         self.addCleanup(tcp_patch.stop)
         original = transport.start_process
+        self.started = threading.Event()
+        self.processes = []
 
         def start(command, **kwargs):
             command = list(command)
             command[command.index("papers_parser.worker")] = "papers_parser.test_worker_transport"
-            return original(command, **kwargs)
+            process = original(command, **kwargs)
+            self.processes.append((process, Path(command[command.index("--socket") + 1]).parent))
+            self.started.set()
+            return process
 
         self.patch = mock.patch("papers_parser.worker_pool.start_process", side_effect=start)
         self.patch.start()
@@ -141,6 +148,36 @@ class SharedLifecycleTest(unittest.TestCase):
         with self.assertRaises(WorkerUnavailable):
             pool.call(METHOD_EXTRACT, b"3", timeout=0.1)
         self.assertEqual(self.call(pool)["pid"], initial["pid"])
+
+    def test_start_failure_removes_private_directory_and_returns_typed_error(self):
+        for pool_class in (WorkerPool, SharedWorkerPool):
+            with self.subTest(pool_class=pool_class.__name__):
+                directory = Path(self.temporary.name) / pool_class.__name__
+                directory.mkdir()
+                pool = pool_class(WorkerPoolConfig(
+                    kind="extract", max_workers=1, idle_seconds=5, max_jobs=10,
+                    queue_timeout=5, start_timeout=5, max_payload_bytes=4096,
+                    worker_config={}, concurrency=1))
+                self.addCleanup(pool.close)
+                with mock.patch("papers_parser.worker_pool.tempfile.mkdtemp", return_value=str(directory)), \
+                        mock.patch("papers_parser.worker_pool.start_process", side_effect=OSError("fixture spawn failure")):
+                    with self.assertRaises(WorkerUnavailable):
+                        pool.call(METHOD_EXTRACT, b"0", timeout=1)
+                self.assertFalse(directory.exists())
+                pool.close()
+
+    def test_close_interrupts_child_startup_and_cleans_process(self):
+        pool = self.pool(worker_config={"startup_delay": 60})
+        with concurrent.futures.ThreadPoolExecutor() as clients:
+            future = clients.submit(self.call, pool)
+            self.assertTrue(self.started.wait(timeout=5))
+            pool.close()
+            with self.assertRaises(WorkerUnavailable):
+                future.result(timeout=5)
+        self.assertEqual(len(self.processes), 1)
+        process, directory = self.processes[0]
+        self.assertIsNotNone(process.poll())
+        self.assertFalse(directory.exists())
 
     def test_native_calls_keep_physical_budget_after_clients_time_out(self):
         trace = Path(self.temporary.name) / "spans.jsonl"
