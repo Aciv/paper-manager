@@ -45,27 +45,36 @@ def snapshot(process: psutil.Process) -> dict:
     workers = []
     helpers = []
     for child in process.children(recursive=True):
-        try:
-            command = child.cmdline()
-            kind = command[command.index("--kind") + 1] if "--kind" in command else "other"
-            entry = {"pid": child.pid, "kind": kind, "rss": child.memory_info().rss,
-                     "threads": child.num_threads()}
-            # PyMuPDF may fork helper grandchildren which inherit worker argv.
-            # Count all memory, but only direct children are parser workers.
-            target = workers if child.ppid() == process.pid and "papers_parser.worker" in command else helpers
-            target.append(entry)
-        except psutil.NoSuchProcess:
-            continue
-        except psutil.AccessDenied:
-            # macOS denies proc_pidinfo for a helper during its exit/reap
-            # window. Only discard a confirmed dead/zombie process; live
-            # access failures still invalidate the measurement.
+        for attempt in range(3):
             try:
-                if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
-                    continue
+                command = child.cmdline()
+                kind = command[command.index("--kind") + 1] if "--kind" in command else "other"
+                entry = {"pid": child.pid, "kind": kind, "rss": child.memory_info().rss,
+                         "threads": child.num_threads()}
+                # Helpers inherit argv; include their RSS but not their PID
+                # in the one-parser-worker-per-kind assertion.
+                target = workers if child.ppid() == process.pid and "papers_parser.worker" in command else helpers
+                target.append(entry)
+                break
             except psutil.NoSuchProcess:
-                continue
-            raise
+                break
+            except psutil.AccessDenied:
+                # macOS can deny proc_pidinfo during exit before status turns
+                # zombie. Retry that transition, then verify fresh ancestry.
+                # A live process which remains inaccessible still fails.
+                try:
+                    if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
+                        break
+                except psutil.NoSuchProcess:
+                    break
+                except psutil.AccessDenied:
+                    pass
+                if attempt < 2:
+                    time.sleep(.01)
+                    continue
+                if child.pid not in {item.pid for item in process.children(recursive=True)}:
+                    break
+                raise
     return {"parent_rss": parent_rss,
             "tree_rss": parent_rss + sum(x["rss"] for x in workers + helpers),
             "workers": workers, "helpers": helpers}

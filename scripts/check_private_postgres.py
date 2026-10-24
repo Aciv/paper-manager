@@ -11,6 +11,7 @@ import json
 import os
 import platform
 import secrets
+import signal
 import socket
 import shutil
 import subprocess
@@ -66,14 +67,37 @@ def probe(bin_dir: Path, output: Path, temp_root: Path | None = None) -> int:
             env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
             env["PGPASSWORD"] = secret
 
+            sequence = 0
+
             def run(name, *arguments):
-                completed = subprocess.run([str(binaries[name]), *map(str, arguments)],
-                                           cwd=root, env=env, capture_output=True, text=True,
-                                           errors="replace", timeout=40)
-                if completed.returncode:
-                    raise RuntimeError(f"{name} exit={completed.returncode}: "
-                                       f"{completed.stderr[-2000:]} {completed.stdout[-2000:]}")
-                return completed.stdout.strip()
+                nonlocal sequence
+                sequence += 1
+                stdout = root / f"command-{sequence}.stdout"
+                stderr = root / f"command-{sequence}.stderr"
+                # Native helpers inherit stdio. PIPE + communicate on Windows
+                # can wait forever after killing only the command on timeout.
+                with stdout.open("wb") as out, stderr.open("wb") as err:
+                    command = subprocess.Popen([str(binaries[name]), *map(str, arguments)],
+                                               cwd=root, env=env, stdout=out, stderr=err,
+                                               start_new_session=os.name != "nt")
+                    try:
+                        command.wait(timeout=40)
+                    except subprocess.TimeoutExpired:
+                        if os.name == "nt":
+                            subprocess.run(["taskkill", "/PID", str(command.pid), "/T", "/F"],
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                           timeout=5, check=False)
+                        else:
+                            os.killpg(command.pid, signal.SIGKILL)
+                        command.kill()
+                        command.wait(timeout=5)
+                        raise RuntimeError(f"{name} timed out; "
+                                           f"{stderr.read_text(errors='replace')[-2000:]}")
+                result = stdout.read_text(encoding="utf-8", errors="replace")
+                if command.returncode:
+                    raise RuntimeError(f"{name} exit={command.returncode}: "
+                                       f"{stderr.read_text(encoding='utf-8', errors='replace')[-2000:]} {result[-2000:]}")
+                return result.strip()
 
             report["version"] = run("initdb", "--version")
             run("initdb", "-D", data, "-U", "papers_probe", "--pwfile", password,

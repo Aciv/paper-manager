@@ -33,7 +33,7 @@ jobs:
           - runner: macos-14
             architecture: arm64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       PARSER_LAYOUT_THREADS: '2'
       MALLOC_ARENA_MAX: '2'
@@ -98,8 +98,16 @@ jobs:
         run: python scripts/run_desktop_integration.py --redis-server "$PAPERS_TEST_REDIS_BINARY" --output-dir tmp/desktop-d0
       - name: Python tests and real worker lifecycle
         if: always()
+        timeout-minutes: 5
         working-directory: pdf_parser
         run: python -m unittest discover -s papers_parser -p 'test_*.py'
+      - name: Preserve worker startup diagnostics immediately
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-d0-python-${{ matrix.runner }}-${{ matrix.architecture }}
+          path: tmp/desktop-d0/python-tests.log
+          if-no-files-found: error
       - name: Web checks
         if: always()
         working-directory: web
@@ -114,6 +122,7 @@ jobs:
         run: python scripts/benchmark_parser_shared.py --engine rules --jobs 8 --mixed-jobs 20 --idle-seconds 15 --output tmp/desktop-d0/shared.json
       - name: Private PostgreSQL initialize, persist, restart, stop
         if: always()
+        timeout-minutes: 5
         # Tests native binaries, not a self-contained redistributable install.
         # A missing runner dependency fails visibly; do not fall back to a
         # different major version or an existing Windows service.
@@ -121,6 +130,7 @@ jobs:
       - name: Windows PostgreSQL under a real non-administrator account
         if: always() && runner.os == 'Windows'
         shell: pwsh
+        timeout-minutes: 5
         run: ./scripts/check_windows_postgres_user.ps1
       - uses: actions/upload-artifact@v4
         if: always()
