@@ -13,6 +13,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import grpc
@@ -190,6 +191,8 @@ def serve_shared_worker(
 
     lock = threading.Lock()
     state = {"active": 0, "jobs": 0, "last_activity": time.monotonic()}
+    connections: set[socket.socket] = set()
+    executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="parser-worker-request")
 
     def handle_connection(connection: socket.socket) -> None:
         try:
@@ -279,6 +282,7 @@ def serve_shared_worker(
                     pass
         finally:
             with lock:
+                connections.discard(connection)
                 state["active"] = max(0, state["active"] - 1)
                 state["last_activity"] = time.monotonic()
             try:
@@ -310,16 +314,27 @@ def serve_shared_worker(
             except OSError:
                 break
             with lock:
+                # A timed-out client may leave a native call finishing in its
+                # thread. Bound both execution and accepted backlog inside the
+                # worker, even after the parent releases its admission slot.
+                if state["active"] >= concurrency * 2:
+                    connection.close()
+                    continue
+                connections.add(connection)
                 state["active"] += 1
                 state["last_activity"] = time.monotonic()
-            threading.Thread(
-                target=handle_connection,
-                args=(connection,),
-                name="parser-worker-request",
-                daemon=True,
-            ).start()
+            executor.submit(handle_connection, connection)
     finally:
         listener.close()
+        executor.shutdown(wait=False, cancel_futures=True)
+        with lock:
+            remaining = list(connections)
+        for connection in remaining:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
         try:
             socket_path.unlink()
         except FileNotFoundError:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import base64
 import json
 import os
 from pathlib import Path
@@ -25,6 +26,8 @@ def child():
     from papers_parser.worker_runtime import serve_shared_worker
     transport.await_parent()
     args = _parse_args()
+    config = json.loads(base64.b64decode(args.config))
+    trace_lock = threading.Lock()
 
     def handler(payload, context):
         if payload == b"crash":
@@ -33,12 +36,17 @@ def child():
             helper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
             return json.dumps({"worker": os.getpid(), "helper": helper.pid}).encode()
         started = time.monotonic()
-        seconds = float(payload)
+        uninterruptible = payload.startswith(b"native:")
+        seconds = float(payload.removeprefix(b"native:"))
         while time.monotonic() - started < seconds:
-            if not context.is_active():
+            if not uninterruptible and not context.is_active():
                 context.abort("CANCELLED", "cancelled")
             time.sleep(0.005)
-        return json.dumps({"pid": os.getpid(), "start": started, "end": time.monotonic()}).encode()
+        result = {"pid": os.getpid(), "start": started, "end": time.monotonic()}
+        if config.get("trace_path"):
+            with trace_lock, open(config["trace_path"], "a", encoding="utf-8") as trace:
+                trace.write(json.dumps(result) + "\n")
+        return json.dumps(result).encode()
 
     serve_shared_worker(socket_path=args.socket, expected_method=METHOD_EXTRACT,
                         handler=handler, idle_seconds=args.idle_seconds,
@@ -60,11 +68,11 @@ class SharedLifecycleTest(unittest.TestCase):
         self.patch.start()
         self.addCleanup(self.patch.stop)
 
-    def pool(self, concurrency=4, idle=1):
+    def pool(self, concurrency=4, idle=1, worker_config=None):
         pool = SharedWorkerPool(WorkerPoolConfig(
             kind="extract", max_workers=1, idle_seconds=idle, max_jobs=100,
             queue_timeout=15, start_timeout=20, max_payload_bytes=4096,
-            worker_config={}, concurrency=concurrency))
+            worker_config=worker_config or {}, concurrency=concurrency))
         self.addCleanup(pool.close)
         return pool
 
@@ -125,6 +133,29 @@ class SharedLifecycleTest(unittest.TestCase):
         with self.assertRaises(WorkerUnavailable):
             pool.call(METHOD_EXTRACT, b"3", timeout=0.1)
         self.assertEqual(self.call(pool)["pid"], initial["pid"])
+
+    def test_native_calls_keep_physical_budget_after_clients_time_out(self):
+        trace = Path(self.temporary.name) / "spans.jsonl"
+        pool = self.pool(idle=5, worker_config={"trace_path": str(trace)})
+        self.call(pool)  # initialize worker before the concurrent timeout batch
+        trace.write_text("", encoding="utf-8")
+
+        def timeout():
+            with self.assertRaises(WorkerUnavailable):
+                pool.call(METHOD_EXTRACT, b"native:2", timeout=.1)
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as clients:
+            list(clients.map(lambda _: timeout(), range(4)))
+            results = list(clients.map(lambda _: self.call(pool), range(4)))
+        spans = [json.loads(line) for line in trace.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(spans), 8)
+        self.assertEqual(len({span["pid"] for span in spans}), 1)
+        events = sorted([(span["start"], 1) for span in spans] + [(span["end"], -1) for span in spans])
+        active = peak = 0
+        for _, change in events:
+            active += change
+            peak = max(peak, active)
+        self.assertEqual(peak, 4)
 
     def test_parent_death_cleans_worker_and_native_helper(self):
         import psutil  # validation dependency, never imported by the server

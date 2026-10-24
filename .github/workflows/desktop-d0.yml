@@ -37,7 +37,8 @@ jobs:
           python-version: '3.12'
           architecture: x64
       - name: Native parser wheels
-        run: python -m pip install --only-binary=:all: -r pdf_parser/requirements.txt -r packaging/desktop/requirements-validation.txt
+        run: |
+          python -m pip install --only-binary=:all: -r pdf_parser/requirements.txt -r packaging/desktop/requirements-validation.txt
       - name: Real model worker startup and idle cleanup
         timeout-minutes: 4
         run: python -m unittest discover -s pdf_parser/papers_parser -t pdf_parser -p test_server_worker.py
