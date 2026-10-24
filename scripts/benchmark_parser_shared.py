@@ -241,6 +241,20 @@ def run_case(args, concurrency: int, root: Path) -> dict:
                          "seconds": time.perf_counter() - started,
                          "p95_seconds": percentile(latencies, .95), "workers": current}
                 warm = after_mixed
+            recovery = None
+            if args.exercise_crash:
+                worker = next(x for x in warm["workers"] if x["kind"] == "extract")
+                victim = psutil.Process(worker["pid"])
+                victim.kill()
+                victim.wait(timeout=10)
+                started = time.perf_counter()
+                invoke("extract")
+                warm = snapshot(parent)
+                current = [x["pid"] for x in warm["workers"] if x["kind"] == "extract"]
+                if len(current) != 1 or current[0] == worker["pid"] or process.poll() is not None:
+                    raise RuntimeError("shared worker crash did not recover under the same lightweight parent")
+                recovery = {"kind": "extract", "killed": worker["pid"], "replacement": current[0],
+                            "seconds": time.perf_counter() - started}
             worker_kinds = sorted(x["kind"] for x in warm["workers"])
             if len(worker_kinds) != len(set(worker_kinds)) or any(
                 kind not in ("extract", "recognize", "render") for kind in worker_kinds
@@ -272,7 +286,7 @@ def run_case(args, concurrency: int, root: Path) -> dict:
                 "peak_tree_rss": max([cold, warm, idle] + samples, key=lambda x: x["tree_rss"])["tree_rss"],
                 "peak_parent_rss": max([cold, warm, idle] + samples, key=lambda x: x["parent_rss"])["parent_rss"],
                 "metrics": results,
-                "mixed": mixed,
+                "mixed": mixed, "worker_crash_recovery": recovery,
             }
         finally:
             stopped.set()
@@ -353,6 +367,8 @@ def main() -> int:
                         help="summarize >=3 existing complete runs instead of launching servers")
     parser.add_argument("--pdf", type=Path, help="optional local fixture; --pages must match it")
     parser.add_argument("--jobs", type=int, default=12)
+    parser.add_argument("--exercise-crash", action="store_true",
+                        help="also kill and recover a shared extraction worker after the stable batch")
     parser.add_argument("--mixed-jobs", type=int, default=0,
                         help="additional alternating recognize/extract jobs at 4+4, RPC cap 8")
     parser.add_argument("--pages", type=int, default=4)
@@ -413,6 +429,8 @@ def main() -> int:
                 "model_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                                  for path in sorted((args.parser_dir / "paper_crf" / "weights").glob("*.crfsuite"))},
             }
+            if args.exercise_crash:
+                report["fingerprint"]["exercise_crash"] = True
             if args.mixed_jobs:
                 report["fingerprint"]["mixed_jobs"] = args.mixed_jobs
             for concurrency in (1, 4):

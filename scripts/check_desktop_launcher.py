@@ -323,7 +323,9 @@ def main():
                 code, data, _ = http(markdown_url)
                 require(code == 200 and b"Desktop lifecycle probe" in data, "data lost after restart")
                 require(init_log.read_bytes() == initialized_log, "restart unexpectedly ran initdb")
-                report["steps"].append("stop/start preserved database, PDF, blocks and Markdown; no initdb")
+                code, note, _ = http(note_url)
+                require(code == 200 and b"Methods" in note, "note directory lost after restart")
+                report["steps"].append("stop/start preserved database, PDF, blocks, Markdown and notes; no initdb")
 
                 children = psutil.Process(process.pid).children(recursive=True)
                 servers = [child for child in children
@@ -379,11 +381,11 @@ def main():
                         subprocess.run([
                             sys.executable, str(benchmark), "--parser-dir", str(args.bundle / "pdf_parser"),
                             "--parser-python", str(python_path), "--engine", manifest["profile"],
-                            "--jobs", "8", "--mixed-jobs", "20", "--idle-seconds", "15",
+                            "--jobs", "8", "--mixed-jobs", "20", "--idle-seconds", "15", "--exercise-crash",
                             "--output", str(output / "parser-benchmark.json"),
                         ], env={**os.environ, "PATH": launcher_env["PATH"], "PYTHONDONTWRITEBYTECODE": "1"},
                             stdout=log, stderr=log, check=True, timeout=300)
-                    report["steps"].append("bundle c1/c4 and 20 mixed tasks: single workers, RSS and idle retirement")
+                    report["steps"].append("bundle c1/c4 and 20 mixed tasks: single workers, crash recovery, RSS and idle retirement")
                     verify(args.bundle)
                 report["status"] = "passed"
             finally:

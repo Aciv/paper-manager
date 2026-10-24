@@ -194,6 +194,9 @@ def assemble(args):
                        "purl": f"pkg:pypi/{p['name'].lower()}@{p['version']}"} for p in packages]
         components += [{"type": "library", "name": p["Path"], "version": p.get("Version", "local")}
                        for p in modules]
+        components += [{"type": "data", "name": p.name, "version": sha256(p)[:16],
+                        "hashes": [{"alg": "SHA-256", "content": sha256(p)}]}
+                       for p in sorted((parser / "paper_crf/weights").glob("*.crfsuite"))]
         components += [{"type": "application", "name": name, "version": version}
                        for name, version in (("PostgreSQL", "17.11"), ("Redis", "7.4.11"),
                                              ("CPython", "3.12.15"))]

@@ -6,6 +6,18 @@ Go HTTP 层使用 Gin 与 Handler 结构；需要跨表原子性的写入由 Rep
 
 业务代码可直接使用项目级日志方法：`logger.Debug(...)`、`logger.Info(...)`、`logger.Warn(...)`、`logger.Error(...)`。`LOG_LEVEL` 会过滤低于当前等级的消息；例如 `LOG_LEVEL=warn` 时不会输出 debug 与 info。
 
+## 本地桌面内部验证包
+
+Launcher 管理应用私有的 PostgreSQL、Redis、Python 与 Go 服务，Go 同时托管预构建
+前端，运行时不需要 Docker、Go、Node 或系统 Python。首次启动先在管理页执行
+“首次配置”，完成后再点击“启动”；安装器可调用同一个 `launcher --initialize` 入口。
+
+当前只生成内部验证目录包，尚未提供签名安装器或确定项目开源协议，不代表已经取得
+第三方组件/模型的公开再分发批准。构建、平台证据与剩余限制见
+[桌面打包说明](packaging/desktop/BUILD.md)、
+[Launcher 配置](packaging/desktop/LAUNCHER.md) 和
+[第三方依赖说明](packaging/desktop/THIRD_PARTY_NOTICES.md)。
+
 ## Docker 一键启动
 
 ```bash

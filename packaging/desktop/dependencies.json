@@ -91,7 +91,7 @@
       "sha256": "896aee013242c05809896ded0f1be1588d41d94b48fbf42d8b42576bb654e19b"
     }
   ],
-  "models_status": "local weights are git-ignored; artifact distribution, provenance and license remain release gates",
+  "models_status": "Header/citation weights tracked with explicit maintainer authorization for private internal hybrid builds (2026-10-25). Large reference model remains git-ignored and disabled by default. Public provenance/license approval remains pending.",
   "fonts_status": "collect notices from web/package-lock.json and built assets in D3",
   "internal_bundle_lock": "sources.lock.json; requirements-runtime.lock; internal validation only, not public redistribution approval"
 }
