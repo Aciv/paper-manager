@@ -21,6 +21,32 @@ permissions:
   contents: read
 
 jobs:
+  windows-worker:
+    # Fast native feedback for IPC/model startup; no Go/DB installation needed.
+    runs-on: windows-2022
+    timeout-minutes: 10
+    env:
+      PARSER_LAYOUT_THREADS: '2'
+      PARSER_WORKER_STARTUP_TRACE: '1'
+      PYTHONUNBUFFERED: '1'
+      LOG_PATH: ${{ github.workspace }}/tmp/desktop-d0/windows-worker.log
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Native parser wheels
+        run: python -m pip install --only-binary=:all: -r pdf_parser/requirements.txt -r packaging/desktop/requirements-validation.txt
+      - name: Real model worker startup and idle cleanup
+        timeout-minutes: 4
+        run: python -m unittest discover -s pdf_parser/papers_parser -t pdf_parser -p test_server_worker.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-d0-windows-worker
+          path: tmp/desktop-d0/windows-worker.log
+          if-no-files-found: error
   native:
     strategy:
       fail-fast: false
