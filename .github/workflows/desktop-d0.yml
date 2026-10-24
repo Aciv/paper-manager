@@ -7,10 +7,13 @@ on:
       - '.github/workflows/desktop-d0.yml'
       - 'cmd/**'
       - 'internal/**'
+      - 'proto/**'
+      - 'gen/**'
       - 'pdf_parser/**'
       - 'scripts/*desktop*'
       - 'scripts/*postgres*'
       - 'scripts/benchmark_parser_shared.py'
+      - 'scripts/check_recognition_storage_key.py'
       - 'packaging/desktop/**'
       - '!packaging/desktop/**/*.md'
       - 'go.mod'
@@ -135,6 +138,9 @@ jobs:
           name: desktop-d0-python-${{ matrix.runner }}-${{ matrix.architecture }}
           path: tmp/desktop-d0/python-tests.log
           if-no-files-found: error
+      - name: Real stored-PDF recognition and lazy bytes fallback
+        if: always()
+        run: python scripts/check_recognition_storage_key.py --output-dir tmp/desktop-d0/recognition-key
       - name: Web checks
         if: always()
         working-directory: web
