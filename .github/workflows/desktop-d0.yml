@@ -41,7 +41,7 @@ jobs:
           python -m pip install --only-binary=:all: -r pdf_parser/requirements.txt -r packaging/desktop/requirements-validation.txt
       - name: Real model worker startup and idle cleanup
         timeout-minutes: 4
-        run: python -m unittest discover -s pdf_parser/papers_parser -t pdf_parser -p test_server_worker.py
+        run: python -m unittest discover -s pdf_parser/papers_parser -t pdf_parser -p 'test_*worker*.py'
       - uses: actions/upload-artifact@v4
         if: always()
         with:

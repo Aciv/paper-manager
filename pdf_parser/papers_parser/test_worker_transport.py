@@ -29,6 +29,8 @@ def child():
     transport.await_parent()
     args = _parse_args()
     config = json.loads(base64.b64decode(args.config))
+    if config.get("tcp"):
+        transport._TCP = True
     trace_lock = threading.Lock()
 
     def handler(payload, context):
@@ -59,6 +61,10 @@ class SharedLifecycleTest(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="pm worker 空格 ")
         self.addCleanup(self.temporary.cleanup)
+        # Exercise Windows's TCP handshake/queue path on every platform, too.
+        tcp_patch = mock.patch.object(transport, "_TCP", True)
+        tcp_patch.start()
+        self.addCleanup(tcp_patch.stop)
         original = transport.start_process
 
         def start(command, **kwargs):
@@ -74,7 +80,7 @@ class SharedLifecycleTest(unittest.TestCase):
         pool = SharedWorkerPool(WorkerPoolConfig(
             kind="extract", max_workers=1, idle_seconds=idle, max_jobs=100,
             queue_timeout=15, start_timeout=20, max_payload_bytes=4096,
-            worker_config=worker_config or {}, concurrency=concurrency))
+            worker_config={"tcp": True, **(worker_config or {})}, concurrency=concurrency))
         self.addCleanup(pool.close)
         return pool
 

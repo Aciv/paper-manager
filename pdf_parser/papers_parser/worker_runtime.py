@@ -196,8 +196,6 @@ def serve_shared_worker(
 
     def handle_connection(connection: socket.socket) -> None:
         try:
-            if not authenticate(connection):
-                return
             connection.settimeout(0.5)
             deadline = time.monotonic() + 60
             try:
@@ -313,6 +311,11 @@ def serve_shared_worker(
                 continue
             except OSError:
                 break
+            # Authenticate before execution admission: a queued connection
+            # must not wait for a busy native parser just to receive its ACK.
+            if not authenticate(connection):
+                connection.close()
+                continue
             with lock:
                 # A timed-out client may leave a native call finishing in its
                 # thread. Bound both execution and accepted backlog inside the
