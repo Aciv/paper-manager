@@ -475,6 +475,9 @@ def _start_memory_trim(interval_seconds: float) -> None:
     if interval_seconds <= 0:
         LOG.info("parser memory trim disabled")
         return
+    if os.name == "nt":
+        LOG.info("parser memory trim unavailable (glibc malloc_trim not found)")
+        return
     try:
         malloc_trim = ctypes.CDLL(None).malloc_trim
     except (AttributeError, OSError):

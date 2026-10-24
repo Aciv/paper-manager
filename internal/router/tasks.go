@@ -169,7 +169,7 @@ func limitTaskConcurrency(limit int, handler asynq.HandlerFunc) asynq.HandlerFun
 	}
 }
 
-func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
+func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 	// Create a new mux and register all handlers
 	mux := asynq.NewServeMux()
 
@@ -230,13 +230,12 @@ func RunAsynqServer(params AsynqTaskParams) *asynq.ServeMux {
 		))
 	}
 
-	go func() {
-		// Start the server
-		if err := params.Server.Run(mux); err != nil {
-			logger.Error(context.Background(), "asynq server stopped", "error", err)
-		}
-	}()
-	return mux
+	// The application owns signals and calls Shutdown. Run installs its own
+	// signal loop, which conflicts with the launcher and is platform-specific.
+	if err := params.Server.Start(mux); err != nil {
+		return nil, fmt.Errorf("start asynq server: %w", err)
+	}
+	return mux, nil
 }
 
 func processPaperMetadataExtractTask(

@@ -257,8 +257,12 @@ func TestLocalStoragePlacesCategorizedFilesUnderTypeDirectory(t *testing.T) {
 	if !strings.HasPrefix(stored.Key, "pdf/") {
 		t.Fatalf("storage key = %q, want pdf/ prefix", stored.Key)
 	}
-	if _, err := storage.Open(context.Background(), stored.Key); err != nil {
+	reader, err := storage.Open(context.Background(), stored.Key)
+	if err != nil {
 		t.Fatalf("open categorized file: %v", err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatalf("close stored file: %v", err)
 	}
 }
 

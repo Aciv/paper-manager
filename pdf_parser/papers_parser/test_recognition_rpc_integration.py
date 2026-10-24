@@ -108,8 +108,23 @@ class RecognitionRPCIntegrationTest(unittest.TestCase):
 
     def test_deadline_is_returned_to_the_client(self) -> None:
         server = self.start()
-        with self.assertRaises(grpc.RpcError) as raised:
-            server.stub.Recognize(recognition_request(self.pdf), timeout=0.000001)
+        entered = threading.Event()
+        release = threading.Event()
+        original = pymupdf4llm.to_markdown
+
+        def slow_to_markdown(*args, **kwargs):
+            entered.set()
+            release.wait(timeout=10)
+            return original(*args, **kwargs)
+
+        with mock.patch.object(pymupdf4llm, "to_markdown", side_effect=slow_to_markdown):
+            future = server.stub.Recognize.future(recognition_request(self.pdf), timeout=2)
+            try:
+                self.assertTrue(entered.wait(timeout=1.5))
+                with self.assertRaises(grpc.RpcError) as raised:
+                    future.result(timeout=5)
+            finally:
+                release.set()
         self.assertEqual(raised.exception.code(), grpc.StatusCode.DEADLINE_EXCEEDED)
 
     def test_concurrent_rpc_cap_rejects_excess_work(self) -> None:

@@ -43,16 +43,41 @@ def percentile(values: list[float], fraction: float) -> float:
 def snapshot(process: psutil.Process) -> dict:
     parent_rss = process.memory_info().rss
     workers = []
+    helpers = []
     for child in process.children(recursive=True):
-        try:
-            command = child.cmdline()
-            kind = command[command.index("--kind") + 1] if "--kind" in command else "other"
-            workers.append({"pid": child.pid, "kind": kind, "rss": child.memory_info().rss,
-                            "threads": child.num_threads()})
-        except psutil.NoSuchProcess:
-            continue
-    return {"parent_rss": parent_rss, "tree_rss": parent_rss + sum(x["rss"] for x in workers),
-            "workers": workers}
+        for attempt in range(3):
+            try:
+                command = child.cmdline()
+                kind = command[command.index("--kind") + 1] if "--kind" in command else "other"
+                entry = {"pid": child.pid, "kind": kind, "rss": child.memory_info().rss,
+                         "threads": child.num_threads()}
+                # Helpers inherit argv; include their RSS but not their PID
+                # in the one-parser-worker-per-kind assertion.
+                target = workers if child.ppid() == process.pid and "papers_parser.worker" in command else helpers
+                target.append(entry)
+                break
+            except psutil.NoSuchProcess:
+                break
+            except psutil.AccessDenied:
+                # macOS can deny proc_pidinfo during exit before status turns
+                # zombie. Retry that transition, then verify fresh ancestry.
+                # A live process which remains inaccessible still fails.
+                try:
+                    if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
+                        break
+                except psutil.NoSuchProcess:
+                    break
+                except psutil.AccessDenied:
+                    pass
+                if attempt < 2:
+                    time.sleep(.01)
+                    continue
+                if child.pid not in {item.pid for item in process.children(recursive=True)}:
+                    break
+                raise
+    return {"parent_rss": parent_rss,
+            "tree_rss": parent_rss + sum(x["rss"] for x in workers + helpers),
+            "workers": workers, "helpers": helpers}
 
 
 def stop_owned_process(process: subprocess.Popen) -> None:
@@ -192,6 +217,29 @@ def run_case(args, concurrency: int, root: Path) -> dict:
                     "p95_seconds": percentile(latencies, .95),
                 }
             warm = snapshot(parent)
+            mixed = None
+            if args.mixed_jobs:
+                initial = {worker["kind"]: worker["pid"] for worker in warm["workers"]}
+                started = time.perf_counter()
+                kinds = ["recognize" if index % 2 == 0 else "extract"
+                         for index in range(args.mixed_jobs)]
+                # Match Go's separate 4+4 admission gates. A single client
+                # executor lets fast extracts turn all eight slots into
+                # recognition calls and tests overload rejection instead.
+                with ThreadPoolExecutor(max_workers=4) as recognition_clients, \
+                        ThreadPoolExecutor(max_workers=4) as extraction_clients:
+                    futures = [(recognition_clients if kind == "recognize" else extraction_clients).submit(invoke, kind)
+                               for kind in kinds]
+                    latencies = [future.result() for future in futures]
+                after_mixed = snapshot(parent)
+                current = {worker["kind"]: worker["pid"] for worker in after_mixed["workers"]}
+                if any(current.get(kind) != initial.get(kind) for kind in ("recognize", "extract")):
+                    raise RuntimeError("mixed load duplicated or replaced a shared worker")
+                mixed = {"jobs": len(kinds), "client_concurrency": 8,
+                         "recognize_budget": 4, "extract_budget": 4,
+                         "seconds": time.perf_counter() - started,
+                         "p95_seconds": percentile(latencies, .95), "workers": current}
+                warm = after_mixed
             worker_kinds = sorted(x["kind"] for x in warm["workers"])
             if len(worker_kinds) != len(set(worker_kinds)) or any(
                 kind not in ("extract", "recognize", "render") for kind in worker_kinds
@@ -223,6 +271,7 @@ def run_case(args, concurrency: int, root: Path) -> dict:
                 "peak_tree_rss": max([cold, warm, idle] + samples, key=lambda x: x["tree_rss"])["tree_rss"],
                 "peak_parent_rss": max([cold, warm, idle] + samples, key=lambda x: x["parent_rss"])["parent_rss"],
                 "metrics": results,
+                "mixed": mixed,
             }
         finally:
             stopped.set()
@@ -300,6 +349,8 @@ def main() -> int:
                         help="summarize >=3 existing complete runs instead of launching servers")
     parser.add_argument("--pdf", type=Path, help="optional local fixture; --pages must match it")
     parser.add_argument("--jobs", type=int, default=12)
+    parser.add_argument("--mixed-jobs", type=int, default=0,
+                        help="additional alternating recognize/extract jobs at 4+4, RPC cap 8")
     parser.add_argument("--pages", type=int, default=4)
     parser.add_argument("--idle-seconds", type=float, default=15)
     parser.add_argument("--layout-threads", type=int, default=2)
@@ -307,6 +358,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.jobs < 4 or args.pages < 1 or args.idle_seconds < 5 or args.layout_threads < 1:
         parser.error("need jobs>=4, pages>=1, idle-seconds>=5 and layout-threads>=1")
+    if args.mixed_jobs < 0:
+        parser.error("mixed-jobs must not be negative")
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.aggregate:
@@ -345,6 +398,8 @@ def main() -> int:
                 "model_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
                                  for path in sorted((PARSER / "paper_crf" / "weights").glob("*.crfsuite"))},
             }
+            if args.mixed_jobs:
+                report["fingerprint"]["mixed_jobs"] = args.mixed_jobs
             for concurrency in (1, 4):
                 print(f"benchmark shared server load={concurrency}", flush=True)
                 report["cases"].append(run_case(args, concurrency, root))

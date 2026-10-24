@@ -139,6 +139,18 @@ class RPCAbort(Exception):
         self.message = message
 
 
+class _CheckpointContext:
+    """Keep abort statuses typed until Recognize leaves its broad try block."""
+
+    def __init__(self, context):
+        self.time_remaining = context.time_remaining
+        self.is_active = context.is_active
+
+    @staticmethod
+    def abort(code, message):
+        raise RPCAbort(code, message)
+
+
 class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
     parser_name = "pymupdf4llm"
 
@@ -181,9 +193,10 @@ class DocumentParser(document_parser_pb2_grpc.DocumentParserServicer):
 
         pdf = None
         started_at = time.monotonic()
+        checkpoint_context = _CheckpointContext(context)
 
         def checkpoint() -> None:
-            check_rpc(context, started_at, self.rpc_max_seconds)
+            check_rpc(checkpoint_context, started_at, self.rpc_max_seconds)
 
         try:
             # The PDF stays in memory for every input mode. Writing content to a

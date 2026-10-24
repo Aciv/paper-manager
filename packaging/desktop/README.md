@@ -1,20 +1,22 @@
 # D0：跨平台发行审计与验证
 
-日期：2026-10-24。当前结论：**可以继续保留 Asynq 和现有共享 worker 架构，
-进入 Python 平台适配；尚未满足三平台发行验收，不能称为正式支持。**
+日期：2026-10-24。当前结论：**D0/D1原生技术验证完成，保留Asynq和共享worker
+架构，下一步为D2 Launcher；自包含发行物和最终再分发验收仍在D3。**
 
 ## 支持矩阵和证据
 
 | 目标 | 候选 CI 基线 | 已有证据 | 待补 |
 | --- | --- | --- | --- |
-| Windows x86_64 | windows-2022、Python 3.12 | 用户报告独立 Asynq 测试在下述 Redis 包上通过 | Windows 精确版本、原始日志/测试模式；私有 PostgreSQL 普通用户生命周期；完整 Python/原生 wheel、任务取消/恢复 |
-| Linux x86_64 | ubuntu-22.04、glibc 2.35、Python 3.12 | 本机 Ubuntu 24.04/WSL2、Python 3.12.3：127 项 parser 测试及真实 shared gRPC 基线通过 | 最低基线 CI、私有数据库发行物 |
-| macOS arm64 | macos-14、Python 3.12 | 无本次运行证据 | 原生 CI、wheel、模型、私有数据库与发行物运行 |
+| Windows x86_64 | windows-2022、Python 3.12 | run40085276527完整通过：原生wheel、真实parser、队列/Lua/AOF/崩溃恢复、普通账号PostgreSQL生命周期 | 自包含发行包、Windows10/11安装实测、生产CRF权重分发 |
+| Linux x86_64 | ubuntu-22.04、glibc 2.35、Python 3.12 | 原生CI完整通过；本机Ubuntu24.04/WSL2同参数三轮性能/内存与真实论文压力测试通过 | 私有运行时/数据库发行目录、干净系统安装验收 |
+| macOS arm64 | macos-14、Python 3.12 | 原生CI完整通过：wheel、真实parser、队列/数据库、生命周期与基准 | 自包含目录、生产CRF权重、签名/公证及安装验收 |
 
 CI runner 不等于最低用户系统承诺。Windows Server runner 不证明所有
 Windows 10 安装/窗口行为。macOS runner 要在日志中确认架构。
-.github/workflows/desktop-d0.yml 已建立三平台原生检查，尚未上传/触发；
-Windows 的已知缺口会真实报失败，没有用 continue-on-error 掩盖。
+.github/workflows/desktop-d0.yml 已建立并执行三平台原生检查。
+最初 run 40070038953 的 Windows/macOS 失败触发了下述 D1 修复；
+修复过程见 [草稿 PR #1](https://github.com/Aciv/paper-master/pull/1)。
+失败会真实保留，没有用 continue-on-error 掩盖。
 默认 CI 不带 git-ignored 权重，rules 基线不能替代本机 hybrid/CRF 验证。
 检查器会列出缺失模型；正式 CRF 发行必须使用 --require-models。
 
@@ -46,7 +48,9 @@ Cygwin DLL 为 LGPLv3+，有链接例外；其他 DLL、服务包装器和来源
 - https://redis.io/legal/licenses/
 - https://cygwin.com/licensing.html
 
-## 现有代码审计与 D1 必须保留的结构
+## D0 初始源码审计与 D1 必须保留的结构
+
+下列1–10为适配前观察，保留作为历史依据；最终实现与验收见后面的D1章节。
 
 1. server.py 的 _build_shared_pools 创建 recognize/extract/render 各一份
    SharedWorkerPool；每类只持有一个 _worker，重包在 worker.py 延迟加载。
@@ -161,13 +165,98 @@ D1 必须在同一机器/解释器/库/模型/线程配置/输入下比较，至
 默认 4 页输入/8 个任务不能代替长文档、混合 4+4 压力验收。
 还需验证持续高负载时无请求数倍增的重包进程，空闲后保留轻量 server。
 
-## D0 结论与剩余验收
+## D1 实施与本机验收（2026-10-24）
 
-- Go：继续 D1，保留 Asynq、共享重包 worker 与内部线程并发；
-  Windows Redis 候选已有用户运行证据和来源哈希匹配。
-- Release no-go：Windows/macOS CI 尚未运行，原生 PostgreSQL普通用户测试、
-  Python 私有运行时/权重分发及许可材料未验收。D0 保持 in progress，
-  不因工具已写好就把跨平台兼容性勾成完成。
-- 本次未修改 parser 生产执行、协议、并发预算、API/schema/proto/env。
-- 下一交付：运行三系统 workflow、补原生 PostgreSQL/Windows 结果；
-  D1 再修改平台进程/IPC，并强制附上上述前后性能报告。
+- worker_transport.py 隔离平台差异：Unix socket 保留；Windows 使用
+  loopback TCP、环境变量传递每次启动的随机认证令牌和私有 endpoint 文件。
+  不增加公开 gRPC/HTTP 接口，不把凭据放在 argv 或日志中。
+- 轻量 server 保留；recognize/extract/render 各一份 SharedWorkerPool。
+  Windows Job Object 在启动握手放行重包导入前创建；Unix 使用私有 session。
+  父进程管道 EOF 清理 worker/helper，请求连接 EOF 只取消自己的请求。
+  协作取消仍受原生库调用边界限制；关闭 worker 会使未完成调用明确失败。
+- worker 内部线程执行、模型仅加载一次；recognize4 + extract4、RPC8
+  保持。修复 shared concurrency=1 误走 persistent 协议、Windows EOF/
+  退出码竞态、glibc trim 启动错误、工作目录依赖和大 payload 发送超时。
+  分段发送遵守整个调用 deadline；0.5s socket 轮询不再代表整个发送失败。
+  启动失败会清理私有目录并返回 typed unavailable；关闭池会中断启动等待，
+  不等到完整启动超时才回收子进程。
+- Asynq 使用 Start/Shutdown，由主程序统一管理信号。任务类型、状态存储、
+  Redis 数据格式和重试机制保持；修复各平台测试的文件句柄及规范路径断言。
+- 原生 CI 启动 PostgreSQL17 和 Redis7.4.11，真正执行项目 SQL、Lua、
+  并发/延迟/重试/取消/超时/drain，并检查 Go JSON 测试事件拒绝静默 skip。
+  额外强制杀死执行中的 worker，重启 Redis，验证 pending/scheduled 与
+  active lease 自然过期恢复；不修改内部 Redis key 或用 Inspector 手动重排。
+- Windows PostgreSQL ANSI argv 无法直接表达中文路径，探针显式使用并记录
+  GetShortPathNameW 别名。没有可用别名时明确失败；D2 目录策略需处理这个
+  约束，不能从短路径探针推断任意 Unicode 参数都被数据库支持。
+- Windows 真正普通账号验证脚本仅允许临时 Actions runner，创建隔离本地
+  用户和私有 ACL 目录，检查 `is_admin=false`；不把 runneradmin 误作普通用户。
+
+本机142项Python与9项验证工具测试、Go全量build/test、前端build
+与34项 reading-note 测试通过。本地真实 Redis7.4.11＋临时 PostgreSQL17
+容器全量集成通过，包括8项必执行测试及 AOF/崩溃租约恢复；本地容器证据
+不能替代各系统原生数据库证据。原生 CI 结果与工件见 PR 的 Actions。
+
+同机器/解释器/库/模型/输入、jobs8、layout_threads2 的三轮中位数比较：
+
+| 客户端并发 | 识别 jobs/s（前→后） | 识别 p95 秒（前→后） | 全树峰值 MiB（前→后） | 回收后父 RSS MiB |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 0.996→0.961 | 1.007→1.062 | 429.1→432.2 | 40.6 |
+| 4 | 2.277→2.622 | 2.009→1.732 | 705.2→627.4 | 40.9 |
+
+最终固定线程池比较结果 shared-d1-pool-median.json：regressions=[]；
+三个独立运行使用 shared-d1-pool-6/7/8.json，首轮与测试有短暂重叠，
+未纳入最终比较。worker 内有实际固定线程池，客户端超时后原生调用尚未
+返回时，后续请求仍不能突破物理执行预算；实际测试覆盖这个边界。
+更短的取消监视轮询降低响应等待；性能数字仅代表这个固定输入。
+
+另以本地16页/5.3MiB PDF、20个 recognize/extract 混合任务、客户端4+4并发、
+4+4 worker预算运行两组并完成空闲回收：最终混合批次40.1/40.7秒，
+全树峰值1438.5/1464.6MiB，回收后父进程53.2/60.1MiB。
+长批次 idle60s，防止15秒的正常空闲回收干扰 PID 稳定性断言；
+不据此改变生产默认 idle。最终报告 shared-d1-pool-paper-final.json 保留本地。
+前一版报告 shared-d1-paper-mixed60.json 的37.6/37.9秒和1568.6/1570.5MiB
+是中间版本，已被最终固定池/独立客户端预算结果 superseded，文件保留。
+另用 d35d51e 原始源码快照、相同解释器/依赖/模型/论文和当前相同混合调度
+复测：旧实现以 UNAVAILABLE / worker response timed out 失败，不能把未完成
+的旧运行当作完整大论文内存基线。有效的定量前后比较仍是上述三轮固定输入；
+大论文结果说明当前负载完成及资源回收，不推断相对旧版的内存改善比例。
+不把论文内容/产物提交仓库。
+
+复现入口（验证依赖见 requirements-validation.txt）：
+
+    .venv/bin/python -m unittest discover -s pdf_parser/papers_parser -t pdf_parser -p 'test_*.py'
+    .venv/bin/python -m unittest discover -s pdf_parser/papers_parser -t pdf_parser -p test_worker_transport.py
+    .venv/bin/python -m unittest discover -s scripts -p test_desktop_validation.py
+    go test ./...
+    go build ./...
+    (cd web && npm run build && npm run test:reading-note)
+    .venv/bin/python scripts/benchmark_parser_shared.py --jobs 8 --output tmp/desktop-d0/after.json
+    .venv/bin/python scripts/run_desktop_integration.py --redis-server <owned-native-redis-server> --output-dir tmp/desktop-d0/native
+
+最后一个命令要求 PAPERS_MANAGER_TEST_POSTGRES_DSN 指向专用测试实例，
+不能对用户数据库运行；它会启动自己的 Redis 并运行 go test -json -count=1 ./...。
+
+## D0 结论与剩余发行验收
+
+- Go for D2：保留Asynq、每类单一共享重包worker与内部固定线程池；
+  Windows Redis候选来源哈希匹配，项目真实队列/Lua/恢复原生验证通过。
+- 最初“CI尚未运行、D1尚未修改生产实现”的结论已被本次实施 superseded。
+  Linux/macOS 已通过完整原生 run 40081950947；Windows普通账号 PostgreSQL
+  17.11 验收已通过（run 40083445477 的 postgres-ordinary-user.json，
+  is_admin=false）。Windows模型启动专项 run 40084025951 已通过。
+  首次 Windows 管道监视线程触发 NumPy DLL 导入死锁，已用原生堆栈定位，
+  改为仅依靠 Job Object 监视父进程，保留 Unix 管道监视：
+  https://github.com/numpy/numpy/issues/24290。
+  最终完整矩阵 [run40086630821](https://github.com/Aciv/paper-master/actions/runs/40086630821)
+  全部success：三系统完整job及Windows18项worker专项。
+  源码8632b66e80886c612f30e8f4fe7eb0699e85aed1；修复位于PR#1，未合并main。
+  原生数据库8项required tests无skip；CI的4项生产CRF权重专项仍明确skip，
+  小型生成CRF模型已执行读写/推理测试，生产模型分发与质量留在D3验收。
+- Release no-go 仍成立：自包含解释器/数据库目录、权重分发与各依赖许可
+  材料尚未验收；CI 工具链和 runner 自带安装不代表用户无需安装的发行物。
+- 无数据库 migration、API/protobuf 或公开环境变量默认值变更。
+  新内部 --shared 标志、进程令牌/父管道环境变量不面向应用调用者；
+  PARSER_WORKER_STARTUP_TRACE=1 仅为 CI 启动卡住时输出堆栈诊断。
+- D2 仍为 Launcher、私有运行时路径/生命周期及静态前端托管；D3 为
+  实际自包含目录、版本/哈希锁、许可证、签名和干净系统发行验收。

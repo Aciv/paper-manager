@@ -1,4 +1,4 @@
-"""Local worker runtime: one Unix socket, one job at a time.
+"""Local worker runtime over a private endpoint, with request-scoped threads.
 
 The server process owns process lifecycle and scheduling. This module stays
 free of PyMuPDF/ONNX/CRF imports; the kind-specific worker module supplies the
@@ -13,11 +13,13 @@ import socket
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import grpc
 
 from logger import get_logger
+from papers_parser.worker_transport import authenticate, listen
 from papers_parser.worker_protocol import (
     STATUS_ERROR,
     STATUS_OK,
@@ -83,14 +85,15 @@ def serve_worker(
     signal.signal(signal.SIGTERM, stop_worker)
     if socket_path.exists():
         socket_path.unlink()
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(socket_path))
-    os.chmod(socket_path, 0o600)
-    listener.listen(1)
+    listener = listen(socket_path, 1)
     LOG.info("parser worker ready kind=%s socket=%s", expected_method, socket_path)
     jobs = 0
     try:
-        connection, _ = listener.accept()
+        while True:
+            connection, _ = listener.accept()
+            if authenticate(connection):
+                break
+            connection.close()
         with connection:
             connection.settimeout(0.5)
             while jobs < max_jobs:
@@ -169,17 +172,6 @@ def serve_shared_worker(
     thread, so the heavy imports/model are loaded once and shared by all
     in-flight jobs. The process exits after the idle window or max_jobs.
     """
-    if concurrency <= 1:
-        serve_worker(
-            socket_path=socket_path,
-            expected_method=expected_method,
-            handler=handler,
-            idle_seconds=idle_seconds,
-            max_jobs=max_jobs,
-            max_payload_bytes=max_payload_bytes,
-        )
-        return
-
     stop = threading.Event()
 
     def request_stop(_signum, _frame) -> None:
@@ -194,14 +186,13 @@ def serve_shared_worker(
 
     if socket_path.exists():
         socket_path.unlink()
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(socket_path))
-    os.chmod(socket_path, 0o600)
-    listener.listen(max(16, concurrency * 4))
+    listener = listen(socket_path, max(16, concurrency * 4))
     listener.settimeout(0.5)
 
     lock = threading.Lock()
     state = {"active": 0, "jobs": 0, "last_activity": time.monotonic()}
+    connections: set[socket.socket] = set()
+    executor = ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="parser-worker-request")
 
     def handle_connection(connection: socket.socket) -> None:
         try:
@@ -235,7 +226,7 @@ def serve_shared_worker(
                 # for EOF without consuming response bytes.
                 while not done.is_set() and not cancelled.is_set():
                     try:
-                        readable, _, _ = select.select([connection], [], [], 0.5)
+                        readable, _, _ = select.select([connection], [], [], 0.05)
                     except (OSError, ValueError):
                         cancelled.set()
                         return
@@ -289,6 +280,7 @@ def serve_shared_worker(
                     pass
         finally:
             with lock:
+                connections.discard(connection)
                 state["active"] = max(0, state["active"] - 1)
                 state["last_activity"] = time.monotonic()
             try:
@@ -319,17 +311,33 @@ def serve_shared_worker(
                 continue
             except OSError:
                 break
+            # Authenticate before execution admission: a queued connection
+            # must not wait for a busy native parser just to receive its ACK.
+            if not authenticate(connection):
+                connection.close()
+                continue
             with lock:
+                # A timed-out client may leave a native call finishing in its
+                # thread. Bound both execution and accepted backlog inside the
+                # worker, even after the parent releases its admission slot.
+                if state["active"] >= concurrency * 2:
+                    connection.close()
+                    continue
+                connections.add(connection)
                 state["active"] += 1
                 state["last_activity"] = time.monotonic()
-            threading.Thread(
-                target=handle_connection,
-                args=(connection,),
-                name="parser-worker-request",
-                daemon=True,
-            ).start()
+            executor.submit(handle_connection, connection)
     finally:
         listener.close()
+        executor.shutdown(wait=False, cancel_futures=True)
+        with lock:
+            remaining = list(connections)
+        for connection in remaining:
+            try:
+                connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            connection.close()
         try:
             socket_path.unlink()
         except FileNotFoundError:

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import socket
 import struct
+import time
 from collections.abc import Callable
 
 METHOD_RECOGNIZE = 1
@@ -75,6 +76,10 @@ def recv_exact(
     chunks: list[bytes] = []
     remaining = size
     while remaining:
+        if deadline is not None and clock is not None and clock() > deadline:
+            raise TimeoutError("worker response timed out")
+        if cancel_check is not None and cancel_check():
+            raise WorkerCancelled("worker request was cancelled")
         try:
             chunk = sock.recv(remaining)
         except socket.timeout:
@@ -118,5 +123,30 @@ def read_frame(
     return kind, payload
 
 
-def write_frame(sock: socket.socket, kind: int, payload: bytes) -> None:
-    sock.sendall(encode_frame(kind, payload))
+def write_frame(sock: socket.socket, kind: int, payload: bytes, *,
+                deadline: float | None = None,
+                cancel_check: Callable[[], bool] | None = None) -> None:
+    """Bounded, resumable writes; a poll timeout is not a whole-frame timeout.
+
+    Large PDFs may fill the IPC send buffer while another request runs. Keep
+    progress across poll timeouts instead of discarding a partially sent frame.
+    Avoid concatenating a second full copy of a multi-megabyte payload.
+    """
+    if not 0 <= kind <= 255 or len(payload) > 0xFFFFFFFF:
+        raise ValueError("frame kind or payload size is out of range")
+    deadline = deadline if deadline is not None else time.monotonic() + 60
+    for part in (FRAME_HEADER.pack(kind, len(payload)), payload):
+        view = memoryview(part)
+        offset = 0
+        while offset < len(view):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("worker frame write timed out")
+            if cancel_check is not None and cancel_check():
+                raise WorkerCancelled("worker request was cancelled")
+            try:
+                sent = sock.send(view[offset:offset + (64 << 10)])
+            except socket.timeout:
+                continue
+            if sent == 0:
+                raise WorkerProtocolError("worker connection closed during write")
+            offset += sent

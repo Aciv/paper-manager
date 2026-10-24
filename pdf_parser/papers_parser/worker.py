@@ -17,6 +17,7 @@ import document_parser_pb2
 from logger import get_logger
 from papers_parser.worker_protocol import METHOD_EXTRACT, METHOD_RECOGNIZE, METHOD_RENDER
 from papers_parser.worker_runtime import WorkerAbort, serve_shared_worker, serve_worker
+from papers_parser.worker_transport import await_parent
 
 LOG = get_logger(__name__)
 
@@ -29,6 +30,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--idle-seconds", type=float, required=True)
     parser.add_argument("--max-jobs", type=int, required=True)
     parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--shared", action="store_true", help="one connection per request")
     return parser.parse_args()
 
 
@@ -163,6 +165,11 @@ def _build_render_handler(config: dict):
 
 
 def main() -> None:
+    await_parent()
+    trace_startup = os.getenv("PARSER_WORKER_STARTUP_TRACE") == "1"
+    if trace_startup:
+        import faulthandler
+        faulthandler.dump_traceback_later(15, repeat=True)
     args = _parse_args()
     config = _config(args)
     if args.max_jobs <= 0:
@@ -177,6 +184,8 @@ def main() -> None:
         method, handler = _build_extract_handler(config)
     else:
         method, handler = _build_render_handler(config)
+    if trace_startup:
+        faulthandler.cancel_dump_traceback_later()
     LOG.info(
         "parser worker starting kind=%s pid=%d extraction_engine=%s concurrency=%d",
         args.kind,
@@ -184,14 +193,16 @@ def main() -> None:
         config.get("paper_extraction_engine", ""),
         args.concurrency,
     )
-    serve_shared_worker(
+    serve = serve_shared_worker if args.shared else serve_worker
+    options = {"concurrency": args.concurrency} if args.shared else {}
+    serve(
         socket_path=args.socket,
         expected_method=method,
         handler=handler,
         idle_seconds=args.idle_seconds,
         max_jobs=args.max_jobs,
         max_payload_bytes=int(config["grpc_max_message_size"]),
-        concurrency=args.concurrency,
+        **options,
     )
 
 
