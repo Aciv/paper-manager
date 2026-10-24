@@ -85,7 +85,20 @@ def service_ports_closed(config):
     return True
 
 
-def fixture_pdf():
+def upload_pdf(api, pdf):
+    boundary = "papers-desktop-recovery-probe"
+    body = (
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+        'filename="recovery.pdf"\r\nContent-Type: application/pdf\r\n\r\n'
+    ).encode() + pdf + f"\r\n--{boundary}--\r\n".encode()
+    code, data, _ = http(api + "/api/document/upload", "POST", body, {
+        "Content-Type": f"multipart/form-data; boundary={boundary}",
+    })
+    require(code == 201, f"recovery PDF upload returned {code}")
+    return json.loads(data)["document"]["id"]
+
+
+def fixture_pdf(pages=1):
     text = b"BT /F1 20 Tf 72 720 Td (Desktop lifecycle probe) Tj 0 -40 Td (Methods) Tj ET"
     objects = [b"<< /Type /Catalog /Pages 2 0 R >>",
                b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -93,6 +106,11 @@ def fixture_pdf():
                b"/Resources << /Font << /F1 5 0 R >> >> >>",
                b"<< /Length " + str(len(text)).encode() + b" >>\nstream\n" + text + b"\nendstream",
                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    if pages > 1:
+        page_ids = [3, *range(6, pages + 5)]
+        kids = " ".join(f"{number} 0 R" for number in page_ids)
+        objects[1] = f"<< /Type /Pages /Kids [{kids}] /Count {pages} >>".encode()
+        objects.extend([objects[2]] * (pages - 1))
     result = bytearray(b"%PDF-1.4\n")
     offsets = [0]
     for index, body in enumerate(objects, 1):
@@ -327,6 +345,20 @@ def main():
                 require(code == 200 and b"Methods" in note, "note directory lost after restart")
                 report["steps"].append("stop/start preserved database, PDF, blocks, Markdown and notes; no initdb")
 
+                # Interrupt an actual durable Markdown task, rather than only
+                # crashing an idle server. Retry is explicit by application policy.
+                recovery_id = upload_pdf(api, fixture_pdf(pages=20))
+                recovery_status = api + f"/api/document/{recovery_id}/processing"
+                deadline = time.monotonic() + 20
+                while time.monotonic() < deadline:
+                    code, data, _ = http(recovery_status)
+                    stages = json.loads(data)["processing"]["stageStates"] if code == 200 else []
+                    if any(stage["stage"] == "markdown" and stage["status"] == "running"
+                           for stage in stages):
+                        break
+                    time.sleep(0.02)
+                else:
+                    raise RuntimeError("recovery fixture never entered the running Markdown stage")
                 children = psutil.Process(process.pid).children(recursive=True)
                 servers = [child for child in children
                            if Path(child.exe()).resolve() == args.server.resolve()]
@@ -337,7 +369,22 @@ def main():
                 require(http(base)[0] == 200, "management page disappeared after API crash")
                 action("start")
                 wait_state(base, "ready", process)
-                report["steps"].append("API crash cleaned dependencies; management survived; explicit retry worked")
+                code, data, _ = http(recovery_status)
+                stages = json.loads(data)["processing"]["stageStates"] if code == 200 else []
+                require(any(stage["stage"] == "markdown" and stage["status"] == "failed" for stage in stages),
+                        "interrupted task was not marked failed after restart")
+                code, _, _ = http(api + f"/api/document/{recovery_id}/retry", "POST", b"")
+                require(code == 202, "interrupted task retry was rejected")
+                deadline = time.monotonic() + 120
+                while time.monotonic() < deadline:
+                    code, recovered, _ = http(api + f"/api/document/{recovery_id}/markdown")
+                    if code == 200 and b"Desktop lifecycle probe" in recovered:
+                        break
+                    time.sleep(0.5)
+                else:
+                    raise RuntimeError("interrupted task did not produce Markdown after explicit retry")
+                report["steps"].append(
+                    "API crash cleaned dependencies; interrupted task failed visibly and retry succeeded")
                 quit_launcher()
                 process = None
 
