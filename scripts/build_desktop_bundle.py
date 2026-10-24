@@ -152,6 +152,10 @@ def assemble(args):
                 "--without-icu", "--without-lz4", "--without-zstd", "--disable-rpath", cwd=pg)
             run("make", "-j2", cwd=pg)
             run("make", "install", cwd=pg)
+            # Migration 28 requires this contrib extension; core PG install
+            # alone starts successfully but cannot initialize the application.
+            run("make", "-j2", cwd=pg / "contrib/pg_trgm")
+            run("make", "install", cwd=pg / "contrib/pg_trgm")
             shutil.copy2(pg / "COPYRIGHT", notices / "PostgreSQL-COPYRIGHT")
             if platform.system() == "Darwin":
                 relocate_macos_libraries(bundle / "postgres")
