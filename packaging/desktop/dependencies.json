@@ -2,18 +2,41 @@
   "schema_version": 1,
   "status": "validation candidates, not a redistribution approval or release lock",
   "targets": [
-    {"os": "linux", "arch": "x86_64", "runner": "ubuntu-22.04", "minimum_candidate": "Ubuntu 22.04 / glibc 2.35"},
-    {"os": "windows", "arch": "x86_64", "runner": "windows-2022", "minimum_candidate": "Windows 10; server runner does not prove Windows 10 UI compatibility"},
-    {"os": "macos", "arch": "arm64", "runner": "macos-14", "minimum_candidate": "macOS 14; validate actual runner architecture"}
+    {
+      "os": "linux",
+      "arch": "x86_64",
+      "runner": "ubuntu-22.04",
+      "minimum_candidate": "Ubuntu 22.04 / glibc 2.35"
+    },
+    {
+      "os": "windows",
+      "arch": "x86_64",
+      "runner": "windows-2022",
+      "minimum_candidate": "Windows 10; server runner does not prove Windows 10 UI compatibility"
+    },
+    {
+      "os": "macos",
+      "arch": "arm64",
+      "runner": "macos-14",
+      "minimum_candidate": "macOS 14; validate actual runner architecture"
+    }
   ],
-  "toolchains": {"go": "go.mod", "python": "3.12", "node_build_only": "22"},
+  "toolchains": {
+    "go": "go.mod",
+    "python": "3.12",
+    "node_build_only": "22"
+  },
   "windows_redis": {
     "version": "7.4.11",
     "filename": "Redis-7.4.11-Windows-x64-cygwin-with-Service.zip",
     "url": "https://github.com/redis-windows/redis-windows/releases/download/7.4.11/Redis-7.4.11-Windows-x64-cygwin-with-Service.zip",
     "sha256": "2289eca02c25e96a918812c3b05083c3a8bc9440f1b268cc48e14bd93ed2acb0",
     "evidence": "User reported the independent Asynq test passed on Windows, 2026-10-24. Logs, exact Windows build and modes not supplied.",
-    "licenses": ["Redis 7.4: RSALv2 OR SSPLv1", "Cygwin DLL: LGPL-3.0-or-later with linking exception", "other DLLs and .NET wrapper: inventory/source notices pending"],
+    "licenses": [
+      "Redis 7.4: RSALv2 OR SSPLv1",
+      "Cygwin DLL: LGPL-3.0-or-later with linking exception",
+      "other DLLs and .NET wrapper: inventory/source notices pending"
+    ],
     "redistribution_status": "pending",
     "notes": [
       "Publisher release digest matches local archive; archive has no license/source notice files.",
@@ -21,16 +44,28 @@
       "redis-server.exe requires Cygwin CLI paths; wrapper documents Windows path conversion.",
       "RedisService.exe is documented as .NET 10; self-contained runtime has not been verified. Private launcher should first validate direct redis-server.exe without service installation.",
       "Do not infer Redis upstream license from the Windows wrapper repository license."
-    ]
+    ],
+    "validation_evidence": "D0-D2 native CI: run40083445477 Asynq and run40095861135 ordinary-user full Launcher lifecycle passed. D3 downloaded bundle verification is tracked separately."
   },
-  "postgresql": {"major": 17, "patch_and_platform_digests": "pending private binary selection", "license": "PostgreSQL License", "status": "private native lifecycle probe required on each target"},
+  "postgresql": {
+    "major": 17,
+    "patch_and_platform_digests": "pending private binary selection",
+    "license": "PostgreSQL License",
+    "status": "D0-D2 native lifecycle passed; D3 pins 17.11 source/EDB archives in sources.lock.json and validates relocated bundles separately."
+  },
   "python_stack": {
     "production_requirements": "pdf_parser/requirements.txt",
     "validation_requirements": "packaging/desktop/requirements-validation.txt",
     "observed_linux_versions": {
-      "grpcio": "1.82.1", "grpcio-tools": "1.82.1", "protobuf": "7.35.1",
-      "pymupdf": "1.28.0", "pymupdf4llm": "1.28.0", "pymupdf-layout": "1.28.0",
-      "onnxruntime": "1.27.0", "numpy": "2.5.1", "python-crfsuite": "0.9.12"
+      "grpcio": "1.82.1",
+      "grpcio-tools": "1.82.1",
+      "protobuf": "7.35.1",
+      "pymupdf": "1.28.0",
+      "pymupdf4llm": "1.28.0",
+      "pymupdf-layout": "1.28.0",
+      "onnxruntime": "1.27.0",
+      "numpy": "2.5.1",
+      "python-crfsuite": "0.9.12"
     },
     "license_findings": {
       "pymupdf": "installed metadata: AGPL-3.0 or Artifex commercial",
@@ -40,10 +75,23 @@
     "status": "observed environment is not a clean per-platform release lock"
   },
   "models": [
-    {"file": "citation-context.crfsuite", "bytes": 5129844, "sha256": "72bed699c06d4ba42f099e8c4b72b6cc11f753c2428020b88585eda22b697e18"},
-    {"file": "header-text-title-priors.crfsuite", "bytes": 3557404, "sha256": "854868e81914121c5f05d3b1ca6fdbde41359ce081ac97f2272b1bd0830e6249"},
-    {"file": "reference-text.crfsuite", "bytes": 119635508, "sha256": "896aee013242c05809896ded0f1be1588d41d94b48fbf42d8b42576bb654e19b"}
+    {
+      "file": "citation-context.crfsuite",
+      "bytes": 5129844,
+      "sha256": "72bed699c06d4ba42f099e8c4b72b6cc11f753c2428020b88585eda22b697e18"
+    },
+    {
+      "file": "header-text-title-priors.crfsuite",
+      "bytes": 3557404,
+      "sha256": "854868e81914121c5f05d3b1ca6fdbde41359ce081ac97f2272b1bd0830e6249"
+    },
+    {
+      "file": "reference-text.crfsuite",
+      "bytes": 119635508,
+      "sha256": "896aee013242c05809896ded0f1be1588d41d94b48fbf42d8b42576bb654e19b"
+    }
   ],
   "models_status": "local weights are git-ignored; artifact distribution, provenance and license remain release gates",
-  "fonts_status": "collect notices from web/package-lock.json and built assets in D3"
+  "fonts_status": "collect notices from web/package-lock.json and built assets in D3",
+  "internal_bundle_lock": "sources.lock.json; requirements-runtime.lock; internal validation only, not public redistribution approval"
 }

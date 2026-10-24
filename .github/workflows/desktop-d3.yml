@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 # No public release action. All artifacts are private validation candidates,
-# with short retention. Production CRF weights are never uploaded implicitly.
+# with short retention. Only explicitly authorized small CRF weights are committed.
 jobs:
   build:
     strategy:
@@ -52,11 +52,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bison flex
       - name: Bundle helper tests
         run: python -m unittest discover -s scripts -p test_desktop_bundle.py
-      - name: Build sealed rules-profile bundle
+      - name: Build sealed hybrid-profile bundle
         # Exact archives and wheels are SHA-256 verified; no developer venv,
         # global database install, or post-install pip downloads are used.
         run: >-
-          python scripts/build_desktop_bundle.py --profile rules
+          python scripts/build_desktop_bundle.py --profile hybrid
           --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/desktop-bundle"
           --cache "$RUNNER_TEMP/desktop-downloads"
       - name: Archive bundle and standalone validation harness

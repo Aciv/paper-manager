@@ -27,7 +27,7 @@ it contains the database credentials and MCP token. Back it up with user data.
 `bundle.json` records the native target, revision, extraction profile and exact
 files. `SHA256SUMS` also seals the manifest. Checksums detect accidental changes;
 they are not a publisher signature. The rules validation profile excludes CRF
-weights explicitly. Hybrid builds require all pinned local production weights.
+weights explicitly. Hybrid builds require pinned header/citation weights; --include-reference-model optionally adds the large local weight.
 The core parser/reading path works offline; external metadata providers require
 network access and may report their own failure independently.
 

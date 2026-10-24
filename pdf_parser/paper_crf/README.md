@@ -60,11 +60,14 @@ runtime source. To promote a trained artifact:
 
 ## Version control
 
-The `.crfsuite` files are release artifacts, not source. The reference model is
-about 115 MB, which exceeds GitHub's 100 MiB per-file limit, so
-`weights/*.crfsuite` is git-ignored. A release build or package must supply the
-weights from the training workspace (or a future artifact store); `specs/` and
-`models/` are tracked. `model_train/` keeps its own training copy and is
-intentionally unchanged; when promoting an artifact, verify that the runtime
-`models/` feature code and feature versions still match the training run that
-produced it.
+The header and citation `.crfsuite` files are tracked for internal hybrid
+validation, explicitly authorized by the maintainer. Their hashes are recorded in
+`packaging/desktop/dependencies.json`; the D3 builder rejects different weights.
+The reference model is about 115 MB and exceeds GitHub's 100 MiB file limit, so
+`weights/reference-text.crfsuite` remains git-ignored. It is disabled by default
+and is not required by the slim hybrid bundle. Local complete builds can pass
+`--include-reference-model` to include the pinned local weight without enabling it.
+
+`model_train/` remains the training workspace; runtime inference never imports it.
+Private repository availability is not permission to redistribute model weights
+publicly; provenance/licensing review is still a public-release gate.

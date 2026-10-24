@@ -118,11 +118,11 @@ def run_case(args, concurrency: int, root: Path) -> dict:
     case.mkdir()
     pdf = root / "fixture.pdf"
     env = os.environ.copy()
-    env.update(PYTHONPATH=str(PARSER), LOG_PATH=str(case / "parser.log"),
+    env.update(PYTHONPATH=str(args.parser_dir), LOG_PATH=str(case / "parser.log"),
                PARSER_LAYOUT_THREADS=str(args.layout_threads),
                PARSER_PYMUPDF_LAYOUT="true", MALLOC_ARENA_MAX="2")
     command = [
-        sys.executable, "-m", "papers_parser.server", "--address", f"127.0.0.1:{port}",
+        str(args.parser_python), "-m", "papers_parser.server", "--address", f"127.0.0.1:{port}",
         "--upload-dir", str(root), "--execution-mode", "shared",
         "--recognize-concurrency", "4", "--extract-concurrency", "4",
         "--render-concurrency", "4", "--max-workers", "8", "--max-concurrent-rpcs", "8",
@@ -136,7 +136,7 @@ def run_case(args, concurrency: int, root: Path) -> dict:
     sampling_errors = []
     stopped = threading.Event()
     with (case / "console.log").open("wb") as log:
-        process = subprocess.Popen(command, cwd=PARSER, env=env, stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, cwd=args.parser_dir, env=env, stdout=log, stderr=subprocess.STDOUT)
         channel = grpc.insecure_channel(f"127.0.0.1:{port}", options=[
             ("grpc.max_receive_message_length", 105906176),
             ("grpc.max_send_message_length", 105906176),
@@ -344,6 +344,8 @@ def aggregate(reports: list[dict]) -> dict:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--parser-dir", type=Path, default=PARSER)
+    parser.add_argument("--parser-python", type=Path, default=Path(sys.executable))
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--aggregate", nargs="+", type=Path,
                         help="summarize >=3 existing complete runs instead of launching servers")
@@ -360,6 +362,8 @@ def main() -> int:
         parser.error("need jobs>=4, pages>=1, idle-seconds>=5 and layout-threads>=1")
     if args.mixed_jobs < 0:
         parser.error("mixed-jobs must not be negative")
+    args.parser_dir = args.parser_dir.resolve()
+    args.parser_python = args.parser_python.resolve()
     args.output = args.output.resolve()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     if args.aggregate:
@@ -380,23 +384,28 @@ def main() -> int:
             else:
                 # Fixture generation happens in another process so measurements
                 # cannot hide heavy imports in the controller or server.
-                subprocess.run([sys.executable, "-c",
+                subprocess.run([str(args.parser_python), "-c",
                     "import pymupdf,sys; d=pymupdf.open(); "
                     "[(lambda p: [p.insert_text((50,60+i*18),"
                     "'Shared worker benchmark paper, method and results line '+str(i))"
                     " for i in range(25)])(d.new_page()) for _ in range(int(sys.argv[2]))]; "
                     "d.save(sys.argv[1],no_new_id=True); d.close()", str(target), str(args.pages)], check=True, timeout=30)
+            target_info = json.loads(subprocess.check_output([
+                str(args.parser_python), "-c",
+                "import json,platform,importlib.metadata as m;"
+                "print(json.dumps({'python':platform.python_version(),'versions':"
+                "{n:m.version(n) for n in ['grpcio','protobuf','pymupdf','pymupdf4llm',"
+                "'pymupdf-layout','onnxruntime','python-crfsuite']}}))",
+            ], text=True))
             report["fingerprint"] = {
                 "platform": platform.platform(), "machine": platform.machine(),
-                "python": platform.python_version(), "cpu_count": os.cpu_count(),
+                "python": target_info["python"], "cpu_count": os.cpu_count(),
                 "host": platform.node(), "jobs": args.jobs, "pages": args.pages,
                 "idle_seconds": args.idle_seconds, "layout_threads": args.layout_threads,
                 "engine": args.engine, "pdf_sha256": hashlib.sha256(target.read_bytes()).hexdigest(),
-                "versions": {name: importlib.metadata.version(name) for name in (
-                    "grpcio", "protobuf", "pymupdf", "pymupdf4llm", "pymupdf-layout",
-                    "onnxruntime", "python-crfsuite", "psutil")},
+                "versions": {**target_info["versions"], "psutil": importlib.metadata.version("psutil")},
                 "model_sha256": {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-                                 for path in sorted((PARSER / "paper_crf" / "weights").glob("*.crfsuite"))},
+                                 for path in sorted((args.parser_dir / "paper_crf" / "weights").glob("*.crfsuite"))},
             }
             if args.mixed_jobs:
                 report["fingerprint"]["mixed_jobs"] = args.mixed_jobs

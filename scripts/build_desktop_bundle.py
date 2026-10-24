@@ -67,6 +67,13 @@ def assemble(args):
     if not target:
         raise RuntimeError(f"unsupported native build target: {platform.system()}/{machine}")
     lock = json.loads((ROOT / "packaging/desktop/sources.lock.json").read_text())
+    # Fail on missing/corrupt inputs before spending time compiling databases.
+    if args.output.exists():
+        raise RuntimeError("output already exists; use a new version directory")
+    archives = {"python": download(lock["python"][target], args.cache)}
+    for name in (("postgres_windows", "redis_windows") if os.name == "nt"
+                 else ("postgres_source", "redis_source")):
+        archives[name] = download(lock[name], args.cache)
     output = args.output.resolve()
     if output.exists():
         raise RuntimeError("output already exists; use a new version directory")
@@ -88,19 +95,20 @@ def assemble(args):
         for directory in ("papers_parser", "paper_crf"):
             shutil.copytree(ROOT / "pdf_parser" / directory, parser / directory,
                             ignore=shutil.ignore_patterns("__pycache__", "test_*", "*.pyc", "weights"))
-        for path in (ROOT / "pdf_parser").glob("document_parser_pb2*.py"):
+        for path in (ROOT / "pdf_parser").glob("*.py"):
             shutil.copy2(path, parser / path.name)
         if args.profile == "hybrid":
             models = json.loads((ROOT / "packaging/desktop/dependencies.json").read_text())["models"]
             weights = parser / "paper_crf/weights"
             weights.mkdir()
             for item in models:
+                if item["file"] == "reference-text.crfsuite" and not args.include_reference_model:
+                    continue
                 source = args.model_dir / item["file"]
                 if sha256(source) != item["sha256"]:
                     raise RuntimeError(f"production model differs from pinned model: {item['file']}")
                 shutil.copy2(source, weights / source.name)
-        python_source = lock["python"][target]
-        extract(download(python_source, args.cache), bundle)
+        extract(archives["python"], bundle)
         python = bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
         wheels = work / "wheels"
         requirements = ROOT / "packaging/desktop/requirements-runtime.lock"
@@ -110,6 +118,18 @@ def assemble(args):
             "--require-hashes", "--find-links", wheels, "-r", requirements)
         run(python, "-I", "-m", "pip", "check")
         packages = python_inventory(python, bundle / "python-packages.json")
+        # Validate mandatory inference artifacts with fail-closed CRF mode.
+        # Hybrid's normal fallback must not hide a broken release bundle.
+        if args.profile == "hybrid":
+            code = (
+                "import sys,pathlib;sys.path.insert(0,sys.argv[1]);"
+                "from papers_parser.engine_factory import build_extraction_engine;"
+                "from papers_parser.crf_engine import HybridPaperExtractionEngine;"
+                "e=build_extraction_engine('crf',pathlib.Path(sys.argv[1])/'paper_crf');"
+                "assert isinstance(e,HybridPaperExtractionEngine);print('Required CRF models loaded')"
+            )
+            run(python, "-I", "-B", "-c", code, parser, cwd=work,
+                env={**os.environ, "LOG_PATH": str(work / "model-validation.log")})
         wheel_record = [{"file": p.name, "sha256": sha256(p)} for p in sorted(wheels.glob("*.whl"))]
         write_json(bundle / "python-wheels.json", wheel_record)
         shutil.copy2(requirements, bundle / requirements.name)
@@ -117,16 +137,16 @@ def assemble(args):
         notices.mkdir()
         copy_notices(bundle / "python", notices / "python")
         if os.name == "nt":
-            extract(download(lock["postgres_windows"], args.cache), work / "pg")
+            extract(archives["postgres_windows"], work / "pg")
             shutil.copytree(work / "pg/pgsql", bundle / "postgres")
-            extract(download(lock["redis_windows"], args.cache), work / "redis")
+            extract(archives["redis_windows"], work / "redis")
             redis_binary = next((work / "redis").rglob("redis-server.exe"))
             (bundle / "redis").mkdir()
             # Run the CLI directly; never ship the unused .NET service installer.
             for source in [redis_binary, *redis_binary.parent.glob("*.dll")]:
                 shutil.copy2(source, bundle / "redis" / source.name)
         else:
-            extract(download(lock["postgres_source"], args.cache), work)
+            extract(archives["postgres_source"], work)
             pg = work / "postgresql-17.11"
             run(pg / "configure", f"--prefix={bundle / 'postgres'}", "--without-readline", "--without-zlib",
                 "--without-icu", "--without-lz4", "--without-zstd", "--disable-rpath", cwd=pg)
@@ -135,7 +155,7 @@ def assemble(args):
             shutil.copy2(pg / "COPYRIGHT", notices / "PostgreSQL-COPYRIGHT")
             if platform.system() == "Darwin":
                 relocate_macos_libraries(bundle / "postgres")
-            extract(download(lock["redis_source"], args.cache), work)
+            extract(archives["redis_source"], work)
             redis = work / "redis-7.4.11"
             run("make", "-j2", "MALLOC=libc", "BUILD_TLS=no", cwd=redis)
             (bundle / "redis").mkdir()
@@ -175,6 +195,8 @@ def assemble(args):
                                             "version": 1, "components": components})
         shutil.copy2(ROOT / "packaging/desktop/THIRD_PARTY_NOTICES.md", bundle)
         shutil.copy2(ROOT / "packaging/desktop/sources.lock.json", bundle)
+        shutil.copy2(ROOT / "packaging/desktop/dependencies.json", bundle / "dependency-audit.json")
+        shutil.copy2(ROOT / "web/package-lock.json", bundle / "web-packages.lock.json")
         (bundle / ".launcher_env").write_text(f"LAUNCHER_EXTRACTION_ENGINE={args.profile}\n", encoding="utf-8")
         shutil.copy2(ROOT / "packaging/desktop/BUNDLE.md", bundle / "README.md")
         # Generated caches/bytecode contain build paths and are not runtime inputs.
@@ -199,6 +221,8 @@ def main():
     parser.add_argument("--revision", required=True)
     parser.add_argument("--profile", choices=("rules", "hybrid"), default="hybrid")
     parser.add_argument("--model-dir", type=Path, default=ROOT / "pdf_parser/paper_crf/weights")
+    parser.add_argument("--include-reference-model", action="store_true",
+                        help="also ship the large, disabled-by-default reference-region model")
     parser.add_argument("--go", default="go")
     parser.add_argument("--npm", default="npm.cmd" if os.name == "nt" else "npm")
     args = parser.parse_args()

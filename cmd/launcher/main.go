@@ -45,6 +45,9 @@ func run() error {
 	envFile := flag.String("env-file", filepath.Join(filepath.Dir(executable), ".launcher_env"),
 		"optional Launcher-only environment file")
 	flag.Parse()
+	if *configure && *initialize {
+		return fmt.Errorf("--configure and --initialize are separate operations")
+	}
 	if err := config.LoadDotEnv(*envFile); err != nil {
 		return err
 	}

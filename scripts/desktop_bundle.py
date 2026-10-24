@@ -35,7 +35,8 @@ def download(item: dict, cache: Path) -> Path:
         return path
     temporary = path.with_suffix(path.suffix + ".part")
     try:
-        with urllib.request.urlopen(item["url"], timeout=120) as response, temporary.open("wb") as out:
+        request = urllib.request.Request(item["url"], headers={"User-Agent": "papersManager-desktop-build/1.0"})
+        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as out:
             shutil.copyfileobj(response, out, length=1 << 20)
         if sha256(temporary) != expected:
             raise ValueError(f"download hash mismatch: {path.name}")
@@ -75,6 +76,8 @@ def inventory(root: Path) -> dict:
             files[relative] = {"symlink": os.readlink(path)}
         elif path.is_file():
             files[relative] = {"sha256": sha256(path), "bytes": path.stat().st_size}
+            if os.name != "nt":
+                files[relative]["executable"] = bool(path.stat().st_mode & 0o111)
     return files
 
 

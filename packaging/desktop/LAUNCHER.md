@@ -115,3 +115,21 @@ reading, persistent restart, API crash cleanup/retry and occupied-port refusal.
 It creates only private temporary state and exports sanitized logs and a JSON
 report. CI runs native Linux/macOS and a newly created ordinary Windows account.
 These tests do not substitute for D3's clean, self-contained artifact acceptance.
+
+
+## D3 explicit setup (internal validation)
+
+Normal startup no longer invokes initdb. On a fresh data directory the management
+page shows `setup_required`; choose “首次配置”, wait for completion, then start
+services. Installers use `launcher --initialize` as the same ordinary target user.
+`--configure` only creates/validates runtime.json. Existing D2 data can be validated
+by explicit setup to create the new completion marker; its database is preserved.
+Damaged clusters and mismatched credentials require restoration, never automatic
+reinitialization. Initialization logs have a separate management-page action.
+
+The build entry is `scripts/build_desktop_bundle.py`; the downloaded-artifact probe
+is `scripts/check_desktop_launcher.py --bundle ... --output-dir ...`. See
+[BUNDLE.md](BUNDLE.md) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+The D3 workflow produces internal hybrid candidates with the two explicitly
+authorized header/citation weights. The large reference model remains local.
+No project license or public-release permission is selected by these scripts.

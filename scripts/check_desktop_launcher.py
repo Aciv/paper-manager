@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the real Launcher stack with explicit native dependency paths.
 
-This validates D2 lifecycle against installed CI/developer runtimes. It is not
-the D3 self-contained artifact test. All writable state belongs to this probe.
+Explicit component paths validate source/D2 runtimes. --bundle validates a sealed
+D3 artifact with controlled child PATH and no source-directory dependency. All
+writable state belongs to this probe.
 """
 from __future__ import annotations
 
@@ -156,6 +157,21 @@ def main():
                        "--env-file", str(env_file), "--open-browser=false"]
             if args.bundle:
                 command += ["--install-dir", str(args.bundle)]
+            if args.bundle and manifest["profile"] == "hybrid":
+                python_path = args.bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
+                model_check = (
+                    "import sys,pathlib;sys.path.insert(0,sys.argv[1]);"
+                    "from papers_parser.engine_factory import build_extraction_engine;"
+                    "from papers_parser.crf_engine import HybridPaperExtractionEngine;"
+                    "e=build_extraction_engine('crf',pathlib.Path(sys.argv[1])/'paper_crf');"
+                    "assert isinstance(e,HybridPaperExtractionEngine)"
+                )
+                model_env = {**launcher_env, "PYTHONDONTWRITEBYTECODE": "1",
+                             "LOG_PATH": str(Path(temporary) / "model-check.log")}
+                subprocess.run([str(python_path), "-I", "-B", "-c", model_check,
+                                str(args.bundle / "pdf_parser")], env=model_env,
+                               check=True, capture_output=True, timeout=60)
+                report["steps"].append("required production CRF models loaded without rules fallback")
             subprocess.run(command + ["--configure"], env=launcher_env, check=True, capture_output=True, timeout=15)
             config_path = root / "runtime.json"
             config = json.loads(config_path.read_text(encoding="utf-8"))
@@ -217,8 +233,10 @@ def main():
                 require((root / "initialized.json").is_file(), "setup completion marker missing")
                 init_log = root / "logs" / "initdb.log"
                 initialized_log = init_log.read_bytes()
+                startup_at = time.monotonic()
                 action("start")
                 ready = wait_state(base, "ready", process)
+                report["startup_seconds"] = time.monotonic() - startup_at
                 report["steps"].append("ordinary-user first start, all real services ready")
                 code, _, _ = http(base + "/stop", "POST", b"", {"Origin": "https://example.com"})
                 require(code == 403, "cross-origin stop accepted")
@@ -264,6 +282,7 @@ def main():
                     f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
                     'filename="probe.pdf"\r\nContent-Type: application/pdf\r\n\r\n'
                 ).encode() + pdf + f"\r\n--{boundary}--\r\n".encode()
+                recognition_at = time.monotonic()
                 code, data, _ = http(api + "/api/document/upload", "POST", body, {
                     "Content-Type": f"multipart/form-data; boundary={boundary}",
                 })
@@ -284,6 +303,7 @@ def main():
                     time.sleep(0.5)
                 else:
                     raise RuntimeError("queued PDF did not produce readable Markdown")
+                report["upload_to_read_seconds"] = time.monotonic() - recognition_at
                 code, data, _ = http(api + f"/api/document/{document_id}/blocks")
                 require(code == 200 and json.loads(data)["items"], "PDF blocks were not persisted")
                 note_url = api + f"/api/document/{document_id}/reading-note"
