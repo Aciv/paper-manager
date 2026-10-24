@@ -35,17 +35,20 @@ def redis_command(port, *arguments):
             raise RuntimeError(f"unexpected Redis response: {line!r}")
 
 
+REQUIRED_TESTS = {
+    "TestRedisLimiterAtomicHierarchyAndLeaseExpiry",
+    "TestHasQueuedQueryApplyForReferenceRedis",
+    "TestSnapshotQueuedWorkBoundedRedis",
+    "TestAsynqNativeLifecycleRedis",
+    "TestAsynqNativePersistenceRedis",
+    "TestDocumentStageRepositoryPostgres",
+    "TestNoteReadingOptimisticCRUDAndCascadePostgres",
+    "TestFailInterruptedWorkPostgres",
+}
+
+
 def verify_events(path):
-    required = {
-        "TestRedisLimiterAtomicHierarchyAndLeaseExpiry",
-        "TestHasQueuedQueryApplyForReferenceRedis",
-        "TestSnapshotQueuedWorkBoundedRedis",
-        "TestAsynqNativeLifecycleRedis",
-        "TestAsynqNativePersistenceRedis",
-        "TestDocumentStageRepositoryPostgres",
-        "TestNoteReadingOptimisticCRUDAndCascadePostgres",
-        "TestFailInterruptedWorkPostgres",
-    }
+    required = REQUIRED_TESTS
     passed = set()
     skipped = []
     for line in path.read_text(encoding="utf-8").splitlines():

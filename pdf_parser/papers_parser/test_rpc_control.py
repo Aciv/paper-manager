@@ -43,6 +43,12 @@ class _Context:
 
 
 class RpcControlTest(unittest.TestCase):
+    def test_windows_startup_does_not_load_glibc_allocator(self) -> None:
+        with mock.patch.object(server_module.os, "name", "nt"), \
+                mock.patch.object(server_module.ctypes, "CDLL") as load_library:
+            server_module._start_memory_trim(60)
+        load_library.assert_not_called()
+
     def test_check_rpc_allows_active_rpc(self) -> None:
         check_rpc(_Context(), time.monotonic(), 60)
 

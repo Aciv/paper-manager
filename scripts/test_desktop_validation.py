@@ -3,8 +3,10 @@ import copy
 import contextlib
 import importlib.util
 import io
+import json
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 
@@ -18,6 +20,7 @@ def load(name):
 benchmark = load("benchmark_parser_shared")
 dependencies = load("check_desktop_dependencies")
 postgres = load("check_private_postgres")
+integration = load("run_desktop_integration")
 
 
 class DesktopValidationTest(unittest.TestCase):
@@ -92,6 +95,47 @@ class DesktopValidationTest(unittest.TestCase):
             report = json.loads(output.read_text())
             self.assertEqual(report["status"], "failed")
             self.assertEqual(report["steps"], [])
+
+    def test_native_gate_requires_actual_pass_events_and_rejects_skip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "events.jsonl"
+            events = [{"Action": "pass", "Test": name} for name in integration.REQUIRED_TESTS]
+            path.write_text("\n".join(json.dumps(event) for event in events))
+            self.assertEqual(set(integration.verify_events(path)), integration.REQUIRED_TESTS)
+            path.write_text("\n".join(json.dumps(event) for event in events[1:]))
+            with self.assertRaises(RuntimeError):
+                integration.verify_events(path)
+            events.append({"Action": "skip", "Test": "TestSomeOtherDatabasePostgres"})
+            path.write_text("\n".join(json.dumps(event) for event in events))
+            with self.assertRaises(RuntimeError):
+                integration.verify_events(path)
+
+    def test_sampler_counts_helper_memory_without_duplicate_worker(self):
+        parent = mock.Mock(pid=100)
+        parent.memory_info.return_value.rss = 10
+        worker, helper = mock.Mock(pid=101), mock.Mock(pid=102)
+        for child, ppid, rss in ((worker, 100, 20), (helper, 101, 30)):
+            child.cmdline.return_value = ["python", "-m", "papers_parser.worker", "--kind", "recognize"]
+            child.ppid.return_value = ppid
+            child.memory_info.return_value.rss = rss
+            child.num_threads.return_value = 2
+        parent.children.return_value = [worker, helper]
+        observed = benchmark.snapshot(parent)
+        self.assertEqual([item["pid"] for item in observed["workers"]], [101])
+        self.assertEqual([item["pid"] for item in observed["helpers"]], [102])
+        self.assertEqual(observed["tree_rss"], 60)
+
+    def test_sampler_ignores_only_confirmed_zombies_after_access_denied(self):
+        parent, helper = mock.Mock(pid=100), mock.Mock(pid=101)
+        parent.memory_info.return_value.rss = 10
+        parent.children.return_value = [helper]
+        helper.cmdline.side_effect = benchmark.psutil.AccessDenied(pid=101)
+        helper.is_running.return_value = True
+        helper.status.return_value = benchmark.psutil.STATUS_ZOMBIE
+        self.assertEqual(benchmark.snapshot(parent)["tree_rss"], 10)
+        helper.status.return_value = benchmark.psutil.STATUS_RUNNING
+        with self.assertRaises(benchmark.psutil.AccessDenied):
+            benchmark.snapshot(parent)
 
 
 if __name__ == "__main__":

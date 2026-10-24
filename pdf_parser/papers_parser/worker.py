@@ -166,6 +166,10 @@ def _build_render_handler(config: dict):
 
 def main() -> None:
     await_parent()
+    trace_startup = os.getenv("PARSER_WORKER_STARTUP_TRACE") == "1"
+    if trace_startup:
+        import faulthandler
+        faulthandler.dump_traceback_later(15, repeat=True)
     args = _parse_args()
     config = _config(args)
     if args.max_jobs <= 0:
@@ -180,6 +184,8 @@ def main() -> None:
         method, handler = _build_extract_handler(config)
     else:
         method, handler = _build_render_handler(config)
+    if trace_startup:
+        faulthandler.cancel_dump_traceback_later()
     LOG.info(
         "parser worker starting kind=%s pid=%d extraction_engine=%s concurrency=%d",
         args.kind,

@@ -12,6 +12,7 @@ on:
       - 'scripts/*postgres*'
       - 'scripts/benchmark_parser_shared.py'
       - 'packaging/desktop/**'
+      - '!packaging/desktop/**/*.md'
       - 'go.mod'
       - 'go.sum'
       - 'web/**'
@@ -37,6 +38,7 @@ jobs:
       PARSER_LAYOUT_THREADS: '2'
       MALLOC_ARENA_MAX: '2'
       PYTHONUNBUFFERED: '1'
+      PARSER_WORKER_STARTUP_TRACE: '1'
       LOG_PATH: ${{ github.workspace }}/tmp/desktop-d0/python-tests.log
     defaults:
       run:
@@ -116,6 +118,10 @@ jobs:
         # A missing runner dependency fails visibly; do not fall back to a
         # different major version or an existing Windows service.
         run: python scripts/check_private_postgres.py --output tmp/desktop-d0/postgres.json
+      - name: Windows PostgreSQL under a real non-administrator account
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check_windows_postgres_user.ps1
       - uses: actions/upload-artifact@v4
         if: always()
         with:

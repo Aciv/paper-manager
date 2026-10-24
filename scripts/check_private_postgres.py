@@ -38,17 +38,20 @@ def native_cluster_path(path: Path) -> Path:
     return Path(result.value)
 
 
-def probe(bin_dir: Path, output: Path) -> int:
+def probe(bin_dir: Path, output: Path, temp_root: Path | None = None) -> int:
     suffix = ".exe" if os.name == "nt" else ""
     binaries = {name: bin_dir.resolve() / (name + suffix) for name in ("initdb", "pg_ctl", "psql")}
     report = {"status": "failed", "platform": platform.platform(), "steps": []}
+    if os.name == "nt":
+        import ctypes
+        report["is_admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
     output.parent.mkdir(parents=True, exist_ok=True)
     try:
         if hasattr(os, "geteuid") and os.geteuid() == 0:
             raise RuntimeError("run as an ordinary user, not root")
         if any(not path.is_file() for path in binaries.values()):
             raise FileNotFoundError(f"missing PostgreSQL binaries in {bin_dir}")
-        with tempfile.TemporaryDirectory(prefix="pm postgres 验证 ") as temporary:
+        with tempfile.TemporaryDirectory(prefix="pm postgres 验证 ", dir=temp_root) as temporary:
             root = native_cluster_path(Path(temporary))
             report["path_mode"] = "Windows short alias" if str(root) != temporary else "native path"
             data = root / "data"
@@ -111,5 +114,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin-dir", type=Path, default=Path(shutil.which("pg_ctl") or "/missing/pg_ctl").parent)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--temp-root", type=Path)
     args = parser.parse_args()
-    raise SystemExit(probe(args.bin_dir, args.output))
+    raise SystemExit(probe(args.bin_dir, args.output, args.temp_root))
