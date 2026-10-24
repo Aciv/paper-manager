@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 from pathlib import Path
 import shutil
 import socket
@@ -40,6 +41,7 @@ def verify_events(path):
         "TestHasQueuedQueryApplyForReferenceRedis",
         "TestSnapshotQueuedWorkBoundedRedis",
         "TestAsynqNativeLifecycleRedis",
+        "TestAsynqNativePersistenceRedis",
         "TestDocumentStageRepositoryPostgres",
         "TestNoteReadingOptimisticCRUDAndCascadePostgres",
         "TestFailInterruptedWorkPostgres",
@@ -115,12 +117,19 @@ def main():
             try:
                 process = start()
                 redis_command(port, "SET", "papers-native-persistence-probe", "persisted")
+                env = {**os.environ, "PAPERS_MANAGER_TEST_REDIS_ADDR": f"127.0.0.1:{port}",
+                       "PAPERS_TEST_PERSISTENCE_QUEUE": "native-persist-" + secrets.token_hex(12),
+                       "PAPERS_TEST_PERSISTENCE_PHASE": "seed"}
+                with (output / "go-persistence-seed.log").open("w", encoding="utf-8") as seed_log:
+                    subprocess.run([shutil.which("go") or "go", "test", "-count=1", "./internal/router",
+                                    "-run", "^TestAsynqNativePersistenceRedis$", "-v"],
+                                   env=env, stdout=seed_log, stderr=subprocess.STDOUT, timeout=180, check=True)
                 stop()
                 process = start()
                 if redis_command(port, "GET", "papers-native-persistence-probe") != "persisted":
                     raise RuntimeError("Redis AOF did not survive restart")
                 report["steps"].append("Redis AOF restart persisted data")
-                env = {**os.environ, "PAPERS_MANAGER_TEST_REDIS_ADDR": f"127.0.0.1:{port}"}
+                env["PAPERS_TEST_PERSISTENCE_PHASE"] = "verify"
                 events = output / "go-integration.jsonl"
                 with events.open("w", encoding="utf-8") as stdout:
                     completed = subprocess.run([shutil.which("go") or "go", "test", "-json", "-count=1", "./..."],
@@ -128,8 +137,14 @@ def main():
                 if completed.returncode:
                     # Print failures, keep complete JSON event log as artifact.
                     lines = events.read_text(encoding="utf-8").splitlines()
-                    failed_tests = {event.get("Test") for line in lines
-                                    if (event := json.loads(line)).get("Action") == "fail" and event.get("Test")}
+                    decoded = []
+                    for line in lines:
+                        try:
+                            decoded.append(json.loads(line))
+                        except ValueError:
+                            print(line)
+                    failed_tests = {event.get("Test") for event in decoded
+                                    if event.get("Action") == "fail" and event.get("Test")}
                     for line in lines:
                         try:
                             event = json.loads(line)
@@ -139,6 +154,7 @@ def main():
                             print(line)
                     raise RuntimeError(f"go test exit={completed.returncode}; see {events}")
                 report["required_tests_passed"] = verify_events(events)
+                report["steps"].append("Asynq pending/scheduled tasks and crashed worker lease recovered after Redis restart")
                 report["status"] = "passed"
             finally:
                 stop()

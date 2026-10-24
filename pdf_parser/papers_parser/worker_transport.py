@@ -186,7 +186,11 @@ def stop_process(process: subprocess.Popen) -> None:
             os.killpg(process.pid, signal.SIGTERM)
         process.wait(timeout=5)
     except (ProcessLookupError, PermissionError):
-        pass
+        # Even if the EOF watcher won the signal race, reap the owned child.
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
     except subprocess.TimeoutExpired:
         if os.name == "nt":
             process.kill()

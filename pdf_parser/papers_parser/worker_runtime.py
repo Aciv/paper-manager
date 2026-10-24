@@ -1,4 +1,4 @@
-"""Local worker runtime: one Unix socket, one job at a time.
+"""Local worker runtime over a private endpoint, with request-scoped threads.
 
 The server process owns process lifecycle and scheduling. This module stays
 free of PyMuPDF/ONNX/CRF imports; the kind-specific worker module supplies the

@@ -17,6 +17,7 @@ from unittest import mock
 from papers_parser import worker_transport as transport
 from papers_parser.worker_pool import SharedWorkerPool, WorkerPoolConfig, WorkerRPCError, WorkerUnavailable
 from papers_parser.worker_protocol import METHOD_EXTRACT
+from papers_parser.worker_protocol import WorkerProtocolError, encode_frame, read_frame, write_frame
 
 
 def child():
@@ -217,6 +218,49 @@ class TCPAuthenticationTest(unittest.TestCase):
                 future.result(timeout=5)
             self.assertEqual(results, [False, True])
             self.assertNotIn("a" * 64, path.read_text())
+
+
+class FrameBoundaryTest(unittest.TestCase):
+    def test_write_keeps_progress_after_socket_poll_timeout(self):
+        class SlowSocket:
+            def __init__(self):
+                self.sent = bytearray()
+                self.calls = 0
+
+            def send(self, data):
+                self.calls += 1
+                if self.calls == 2:
+                    raise socket.timeout()
+                size = min(len(data), 3)
+                self.sent.extend(data[:size])
+                return size
+
+        connection = SlowSocket()
+        write_frame(connection, METHOD_EXTRACT, b"bounded frame", deadline=time.monotonic() + 1)
+        self.assertEqual(connection.sent, encode_frame(METHOD_EXTRACT, b"bounded frame"))
+
+    def test_frame_limit_rejects_header_before_reading_payload(self):
+        class HeaderSocket:
+            def recv(self, size):
+                self.assert_size = size
+                return encode_frame(METHOD_EXTRACT, b"oversized")[:5]
+
+        with self.assertRaises(WorkerProtocolError):
+            read_frame(HeaderSocket(), max_payload_bytes=2)
+
+    def test_deadline_applies_even_when_peer_keeps_sending(self):
+        class BusySocket:
+            def recv(self, size):
+                self.calls += 1
+                return b"x"
+
+            calls = 0
+
+        connection = BusySocket()
+        with self.assertRaises(TimeoutError):
+            read_frame(connection, max_payload_bytes=1024,
+                       deadline=0, clock=lambda: 1)
+        self.assertEqual(connection.calls, 0)
 
 
 if __name__ == "__main__":

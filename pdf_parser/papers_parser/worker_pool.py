@@ -26,10 +26,9 @@ from papers_parser.worker_protocol import (
     read_frame,
     write_frame,
 )
+from papers_parser.worker_transport import TOKEN_ENV, connect, start_process, stop_process
 
 LOG = get_logger(__name__)
-
-from papers_parser.worker_transport import TOKEN_ENV, connect, start_process, stop_process
 
 
 class WorkerUnavailable(Exception):
