@@ -51,6 +51,9 @@ func TestAsynqNativeLifecycleRedis(t *testing.T) {
 			<-ctx.Done()
 			done <- "timed-out"
 			return asynq.SkipRetry
+		case "drain":
+			entered <- struct{}{}
+			time.Sleep(200 * time.Millisecond)
 		default:
 			n := active.Add(1)
 			for old := peak.Load(); n > old; old = peak.Load() {
@@ -102,10 +105,12 @@ func TestAsynqNativeLifecycleRedis(t *testing.T) {
 	if retries.Load() != 2 {
 		t.Fatalf("attempts=%d, want 2", retries.Load())
 	}
-	started := time.Now()
-	enqueue("delayed", asynq.ProcessIn(time.Second))
+	// Asynq persists scheduled timestamps at whole-second precision. Select
+	// an exact second and assert that deadline rather than elapsed subsecond time.
+	scheduled := time.Now().Add(2 * time.Second).Truncate(time.Second)
+	enqueue("delayed", asynq.ProcessAt(scheduled))
 	wait("delayed")
-	if time.Since(started) < 900*time.Millisecond {
+	if time.Now().Before(scheduled) {
 		t.Fatal("delayed task ran early")
 	}
 	info := enqueue("cancel", asynq.MaxRetry(0))
@@ -120,7 +125,16 @@ func TestAsynqNativeLifecycleRedis(t *testing.T) {
 	wait("cancelled")
 	enqueue("timeout", asynq.Timeout(time.Second), asynq.MaxRetry(0))
 	wait("timed-out")
-	enqueue("drain")
+	drained := enqueue("drain")
+	select {
+	case <-entered:
+	case <-time.After(20 * time.Second):
+		t.Fatal("drain task did not start")
+	}
 	server.Shutdown()
 	wait("drain")
+	info, err = inspector.GetTaskInfo(queue, drained.ID)
+	if err != nil || info.State != asynq.TaskStateCompleted {
+		t.Fatalf("drained task=%+v error=%v", info, err)
+	}
 }

@@ -30,6 +30,10 @@ def await_parent() -> None:
     def watch_parent():
         # The pipe has one writer: the owning server. EOF also covers crashes.
         sys.stdin.buffer.read()
+        if os.name != "nt":
+            # start_process created this private session. Clear native-library
+            # helpers too if the owning server died before normal cleanup.
+            os.killpg(os.getpgrp(), signal.SIGKILL)
         os._exit(0)
 
     threading.Thread(target=watch_parent, name="parser-worker-parent", daemon=True).start()
@@ -161,7 +165,10 @@ def stop_process(process: subprocess.Popen) -> None:
     """Reap only this owned worker, including native-library descendants."""
     try:
         if process.stdin is not None:
-            process.stdin.close()
+            try:
+                process.stdin.close()
+            except BrokenPipeError:
+                pass
         job = getattr(process, "_parser_job", None)
         if job is not None:
             kernel, handle = job

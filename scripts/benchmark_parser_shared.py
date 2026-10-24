@@ -56,6 +56,16 @@ def snapshot(process: psutil.Process) -> dict:
             target.append(entry)
         except psutil.NoSuchProcess:
             continue
+        except psutil.AccessDenied:
+            # macOS denies proc_pidinfo for a helper during its exit/reap
+            # window. Only discard a confirmed dead/zombie process; live
+            # access failures still invalidate the measurement.
+            try:
+                if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
+                    continue
+            except psutil.NoSuchProcess:
+                continue
+            raise
     return {"parent_rss": parent_rss,
             "tree_rss": parent_rss + sum(x["rss"] for x in workers + helpers),
             "workers": workers, "helpers": helpers}

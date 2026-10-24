@@ -127,10 +127,13 @@ def main():
                                                env=env, stdout=stdout, stderr=subprocess.STDOUT, timeout=900)
                 if completed.returncode:
                     # Print failures, keep complete JSON event log as artifact.
-                    for line in events.read_text(encoding="utf-8").splitlines():
+                    lines = events.read_text(encoding="utf-8").splitlines()
+                    failed_tests = {event.get("Test") for line in lines
+                                    if (event := json.loads(line)).get("Action") == "fail" and event.get("Test")}
+                    for line in lines:
                         try:
                             event = json.loads(line)
-                            if event.get("Action") == "fail" or "FAIL" in event.get("Output", ""):
+                            if event.get("Action") == "fail" or event.get("Test") in failed_tests or "FAIL" in event.get("Output", ""):
                                 print(line)
                         except ValueError:
                             print(line)
