@@ -27,6 +27,12 @@ def await_parent() -> None:
         return
     if sys.stdin.buffer.read(1) != b"\x01":
         raise SystemExit("worker parent handshake failed")
+    if os.name == "nt":
+        # Job Object ownership is established before this handshake. It also
+        # handles parent death without reading stdin on a background thread.
+        # Such a CRT read deadlocks NumPy/OpenBLAS DLL loading on Windows:
+        # https://github.com/numpy/numpy/issues/24290
+        return
 
     def watch_parent():
         # The pipe has one writer: the owning server. EOF also covers crashes.

@@ -4,6 +4,7 @@ from __future__ import annotations
 import concurrent.futures
 import base64
 import json
+import io
 import os
 from pathlib import Path
 import socket
@@ -14,6 +15,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+from types import SimpleNamespace
 
 from papers_parser import worker_transport as transport
 from papers_parser.worker_pool import SharedWorkerPool, WorkerPoolConfig, WorkerRPCError, WorkerUnavailable
@@ -225,6 +227,16 @@ time.sleep(60)
 
 
 class TCPAuthenticationTest(unittest.TestCase):
+    def test_windows_parent_handshake_does_not_start_a_stdin_reader(self):
+        stream = io.BytesIO(b"\x01")
+        with mock.patch.object(transport.os, "name", "nt"), \
+                mock.patch.object(transport.sys, "stdin", SimpleNamespace(buffer=stream)), \
+                mock.patch.dict(os.environ, {transport.PARENT_ENV: "1"}), \
+                mock.patch.object(transport.threading, "Thread") as thread:
+            transport.await_parent()
+        self.assertEqual(stream.tell(), 1)
+        thread.assert_not_called()
+
     def test_valid_and_invalid_keys_over_real_loopback(self):
         with tempfile.TemporaryDirectory() as temporary, \
                 mock.patch.object(transport, "_TCP", True), \
