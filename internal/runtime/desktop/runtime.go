@@ -296,7 +296,9 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 	})
 	release = append(release, func() { _ = rc.Close() })
 	redisProcess, err := start(
-		"redis", r.cfg.Redis, []string{redisConfig}, env, filepath.Join(r.cfg.DataDir, "redis"),
+		// The selected Windows Redis is Cygwin-based. A relative POSIX-style
+		// config path works there and on Unix without translating drive letters.
+		"redis", r.cfg.Redis, []string{"../redis.conf"}, env, filepath.Join(r.cfg.DataDir, "redis"),
 		func(c *child, stopCtx context.Context) {
 			_ = rc.Shutdown(stopCtx).Err()
 		},

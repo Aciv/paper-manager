@@ -82,6 +82,8 @@ No database schema or protobuf change is introduced by D2.
 Shutdown closes admission and drains the Go runtime first, then Python, Redis and
 PostgreSQL. Parent pipe EOF provides portable Go/Python shutdown; Windows uses
 private kill-on-close jobs and Unix uses owned process groups for cleanup.
+Short Unix worker paths keep AF_UNIX; long paths use the existing authenticated
+loopback TCP transport so deep/Unicode data directories remain usable.
 Each service has a shutdown deadline, followed by forced cleanup of its owned
 tree. Failed cycles require explicit retry; there is no automatic restart loop.
 Stale PostgreSQL PID files after an unclean shutdown require verification; the

@@ -203,6 +203,12 @@ def main():
                     code, markdown, _ = http(markdown_url)
                     if code == 200 and b"Desktop lifecycle probe" in markdown:
                         break
+                    status_url = api + f"/api/document/{document_id}/processing"
+                    status_code, stage_data, _ = http(status_url)
+                    if status_code == 200:
+                        stages = json.loads(stage_data)["processing"]["stageStates"]
+                        require(not any(stage["stage"] == "markdown" and stage["status"] == "failed"
+                                        for stage in stages), "Markdown stage failed; see parser and API logs")
                     time.sleep(0.5)
                 else:
                     raise RuntimeError("queued PDF did not produce readable Markdown")
