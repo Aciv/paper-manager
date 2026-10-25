@@ -6,7 +6,7 @@ follow [RELEASE_POLICY.md](RELEASE_POLICY.md). New bundles use product.json
 This does not change dependency or schema versions, or relabel existing artifacts.
 
 These commands build private validation candidates, not public releases or
-signed installers. The maintainer has deferred the project license. See
+signed installers. Project-owned code uses MIT; dependency terms remain separate. See
 [third-party notices and unresolved public distribution gates](THIRD_PARTY_NOTICES.md).
 
 Build on each target OS/architecture. Required build tools are Go from go.mod,

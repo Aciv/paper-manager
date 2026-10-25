@@ -30,5 +30,19 @@
   "redis_windows": {
     "url": "https://github.com/redis-windows/redis-windows/releases/download/7.4.11/Redis-7.4.11-Windows-x64-cygwin-with-Service.zip",
     "sha256": "2289eca02c25e96a918812c3b05083c3a8bc9440f1b268cc48e14bd93ed2acb0"
+  },
+  "windows_redis_notices": {
+    "cygwin_source": {
+      "url": "https://mirrors.edge.kernel.org/sourceware/cygwin/src/release/cygwin/cygwin-3.6.10-1-src.tar.xz",
+      "sha256": "895bb3969786d92e92e3836d4860ed0764c1888fa7f4d2dd9d6baca018935325"
+    },
+    "openssl_license": {
+      "url": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.7/LICENSE.txt",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    },
+    "zlib_license": {
+      "url": "https://raw.githubusercontent.com/madler/zlib/v1.3.2/LICENSE",
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    }
   }
 }

@@ -1,6 +1,11 @@
 name: Desktop internal bundle (D3)
 
 on:
+  # Explicit operator-created validation tags only. Ordinary pushes/PRs do
+  # not launch this matrix; this also works before the workflow reaches main.
+  push:
+    tags:
+      - 'validation/d4-*'
   workflow_call:
     inputs:
       target:
@@ -51,7 +56,7 @@ jobs:
       fail-fast: false
       matrix:
         runner: >-
-          ${{ fromJSON(inputs.target == 'all'
+          ${{ fromJSON((github.event_name == 'push' || inputs.target == 'all')
             && '["ubuntu-22.04","windows-2022","macos-14"]'
             || format('["{0}"]', inputs.target)) }}
     runs-on: ${{ matrix.runner }}
@@ -75,6 +80,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y bison flex
       - name: Bundle helper tests
         run: python -m unittest discover -s scripts -p test_desktop_bundle.py
+      - name: Native installation transaction and retention tests
+        run: go test ./internal/runtime/desktop ./cmd/launcher ./scripts/upgrade-failure
       - name: Build sealed hybrid-profile bundle
         # Exact archives and wheels are SHA-256 verified; no developer venv,
         # global database install, or post-install pip downloads are used.
@@ -82,10 +89,14 @@ jobs:
           python scripts/build_desktop_bundle.py --profile hybrid
           --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/desktop-bundle"
           --cache "$RUNNER_TEMP/desktop-downloads"
+      - name: Build guarded synthetic migration failure tool
+        run: >-
+          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/upgrade-failure" ./scripts/upgrade-failure
       - name: Archive bundle and standalone validation harness
         run: >-
           python scripts/package_desktop_bundle.py
           --bundle "$RUNNER_TEMP/desktop-bundle" --output "$RUNNER_TEMP/desktop.tar.gz"
+          --failure-probe "$RUNNER_TEMP/upgrade-failure"
       - uses: actions/upload-artifact@v4
         with:
           name: internal-desktop-${{ matrix.runner }}
@@ -100,11 +111,11 @@ jobs:
       fail-fast: false
       matrix:
         runner: >-
-          ${{ fromJSON(inputs.target == 'all'
+          ${{ fromJSON((github.event_name == 'push' || inputs.target == 'all')
             && '["ubuntu-22.04","windows-2022","macos-14"]'
             || format('["{0}"]', inputs.target)) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       # Deliberately no checkout, no setup-go/node/PostgreSQL/Redis, and no
       # parser wheels installed on this clean job. Test orchestration uses
@@ -147,7 +158,14 @@ jobs:
           & "$env:RUNNER_TEMP/pm bundle 阅读/validation/check_windows_desktop_user.ps1" `
             -Bundle "$env:RUNNER_TEMP/pm bundle 阅读/bundle" `
             -Harness "$env:RUNNER_TEMP/pm bundle 阅读/validation" `
-            -OutputDirectory "$env:RUNNER_TEMP/desktop-results"
+            -OutputDirectory "$env:RUNNER_TEMP/desktop-results" -Upgrade
+      - name: Exercise installed upgrades and real migration rollback
+        if: runner.os != 'Windows'
+        shell: bash
+        run: >-
+          python "$RUNNER_TEMP/pm bundle 阅读/validation/check_desktop_upgrade.py"
+          --bundle "$RUNNER_TEMP/pm bundle 阅读/bundle"
+          --output-dir "$RUNNER_TEMP/desktop-results/upgrade"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

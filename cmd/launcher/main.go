@@ -44,7 +44,27 @@ func run() error {
 	browser := flag.Bool("open-browser", true, "open the independent management page")
 	envFile := flag.String("env-file", filepath.Join(filepath.Dir(executable), ".launcher_env"),
 		"optional Launcher-only environment file")
+	maintenance := flag.String("maintenance", "", "offline install, retry, restore, cleanup or uninstall")
+	program := flag.String("program-dir", "", "managed program directory, separate from user data")
+	source := flag.String("source-bundle", filepath.Dir(executable), "sealed directory to install or update")
+	checkpoint := flag.String("checkpoint-id", "", "managed upgrade checkpoint to restore")
+	confirmRestore := flag.Bool("confirm-restore", false, "confirm replacement of managed user data")
+	shortcuts := flag.String("shortcut-dir", "", "optional per-user desktop/application shortcut directory")
+	confirmDelete := flag.Bool("confirm-delete", false, "confirm explicit deletion of a managed checkpoint")
 	flag.Parse()
+	if *maintenance != "" {
+		if *configure || *initialize {
+			return fmt.Errorf("maintenance cannot be combined with configure or initialize")
+		}
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return desktop.RunMaintenance(ctx, desktop.MaintenanceOptions{
+			Operation: *maintenance, DataDir: *root, ProgramDir: *program,
+			SourceBundle: *source, Checkpoint: *checkpoint, ConfirmRestore: *confirmRestore,
+			ShortcutDir:   *shortcuts,
+			ConfirmDelete: *confirmDelete,
+		})
+	}
 	if *configure && *initialize {
 		return fmt.Errorf("--configure and --initialize are separate operations")
 	}
@@ -76,6 +96,9 @@ func run() error {
 		return fmt.Errorf("lock runtime: %w; see %s", err, filepath.Join(*root, "runtime.json"))
 	}
 	defer lock.Close()
+	if err := desktop.CheckMaintenanceReady(*root); err != nil {
+		return err
+	}
 	cfg, err := desktop.OpenConfig(*root, *install)
 	if err != nil {
 		return err

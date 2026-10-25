@@ -56,6 +56,9 @@ func run() error {
 		}
 	}()
 	app := serverruntime.New()
+	if os.Getenv("PAPERS_MAINTENANCE_PROBE") == "1" {
+		app = serverruntime.NewMaintenanceProbe()
+	}
 	if err := app.Start(ctx); err != nil {
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 90*time.Second)
 		defer stopCancel()

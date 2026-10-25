@@ -39,13 +39,14 @@ type managed struct {
 	log     io.Closer
 }
 type Runtime struct {
-	cfg       Config
-	mu        sync.Mutex
-	state     Snapshot
-	cancel    context.CancelFunc
-	cycleDone chan struct{}
-	quit      chan struct{}
-	quitOnce  sync.Once
+	maintenanceProbe bool
+	cfg              Config
+	mu               sync.Mutex
+	state            Snapshot
+	cancel           context.CancelFunc
+	cycleDone        chan struct{}
+	quit             chan struct{}
+	quitOnce         sync.Once
 }
 
 func New(cfg Config) *Runtime {

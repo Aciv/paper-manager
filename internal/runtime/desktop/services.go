@@ -52,7 +52,12 @@ func (r *Runtime) parserEnv() []string {
 }
 
 func (r *Runtime) apiEnv() []string {
+	probe := "0"
+	if r.maintenanceProbe {
+		probe = "1"
+	}
 	return r.serviceEnv(map[string]string{
+		"PAPERS_MAINTENANCE_PROBE":     probe,
 		"PAPERS_PARENT_STDIN":          "1",
 		"PAPERS_SKIP_DOTENV":           "1",
 		"HTTP_ADDR":                    address(r.cfg.Ports.API),

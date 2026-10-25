@@ -21,6 +21,14 @@ func New() *Runtime {
 	return &Runtime{run: runApplication}
 }
 
+// NewMaintenanceProbe checks migrations/listeners without consuming queued
+// tasks, reconciling interrupted jobs or admitting business requests.
+func NewMaintenanceProbe() *Runtime {
+	return &Runtime{run: func(ctx context.Context, ready func()) error {
+		return runApplicationMode(ctx, ready, true)
+	}}
+}
+
 // Start waits for both HTTP/MCP listeners and background services. A runtime
 // instance is single-use; create a new one after shutdown, as the desktop does
 // by spawning a fresh server process.

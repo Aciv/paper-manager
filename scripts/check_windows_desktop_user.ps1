@@ -3,7 +3,8 @@ param(
     [string]$RedisServer,
     [string]$Bundle,
     [string]$Harness,
-    [string]$OutputDirectory
+    [string]$OutputDirectory,
+    [switch]$Upgrade
 )
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true') {
@@ -65,6 +66,27 @@ try {
     $report = Get-Content (Join-Path $output 'launcher.json') -Raw | ConvertFrom-Json
     if ($process.ExitCode -ne 0 -or $report.status -ne 'passed' -or $report.is_admin -ne $false) {
         throw 'Ordinary-account Launcher probe failed; see launcher.json and service logs'
+    }
+    if ($Upgrade) {
+        if (-not $Bundle -or -not $Harness) { throw 'Upgrade probe requires Bundle and Harness' }
+        $upgradeArguments = @(
+            ('"' + (Join-Path $Harness 'check_desktop_upgrade.py') + '"'),
+            '--bundle', ('"' + $Bundle + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'upgrade-result') + '"'),
+            '--temp-root', ('"' + $root + '"')
+        )
+        $upgrade = Start-Process -FilePath $python -ArgumentList $upgradeArguments -Credential $credential `
+            -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
+            -RedirectStandardOutput (Join-Path $root 'upgrade-stdout.log') `
+            -RedirectStandardError (Join-Path $root 'upgrade-stderr.log')
+        $upgradeOutput = Join-Path $output 'upgrade'
+        New-Item -ItemType Directory -Path $upgradeOutput -Force | Out-Null
+        Copy-Item (Join-Path $root 'upgrade-result/*') $upgradeOutput -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $root 'upgrade-*.log') $upgradeOutput -ErrorAction SilentlyContinue
+        $upgradeReport = Get-Content (Join-Path $upgradeOutput 'upgrade.json') -Raw | ConvertFrom-Json
+        if ($upgrade.ExitCode -ne 0 -or $upgradeReport.status -ne 'passed' -or $upgradeReport.is_admin -ne $false) {
+            throw 'Ordinary-account upgrade probe failed; see upgrade/upgrade.json'
+        }
     }
 } finally {
     Remove-LocalUser -Name $account -ErrorAction SilentlyContinue

@@ -16,12 +16,14 @@ sys.dont_write_bytecode = True
 
 from desktop_bundle import extract, inventory, sha256, verify
 
+BOOTSTRAPS = ("Install.sh", "Uninstall.sh", "Install.cmd", "Uninstall.cmd", "Install.command", "Uninstall.command")
+
 
 def verify_delivery(root: Path) -> dict:
     record = json.loads((root / "package.json").read_text(encoding="utf-8"))
     if record.get("schema_version") != 1 or record.get("distribution") != "internal-validation-only":
         raise ValueError("unsupported delivery manifest")
-    allowed = {"bundle", "validation", "reports", "package.json"}
+    allowed = {"bundle", "validation", "reports", "installer", "package.json", *BOOTSTRAPS}
     if any(path.name not in allowed for path in root.iterdir()):
         raise ValueError("unexpected delivery contents")
     manifest = verify(root / "bundle")
@@ -32,8 +34,17 @@ def verify_delivery(root: Path) -> dict:
     if record.get("application") != manifest.get("application"):
         raise ValueError("delivery product metadata differs from the bundle")
     observed = {}
-    for name in ("validation", "reports"):
+    for name in ("validation", "reports", "installer"):
         observed.update({name + "/" + key: value for key, value in inventory(root / name, exclude=()).items()})
+    for name in BOOTSTRAPS:
+        path = root / name
+        if path.exists():
+            if not path.is_file() or path.is_symlink():
+                raise ValueError("installer entry point must be a regular file")
+            item = {"sha256": sha256(path), "bytes": path.stat().st_size}
+            if os.name != "nt":
+                item["executable"] = bool(path.stat().st_mode & 0o111)
+            observed[name] = item
     if observed != record["files"]:
         raise ValueError("validation tools or attached reports differ from their sealed inventory")
     return record
@@ -54,7 +65,10 @@ def main():
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--verify-only", action="store_true")
     action.add_argument("--output-dir", type=Path, help="run the full ordinary-user acceptance probe")
+    parser.add_argument("--upgrade", action="store_true", help="run D4 install/upgrade/restore acceptance instead")
     args = parser.parse_args()
+    if args.upgrade and not args.output_dir:
+        parser.error("--upgrade requires --output-dir")
     output = args.output_dir.resolve() if args.output_dir else None
     with tempfile.TemporaryDirectory(prefix="pm delivery 阅读 ") as temporary:
         if args.archive:
@@ -66,8 +80,9 @@ def main():
             root = args.directory.resolve()
         record = verify_delivery(root)
         if output:
+            probe = "check_desktop_upgrade.py" if args.upgrade else "check_desktop_launcher.py"
             subprocess.run([
-                sys.executable, str(root / "validation/check_desktop_launcher.py"),
+                sys.executable, str(root / "validation" / probe),
                 "--bundle", str(root / "bundle"), "--output-dir", str(output),
             ], check=True, env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"})
         print(f"passed: {record['target']} / {record['profile']} / {record['revision']}")

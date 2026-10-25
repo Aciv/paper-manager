@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 from pathlib import Path
@@ -10,6 +11,7 @@ import platform
 import shutil
 import subprocess
 import tempfile
+import tarfile
 
 from desktop_bundle import download, extract, inventory, sha256, verify, write_json
 
@@ -90,6 +92,18 @@ def install_windows_postgres_libraries(bundle: Path):
     write_json(bundle / "windows-native-libraries.json", provenance)
 
 
+def copy_cygwin_notices(archive: Path, destination: Path):
+    destination.mkdir()
+    with tarfile.open(archive) as source:
+        member = next(item for item in source.getmembers() if item.name.endswith("newlib-cygwin-3.6.10.tar.bz2"))
+        with tarfile.open(fileobj=io.BytesIO(source.extractfile(member).read())) as nested:
+            for name in ("COPYING", "COPYING.LIB", "CYGWIN_LICENSE"):
+                item = nested.getmember("newlib-cygwin/winsup/" + name)
+                if not item.isfile():
+                    raise ValueError("invalid pinned Cygwin notice member")
+                (destination / name).write_bytes(nested.extractfile(item).read())
+
+
 def assemble(args):
     validate_prebuilt_inputs(args.web_dist, args.wheel_dir)
     product = json.loads((ROOT / "packaging/desktop/product.json").read_text(encoding="utf-8"))
@@ -110,6 +124,10 @@ def assemble(args):
     for name in (("postgres_windows", "redis_windows") if os.name == "nt"
                  else ("postgres_source", "redis_source")):
         archives[name] = download(lock[name], args.cache)
+    if os.name == "nt":
+        archives["redis_source"] = download(lock["redis_source"], args.cache)
+        for name, item in lock["windows_redis_notices"].items():
+            archives[name] = download(item, args.cache)
     output = args.output.resolve()
     if output.exists():
         raise RuntimeError("output already exists; use a new version directory")
@@ -177,6 +195,7 @@ def assemble(args):
         shutil.copy2(requirements, bundle / requirements.name)
         notices = bundle / "licenses"
         notices.mkdir()
+        shutil.copy2(ROOT / "LICENSE", notices / "paper_manager-MIT.txt")
         copy_notices(bundle / "python", notices / "python")
         if os.name == "nt":
             extract(archives["postgres_windows"], work / "pg", prefixes=(
@@ -195,8 +214,25 @@ def assemble(args):
             redis_binary = next((work / "redis").rglob("redis-server.exe"))
             (bundle / "redis").mkdir()
             # Run the CLI directly; never ship the unused .NET service installer.
-            for source in [redis_binary, *redis_binary.parent.glob("*.dll")]:
+            # Audited import closure of this hash-pinned redis-server.exe:
+            # server -> SSL/crypto -> zlib/Cygwin -> Windows system libraries.
+            dlls = ("cygcrypto-3.dll", "cygssl-3.dll", "cygwin1.dll", "cygz.dll")
+            for source in [redis_binary, *(redis_binary.parent / name for name in dlls)]:
                 shutil.copy2(source, bundle / "redis" / source.name)
+            source_dir = bundle / "third-party-sources"
+            source_dir.mkdir()
+            shutil.copy2(archives["cygwin_source"], source_dir / "cygwin-3.6.10-1-src.tar.xz")
+            copy_cygwin_notices(archives["cygwin_source"], notices / "cygwin")
+            shutil.copy2(archives["openssl_license"], notices / "OpenSSL-LICENSE.txt")
+            shutil.copy2(archives["zlib_license"], notices / "zlib-LICENSE")
+            extract(archives["redis_source"], work / "redis-source")
+            copy_notices(work / "redis-source", notices / "redis")
+            write_json(bundle / "redis-native-libraries.json", {
+                "provider": lock["redis_windows"],
+                "versions": {"cygwin": "3.6.10", "openssl": "3.5.7", "zlib": "1.3.2"},
+                "dlls": {name: sha256(bundle / "redis" / name) for name in dlls},
+                "corresponding_source": "third-party-sources/cygwin-3.6.10-1-src.tar.xz",
+            })
         else:
             extract(archives["postgres_source"], work)
             pg = work / "postgresql-17.11"
@@ -224,6 +260,8 @@ def assemble(args):
         else:
             copy_notices(ROOT / "web/node_modules", notices / "web")
         # Lock Go module identities and collect their shipped upstream license files.
+        goroot = subprocess.check_output([str(args.go), "env", "GOROOT"], text=True).strip()
+        shutil.copy2(Path(goroot) / "LICENSE", notices / "Go-LICENSE")
         module_data = subprocess.check_output([str(args.go), "list", "-m", "-json", "all"], cwd=ROOT, text=True)
         decoder = json.JSONDecoder()
         modules = []
@@ -250,6 +288,8 @@ def assemble(args):
         components += [{"type": "application", "name": name, "version": version}
                        for name, version in (("PostgreSQL", "17.11"), ("Redis", "7.4.11"),
                                              ("CPython", "3.12.15"))]
+        components.append({"type": "application", "name": product["display_name"], "version": product["version"],
+                           "licenses": [{"license": {"id": "MIT"}}]})
         node_lock = json.loads((ROOT / "web/package-lock.json").read_text())
         components += [{"type": "library", "name": name.removeprefix("node_modules/"),
                         "version": p["version"]} for name, p in node_lock["packages"].items()
@@ -267,6 +307,7 @@ def assemble(args):
             shutil.rmtree(directory)
         manifest = {"schema_version": 1, "distribution": "internal-validation-only",
                     "application": product,
+                    "compatibility": {"postgres_major": 17, "data_format": 1, "task_payload": 1},
                     "target": target, "profile": args.profile, "revision": args.revision,
                     "sources": lock, "public_release_approved": False,
                     "web_build": "prebuilt" if args.web_dist else "native",

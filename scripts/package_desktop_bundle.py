@@ -15,11 +15,13 @@ ROOT = Path(__file__).resolve().parents[1]
 HARNESS = (
     "check_desktop_launcher.py", "desktop_bundle.py", "check_windows_desktop_user.ps1",
     "benchmark_parser_shared.py", "check_desktop_setup_failures.py", "check_desktop_package.py",
+    "check_desktop_upgrade.py",
 )
 REPORTS = ("launcher.json", "setup-failures.json", "parser-benchmark.json")
+BOOTSTRAPS = ("Install.sh", "Uninstall.sh", "Install.cmd", "Uninstall.cmd", "Install.command", "Uninstall.command")
 
 
-def package(bundle: Path, output: Path, reports: Path | None = None) -> Path:
+def package(bundle: Path, output: Path, reports: Path | None = None, failure_probe: Path | None = None) -> Path:
     bundle, output = bundle.resolve(), output.resolve()
     checksum = output.with_name(output.name + ".sha256")
     if output.is_relative_to(bundle):
@@ -34,6 +36,19 @@ def package(bundle: Path, output: Path, reports: Path | None = None) -> Path:
         validation.mkdir()
         for name in HARNESS:
             shutil.copy2(ROOT / "scripts" / name, validation / name)
+        if failure_probe is not None:
+            if not failure_probe.is_file() or failure_probe.is_symlink():
+                raise ValueError("failure probe must be a native regular executable")
+            suffix = ".exe" if manifest["target"] == "windows-x86_64" else ""
+            shutil.copy2(failure_probe, validation / ("upgrade-failure" + suffix))
+        installer = staging / "installer"
+        installer.mkdir()
+        shutil.copy2(ROOT / "packaging/desktop/installer/install.py", installer / "install.py")
+        for name in BOOTSTRAPS:
+            source_name = name.replace(".command", ".sh")
+            shutil.copy2(ROOT / "packaging/desktop/installer" / source_name, staging / name)
+            if name.endswith((".sh", ".command")):
+                (staging / name).chmod(0o755)
         if reports:
             destination = staging / "reports"
             destination.mkdir()
@@ -58,7 +73,7 @@ def package(bundle: Path, output: Path, reports: Path | None = None) -> Path:
         archive = staging / "delivery.tar.gz"
         with tarfile.open(archive, "w:gz", compresslevel=6) as stream:
             stream.add(bundle, arcname="bundle")
-            for name in ("validation", "reports", "package.json"):
+            for name in ("validation", "reports", "installer", "package.json", *BOOTSTRAPS):
                 if (staging / name).exists():
                     stream.add(staging / name, arcname=name)
         # Reuse the runtime, but never export a directory modified during packing.
@@ -90,8 +105,9 @@ def main():
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reports-dir", type=Path)
+    parser.add_argument("--failure-probe", type=Path, help="validation-only native synthetic migration failure tool")
     args = parser.parse_args()
-    print(package(args.bundle, args.output, args.reports_dir))
+    print(package(args.bundle, args.output, args.reports_dir, args.failure_probe))
 
 
 if __name__ == "__main__":

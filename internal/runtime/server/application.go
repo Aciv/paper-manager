@@ -25,6 +25,10 @@ import (
 // runApplication owns all in-process services; operating-system signals belong
 // to cmd/server, while desktop owns the enclosing process and its dependencies.
 func runApplication(ctx context.Context, onReady func()) error {
+	return runApplicationMode(ctx, onReady, false)
+}
+
+func runApplicationMode(ctx context.Context, onReady func(), maintenance bool) error {
 	dependencies := container.Build()
 	err := dependencies.Invoke(func(
 		cfg config.Config,
@@ -57,38 +61,43 @@ func runApplication(ctx context.Context, onReady func()) error {
 			taskClient.Close()
 			logger.Info(ctx, "task enqueuer closed")
 		}()
-		defer func() {
-			catalogDispatcher.Stop()
-			logger.Info(ctx, "catalog dispatcher stopped")
-		}()
-		defer func() {
-			worker.Shutdown()
-			logger.Info(ctx, "asynq worker stopped")
-		}()
-		if err := documentHousekeeping.FailInterruptedWork(ctx); err != nil {
-			return fmt.Errorf("fail interrupted work: %w", err)
+		if !maintenance {
+			defer func() {
+				catalogDispatcher.Stop()
+				logger.Info(ctx, "catalog dispatcher stopped")
+			}()
+			defer func() {
+				worker.Shutdown()
+				logger.Info(ctx, "asynq worker stopped")
+			}()
+			if err := documentHousekeeping.FailInterruptedWork(ctx); err != nil {
+				return fmt.Errorf("fail interrupted work: %w", err)
+			}
+			// The dispatcher remains available while Asynq drains.
+			catalogDispatcher.Start(context.WithoutCancel(ctx))
+			if _, err := router.RunAsynqServer(taskParams); err != nil {
+				return fmt.Errorf("start Asynq worker: %w", err)
+			}
+			if err := documentHousekeeping.Start(ctx); err != nil {
+				logger.Warn(ctx, "start document housekeeping failed", "error", err)
+			}
+			defer func() {
+				documentHousekeeping.Stop()
+				logger.Info(ctx, "document housekeeping stopped")
+			}()
 		}
-		// Provider workers remain available while Asynq drains; Stop below
-		// owns their cancellation after the last task has finished submitting.
-		catalogDispatcher.Start(context.WithoutCancel(ctx))
-		if _, err := router.RunAsynqServer(taskParams); err != nil {
-			return fmt.Errorf("start Asynq worker: %w", err)
-		}
-		if err := documentHousekeeping.Start(ctx); err != nil {
-			logger.Warn(ctx, "start document housekeeping failed", "error", err)
-		}
-		defer func() {
-			documentHousekeeping.Stop()
-			logger.Info(ctx, "document housekeeping stopped")
-		}()
 
 		frontend, err := router.NewStaticFrontend(engine, cfg.WebDistDirectory)
 		if err != nil {
 			return err
 		}
 		defer frontend.Close()
+		var handler http.Handler = frontend
+		if maintenance {
+			handler = maintenanceAPIHandler(frontend)
+		}
 		server := &http.Server{
-			Handler:           frontend,
+			Handler:           handler,
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       cfg.HTTPReadTimeout,
 			WriteTimeout:      cfg.HTTPWriteTimeout,
@@ -106,6 +115,9 @@ func runApplication(ctx context.Context, onReady func()) error {
 			mcpHandler, err := toolServer.Handler()
 			if err != nil {
 				return fmt.Errorf("prepare MCP adapter: %w", err)
+			}
+			if maintenance {
+				mcpHandler = maintenanceMCPHandler(mcpHandler)
 			}
 			mcpListener, err := net.Listen("tcp", cfg.MCPAddress)
 			if err != nil {
@@ -147,7 +159,9 @@ func runApplication(ctx context.Context, onReady func()) error {
 		case <-ctx.Done():
 			logger.Info(ctx, "application shutdown requested")
 		}
-		worker.Stop()
+		if !maintenance {
+			worker.Stop()
+		}
 		// Shutdown closes the listener immediately but keeps waiting for
 		// handlers. Waiting here (before main's defers) is what guarantees
 		// HTTP requests finish before the worker/pool are closed.
