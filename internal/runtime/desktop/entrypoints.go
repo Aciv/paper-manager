@@ -16,12 +16,23 @@ func (m *maintenance) writeUninstaller() error {
 			"$bundle = Join-Path (Join-Path $PSScriptRoot 'versions') $record.active\n" +
 			"$temporary = Join-Path ([IO.Path]::GetTempPath()) ('paper-manager-uninstall-' + [guid]::NewGuid())\n" +
 			"New-Item -ItemType Directory -Path $temporary | Out-Null\n" +
+			"$code = 1\n" +
 			"try {\n" +
 			"  $helper = Join-Path $temporary 'launcher.exe'\n" +
 			"  Copy-Item -LiteralPath (Join-Path $bundle 'launcher.exe') -Destination $helper\n" +
-			"  & $helper --maintenance uninstall --data-dir " + powershellLiteral(m.root) +
-			" --program-dir $PSScriptRoot\n  $code = $LASTEXITCODE\n" +
-			"} finally { Remove-Item -LiteralPath $temporary -Recurse -Force }\nexit $code\n"
+			"  $arguments = @('--maintenance', 'uninstall', '--data-dir', " +
+			powershellLiteral("\""+m.root+"\"") + ", '--program-dir', ('\"' + $PSScriptRoot + '\"'))\n" +
+			"  $process = Start-Process -FilePath $helper -ArgumentList $arguments -NoNewWindow -Wait -PassThru\n" +
+			"  $code = $process.ExitCode\n" +
+			"} finally {\n" +
+			"  for ($attempt = 0; $attempt -lt 20; $attempt++) {\n" +
+			"    try { Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction Stop; break }\n" +
+			"    catch {\n" +
+			"      if ($attempt -eq 19) { Write-Warning ('Uninstall helper cleanup deferred: ' + $temporary) }\n" +
+			"      else { Start-Sleep -Milliseconds 500 }\n" +
+			"    }\n" +
+			"  }\n" +
+			"}\nexit $code\n"
 	} else {
 		name = "uninstall"
 		script = "#!/bin/sh\nset -eu\n" +

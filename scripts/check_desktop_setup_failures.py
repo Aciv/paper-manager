@@ -15,11 +15,12 @@ sys.dont_write_bytecode = True
 from desktop_bundle import verify
 
 
-def check(bundle: Path, output: Path):
+def check(bundle: Path, output: Path, *, ascii_paths: bool = False, temp_root: Path | None = None):
     verify(bundle)
     launcher = bundle / ("launcher.exe" if os.name == "nt" else "launcher")
     steps = []
-    with tempfile.TemporaryDirectory(prefix="pm setup failures 阅读 ") as temporary:
+    prefix = "pm setup failures " if ascii_paths else "pm setup failures 阅读 "
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=temp_root) as temporary:
         root = Path(temporary) / "data"
         command = [str(launcher), "--data-dir", str(root), "--install-dir", str(bundle),
                    "--env-file", str(bundle / ".launcher_env"), "--open-browser=false"]
@@ -75,8 +76,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ascii-paths", action="store_true")
+    parser.add_argument("--temp-root", type=Path)
     args = parser.parse_args()
-    check(args.bundle.resolve(), args.output.resolve())
+    check(args.bundle.resolve(), args.output.resolve(), ascii_paths=args.ascii_paths, temp_root=args.temp_root)
 
 
 if __name__ == "__main__":

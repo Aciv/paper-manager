@@ -56,9 +56,11 @@ jobs:
       fail-fast: false
       matrix:
         runner: >-
-          ${{ fromJSON((github.event_name == 'push' || inputs.target == 'all')
+          ${{ fromJSON(startsWith(github.ref, 'refs/tags/validation/d4-windows-')
+            && '["windows-2022"]'
+            || ((github.event_name == 'push' || inputs.target == 'all')
             && '["ubuntu-22.04","windows-2022","macos-14"]'
-            || format('["{0}"]', inputs.target)) }}
+            || format('["{0}"]', inputs.target))) }}
     uses: ./.github/workflows/desktop-platform.yml
     with:
       runner: ${{ matrix.runner }}

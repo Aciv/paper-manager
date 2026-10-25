@@ -64,6 +64,36 @@ try {
     Copy-Item (Join-Path $root 'result/*') $output -ErrorAction SilentlyContinue
     Copy-Item (Join-Path $root '*.log') $output -ErrorAction SilentlyContinue
     $report = Get-Content (Join-Path $output 'launcher.json') -Raw | ConvertFrom-Json
+    $asciiPaths = $false
+    if ($Bundle -and $report.status -eq 'failed' -and
+        $report.error -like '*PostgreSQL needs an ASCII path on this volume*' -and
+        $report.is_admin -eq $false) {
+        # Some hosted volumes disable 8.3 names. Preserve the actual Unicode
+        # refusal and CRF load result, then exercise the documented ASCII setup.
+        # Other failures never qualify for this retry.
+        $unicodeOutput = Join-Path $output 'unicode-path'
+        New-Item -ItemType Directory -Path $unicodeOutput | Out-Null
+        Copy-Item (Join-Path $root 'result/*') $unicodeOutput
+        Copy-Item (Join-Path $root '*.log') $unicodeOutput
+        $delivery = Join-Path $root 'delivery'
+        Copy-Item -LiteralPath (Split-Path $Bundle) -Destination $delivery -Recurse
+        $Bundle = Join-Path $delivery 'bundle'
+        $Harness = Join-Path $delivery 'validation'
+        $asciiPaths = $true
+        $arguments = @(
+            ('"' + (Join-Path $Harness 'check_desktop_launcher.py') + '"'),
+            '--bundle', ('"' + $Bundle + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'result') + '"'),
+            '--temp-root', ('"' + $root + '"'), '--ascii-paths'
+        )
+        $process = Start-Process -FilePath $python -ArgumentList $arguments -Credential $credential `
+            -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
+            -RedirectStandardOutput (Join-Path $root 'stdout.log') `
+            -RedirectStandardError (Join-Path $root 'stderr.log')
+        Copy-Item (Join-Path $root 'result/*') $output -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $root '*.log') $output -ErrorAction SilentlyContinue
+        $report = Get-Content (Join-Path $output 'launcher.json') -Raw | ConvertFrom-Json
+    }
     if ($process.ExitCode -ne 0 -or $report.status -ne 'passed' -or $report.is_admin -ne $false) {
         throw 'Ordinary-account Launcher probe failed; see launcher.json and service logs'
     }
@@ -75,6 +105,7 @@ try {
             '--output-dir', ('"' + (Join-Path $root 'upgrade-result') + '"'),
             '--temp-root', ('"' + $root + '"')
         )
+        if ($asciiPaths) { $upgradeArguments += '--ascii-paths' }
         $upgrade = Start-Process -FilePath $python -ArgumentList $upgradeArguments -Credential $credential `
             -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
             -RedirectStandardOutput (Join-Path $root 'upgrade-stdout.log') `

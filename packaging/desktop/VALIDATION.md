@@ -1,10 +1,11 @@
 # D3 internal validation evidence
 
-Status: Linux archived delivery and Windows 10 native directory/archive acceptance
-passed; the final selected-baseline native matrix is pending.
-GitHub Actions free allowance is exhausted (maintainer confirmed).
-No additional hosted validation runs are authorized or started for this handoff.
-The project license remains undecided; this is not a public release approval.
+Status: D3/D4 native acceptance at commit fe2506b completed; see
+[run 40181692843](https://github.com/Aciv/paper-master/actions/runs/40181692843).
+The maintainer authorized one consolidated final matrix after making the repository
+public. Earlier quota exhaustion remains historical evidence below. Project-owned
+code is MIT; third-party public redistribution and signing gates remain separate.
+The earlier local Linux/Windows results below remain useful, revision-specific evidence.
 
 Linux runtime revision: `66a99c66571def5d7f1374161e3ee010b863152e`.
 The export tool keeps this revision and independently records validation-tool
@@ -157,8 +158,9 @@ Go also passed `go test ./internal/runtime/desktop -run TestPostgresProgramPath
 Heavy CI is manual, defaults to the minimal Windows CRF
 case, and can target one OS. It was syntax-checked locally, not executed remotely.
 
-Public licensing audit, signed installers, upgrades, relocation of existing user
-configuration and uninstall/restore workflows remain D4 work.
+Public redistribution review, signing and automatic migration of unmanaged existing
+installations remain separate gates. Managed install/upgrade/restore/uninstall
+are implemented; see INSTALL.md and the D4 evidence below.
 
 
 ## D4 acceptance snapshot: 2026-10-25
@@ -193,3 +195,46 @@ Current checks and the next consolidated matrix will update this evidence;
 D3/D4 remain in progress until platform acceptance passes. Public redistribution
 review, OS download/signature prompts, antivirus and sleep/resume checks remain
 separate from automated application lifecycle tests.
+
+
+### Consolidated run 40181692843
+
+All three native builds passed. Ubuntu 22.04 and macOS 14 arm64 completed both
+artifact probes successfully, including c1/c4 and 20 mixed parser requests,
+worker recovery/idle retirement, real failed SQL migration and durable-file
+rollback, shortcuts, uninstall and exact-version reinstall. Their JSON reports
+were retrieved locally under tmp/desktop-d4/internal-desktop-results-*.zip.
+Startup was 2.01 s (Linux) / 2.07 s (macOS), and one-page cold upload-to-reading
+was 3.04 s / 2.78 s respectively; these are separate host baselines, not a
+cross-platform speed comparison or a before/after performance claim.
+
+Windows Server 2022 loaded both production CRF models, then explicitly rejected
+the Unicode PostgreSQL program path: that runner volume has no usable ASCII
+short-path alias. This matches the documented limitation, but leaves Windows
+artifact acceptance incomplete. The Windows harness now preserves that exact
+refusal under unicode-path/ and, only for this specific error, copies the delivery
+to an owned ASCII path and runs every lifecycle/upgrade probe there. The result
+records path_mode=ascii-fallback; this does not certify arbitrary Unicode paths.
+Unknown initialization errors cannot use this fallback. A dedicated
+validation/d4-windows-* tag selects only Windows for the final follow-up; already
+passed platforms need not be rebuilt for Windows-only validation changes.
+
+
+### Windows local follow-up
+
+The actual fe2506b Windows archive, using updated validation tools in explicit
+ASCII mode, passed the complete runtime/CRF/setup/shared-worker benchmark probe
+on Windows 10 as an ordinary user. D4 then passed first install, synthetic upgrade
+and real SQL/file rollback, but failed when PowerShell could not immediately
+remove its temporary uninstaller EXE. The failing report is retained under
+tmp/desktop-d4/windows-ascii-local-r2/upgrade.
+This is a real Windows cleanup failure, not an application/queue compatibility pass.
+
+The generated uninstaller now explicitly waits for the helper and retries temporary
+cleanup for up to 20 attempts. A remaining helper cleanup problem warns with the
+owned path while preserving the actual uninstall exit code. A rebuilt native
+launcher passed two focused install/uninstall/reinstall cycles; both preserved
+notes/config and removed their temporary helper. Evidence:
+tmp/desktop-d4/windows-uninstall-focused/uninstall.json. The fixture is labelled
+local-uninstall-fix-fixture, not a clean-commit release. Full Windows Server 2022
+artifact acceptance remains pending the single-target follow-up.

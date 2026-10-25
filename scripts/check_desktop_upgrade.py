@@ -38,7 +38,10 @@ def main() -> int:
     parser.add_argument("--failure-probe", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--temp-root", type=Path)
+    parser.add_argument("--ascii-paths", action="store_true", help="Windows volumes without ASCII short aliases")
     args = parser.parse_args()
+    if args.ascii_paths and os.name != "nt":
+        parser.error("--ascii-paths is only for the documented Windows path fallback")
     bundle = args.bundle.resolve()
     manifest = verify(bundle)
     output = args.output_dir.resolve()
@@ -57,11 +60,14 @@ def main() -> int:
             require(os.geteuid() != 0, "run the upgrade probe as an ordinary user")
         require(failure.is_file(), "validation-only native failure probe missing")
         require(manifest["application"]["version"] == "1.0.0", "fixture currently expects the 1.0.0 baseline")
-        temporary = tempfile.TemporaryDirectory(prefix="pm d4 阅读 ", dir=args.temp_root)
+        report["path_mode"] = "ascii-fallback" if args.ascii_paths else "unicode"
+        prefix = "pm d4 " if args.ascii_paths else "pm d4 阅读 "
+        temporary = tempfile.TemporaryDirectory(prefix=prefix, dir=args.temp_root)
         with temporary, ExitStack() as cleanup:
             root = Path(temporary.name)
-            data, program = root / "user data 阅读", root / "program 阅读"
-            shortcuts = root / "shortcuts 阅读"
+            label = "" if args.ascii_paths else " 阅读"
+            data, program = root / ("user data" + label), root / ("program" + label)
+            shortcuts = root / ("shortcuts" + label)
 
             def cleanup_fixture():
                 if process and process.poll() is None:

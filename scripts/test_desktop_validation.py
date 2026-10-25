@@ -21,6 +21,7 @@ benchmark = load("benchmark_parser_shared")
 dependencies = load("check_desktop_dependencies")
 postgres = load("check_private_postgres")
 integration = load("run_desktop_integration")
+launcher = load("check_desktop_launcher")
 
 
 class DesktopValidationTest(unittest.TestCase):
@@ -85,6 +86,17 @@ class DesktopValidationTest(unittest.TestCase):
             digest = dependencies.sha256(path)
             path.write_bytes(b"modified")
             self.assertNotEqual(dependencies.sha256(path), digest)
+
+    def test_initialization_failure_stops_waiting_immediately(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        failure = json.dumps({"state": "failed", "error": "fixture initialization failure"}).encode()
+        with mock.patch.object(launcher, "http", return_value=(200, failure, {})), \
+                mock.patch.object(launcher.time, "monotonic", side_effect=[0, 0, 121]), \
+                mock.patch.object(launcher.time, "sleep") as sleep:
+            with self.assertRaisesRegex(RuntimeError, "Launcher failed: fixture initialization failure"):
+                launcher.wait_state("http://fixture", "stopped", process)
+            sleep.assert_not_called()
 
     def test_postgres_preflight_reports_failure_without_connecting(self):
         import json

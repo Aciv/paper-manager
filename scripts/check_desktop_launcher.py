@@ -54,7 +54,7 @@ def wait_state(base, expected, process, timeout=120):
                 last = json.loads(data)
                 if last["state"] == expected:
                     return last
-                if last["state"] == "failed" and expected == "ready":
+                if last["state"] == "failed" and expected != "failed":
                     raise RuntimeError(f"Launcher failed: {last['error']}")
         except (OSError, urllib.error.URLError):
             pass
@@ -139,7 +139,10 @@ def main():
     parser.add_argument("--redis-server", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--temp-root", type=Path)
+    parser.add_argument("--ascii-paths", action="store_true", help="Windows volumes without ASCII short aliases")
     args = parser.parse_args()
+    if args.ascii_paths and os.name != "nt":
+        parser.error("--ascii-paths is only for the documented Windows path fallback")
     if args.bundle:
         args.bundle = args.bundle.resolve()
         manifest = verify(args.bundle)
@@ -163,7 +166,9 @@ def main():
             import ctypes
             report["is_admin"] = bool(ctypes.windll.shell32.IsUserAnAdmin())
             require(not report["is_admin"], "run the full Launcher probe under a non-admin account")
-        with tempfile.TemporaryDirectory(prefix="pm launcher 阅读 ", dir=args.temp_root) as temporary:
+        prefix = "pm launcher " if args.ascii_paths else "pm launcher 阅读 "
+        report["path_mode"] = "ascii-fallback" if args.ascii_paths else "unicode"
+        with tempfile.TemporaryDirectory(prefix=prefix, dir=args.temp_root) as temporary:
             root = Path(temporary) / "private data"
             env_file = Path(temporary) / ".launcher_env"
             launcher_env = None
@@ -433,8 +438,12 @@ def main():
                 report["steps"].append("explicit setup failure/retry; damaged data preserved")
                 if args.bundle:
                     setup_probe = Path(__file__).with_name("check_desktop_setup_failures.py")
-                    subprocess.run([sys.executable, str(setup_probe), "--bundle", str(args.bundle),
-                                    "--output", str(output / "setup-failures.json")],
+                    setup_command = [sys.executable, str(setup_probe), "--bundle", str(args.bundle),
+                                     "--output", str(output / "setup-failures.json"),
+                                     "--temp-root", temporary]
+                    if args.ascii_paths:
+                        setup_command.append("--ascii-paths")
+                    subprocess.run(setup_command,
                                    env={**os.environ, "PATH": launcher_env["PATH"]},
                                    check=True, capture_output=True, timeout=180)
                     report["steps"].append("real setup filesystem failures and explicit retry")
@@ -448,7 +457,9 @@ def main():
                             "--output", str(output / "parser-benchmark.json"),
                         ], env={**os.environ, "PATH": launcher_env["PATH"], "PYTHONDONTWRITEBYTECODE": "1"},
                             stdout=log, stderr=log, check=True, timeout=300)
-                    report["steps"].append("bundle c1/c4 and 20 mixed tasks: single workers, crash recovery, RSS and idle retirement")
+                    report["steps"].append(
+                        "bundle c1/c4 and 20 mixed tasks: single workers, crash recovery, RSS and idle retirement"
+                    )
                     verify(args.bundle)
                 report["status"] = "passed"
             finally:

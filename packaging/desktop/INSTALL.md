@@ -28,7 +28,9 @@ macOS 创建 ~/Applications/paper_manager.app，Linux 写入用户 applications 
 初始化失败时查看数据目录中的 logs，保留目录，排除原因后执行 retry。
 
 Windows PostgreSQL 的非 ASCII 路径依赖可用的 ASCII 短路径别名；若系统/卷不提供，
-请选择 ASCII 程序和数据路径。首次下载提示、杀毒和系统隔离仍需用户机器验证。
+请选择 ASCII 程序和数据路径。Windows runner 可能关闭 8.3 别名；验收明确记录
+中文路径拒绝后，再测试 ASCII 路径完整链路，不将其标为任意 Unicode 路径支持。
+首次下载提示、杀毒和系统隔离仍需用户机器验证。
 
 ## 手动升级
 
