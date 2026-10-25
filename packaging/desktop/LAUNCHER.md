@@ -5,8 +5,11 @@ processes, plus a separate management webpage. The same Go server runtime is
 used by development, Docker and Launcher. Python retains shared workers,
 internal thread pools, recognition/extraction concurrency 4+4 and RPC budget 8.
 
-This is the lifecycle framework. D3 still assembles the self-contained runtime
-directory; these instructions require explicit installed dependency paths.
+For downloaded packages, unpack and run the root `paper_manager` executable
+(`paper_manager.exe` on Windows); see [INSTALL.md](INSTALL.md). It locates
+`bundle/` automatically. A custom environment file is optional; the default is
+`bundle/.launcher_env`. The source-development instructions below use explicit
+component paths instead of a self-contained bundle.
 
 ## Configuration and startup
 
@@ -120,7 +123,7 @@ These tests do not substitute for D3's clean, self-contained artifact acceptance
 ## D3 explicit setup (internal validation)
 
 Normal startup no longer invokes initdb. On a fresh data directory the management
-page shows `setup_required`; choose “首次配置”, wait for completion, then start
+page shows `setup_required`; choose “首次初始化 / 重试”, wait for completion, then start
 services. Installers use `launcher --initialize` as the same ordinary target user.
 `--configure` only creates/validates runtime.json. Existing D2 data can be validated
 by explicit setup to create the new completion marker; its database is preserved.

@@ -77,7 +77,7 @@ probe verifies executable origins, mandatory production models, setup failure an
 retry, upload/queue/parse/blocks/notes/MCP, persistence, process crash cleanup,
 occupied ports, c1/c4 performance, 20 mixed tasks, worker crash recovery and idle
 retirement. Each worker kind must retain one shared PID throughout stable loads.
-The three target jobs in desktop-d3.yml download a tarball and standalone harness
+The three target jobs in desktop-d3.yml download an archive and standalone harness
 in a new job without checking out the repository or installing application runtimes.
 
 Current candidate baselines are Ubuntu 22.04 x64, macOS 14 arm64 and Windows
@@ -91,15 +91,27 @@ to validate the cluster and write initialized.json; it is never rebuilt implicit
 
 ## Export and check an internal delivery
 
-Export an already built directory without recompiling any runtime:
+Export a directory built with the current Launcher without recompiling runtimes:
 
 ```bash
 python scripts/package_desktop_bundle.py \
   --bundle tmp/desktop-candidate --output tmp/releases/desktop.tar.gz
 ```
 
-This writes `desktop.tar.gz` plus `desktop.tar.gz.sha256`. The tarball contains
-`bundle/`, `validation/` and `package.json`. It refuses existing output files and
+Use `--output tmp/releases/desktop.zip` for Windows. Unix uses tar.gz to preserve
+executable permissions and symbolic links. The workflow chooses this per target.
+Each archive has a matching `.sha256` file. Its root contains the native
+`paper_manager` / `paper_manager.exe`, `bundle/`, `validation/` and `package.json`,
+plus optional maintenance helpers and instructions. The default flow needs no
+installation script: unpack, run the native entry, initialize in the management
+page and start. Go is already compiled; Node is only used while building the UI.
+The bundled Python interpreter is used by the parser, not to launch the application.
+
+Old sealed runtimes without `launcher_layout: nested-bundle-v1` must be rebuilt
+for the new root entry. `--layout maintenance` explicitly exports the old helper
+layout; verification of existing archives remains supported.
+
+The exporter refuses existing output files and
 an output inside the runtime directory. `package.json` seals the validation tools
 as well as the runtime identity. Optional `--reports-dir PATH` attaches only the
 three passed JSON acceptance reports, with the same runtime revision/target/profile;

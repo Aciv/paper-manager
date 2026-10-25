@@ -1,5 +1,34 @@
 # D3 internal validation evidence
 
+## Unpacked delivery change, 2026-10-25
+
+Current source defaults to a root native `paper_manager` / `paper_manager.exe`
+entry, Windows ZIP and Unix tar.gz. The accepted CI artifacts below predate this
+layout and must not be described as tests of the new entry. No Actions run was
+triggered for this change.
+
+Local checks passed: full Go tests/build, desktop race tests, web production build,
+28 desktop-tool tests and actionlint. A Windows-native Go test executable passed
+the new runtime discovery, identical-copy rebinding, identity preservation and
+different-build/missing-original refusal tests on the local Windows host.
+
+The current Linux launcher/server and parser/UI source were overlaid on sealed
+native dependencies using the explicitly test-only fixture builder. The exported
+archive passed the full ordinary-user, offline, read-only-container harness,
+including root-entry discovery without `--install-dir`, initialization/retry,
+upload/queue/parse/notes, restart persistence, process failures and c1/c4 loads.
+Startup was 2.218 s; synthetic one-page cold upload-to-read was 4.075 s.
+Shared workers, crash recovery and idle retirement passed. These are host-local
+measurements, not a cross-platform performance comparison or release build.
+Evidence: `tmp/desktop-d4/unpacked-results/`; archive:
+`tmp/desktop-d4/releases/unpacked-local.tar.gz`.
+The same archive also passed managed-install setup/reinstall, a synthetic version
+upgrade preserving parsed data, real failed SQL/file rollback, controlled cleanup,
+uninstall preserving data and exact-version reinstall. Report: `upgrade/upgrade.json`.
+Latest Windows ZIP and macOS root-entry full native acceptance remain unrun.
+
+## Previously accepted managed-install candidates
+
 Status: native candidate runtime and managed lifecycle acceptance passed on all
 three selected baselines. Windows completed the full default-without-shortcut
 flow at c5feaa4 in [run 40191338426](https://github.com/Aciv/paper-master/actions/runs/40191338426).

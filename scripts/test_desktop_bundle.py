@@ -79,17 +79,65 @@ class BundleTests(unittest.TestCase):
 
 
 class DeliveryTests(unittest.TestCase):
-    def bundle(self, root):
+    def bundle(self, root, target="fixture"):
         bundle = root / "bundle"
         bundle.mkdir()
         (bundle / "program").write_bytes(b"isolated runtime fixture")
-        record = {"schema_version": 1, "distribution": "internal-validation-only", "target": "fixture",
+        launcher = bundle / ("launcher.exe" if target == "windows-x86_64" else "launcher")
+        launcher.write_bytes(b"native launcher fixture")
+        record = {"schema_version": 1, "distribution": "internal-validation-only", "target": target,
                   "application": {"id": "papers-manager", "display_name": "paper_manager", "version": "1.0.0"},
-                  "revision": "test-revision", "profile": "hybrid", "files": inventory(bundle)}
+                  "revision": "test-revision", "profile": "hybrid",
+                  "launcher_layout": "nested-bundle-v1", "files": inventory(bundle)}
         write_json(bundle / "bundle.json", record)
-        checks = f"{sha256(bundle / 'program')}  program\n{sha256(bundle / 'bundle.json')}  bundle.json\n"
+        checks = "\n".join(
+            [f"{item['sha256']}  {name}" for name, item in record["files"].items()]
+            + [f"{sha256(bundle / 'bundle.json')}  bundle.json"]
+        ) + "\n"
         (bundle / "SHA256SUMS").write_text(checks, encoding="utf-8")
         return bundle
+
+    def test_windows_zip_exposes_verified_native_launcher(self):
+        from package_desktop_bundle import package
+        from check_desktop_package import verify_delivery
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = self.bundle(root, "windows-x86_64")
+            archive = package(bundle, root / "paper_manager.zip")
+            extracted = root / "unpacked"
+            extract(archive, extracted)
+            record = verify_delivery(extracted)
+            self.assertEqual(record["entrypoint"], "paper_manager.exe")
+            self.assertEqual(
+                (extracted / "paper_manager.exe").read_bytes(),
+                (bundle / "launcher.exe").read_bytes(),
+            )
+            # Even a re-indexed outer launcher cannot replace the sealed one.
+            (extracted / "paper_manager.exe").write_bytes(b"different binary")
+            record["files"]["paper_manager.exe"]["sha256"] = sha256(extracted / "paper_manager.exe")
+            write_json(extracted / "package.json", record)
+            with self.assertRaisesRegex(ValueError, "sealed runtime"):
+                verify_delivery(extracted)
+
+    def test_legacy_runtime_needs_explicit_maintenance_export(self):
+        from package_desktop_bundle import package
+        from check_desktop_package import verify_delivery
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bundle = self.bundle(root)
+            record = json.loads((bundle / "bundle.json").read_text(encoding="utf-8"))
+            record.pop("launcher_layout")
+            write_json(bundle / "bundle.json", record)
+            checks = (bundle / "SHA256SUMS").read_text(encoding="utf-8").splitlines()
+            checks[-1] = f"{sha256(bundle / 'bundle.json')}  bundle.json"
+            (bundle / "SHA256SUMS").write_text("\n".join(checks) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "rebuild"):
+                package(bundle, root / "not-compatible.tar.gz")
+            archive = package(bundle, root / "legacy.tar.gz", layout="maintenance")
+            extract(archive, root / "extracted")
+            self.assertNotIn("entrypoint", verify_delivery(root / "extracted"))
 
     def test_exported_delivery_detects_modified_harness_and_unknown_files(self):
         from package_desktop_bundle import package
@@ -106,7 +154,13 @@ class DeliveryTests(unittest.TestCase):
             )
             destination = root / "extracted 阅读"
             extract(archive, destination)
-            verify_delivery(destination)
+            exported = verify_delivery(destination)
+            self.assertEqual(exported["entrypoint"], "paper_manager")
+            self.assertEqual(
+                (destination / "paper_manager").read_bytes(), (bundle / "launcher").read_bytes(),
+            )
+            if os.name != "nt":
+                self.assertTrue(os.access(destination / "paper_manager", os.X_OK))
             guide = destination / "README.md"
             original_guide = guide.read_bytes()
             self.assertIn(b"1.0.0", original_guide)

@@ -65,6 +65,7 @@ def main():
     manifest["compatibility"] = {"postgres_major": 17, "data_format": 1, "task_payload": 1}
     manifest["revision"] = "local-working-tree-d4-fixture"
     manifest["fixture_only"] = True
+    manifest["launcher_layout"] = "nested-bundle-v1"
     manifest["reused_runtime_manifest"] = sha256(base / "bundle.json")
     manifest["files"] = inventory(output)
     write_json(output / "bundle.json", manifest)

@@ -37,16 +37,20 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	bundle, err := desktop.BundleDirectory(executable)
+	if err != nil {
+		return err
+	}
 	root := flag.String("data-dir", defaultRoot, "private writable application directory")
-	install := flag.String("install-dir", filepath.Dir(executable), "read-only runtime bundle directory")
+	install := flag.String("install-dir", bundle, "read-only runtime bundle directory")
 	initialize := flag.Bool("initialize", false, "perform explicit first-time setup and exit")
 	configure := flag.Bool("configure", false, "create/validate runtime.json and exit")
 	browser := flag.Bool("open-browser", true, "open the independent management page")
-	envFile := flag.String("env-file", filepath.Join(filepath.Dir(executable), ".launcher_env"),
+	envFile := flag.String("env-file", filepath.Join(bundle, ".launcher_env"),
 		"optional Launcher-only environment file")
 	maintenance := flag.String("maintenance", "", "offline install, retry, restore, cleanup, status, delete-checkpoint or uninstall")
 	program := flag.String("program-dir", "", "managed program directory, separate from user data")
-	source := flag.String("source-bundle", filepath.Dir(executable), "sealed directory to install or update")
+	source := flag.String("source-bundle", bundle, "sealed directory to install or update")
 	checkpoint := flag.String("checkpoint-id", "", "managed upgrade checkpoint to restore")
 	confirmRestore := flag.Bool("confirm-restore", false, "confirm replacement of managed user data")
 	shortcuts := flag.String("shortcut-dir", "", "optional per-user desktop/application shortcut directory")
@@ -99,7 +103,18 @@ func run() error {
 	if err := desktop.CheckMaintenanceReady(*root); err != nil {
 		return err
 	}
-	cfg, err := desktop.OpenConfig(*root, *install)
+	openConfig := desktop.OpenBundleConfig
+	for _, key := range []string{
+		"LAUNCHER_SERVER", "LAUNCHER_PYTHON", "LAUNCHER_PARSER_DIR",
+		"LAUNCHER_POSTGRES_BIN", "LAUNCHER_REDIS", "LAUNCHER_WEB_DIR",
+	} {
+		if os.Getenv(key) != "" {
+			// Explicit component overrides remain available to source developers.
+			openConfig = desktop.OpenConfig
+			break
+		}
+	}
+	cfg, err := openConfig(*root, *install)
 	if err != nil {
 		return err
 	}

@@ -64,6 +64,11 @@ def extract(archive: Path, destination: Path, *, prefixes: tuple[str, ...] | Non
                     for prefix in prefixes
                 )]
             source.extractall(destination, members=selected)
+            if os.name != "nt":
+                for item in selected:
+                    mode = (item.external_attr >> 16) & 0o777
+                    if not item.is_dir() and mode:
+                        (destination / item.filename).chmod(mode)
     else:
         if prefixes is not None:
             raise ValueError("selective extraction is only supported for ZIP archives")

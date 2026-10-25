@@ -148,6 +148,9 @@ def main():
         manifest = verify(args.bundle)
         suffix = ".exe" if os.name == "nt" else ""
         args.launcher = args.bundle / ("launcher" + suffix)
+        root_entry = args.bundle.parent / ("paper_manager" + suffix)
+        if root_entry.is_file():
+            args.launcher = root_entry
         args.server = args.bundle / ("server" + suffix)
         args.postgres_bin = args.bundle / "postgres/bin"
         args.redis_server = args.bundle / "redis" / ("redis-server" + suffix)
@@ -183,7 +186,7 @@ def main():
                 )
             command = [str(args.launcher.resolve()), "--data-dir", str(root),
                        "--env-file", str(env_file), "--open-browser=false"]
-            if args.bundle:
+            if args.bundle and args.launcher.parent == args.bundle:
                 command += ["--install-dir", str(args.bundle)]
             if args.bundle and manifest["profile"] == "hybrid":
                 python_path = args.bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
@@ -283,7 +286,8 @@ def main():
                     require(all(path.is_relative_to(args.bundle) for path in paths),
                             "a runtime process came from outside the bundle")
                     report["bundle"] = {"target": manifest["target"], "profile": manifest["profile"],
-                                        "revision": manifest["revision"], "runtime_paths": sorted(map(str, paths))}
+                                        "revision": manifest["revision"], "runtime_paths": sorted(map(str, paths)),
+                                        "entrypoint": args.launcher.name}
                     if os.name == "nt":
                         postgres = next(child for child in children if Path(child.exe()).name == "postgres.exe")
                         mapped = {Path(item.path).name.lower(): Path(item.path).resolve()

@@ -54,14 +54,19 @@ jobs:
         run: >-
           CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/upgrade-failure" ./scripts/upgrade-failure
       - name: Archive bundle and standalone validation harness
-        run: >-
-          python scripts/package_desktop_bundle.py
-          --bundle "$RUNNER_TEMP/desktop-bundle" --output "$RUNNER_TEMP/desktop.tar.gz"
-          --failure-probe "$RUNNER_TEMP/upgrade-failure"
+        shell: python
+        run: |
+          import os, pathlib, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          suffix = 'zip' if os.name == 'nt' else 'tar.gz'
+          subprocess.run([sys.executable, 'scripts/package_desktop_bundle.py',
+                          '--bundle', str(root / 'desktop-bundle'),
+                          '--output', str(root / ('desktop.' + suffix)),
+                          '--failure-probe', str(root / 'upgrade-failure')], check=True)
       - uses: actions/upload-artifact@v4
         with:
           name: internal-desktop-${{ inputs.runner }}
-          path: ${{ runner.temp }}/desktop.tar.gz*
+          path: ${{ runner.temp }}/desktop.*
           if-no-files-found: error
           retention-days: 1
 
@@ -86,17 +91,25 @@ jobs:
       - name: Extract into relocated Unicode path
         shell: python
         run: |
-          import hashlib, os, pathlib, subprocess, sys, tarfile
+          import hashlib, os, pathlib, subprocess, sys, tarfile, zipfile
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
-          source = root / 'download/desktop.tar.gz'
+          sources = [root / 'download' / name for name in ('desktop.zip', 'desktop.tar.gz')]
+          sources = [path for path in sources if path.is_file()]
+          if len(sources) != 1:
+              raise ValueError('Expected one platform archive')
+          source = sources[0]
           with source.open('rb') as stream:
               digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-          expected = digest + '  desktop.tar.gz' + chr(10)
+          expected = digest + '  ' + source.name + chr(10)
           if source.with_name(source.name + '.sha256').read_text(encoding='utf-8') != expected:
               raise ValueError('Downloaded archive checksum differs')
           destination = root / 'pm bundle 阅读'
-          with tarfile.open(source) as archive:
-              archive.extractall(destination, filter='data')
+          if zipfile.is_zipfile(source):
+              with zipfile.ZipFile(source) as archive:
+                  archive.extractall(destination)
+          else:
+              with tarfile.open(source) as archive:
+                  archive.extractall(destination, filter='data')
           subprocess.run([sys.executable, '-B', str(destination / 'validation/check_desktop_package.py'),
                           '--directory', str(destination), '--verify-only'], check=True)
       - name: Exercise only the downloaded bundle

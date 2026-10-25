@@ -9,17 +9,17 @@ Go HTTP 层使用 Gin 与 Handler 结构；需要跨表原子性的写入由 Rep
 ## 本地桌面内部验证包
 
 Launcher 管理应用私有的 PostgreSQL、Redis、Python 与 Go 服务，Go 同时托管预构建
-前端，运行时不需要 Docker、Go、Node 或系统 Python。直接运行原始 bundle 时，
-先在管理页执行“首次配置”，再点击“启动”。使用完整归档时，以普通用户运行
-`Install.cmd`（Windows）、`Install.command`（macOS）或 `./Install.sh`（Linux），
-安装器会完成首次配置、健康检查并启动应用；正常重启不会重复初始化数据库。
+前端，运行时不需要 Docker、Go、Node 或系统 Python。下载对应平台归档并完整解压，
+Windows 运行根目录 `paper_manager.exe`，Linux/macOS 运行 `./paper_manager`。
+首次在管理页点击“首次初始化 / 重试”，完成后点击“启动”；后续启动复用已有数据。
+程序留在解压目录，论文、笔记和数据库保存在独立的用户数据目录。默认无需运行安装脚本。
 
 Windows 程序和数据目录使用英文 ASCII 完整路径，检测到中文等字符时会提前提示。
-快捷方式默认不创建，需要时加 `--create-shortcut`。升级、检查点恢复、清理和卸载见
-[安装维护说明](packaging/desktop/INSTALL.md)，各平台实测状态见
+可选安装脚本仍供受管理安装和维护使用，快捷方式默认不创建。
+数据位置、更新限制和可选维护见 [使用说明](packaging/desktop/INSTALL.md)，各平台实测状态见
 [验收记录](packaging/desktop/VALIDATION.md)。关闭浏览器标签不会退出后台服务。
 
-自有代码采用 [MIT](LICENSE)，第三方组件分别遵循其许可。安装候选包未签名，
+自有代码采用 [MIT](LICENSE)，第三方组件分别遵循其许可。候选包未签名，
 不代表已经完成所有第三方二进制的再分发检查。构建、平台证据与剩余限制见
 [桌面打包说明](packaging/desktop/BUILD.md)、
 [Launcher 配置](packaging/desktop/LAUNCHER.md) 和

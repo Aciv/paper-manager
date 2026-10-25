@@ -18,13 +18,17 @@ from desktop_bundle import extract, inventory, sha256, verify
 
 DELIVERY_DOCS = ("README.md", "INSTALL.md", "THIRD_PARTY_NOTICES.md", "VALIDATION.md", "LICENSE")
 BOOTSTRAPS = ("Install.sh", "Uninstall.sh", "Install.cmd", "Uninstall.cmd", "Install.command", "Uninstall.command")
+ENTRYPOINTS = ("paper_manager", "paper_manager.exe")
 
 
 def verify_delivery(root: Path) -> dict:
     record = json.loads((root / "package.json").read_text(encoding="utf-8"))
     if record.get("schema_version") != 1 or record.get("distribution") != "internal-validation-only":
         raise ValueError("unsupported delivery manifest")
-    allowed = {"bundle", "validation", "reports", "installer", "package.json", *BOOTSTRAPS, *DELIVERY_DOCS}
+    allowed = {
+        "bundle", "validation", "reports", "installer", "package.json",
+        *BOOTSTRAPS, *DELIVERY_DOCS, *ENTRYPOINTS,
+    }
     if any(path.name not in allowed for path in root.iterdir()):
         raise ValueError("unexpected delivery contents")
     manifest = verify(root / "bundle")
@@ -34,10 +38,21 @@ def verify_delivery(root: Path) -> dict:
         raise ValueError("delivery identity differs from the bundle")
     if record.get("application") != manifest.get("application"):
         raise ValueError("delivery product metadata differs from the bundle")
+    entrypoint = record.get("entrypoint")
+    if entrypoint is not None:
+        expected = "paper_manager.exe" if manifest["target"] == "windows-x86_64" else "paper_manager"
+        if entrypoint != expected or record.get("launch_mode") != "unpacked":
+            raise ValueError("invalid unpacked launcher entry point")
+        path = root / entrypoint
+        native = root / "bundle" / ("launcher.exe" if expected.endswith(".exe") else "launcher")
+        if not path.is_file() or path.is_symlink() or sha256(path) != sha256(native):
+            raise ValueError("root launcher differs from the sealed runtime executable")
+    elif any((root / name).exists() for name in ENTRYPOINTS):
+        raise ValueError("unrecorded root launcher")
     observed = {}
     for name in ("validation", "reports", "installer"):
         observed.update({name + "/" + key: value for key, value in inventory(root / name, exclude=()).items()})
-    for name in (*BOOTSTRAPS, *DELIVERY_DOCS):
+    for name in (*BOOTSTRAPS, *DELIVERY_DOCS, *ENTRYPOINTS):
         path = root / name
         if path.exists():
             if not path.is_file() or path.is_symlink():

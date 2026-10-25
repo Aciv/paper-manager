@@ -11,7 +11,7 @@
     <main>
       <p class="eyebrow">paper_manager · 1.0.0</p>
       <h1>本地服务</h1>
-      <p>关闭此页面不会停止应用。请使用下方按钮停止服务或退出。</p>
+      <p>首次使用请先初始化数据，再启动服务。数据独立保存在用户目录；关闭此页面不会停止应用。</p>
       <section aria-live="polite">
         <h2 id="state">正在读取状态</h2>
         <p id="error" role="alert"></p>
@@ -19,7 +19,7 @@
       </section>
       <div class="actions">
         <a id="open" target="_blank" rel="noreferrer" hidden>打开论文库 ↗</a>
-        <button data-action="initialize">首次配置 / 重试配置</button>
+        <button data-action="initialize">首次初始化 / 重试</button>
         <button data-action="start">启动 / 重试</button>
         <button data-action="stop">停止服务</button>
         <button data-action="quit">退出 Launcher</button>

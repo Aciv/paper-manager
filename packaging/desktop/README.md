@@ -1,6 +1,8 @@
 # 跨平台发行审计与验证
 
-当前安装和维护说明见 [INSTALL.md](INSTALL.md)，最新证据见 [VALIDATION.md](VALIDATION.md)。
+默认交付为解压运行：Windows 打开根目录 paper_manager.exe，Linux/macOS 运行
+./paper_manager；首次在管理页初始化。无需先运行 Install 脚本。
+使用及可选维护说明见 [INSTALL.md](INSTALL.md)，最新证据见 [VALIDATION.md](VALIDATION.md)。
 下面保留 D0/D1 历史审计；其中“下一步”“尚未实现”等是当时状态，不是当前交付结论。
 
 日期：2026-10-24。当前结论：**D0/D1原生技术验证完成，保留Asynq和共享worker

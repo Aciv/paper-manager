@@ -310,6 +310,7 @@ def assemble(args):
                     "compatibility": {"postgres_major": 17, "data_format": 1, "task_payload": 1},
                     "target": target, "profile": args.profile, "revision": args.revision,
                     "sources": lock, "public_release_approved": False,
+                    "launcher_layout": "nested-bundle-v1",
                     "web_build": "prebuilt" if args.web_dist else "native",
                     "wheel_input": "offline" if args.wheel_dir else "downloaded",
                     "files": inventory(bundle)}

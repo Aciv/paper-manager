@@ -1,50 +1,69 @@
-# paper_manager 桌面候选包使用说明
+# paper_manager 解压运行与维护
 
-版本 1.0.0。当前归档为未签名的验证候选包，尚未发布正式 Release。
-用户无需安装 Docker、Go、Node、Python、PostgreSQL 或 Redis；运行组件随包提供。
-请完整解压归档，保留 bundle、installer 及同级脚本，不要只复制 launcher。
+版本 1.0.0。完整解压对应平台归档，以普通用户运行；无需安装 Docker、Go、Node、
+Python、PostgreSQL 或 Redis。所有运行组件随包提供。当前候选包未签名，尚未发布正式 Release。
 
-## 安装与启动
+## 默认：解压后运行
 
-用普通用户执行，不要使用 sudo 或“以管理员身份运行”。
+| 平台 | 归档和入口 | 默认数据目录 |
+| --- | --- | --- |
+| Windows x86_64 | ZIP；双击根目录 paper_manager.exe | %APPDATA%/papers-manager |
+| macOS arm64 | tar.gz；终端运行 ./paper_manager | ~/Library/Application Support/papers-manager |
+| Linux x86_64 | tar.gz；终端运行 ./paper_manager | $XDG_DATA_HOME/papers-manager |
 
-| 平台 | 解压后的入口 | 默认程序目录 | 默认数据目录 |
-| --- | --- | --- | --- |
-| Windows x86_64 | Install.cmd | %LOCALAPPDATA%/paper_manager-program | %APPDATA%/papers-manager |
-| macOS arm64 | Install.command | ~/Library/Application Support/paper_manager-program | ~/Library/Application Support/papers-manager |
-| Linux x86_64 | ./Install.sh | $XDG_DATA_HOME/paper_manager-program | $XDG_DATA_HOME/papers-manager |
+Linux 未设置 XDG_DATA_HOME 时使用 ~/.local/share。保留整个解压目录，不能只复制 EXE。
+Go 已编译成原生程序，React 已构建成静态网页；运行时不需要 Go 或 Node 环境。
+私有 Python 用于解析器；默认启动不经过 Python 安装脚本。
 
-Linux 未设置 XDG_DATA_HOME 时使用 ~/.local/share。默认不创建桌面/应用快捷方式。
-需要时给安装入口加 --create-shortcut：Windows 写入桌面，macOS 写入 ~/Applications，
-Linux 写入用户 applications 目录；也可用 --shortcut-dir 指定目录，表示明确选择创建。
-快捷方式创建失败只提示，安装与升级继续成功；可以使用程序目录内的固定入口启动。
+1. 打开根目录 paper_manager.exe / paper_manager，浏览器显示管理页。
+2. 首次点击“首次初始化 / 重试”，完成后点击“启动”。初始化只创建本应用私有数据库，
+   不安装全局服务、不修改 PATH。正常重启复用已有数据。
+3. 通过管理页查看服务状态和日志，完成使用后点击“退出 Launcher”。关闭浏览器不会停止服务。
 
-安装器复制私有组件，以当前用户初始化本应用数据库，验证服务后启动 Launcher。
-不安装全局数据库服务，不修改系统 PATH。程序和数据目录必须独立，不能互相嵌套。
-可给入口脚本传入 --program-dir、--data-dir、--shortcut-dir，值均为绝对路径；
---no-launch 可在安装后暂不启动。首版不自动接管开发项目或 Docker 的已有数据。
+程序保留在解压目录，数据库、论文、图片和 notes 存在独立数据目录。
+不要使用 sudo 或管理员身份启动。可传 --data-dir 指定绝对数据路径，
+--open-browser=false 禁止自动打开浏览器；终端仍打印管理地址。
+Windows 包所在目录和数据目录请使用完整 ASCII 路径，含中文等字符时可能被底层运行时拒绝。
+例如将 ZIP 解压到 C:/paper_manager，并运行：
 
-安装后使用程序目录内的 paper_manager（Unix）/paper_manager.ps1（Windows）；
-选用了快捷方式时，也可以从快捷方式打开。
-关闭浏览器标签不会停止后台服务，请通过管理页退出 Launcher。
-初始化失败时查看数据目录中的 logs，保留目录，排除原因后执行 retry。
+```bat
+paper_manager.exe --data-dir C:/paper_manager_data
+```
 
-Windows 默认安装后可从命令提示符打开固定入口；自定义安装目录时替换路径：
+首次初始化失败时查看管理页错误和数据目录 logs，排除原因后重试；不要删除数据库或配置强行重建。
+签名/系统隔离和首次下载提示可能需要用户确认；当前不是 macOS .app 或 Windows 图形安装器。
+
+## 数据保留与更新边界
+
+默认模式不是“把数据也放在 U 盘里”的便携数据库。退出后删除解压目录不会删除用户数据，
+但再次使用需要保留原程序目录；不要移动正在运行的目录。
+运行另一个构建时不会隐式接管原数据库，也不会沿用旧绝对路径偷偷运行旧程序。
+同构建完整副本且原目录仍在时可校验后重新绑定；原目录缺失或构建不同时提示退出并保留数据。
+当前免安装模式没有原地更新或自动转为受管理安装的功能，不能靠直接覆盖旧文件完成升级。
+
+## 可选：受管理安装
+
+已有 Install.cmd / Install.command / Install.sh 仍保留供需要受管理版本目录与升级维护的人使用；
+普通解压运行无需执行。脚本使用随包的私有 Python 调用原生 Go Launcher 维护命令，
+复制组件、初始化并验证后启动，不要求系统安装 Python。
+
+| 平台 | 可选入口 | 默认受管理程序目录 |
+| --- | --- | --- |
+| Windows | Install.cmd | %LOCALAPPDATA%/paper_manager-program |
+| macOS | Install.command | ~/Library/Application Support/paper_manager-program |
+| Linux | ./Install.sh | $XDG_DATA_HOME/paper_manager-program |
+
+程序和数据目录必须独立，不能互相嵌套。Windows 安装器在操作前拒绝非 ASCII 完整路径。
+可传 --program-dir、--data-dir（绝对路径）和 --no-launch；首版不接管免安装、开发或 Docker 已有数据。
+快捷方式默认不创建。--create-shortcut 或 --shortcut-dir 显式启用，创建失败只提示。
+安装后使用程序目录的固定入口：Unix 为 paper_manager，Windows 为 paper_manager.ps1。
+Windows 命令示例：
 
 ```bat
 powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\paper_manager-program\paper_manager.ps1"
 ```
 
-Linux 默认安装可运行 `~/.local/share/paper_manager-program/paper_manager`；macOS 使用
-`"$HOME/Library/Application Support/paper_manager-program/paper_manager"`。
-这些入口读取当前活动版本，升级后无需手动进入 versions 子目录。
-
-Windows 安装器只接受完整路径均为 ASCII 的程序目录和数据目录；包含中文或其他非 ASCII
-字符时，在开始安装前提示并退出，不移动或删除现有文件。可指定
---program-dir C:/paper_manager --data-dir C:/paper_manager_data；父目录和用户名部分也计入检测。
-这是首版明确限制，不再依赖各卷可能禁用的 8.3 短路径。Linux/macOS 保留中文路径支持。
-Windows 验收仍记录底层运行时对无短路径别名的中文目录明确拒绝，再完整验证 ASCII 安装方案。
-首次下载提示、杀毒和系统隔离仍需用户机器验证。
+以下升级、检查点、清理和卸载命令仅针对通过此安装器建立的受管理安装。
 
 ## 手动升级
 
