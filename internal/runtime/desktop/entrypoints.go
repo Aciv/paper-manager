@@ -14,8 +14,13 @@ func (m *maintenance) writeUninstaller() error {
 			"$record = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'installation.json') -Raw | ConvertFrom-Json\n" +
 			"if ($record.active -notmatch '^[a-z0-9][a-z0-9.-]*$') { throw 'Invalid active version' }\n" +
 			"$bundle = Join-Path (Join-Path $PSScriptRoot 'versions') $record.active\n" +
-			"$temporary = Join-Path ([IO.Path]::GetTempPath()) ('paper-manager-uninstall-' + [guid]::NewGuid())\n" +
+			"$temporary = Join-Path " + powershellLiteral(filepath.Join(m.root, "maintenance", "staging")) +
+			" ('uninstall-' + [guid]::NewGuid())\n" +
 			"New-Item -ItemType Directory -Path $temporary | Out-Null\n" +
+			"$stamp = [DateTime]::UtcNow.ToString('o')\n" +
+			"$owner = @{ schema_version = 1; data_dir = " + powershellLiteral(m.root) +
+			"; created = $stamp; last_activity = $stamp } | ConvertTo-Json\n" +
+			"[IO.File]::WriteAllText((Join-Path $temporary 'resource.json'), $owner)\n" +
 			"$code = 1\n" +
 			"try {\n" +
 			"  $helper = Join-Path $temporary 'launcher.exe'\n" +

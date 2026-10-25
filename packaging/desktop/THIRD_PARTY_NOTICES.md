@@ -22,7 +22,7 @@ alone does not mean that executable dependency is shipped.
 | PyMuPDF / PyMuPDF4LLM | 1.28.0 | AGPLv3 or Artifex commercial terms; no commercial license is assumed. |
 | PyMuPDF Layout | 1.28.0 | PolyForm Noncommercial or Artifex commercial terms in the currently pinned wheel; do not infer newer releases' license terms. |
 | CRF models | Optional hybrid profile; hashes in dependencies.json | Header/citation weights are maintainer-authorized bundled resources, identified by their hashes; no training dataset provenance is required. The rules profile excludes weights. |
-| Frontend fonts | Versions from web/package-lock.json | Preserve upstream font notices; audit the final web assets and font subsets. |
+| Frontend fonts | Manrope 5.3.0; Noto Sans SC 5.3.1 | OFL-1.1; upstream LICENSE files are collected under licenses/web/@fontsource-variable/. The 103 web build font files match the pinned package files; original license hashes were verified in the local sealed bundle. |
 | Other Go / Python / JS packages | Exact identities in the bundle | Preserve supplied notices; resolve missing license/source obligations before public distribution. |
 
 Authoritative references:
@@ -35,6 +35,5 @@ Authoritative references:
 
 Public-release blockers: Redis license route and
 complete Windows native-library redistribution review; current Layout terms unresolved for general
-redistribution; third-party font notices and complete transitive audit
-pending. Installers, offline upgrades and data-preserving uninstall are implemented;
+redistribution; complete transitive redistribution review remains pending. Installers, offline upgrades and data-preserving uninstall are implemented;
 final platform acceptance and signing/public-release decisions remain separate gates.

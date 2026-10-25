@@ -5,7 +5,7 @@ Read THIRD_PARTY_NOTICES.md before sharing. The bundle includes private CPython,
 PostgreSQL 17, Redis, parser source, Go entry points and prebuilt web resources.
 Users do not need Go, Node, Python, pip, Redis or PostgreSQL installed.
 
-The outer archive now provides Install.sh/Install.command/Install.cmd, installed
+The outer archive now provides Install.sh/Install.command/Install.cmd, optional
 shortcuts and offline upgrade/uninstall helpers. Prefer those entries and read
 the outer README.md for installation, checkpoints and maintenance commands.
 The following direct-launcher instructions remain useful for standalone testing.

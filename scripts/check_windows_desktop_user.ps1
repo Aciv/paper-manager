@@ -18,6 +18,10 @@ $repo = $env:GITHUB_WORKSPACE
 $output = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repo 'tmp/desktop-d0/launcher' }
 $python = (Get-Command python).Source
 if (-not $Bundle) { $bin = Split-Path (Get-Command pg_ctl).Source }
+$savedChildEnvironment = @{}
+foreach ($name in @('TEMP', 'TMP', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA')) {
+    $savedChildEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+}
 try {
     New-LocalUser -Name $account -Password $password -AccountNeverExpires | Out-Null
     $members = Get-LocalGroupMember -SID 'S-1-5-32-545'
@@ -37,6 +41,19 @@ try {
         "$env:COMPUTERNAME\$account", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
     $acl.AddAccessRule($rule)
     Set-Acl $root $acl
+    # Credential startup loads a registry profile but inherits the caller's
+    # environment. The ordinary account must not use the admin runner's paths.
+    $profileRoot = Join-Path $root 'profile'
+    $childEnvironment = @{
+        TEMP = (Join-Path $root 'temp'); TMP = (Join-Path $root 'temp')
+        USERPROFILE = $profileRoot; HOME = $profileRoot
+        APPDATA = (Join-Path $profileRoot 'AppData/Roaming')
+        LOCALAPPDATA = (Join-Path $profileRoot 'AppData/Local')
+    }
+    foreach ($name in $childEnvironment.Keys) {
+        New-Item -ItemType Directory -Path $childEnvironment[$name] -Force | Out-Null
+        [Environment]::SetEnvironmentVariable($name, $childEnvironment[$name])
+    }
     if ($Bundle) {
         $arguments = @(
             ('"' + (Join-Path $Harness 'check_desktop_launcher.py') + '"'),
@@ -115,10 +132,14 @@ try {
         Copy-Item (Join-Path $root 'upgrade-result/*') $upgradeOutput -ErrorAction SilentlyContinue
         Copy-Item (Join-Path $root 'upgrade-*.log') $upgradeOutput -ErrorAction SilentlyContinue
         $upgradeReport = Get-Content (Join-Path $upgradeOutput 'upgrade.json') -Raw | ConvertFrom-Json
-        if ($upgradeProcess.ExitCode -ne 0 -or $upgradeReport.status -ne 'passed' -or $upgradeReport.is_admin -ne $false) {
+        if ($upgradeProcess.ExitCode -ne 0 -or $upgradeReport.status -ne 'passed' -or
+            $upgradeReport.is_admin -ne $false) {
             throw 'Ordinary-account upgrade probe failed; see upgrade/upgrade.json'
         }
     }
 } finally {
+    foreach ($name in $savedChildEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $savedChildEnvironment[$name])
+    }
     Remove-LocalUser -Name $account -ErrorAction SilentlyContinue
 }

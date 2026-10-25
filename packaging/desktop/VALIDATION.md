@@ -1,11 +1,25 @@
 # D3 internal validation evidence
 
-Status: D3/D4 native acceptance at commit fe2506b completed; see
-[run 40181692843](https://github.com/Aciv/paper-master/actions/runs/40181692843).
-The maintainer authorized one consolidated final matrix after making the repository
-public. Earlier quota exhaustion remains historical evidence below. Project-owned
-code is MIT; third-party public redistribution and signing gates remain separate.
-The earlier local Linux/Windows results below remain useful, revision-specific evidence.
+Status: D4 installation/update/restore/cleanup implementation is complete;
+Windows artifact acceptance of 3f1a58b failed at uninstall in
+[run 40189037420](https://github.com/Aciv/paper-master/actions/runs/40189037420).
+Linux and macOS full install/upgrade/rollback/uninstall acceptance passed at
+fe2506b in run 40181692843. These are revision-specific results; do not treat a
+successful build or old runtime report as a passed Windows upgrade report.
+
+| Target | Latest full artifact evidence | Scope / remaining check |
+| --- | --- | --- |
+| Ubuntu 22.04 x64 | fe2506b, run 40181692843, passed | Full runtime and D4 lifecycle; previous shortcut-enabled behavior |
+| macOS 14 arm64 | fe2506b, run 40181692843, passed | Full runtime and D4 lifecycle; previous shortcut-enabled behavior |
+| Windows Server 2022 x64 | 3f1a58b, run 40189037420, uninstall failed | Install/upgrade/real rollback passed; inherited admin TEMP blocked uninstall |
+| Windows 10 x64 | Local directory/archive, managed runtime and uninstall checks passed | Host evidence does not replace the Server 2022 result |
+
+Project-owned code is MIT. Candidates are unsigned and do not constitute public
+binary redistribution approval. Download/OS prompts, antivirus and sleep/resume
+remain outside hosted application lifecycle coverage. Earlier quota exhaustion,
+failed runs and local archive results below are retained as history.
+
+## Historical D3 archive evidence
 
 Linux runtime revision: `66a99c66571def5d7f1374161e3ee010b863152e`.
 The export tool keeps this revision and independently records validation-tool
@@ -289,3 +303,23 @@ probe option. Focused Python tests cover default/opt-in/custom directory behavio
 and optional Windows lookup failure; Go verifies an actual shortcut filesystem
 failure cannot change healthy installation state or overwrite an obstruction.
 No hosted workflow has been started for this change at this point.
+
+
+### Run 40189037420: inherited administrator TEMP
+
+The Windows default-without-shortcut run passed install, real PDF/queue/parser,
+synthetic upgrade and actual SQL/file rollback. Uninstall failed before starting
+its helper: the ordinary credential inherited the administrator runner's TEMP,
+pointing to C:/Users/RUNNER~1/AppData. This is captured in uninstaller.log, not a
+parser/concurrency failure. That archive is not marked accepted.
+
+The validation wrapper now supplies owned TEMP/TMP/USERPROFILE/HOME/APPDATA/
+LOCALAPPDATA directories and restores its parent environment afterward. The
+uninstaller places its helper under the application's data/maintenance/staging,
+with the same resource.json ownership/timestamp format as managed cleanup. It
+therefore does not require a writable system TEMP; normal cleanup removes the
+helper, while interrupted helper staging can be handled by existing owned TTL
+cleanup. A native regression executes the generated PowerShell uninstaller with
+TEMP/TMP deliberately pointing to a blocking file, verifies helper arguments and
+ownership, and checks that only its own staging is removed. No database services
+or actual account creation are needed by that regression.

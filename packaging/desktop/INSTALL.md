@@ -29,6 +29,16 @@ Linux 写入用户 applications 目录；也可用 --shortcut-dir 指定目录�
 关闭浏览器标签不会停止后台服务，请通过管理页退出 Launcher。
 初始化失败时查看数据目录中的 logs，保留目录，排除原因后执行 retry。
 
+Windows 默认安装后可从命令提示符打开固定入口；自定义安装目录时替换路径：
+
+```bat
+powershell -NoProfile -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\paper_manager-program\paper_manager.ps1"
+```
+
+Linux 默认安装可运行 `~/.local/share/paper_manager-program/paper_manager`；macOS 使用
+`"$HOME/Library/Application Support/paper_manager-program/paper_manager"`。
+这些入口读取当前活动版本，升级后无需手动进入 versions 子目录。
+
 Windows 安装器只接受完整路径均为 ASCII 的程序目录和数据目录；包含中文或其他非 ASCII
 字符时，在开始安装前提示并退出，不移动或删除现有文件。可指定
 --program-dir C:/paper_manager --data-dir C:/paper_manager_data；父目录和用户名部分也计入检测。
@@ -76,7 +86,9 @@ status 列出版本和检查点占用；restore 替换检查点范围内的当�
 
 先退出 Launcher。使用程序目录的 uninstall（Unix）或 uninstall.ps1（Windows），
 也可从下载归档执行 Uninstall.sh/Uninstall.command/Uninstall.cmd 并传入原目录。
-安装目录卸载脚本会复制临时辅助程序，避免删除正在执行的 Windows EXE。
+安装目录卸载脚本会将 Windows 辅助程序复制到数据目录的 maintenance/staging，
+避免删除正在执行的 EXE，也不依赖系统 TEMP 的权限。辅助程序有所有权记录；
+正常卸载后移除，异常遗留由后续受控暂存清理处理。
 卸载删除受管理程序和未被修改的快捷方式，保留数据、检查点和所有权记录。
 重新安装精确原版本可继续使用数据；首版不支持卸载后直接安装任意新版本。
 没有“一键彻底删除数据”功能，需要时由用户确认并手动处理自己的数据目录。

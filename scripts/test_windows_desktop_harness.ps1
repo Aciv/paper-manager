@@ -31,6 +31,15 @@ function Start-Process {
           $WorkingDirectory, [switch]$Wait, [switch]$PassThru,
           $RedirectStandardOutput, $RedirectStandardError)
     $harnessTestState.Calls.Add($ArgumentList)
+    foreach ($name in @('TEMP', 'TMP', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA')) {
+        $value = [Environment]::GetEnvironmentVariable($name)
+        if (-not $value.StartsWith($WorkingDirectory + [IO.Path]::DirectorySeparatorChar)) {
+            throw "Child inherited an unowned environment path: $name"
+        }
+        if (-not (Test-Path -LiteralPath $value -PathType Container)) {
+            throw "Child environment directory missing: $name"
+        }
+    }
     $outputIndex = [array]::IndexOf($ArgumentList, '--output-dir')
     if ($outputIndex -lt 0) { throw 'Output directory missing' }
     $resultPath = $ArgumentList[$outputIndex + 1].Trim('"')

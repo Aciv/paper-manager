@@ -35,10 +35,12 @@ These inputs must match the intended revision and target; the manifest records
 prebuilt/offline use. The default CI build continues to build the UI and download
 locked target wheels. Windows native Go builds require a local drive for source
 and module caches; a WSL UNC share does not provide Go's required file locking.
-Windows PostgreSQL uses ASCII short-path aliases for both program and data paths.
-If a volume disables those aliases, or an alias still contains non-ASCII
-characters, setup requires ASCII installation/data paths and reports this before
-initialization. The Unicode relocation probe uses a mixed ASCII/Chinese name.
+Managed Windows installation requires ASCII program/data paths and rejects
+non-ASCII paths before maintenance. The lower-level PostgreSQL runtime can use
+ASCII short-path aliases for existing direct-launch configurations, but managed
+installation does not depend on 8.3 aliases being enabled. The Unicode relocation
+probe records the explicit refusal and then exercises ASCII installation when
+aliases are unavailable. Shortcuts are optional and disabled by default.
 
 The default hybrid candidate includes the two authorized header/citation CRF
 weights and validates them using fail-closed CRF mode. It cannot silently fall

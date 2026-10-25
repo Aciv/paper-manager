@@ -9,8 +9,15 @@ Go HTTP 层使用 Gin 与 Handler 结构；需要跨表原子性的写入由 Rep
 ## 本地桌面内部验证包
 
 Launcher 管理应用私有的 PostgreSQL、Redis、Python 与 Go 服务，Go 同时托管预构建
-前端，运行时不需要 Docker、Go、Node 或系统 Python。首次启动先在管理页执行
-“首次配置”，完成后再点击“启动”；安装器可调用同一个 `launcher --initialize` 入口。
+前端，运行时不需要 Docker、Go、Node 或系统 Python。直接运行原始 bundle 时，
+先在管理页执行“首次配置”，再点击“启动”。使用完整归档时，以普通用户运行
+`Install.cmd`（Windows）、`Install.command`（macOS）或 `./Install.sh`（Linux），
+安装器会完成首次配置、健康检查并启动应用；正常重启不会重复初始化数据库。
+
+Windows 程序和数据目录使用英文 ASCII 完整路径，检测到中文等字符时会提前提示。
+快捷方式默认不创建，需要时加 `--create-shortcut`。升级、检查点恢复、清理和卸载见
+[安装维护说明](packaging/desktop/INSTALL.md)，各平台实测状态见
+[验收记录](packaging/desktop/VALIDATION.md)。关闭浏览器标签不会退出后台服务。
 
 自有代码采用 [MIT](LICENSE)，第三方组件分别遵循其许可。安装候选包未签名，
 不代表已经完成所有第三方二进制的再分发检查。构建、平台证据与剩余限制见
