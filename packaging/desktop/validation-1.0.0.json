@@ -1,0 +1,53 @@
+{
+  "application": "paper_manager",
+  "version": "1.0.0",
+  "public_release_created": false,
+  "platforms": [
+    {
+      "target": "ubuntu-22.04",
+      "revision": "fe2506b63e98707ecd8414a16530b7c8a2011d6c",
+      "runtime": "passed",
+      "upgrade_rollback_uninstall_reinstall": "passed",
+      "synthetic_upgrade_versions": true,
+      "startup_seconds": 2.012,
+      "cold_upload_to_read_seconds": 3.037,
+      "shortcuts_requested": true,
+      "report_archive_sha256": "6d83932d3ba02a17f7e611e25410dfa9b29df4a0c2087e6ef83b8cad928e7996",
+      "run_id": 40181692843,
+      "artifact_id": 12594880575,
+      "artifact_zip_sha256": "d8b4522cc5c7a1df5877641bf7270f3b47351f0c37cd166e673a6595778ad6e6",
+      "runtime_tar_sha256": "47821498bde90cd744fd0c603c01d08b4c5f0b45f7d78c6fd9b62423f4cef79b"
+    },
+    {
+      "target": "macos-14",
+      "revision": "fe2506b63e98707ecd8414a16530b7c8a2011d6c",
+      "runtime": "passed",
+      "upgrade_rollback_uninstall_reinstall": "passed",
+      "synthetic_upgrade_versions": true,
+      "startup_seconds": 2.066,
+      "cold_upload_to_read_seconds": 2.777,
+      "shortcuts_requested": true,
+      "report_archive_sha256": "ebc1b04d1ee7f39cce3b2c169a46a1b35f16699e8af56382b0c9d8fca5148146",
+      "run_id": 40181692843,
+      "artifact_id": 12594516544,
+      "artifact_zip_sha256": "0fed33b04fa4d1952da9c11090e205b036af1af249c20e8905cca0a8a40a0931",
+      "runtime_tar_sha256": "eff335d2dfdbf29d4fc7e4bf0f90d7fe5d1a9710217c21310dd09ca317ceaa7d"
+    },
+    {
+      "target": "windows-2022",
+      "revision": "c5feaa4f6e37e6faaf1c2b9b1c8bea2c7f00b4da",
+      "runtime": "passed",
+      "upgrade_rollback_uninstall_reinstall": "passed",
+      "synthetic_upgrade_versions": true,
+      "startup_seconds": 2.422,
+      "cold_upload_to_read_seconds": 4.157,
+      "shortcuts_requested": false,
+      "report_archive_sha256": "4e20258b6e5924702270b943bbda408f6d95aadf01e375d39021fe7a7ee4d799",
+      "run_id": 40191338426,
+      "artifact_id": 12598820470,
+      "artifact_zip_sha256": "2b2dc8d778d84d2548d8fc7bdc919ea2222983fa9d3311a3d770bb7eef7409de",
+      "runtime_tar_sha256": "0865c59e90c346b7e12938acf45cafefd84c94d038d6da5cadc68af1172e629b"
+    }
+  ],
+  "publisher_signed": false
+}

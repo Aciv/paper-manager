@@ -1,23 +1,32 @@
 # D3 internal validation evidence
 
-Status: D4 installation/update/restore/cleanup implementation is complete;
-Windows artifact acceptance of 3f1a58b failed at uninstall in
-[run 40189037420](https://github.com/Aciv/paper-master/actions/runs/40189037420).
-Linux and macOS full install/upgrade/rollback/uninstall acceptance passed at
-fe2506b in run 40181692843. These are revision-specific results; do not treat a
-successful build or old runtime report as a passed Windows upgrade report.
+Status: native candidate runtime and managed lifecycle acceptance passed on all
+three selected baselines. Windows completed the full default-without-shortcut
+flow at c5feaa4 in [run 40191338426](https://github.com/Aciv/paper-master/actions/runs/40191338426).
+Linux/macOS evidence remains fe2506b from run 40181692843; these are distinct
+revision-specific candidates, not a claim that every platform ran the same Git SHA.
 
-| Target | Latest full artifact evidence | Scope / remaining check |
+| Target | Full artifact evidence | Scope |
 | --- | --- | --- |
-| Ubuntu 22.04 x64 | fe2506b, run 40181692843, passed | Full runtime and D4 lifecycle; previous shortcut-enabled behavior |
-| macOS 14 arm64 | fe2506b, run 40181692843, passed | Full runtime and D4 lifecycle; previous shortcut-enabled behavior |
-| Windows Server 2022 x64 | 3f1a58b, run 40189037420, uninstall failed | Install/upgrade/real rollback passed; inherited admin TEMP blocked uninstall |
-| Windows 10 x64 | Local directory/archive, managed runtime and uninstall checks passed | Host evidence does not replace the Server 2022 result |
+| Ubuntu 22.04 x64 | fe2506b, run 40181692843, passed | Runtime, install, synthetic upgrade, actual rollback, uninstall/reinstall; shortcuts enabled in that snapshot |
+| macOS 14 arm64 | fe2506b, run 40181692843, passed | Same full lifecycle; shortcuts enabled in that snapshot |
+| Windows Server 2022 x64 | c5feaa4, run 40191338426, passed | Same full lifecycle, default shortcuts off, owned user environment and uninstall staging |
+| Windows 10 x64 | Local runtime/archive and focused native checks passed | Additional host evidence, not a substitute for Server 2022 |
 
-Project-owned code is MIT. Candidates are unsigned and do not constitute public
-binary redistribution approval. Download/OS prompts, antivirus and sleep/resume
-remain outside hosted application lifecycle coverage. Earlier quota exhaustion,
-failed runs and local archive results below are retained as history.
+[validation-1.0.0.json](validation-1.0.0.json) records exact revisions, report/archive
+hashes and measured baselines. Original archives are retained locally under
+`tmp/desktop-d4/final-artifacts/`, with CRC and SHA-256 verification. Its index.json
+selects the accepted Windows c5feaa4 package; the failed 3f1a58b package is under
+history/ and is not a usable delivery. The earlier Unix archives retain their
+original installer behavior; current source defaults to optional shortcuts on
+all platforms. They are not relabelled as newly built c5feaa4 binaries.
+
+D3 native candidate packaging is verified. D4 core installation/update/recovery/
+uninstall implementation and technical acceptance are complete; D4 public-release
+preparation remains in progress. Project-owned code is MIT; third-party binary
+redistribution review, publisher signing/notarization decisions and real-user
+OS/antivirus/sleep-resume checks remain open. No official release was published
+by this task. Original failures and local archive evidence are preserved below.
 
 ## Historical D3 archive evidence
 
@@ -323,3 +332,35 @@ cleanup. A native regression executes the generated PowerShell uninstaller with
 TEMP/TMP deliberately pointing to a blocking file, verifies helper arguments and
 ownership, and checks that only its own staging is removed. No database services
 or actual account creation are needed by that regression.
+
+
+### Windows c5feaa4 accepted: run 40191338426
+
+Both native build and independent artifact-test jobs passed. The four retained
+reports (launcher.json, setup-failures.json, parser-benchmark.json and
+upgrade/upgrade.json) all report passed, is_admin=false where applicable, and
+explicit ASCII installation mode. The upgrade report includes real PDF/queue/
+parser persistence, synthetic 1.0.1 upgrade, failed 1.0.2 SQL/file mutation rollback,
+owned cleanup, data-preserving uninstall and exact-version reinstall. Shortcuts
+were not requested. This validates the inherited-TEMP fix without weakening
+uninstall/data-preservation assertions. New native regression and actual-wrapper
+environment assertions also ran during the build.
+
+Windows baseline startup was 2.422 s and cold one-page upload-to-reading 4.157 s.
+These are synthetic host observations, not a before/after speedup or real-paper
+quality claim. Windows program/data ASCII restrictions remain explicit.
+
+Successful local source checks after the fix:
+
+```bash
+/usr/local/go/bin/go test ./...
+/usr/local/go/bin/go build ./...
+/usr/local/go/bin/go test -race ./internal/runtime/... ./cmd/launcher
+.venv/bin/python -m unittest discover -s scripts -p 'test_desktop*.py'
+cd web && npm run build
+git diff --check
+```
+
+The script suite ran 26 tests. Native Windows additionally executed
+TestWindowsUninstallerIgnoresUnwritableSystemTemp and
+test_windows_desktop_harness.ps1, including the deliberate old-variable regression.
