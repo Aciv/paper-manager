@@ -12,7 +12,6 @@ import json
 import os
 from pathlib import Path
 
-from desktop_bundle import verify
 import socket
 import subprocess
 import sys
@@ -22,6 +21,12 @@ import urllib.error
 import urllib.request
 
 import psutil
+
+# Validation must not modify a sealed harness or its read-only bundle.
+sys.dont_write_bytecode = True
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+
+from desktop_bundle import verify
 
 
 def http(url, method="GET", body=None, headers=None):
@@ -274,6 +279,17 @@ def main():
                             "a runtime process came from outside the bundle")
                     report["bundle"] = {"target": manifest["target"], "profile": manifest["profile"],
                                         "revision": manifest["revision"], "runtime_paths": sorted(map(str, paths))}
+                    if os.name == "nt":
+                        postgres = next(child for child in children if Path(child.exe()).name == "postgres.exe")
+                        mapped = {Path(item.path).name.lower(): Path(item.path).resolve()
+                                  for item in postgres.memory_maps()}
+                        libraries = {}
+                        for name in ("vcruntime140.dll", "msvcp140.dll"):
+                            expected_library = (args.postgres_bin / name).resolve()
+                            require(mapped.get(name) == expected_library,
+                                    f"PostgreSQL did not load private {name}")
+                            libraries[name] = str(mapped[name])
+                        report["bundle"]["native_libraries"] = libraries
                     report["idle_rss_bytes"] = sum(child.memory_info().rss for child in children)
                 api = ready["app_url"]
                 code, data, headers = http(api + "/", headers={"Accept": "text/html"})

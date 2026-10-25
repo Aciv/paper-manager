@@ -1,24 +1,24 @@
 name: Desktop internal bundle (D3)
 
 on:
+  workflow_call:
+    inputs:
+      target:
+        type: string
+        default: windows-crf
   workflow_dispatch:
-  push:
-    branches: [codex_main]
-    paths:
-      - '.github/workflows/desktop-d3.yml'
-      - 'cmd/**'
-      - 'internal/runtime/**'
-      - 'scripts/*desktop*'
-      - 'packaging/desktop/**'
-      - 'pdf_parser/**'
-      - 'web/**'
-  pull_request:
-    paths:
-      - '.github/workflows/desktop-d3.yml'
-      - 'cmd/launcher/**'
-      - 'internal/runtime/desktop/**'
-      - 'scripts/*desktop*'
-      - 'packaging/desktop/**'
+    inputs:
+      target:
+        description: 'Run only the selected target; full matrix is for final acceptance'
+        required: true
+        default: windows-crf
+        type: choice
+        options:
+          - windows-crf
+          - ubuntu-22.04
+          - windows-2022
+          - macos-14
+          - all
 
 permissions:
   contents: read
@@ -31,6 +31,7 @@ concurrency:
 # with short retention. Only explicitly authorized small CRF weights are committed.
 jobs:
   windows-crf-path:
+    if: inputs.target == 'windows-crf'
     runs-on: windows-2022
     timeout-minutes: 8
     steps:
@@ -45,10 +46,14 @@ jobs:
         run: python -m unittest discover -s papers_parser -p test_native_crf_runtime.py
 
   build:
+    if: inputs.target != 'windows-crf'
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, windows-2022, macos-14]
+        runner: >-
+          ${{ fromJSON(inputs.target == 'all'
+            && '["ubuntu-22.04","windows-2022","macos-14"]'
+            || format('["{0}"]', inputs.target)) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -78,29 +83,26 @@ jobs:
           --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/desktop-bundle"
           --cache "$RUNNER_TEMP/desktop-downloads"
       - name: Archive bundle and standalone validation harness
-        shell: python
-        run: |
-          import os, pathlib, tarfile
-          root = pathlib.Path(os.environ['RUNNER_TEMP'])
-          with tarfile.open(root / 'desktop.tar.gz', 'w:gz') as archive:
-              archive.add(root / 'desktop-bundle', arcname='bundle')
-              for name in ('check_desktop_launcher.py', 'desktop_bundle.py', 'check_windows_desktop_user.ps1',
-                           'benchmark_parser_shared.py', 'check_desktop_setup_failures.py'):
-                  archive.add(pathlib.Path('scripts') / name, arcname='validation/' + name)
+        run: >-
+          python scripts/package_desktop_bundle.py
+          --bundle "$RUNNER_TEMP/desktop-bundle" --output "$RUNNER_TEMP/desktop.tar.gz"
       - uses: actions/upload-artifact@v4
         with:
           name: internal-desktop-${{ matrix.runner }}
-          path: ${{ runner.temp }}/desktop.tar.gz
+          path: ${{ runner.temp }}/desktop.tar.gz*
           if-no-files-found: error
           retention-days: 1
 
   artifact-test:
-    if: ${{ !cancelled() }}
+    if: ${{ !cancelled() && needs.build.result == 'success' }}
     needs: build
     strategy:
       fail-fast: false
       matrix:
-        runner: [ubuntu-22.04, windows-2022, macos-14]
+        runner: >-
+          ${{ fromJSON(inputs.target == 'all'
+            && '["ubuntu-22.04","windows-2022","macos-14"]'
+            || format('["{0}"]', inputs.target)) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 15
     steps:
@@ -118,11 +120,19 @@ jobs:
       - name: Extract into relocated Unicode path
         shell: python
         run: |
-          import os, pathlib, tarfile
+          import hashlib, os, pathlib, subprocess, sys, tarfile
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          source = root / 'download/desktop.tar.gz'
+          with source.open('rb') as stream:
+              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+          expected = digest + '  desktop.tar.gz' + chr(10)
+          if source.with_name(source.name + '.sha256').read_text(encoding='utf-8') != expected:
+              raise ValueError('Downloaded archive checksum differs')
           destination = root / 'pm bundle 阅读'
-          with tarfile.open(root / 'download/desktop.tar.gz') as archive:
+          with tarfile.open(source) as archive:
               archive.extractall(destination, filter='data')
+          subprocess.run([sys.executable, '-B', str(destination / 'validation/check_desktop_package.py'),
+                          '--directory', str(destination), '--verify-only'], check=True)
       - name: Exercise only the downloaded bundle
         if: runner.os != 'Windows'
         shell: bash

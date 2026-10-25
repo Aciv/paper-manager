@@ -46,7 +46,7 @@ def download(item: dict, cache: Path) -> Path:
     return path
 
 
-def extract(archive: Path, destination: Path) -> None:
+def extract(archive: Path, destination: Path, *, prefixes: tuple[str, ...] | None = None) -> None:
     """Accept regular files/directories and safe tar links only."""
     destination.mkdir(parents=True, exist_ok=True)
     if zipfile.is_zipfile(archive):
@@ -57,17 +57,25 @@ def extract(archive: Path, destination: Path) -> None:
                     raise ValueError("unsafe ZIP member")
                 if (item.external_attr >> 16) & 0o170000 == 0o120000:
                     raise ValueError("ZIP symlinks are not supported")
-            source.extractall(destination)
+            selected = source.infolist()
+            if prefixes is not None:
+                selected = [item for item in selected if any(
+                    item.filename == prefix or (prefix.endswith("/") and item.filename.startswith(prefix))
+                    for prefix in prefixes
+                )]
+            source.extractall(destination, members=selected)
     else:
+        if prefixes is not None:
+            raise ValueError("selective extraction is only supported for ZIP archives")
         with tarfile.open(archive) as source:
             source.extractall(destination, filter="data")
 
 
-def inventory(root: Path) -> dict:
+def inventory(root: Path, *, exclude: tuple[str, ...] = ("bundle.json", "SHA256SUMS")) -> dict:
     files = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root).as_posix()
-        if relative in {"bundle.json", "SHA256SUMS"}:
+        if relative in exclude:
             continue
         if path.is_symlink():
             target = path.resolve()

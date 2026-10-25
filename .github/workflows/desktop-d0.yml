@@ -2,29 +2,32 @@ name: Desktop native validation (D0-D2)
 
 on:
   workflow_dispatch:
-  pull_request:
-    paths:
-      - '.github/workflows/desktop-d0.yml'
-      - 'cmd/**'
-      - 'internal/**'
-      - 'proto/**'
-      - 'gen/**'
-      - 'pdf_parser/**'
-      - 'scripts/*desktop*'
-      - 'scripts/*postgres*'
-      - 'scripts/benchmark_parser_shared.py'
-      - 'scripts/check_recognition_storage_key.py'
-      - 'packaging/desktop/**'
-      - '!packaging/desktop/**/*.md'
-      - 'go.mod'
-      - 'go.sum'
-      - 'web/**'
+    inputs:
+      suite:
+        description: 'bundle: selected D3 target; native-all: full D0-D2 matrix'
+        type: choice
+        default: bundle
+        options: [bundle, native-all]
+      target:
+        description: 'D3 target (only used by bundle suite)'
+        type: choice
+        default: windows-crf
+        options: [windows-crf, ubuntu-22.04, windows-2022, macos-14, all]
 
 permissions:
   contents: read
 
 jobs:
+  internal-bundle:
+    # This file already exists on main, so it can dispatch the selected
+    # branch's D3 reusable workflow without merging unvalidated code first.
+    if: inputs.suite != 'native-all'
+    uses: ./.github/workflows/desktop-d3.yml
+    with:
+      target: ${{ inputs.target || 'windows-crf' }}
+
   windows-worker:
+    if: inputs.suite == 'native-all'
     # Fast native feedback for IPC/model startup; no Go/DB installation needed.
     runs-on: windows-2022
     timeout-minutes: 10
@@ -52,6 +55,7 @@ jobs:
           path: tmp/desktop-d0/windows-worker.log
           if-no-files-found: error
   native:
+    if: inputs.suite == 'native-all'
     strategy:
       fail-fast: false
       matrix:

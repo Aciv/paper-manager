@@ -84,7 +84,7 @@ class NativeCRFRuntimeTest(unittest.TestCase):
             finally:
                 real.close()
 
-    def test_memory_bridge_only_handles_windows_unicode_file_errors(self):
+    def test_memory_loader_only_applies_to_windows_unicode_paths(self):
         from papers_parser.crf_engine import _open_crf_model
 
         with tempfile.TemporaryDirectory() as temporary:
@@ -94,6 +94,7 @@ class NativeCRFRuntimeTest(unittest.TestCase):
             tagger.open.side_effect = FileNotFoundError("native ANSI fopen")
             retained = _open_crf_model(tagger, model, platform_name="nt")
             self.assertEqual(retained, b"same immutable model")
+            tagger.open.assert_not_called()
             tagger.open_inmemory.assert_called_once_with(b"same immutable model")
             with self.assertRaises(FileNotFoundError):
                 _open_crf_model(tagger, model, platform_name="posix")

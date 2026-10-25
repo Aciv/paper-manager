@@ -60,7 +60,38 @@ def relocate_macos_libraries(postgres: Path):
         run("codesign", "--force", "--sign", "-", binary)
 
 
+def validate_prebuilt_inputs(web_dist: Path | None, wheel_dir: Path | None):
+    if web_dist is not None:
+        if not (web_dist / "index.html").is_file() or not (web_dist / "assets").is_dir():
+            raise ValueError("prebuilt web directory must contain index.html and assets/")
+    if wheel_dir is not None and (not wheel_dir.is_dir() or not any(wheel_dir.glob("*.whl"))):
+        raise ValueError("offline wheel directory must contain binary wheels")
+
+
+def install_windows_postgres_libraries(bundle: Path):
+    """Use locked private MSVC DLLs, never a host redistributable installation."""
+    python = bundle / "python"
+    cpp = list((python / "Lib/site-packages/numpy.libs").glob("msvcp140-*.dll"))
+    if len(cpp) != 1:
+        raise ValueError("expected one MSVC C++ runtime in the locked NumPy wheel")
+    sources = {
+        "vcruntime140.dll": python / "vcruntime140.dll",
+        "vcruntime140_1.dll": python / "vcruntime140_1.dll",
+        "msvcp140.dll": cpp[0],
+    }
+    provenance = {}
+    for name, source in sources.items():
+        shutil.copy2(source, bundle / "postgres/bin" / name)
+        provenance[name] = {"source": source.relative_to(bundle).as_posix(), "sha256": sha256(source)}
+    # This GUI helper is inside EDB's bin/, not just the separate installer tree.
+    (bundle / "postgres/bin/stackbuilder.exe").unlink(missing_ok=True)
+    for path in (bundle / "postgres/bin").glob("wx*.dll"):
+        path.unlink()
+    write_json(bundle / "windows-native-libraries.json", provenance)
+
+
 def assemble(args):
+    validate_prebuilt_inputs(args.web_dist, args.wheel_dir)
     machine = platform.machine().lower()
     target = {("Linux", "x86_64"): "linux-x86_64", ("Windows", "amd64"): "windows-x86_64",
               ("Darwin", "arm64"): "macos-arm64"}.get((platform.system(), machine))
@@ -87,9 +118,10 @@ def assemble(args):
         for binary in ("launcher", "server"):
             run(args.go, "build", "-trimpath", "-o", bundle / (binary + suffix),
                 f"./cmd/{binary}", cwd=ROOT, env=build_env)
-        run(args.npm, "ci", "--include=optional", cwd=ROOT / "web")
-        run(args.npm, "run", "build", cwd=ROOT / "web")
-        shutil.copytree(ROOT / "web/dist", bundle / "web")
+        if args.web_dist is None:
+            run(args.npm, "ci", "--include=optional", cwd=ROOT / "web")
+            run(args.npm, "run", "build", cwd=ROOT / "web")
+        shutil.copytree(args.web_dist or ROOT / "web/dist", bundle / "web")
         parser = bundle / "pdf_parser"
         parser.mkdir()
         for directory in ("papers_parser", "paper_crf"):
@@ -112,8 +144,13 @@ def assemble(args):
         python = bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
         wheels = work / "wheels"
         requirements = ROOT / "packaging/desktop/requirements-runtime.lock"
-        run(python, "-I", "-m", "pip", "download", "--only-binary=:all:", "--require-hashes",
-            "-r", requirements, "--dest", wheels)
+        if args.wheel_dir is None:
+            run(python, "-I", "-m", "pip", "download", "--only-binary=:all:", "--require-hashes",
+                "-r", requirements, "--dest", wheels)
+        else:
+            wheels.mkdir()
+            for wheel in args.wheel_dir.glob("*.whl"):
+                shutil.copy2(wheel, wheels / wheel.name)
         run(python, "-I", "-m", "pip", "install", "--no-index", "--no-compile", "--only-binary=:all:",
             "--require-hashes", "--find-links", wheels, "-r", requirements)
         run(python, "-I", "-m", "pip", "check")
@@ -137,12 +174,16 @@ def assemble(args):
         notices.mkdir()
         copy_notices(bundle / "python", notices / "python")
         if os.name == "nt":
-            extract(archives["postgres_windows"], work / "pg")
+            extract(archives["postgres_windows"], work / "pg", prefixes=(
+                "pgsql/bin/", "pgsql/lib/", "pgsql/share/", "pgsql/server_license.txt",
+                "pgsql/commandlinetools_3rd_party_licenses.txt",
+            ))
             pg = work / "pg/pgsql"
             # The EDB ZIP also contains pgAdmin/Electron, another Python and
             # StackBuilder. Ship only database runtime directories.
             for directory in ("bin", "lib", "share"):
                 shutil.copytree(pg / directory, bundle / "postgres" / directory)
+            install_windows_postgres_libraries(bundle)
             for name in ("server_license.txt", "commandlinetools_3rd_party_licenses.txt"):
                 shutil.copy2(pg / name, notices / ("PostgreSQL-" + name))
             extract(archives["redis_windows"], work / "redis")
@@ -172,7 +213,11 @@ def assemble(args):
             shutil.copy2(redis / "src/redis-server", bundle / "redis/redis-server")
             copy_notices(redis, notices / "redis")
         copy_notices(bundle / "postgres", notices / "postgres")
-        copy_notices(ROOT / "web/node_modules", notices / "web")
+        prebuilt_notices = args.web_dist.parent / "licenses/web" if args.web_dist else None
+        if prebuilt_notices and prebuilt_notices.is_dir():
+            shutil.copytree(prebuilt_notices, notices / "web")
+        else:
+            copy_notices(ROOT / "web/node_modules", notices / "web")
         # Lock Go module identities and collect their shipped upstream license files.
         module_data = subprocess.check_output([str(args.go), "list", "-m", "-json", "all"], cwd=ROOT, text=True)
         decoder = json.JSONDecoder()
@@ -217,7 +262,10 @@ def assemble(args):
             shutil.rmtree(directory)
         manifest = {"schema_version": 1, "distribution": "internal-validation-only",
                     "target": target, "profile": args.profile, "revision": args.revision,
-                    "sources": lock, "public_release_approved": False, "files": inventory(bundle)}
+                    "sources": lock, "public_release_approved": False,
+                    "web_build": "prebuilt" if args.web_dist else "native",
+                    "wheel_input": "offline" if args.wheel_dir else "downloaded",
+                    "files": inventory(bundle)}
         write_json(bundle / "bundle.json", manifest)
         lines = [f"{item['sha256']}  {name}" for name, item in manifest["files"].items() if "sha256" in item]
         lines.append(f"{sha256(bundle / 'bundle.json')}  bundle.json")
@@ -236,10 +284,14 @@ def main():
     parser.add_argument("--model-dir", type=Path, default=ROOT / "pdf_parser/paper_crf/weights")
     parser.add_argument("--include-reference-model", action="store_true",
                         help="also ship the large, disabled-by-default reference-region model")
+    parser.add_argument("--web-dist", type=Path, help="reuse a built static web directory without Node")
+    parser.add_argument("--wheel-dir", type=Path, help="install locked wheels offline from this directory")
     parser.add_argument("--go", default="go")
     parser.add_argument("--npm", default="npm.cmd" if os.name == "nt" else "npm")
     args = parser.parse_args()
     args.cache = args.cache.resolve()
+    args.web_dist = args.web_dist.resolve() if args.web_dist else None
+    args.wheel_dir = args.wheel_dir.resolve() if args.wheel_dir else None
     assemble(args)
 
 

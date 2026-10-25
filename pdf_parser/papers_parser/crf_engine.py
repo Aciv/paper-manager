@@ -98,23 +98,19 @@ _DATE_LIKE_RE = re.compile(
 
 
 def _open_crf_model(tagger, model_path: Path, *, platform_name: str = os.name) -> bytes | None:
-    """Keep ordinary file loading; bridge native Windows Unicode fopen errors.
+    """Read Windows Unicode paths through Python; retain the native buffer.
 
-    Only an existing non-ASCII Windows path receives the documented in-memory
-    load. Python reads the same file without ANSI filename conversion. Invalid
-    models still fail; Unix and ASCII paths keep the existing allocation path.
+    CRFsuite's filename API may raise ValueError rather than OSError after ANSI
+    path conversion. Select memory loading before that conversion, without
+    changing ASCII/Unix file loading or accepting corrupt models.
     """
-    try:
-        tagger.open(str(model_path))
-        return None
-    except OSError:
-        if platform_name != "nt" or str(model_path).isascii() or not model_path.is_file():
-            raise
-        # CRFsuite keeps a pointer into this buffer; the owner must retain it
-        # until the tagger is closed. A temporary read_bytes() is unsafe.
+    if platform_name == "nt" and not str(model_path).isascii():
+        # CRFsuite keeps a pointer into this buffer until the tagger closes.
         data = model_path.read_bytes()
         tagger.open_inmemory(data)
         return data
+    tagger.open(str(model_path))
+    return None
 
 
 class _CRF:

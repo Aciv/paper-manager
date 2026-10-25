@@ -15,6 +15,7 @@ alone does not mean that executable dependency is shipped.
 | --- | --- | --- |
 | CPython standalone | 3.12.15 / build 20261021 | Retain bundled CPython and native library license texts; audit exact target archives. |
 | PostgreSQL | 17.11 | PostgreSQL License; retain COPYRIGHT and audit dependencies of the Windows EDB ZIP. |
+| Windows MSVC runtime | From pinned CPython/NumPy inputs | Private PostgreSQL DLL copies retain their bytes and record provenance; audit Microsoft redistribution notices before public distribution. |
 | Redis | 7.4.11 | RSALv2 OR SSPLv1; select a compliant route before public distribution. This version is not BSD licensed. |
 | Windows Redis DLLs | Candidate ZIP pinned in sources.lock.json | Includes Cygwin and other libraries. Collect exact DLL identities, license texts and corresponding source material before public distribution. The unused .NET service wrapper is excluded. |
 | PyMuPDF / PyMuPDF4LLM | 1.28.0 | AGPLv3 or Artifex commercial terms; no commercial license is assumed. |

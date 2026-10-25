@@ -11,11 +11,17 @@ import (
 	"strings"
 )
 
-func (r *Runtime) pgBinary(name string) string {
+func (r *Runtime) pgBinary(name string) (string, error) {
+	// EDB's Windows binaries also interpolate their installation/share path into
+	// bootstrap SQL. Normalizing only the data directory leaves Unicode failures.
+	bin, err := nativePath(r.cfg.PostgresBin)
+	if err != nil {
+		return "", fmt.Errorf("PostgreSQL installation directory: %w", err)
+	}
 	if runtime.GOOS == "windows" {
 		name += ".exe"
 	}
-	return filepath.Join(r.cfg.PostgresBin, name)
+	return filepath.Join(bin, name), nil
 }
 func (r *Runtime) dsn() string {
 	u := &url.URL{
@@ -43,6 +49,10 @@ func (r *Runtime) postgresData(ctx context.Context, initialize bool) (string, er
 		if !initialize {
 			return "", fmt.Errorf("private PostgreSQL is not initialized; run first-time setup")
 		}
+		binary, e := r.pgBinary("initdb")
+		if e != nil {
+			return "", e
+		}
 		// Initialize in a disposable sibling. Failed initdb never turns a partial
 		// cluster into an apparently valid existing cluster on retry.
 		temp, e := os.MkdirTemp(root, ".postgres-init-")
@@ -65,7 +75,7 @@ func (r *Runtime) postgresData(ctx context.Context, initialize bool) (string, er
 			"--auth=scram-sha-256", "--encoding=UTF8", "--no-locale",
 		}
 		e = runCommand(
-			ctx, r.pgBinary("initdb"), args, r.serviceEnv(nil), root,
+			ctx, binary, args, r.serviceEnv(nil), root,
 			&redactedWriter{cfg: r.cfg, out: log},
 		)
 		if e != nil {

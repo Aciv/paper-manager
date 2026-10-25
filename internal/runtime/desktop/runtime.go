@@ -277,14 +277,24 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		return c, nil
 	}
 	env := r.serviceEnv(nil)
+	pgServer, err := r.pgBinary("postgres")
+	if err != nil {
+		fail(err)
+		return
+	}
+	pgControl, err := r.pgBinary("pg_ctl")
+	if err != nil {
+		fail(err)
+		return
+	}
 	postgres, err := start(
-		"postgres", r.pgBinary("postgres"), []string{
+		"postgres", pgServer, []string{
 			"-D", pgData, "-h", "127.0.0.1", "-p", fmt.Sprint(r.cfg.Ports.Postgres),
 			"-c", "unix_socket_directories=", "-c", "password_encryption=scram-sha-256",
 		}, env, r.cfg.DataDir,
 		func(c *child, stopCtx context.Context) {
 			args := []string{"-D", pgData, "-m", "fast", "-w", "-t", "30", "stop"}
-			_ = runCommand(stopCtx, r.pgBinary("pg_ctl"), args, env, r.cfg.DataDir, io.Discard)
+			_ = runCommand(stopCtx, pgControl, args, env, r.cfg.DataDir, io.Discard)
 		},
 	)
 	if err != nil {

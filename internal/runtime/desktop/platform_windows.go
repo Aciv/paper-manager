@@ -112,12 +112,12 @@ func nativePath(path string) (string, error) {
 	buf := make([]uint16, 32768)
 	n, err := windows.GetShortPathName(p, &buf[0], uint32(len(buf)))
 	if err != nil || n == 0 || n >= uint32(len(buf)) {
-		return "", fmt.Errorf("PostgreSQL needs an ANSI-compatible path; use an ASCII data directory on this volume")
+		return "", fmt.Errorf("PostgreSQL needs an ASCII path on this volume; choose ASCII installation/data directories")
 	}
 	result := windows.UTF16ToString(buf[:n])
 	for _, r := range result {
 		if r > 127 {
-			return "", fmt.Errorf("PostgreSQL needs an ASCII data directory on this volume")
+			return "", fmt.Errorf("PostgreSQL needs an ASCII path on this volume; choose ASCII installation/data directories")
 		}
 	}
 	return result, nil

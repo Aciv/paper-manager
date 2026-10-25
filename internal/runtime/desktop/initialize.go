@@ -54,7 +54,13 @@ func (r *Runtime) validateFiles() error {
 		r.cfg.Server, r.cfg.Python, r.cfg.Redis,
 		filepath.Join(r.cfg.ParserDir, "papers_parser", "server.py"),
 		filepath.Join(r.cfg.WebDir, "index.html"),
-		r.pgBinary("initdb"), r.pgBinary("postgres"), r.pgBinary("pg_ctl"),
+	}
+	for _, name := range []string{"initdb", "postgres", "pg_ctl"} {
+		path, err := r.pgBinary(name)
+		if err != nil {
+			return err
+		}
+		files = append(files, path)
 	}
 	for _, path := range files {
 		if info, err := os.Stat(path); err != nil || info.IsDir() {
