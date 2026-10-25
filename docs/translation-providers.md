@@ -1,5 +1,7 @@
 # 翻译 Provider 配置与模块指南
 
+[文档导航](README.md) · [总体架构](architecture.md)
+
 本文说明翻译 provider 如何通过**一个配置文件 + 独立模块**注册，以及如何新增脚本型（Chrome）或 API 型 provider。
 
 ## 结论

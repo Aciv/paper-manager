@@ -1,79 +1,45 @@
-# papersManager MCP tool contract
+# MCP 工具契约
 
-Status: specification implemented by `internal/mcp` and the in-process MCP
-listener. The manifest contains 47 tools across four groups: `library`,
-`reading`, `base`, and `citation`. The manifest remains the source of truth for
-tool names and schemas. Per-host connection and skill installation are covered
-by [agent-installation.md](agent-installation.md).
+[文档导航](../README.md) · [客户端与技能接入](agent-installation.md)
 
-## Purpose
+当前 `internal/mcp` 已实现 47 个工具，分为 `library`、`reading`、`base`、`citation`
+四组。精确的工具名称、必填项、枚举和输入模式见[机器清单](papers-manager-tools.json)；
+本文解释行为、边界和消费者应遵守的规则。JSON 字段与工具标识符不翻译。
 
-Expose papersManager's existing application services to Agent hosts through a
-stable, bounded MCP tool surface. The MCP server is an adapter:
+## 设计边界
 
-- it does not introduce a second storage model;
-- it does not create Agent identities or preference tables;
-- it calls the same application services as HTTP (or the same HTTP endpoints
-  when implemented as a client adapter);
-- it returns section IDs and content, never private storage keys or paths.
+MCP 是应用服务的适配层，与 HTTP 共用数据库、文件存储、服务和笔记 revision 规则。
+不引入另一套存储，也不创建 Agent 身份、偏好或独立资源所有权。
+响应返回文档/章节 ID 和内容，不返回私有 storage key、路径或凭据。
 
-Humans and Agents use the same resources and revision rules.
+全部工具使用 `papers_manager_` 前缀；宿主可再加自己的服务器命名空间。
+技能应按工具前缀或 `papers-manager` 服务识别能力，不能依赖某个宿主固定的外层包装。
+`group` 只用于描述分组，Base 和引用仍有独立的 `papers_manager_base_*`、
+`papers_manager_citation_*` 工具前缀。
 
-## Tool naming
+## 传输与访问
 
-Every tool name starts with the `papers_manager_` prefix (for example,
-`papers_manager_reading_note_outline`). This is the reserved capability
-namespace for this server. A host may additionally namespace tools by server
-name; skills should match the prefix or the `papers-manager` server identity,
-not assume one particular outer wrapper. The manifest exposes this as
-`server.toolNamePrefix`.
+- 仅支持 **MCP Streamable HTTP**，路径为 `/mcp`；没有内置 stdio 或旧 HTTP+SSE 入口。
+- 普通 API 默认关闭 MCP，默认地址为 `127.0.0.1:8090`；Launcher 使用管理页显示的实际地址。
+- 当前实现中，`MCP_TOKEN` 为空会关闭认证；非回环监听只记录警告，不会拒绝启动。
+  token 非空时，每次请求都必须提供 `Authorization: Bearer <token>`。
+- 无多用户权限隔离。网络可达且通过 token 验证的客户端共享同一套资源权限。
+- 仅支持 stdio 的宿主可使用客户端桥接；桥接仍调用同一个 `/mcp`，不直接访问数据库。
+- 本地导入默认禁用；`MCP_LOCAL_IMPORT_ROOT` 非空才允许导入受控根目录中的普通文件，
+  路径检查包含符号链接解析，越界返回 `FORBIDDEN`。
+- 单项与批量导入共用 `MCP_IMPORT_CONCURRENCY`，默认最多 20 个导入调用同时执行。
+  超限立即返回 `RESOURCE_EXHAUSTED`；每批最多 20 项，持有一个名额并顺序执行。
+- 图片响应使用 MCP 图片内容块，受 `MCP_MAX_IMAGE_BYTES`（默认 12 MiB）等上限约束。
 
-The manifest's `group` field is descriptive only. Base operations (including
-Base bibliography generation) use the independent `papers_manager_base_*`
-collection, and citation operations use `papers_manager_citation_*`; they are
-not folded into `papers_manager_library_*`.
+## 返回结构、错误与注解
 
-Skills treat an absent prefix/server as “MCP unavailable” and fail closed.
-
-## Transport and access
-
-- Transport: MCP Streamable HTTP only, served at `/mcp` by the in-process
-  adapter. stdio is not implemented by the server.
-- The default listener is loopback (`127.0.0.1:8090`). Non-loopback HTTP is not
-  allowed until bearer-token authentication is configured and verified.
-- Hosts that only support stdio can use an external stdio-to-HTTP bridge such
-  as `mcp-remote`; the bridge is a client-side adapter, not part of this
-  server's contract.
-- There is no per-user ownership model yet. Do not claim per-Agent isolation.
-- Secrets and API tokens are server configuration, never tool inputs or tool
-  output.
-- `papers_manager_library_import_url` accepts HTTP(S) URLs only. Local-file
-  import is a separate, explicitly enabled tool
-  (`papers_manager_library_import_file`) and is confined to
-  `MCP_LOCAL_IMPORT_ROOT`, including symlink resolution. When that setting is
-  empty the tool fails closed with `FORBIDDEN`.
-- Import calls share one concurrency gate: at most `MCP_IMPORT_CONCURRENCY`
-  (default 20, matching the web batch limit) import calls may run at once,
-  whether single (`import_url`/`import_file`) or batch
-  (`import_urls`/`import_files`). A call over the limit fails immediately with
-  `RESOURCE_EXHAUSTED`; wait and retry instead of piling up calls. Each batch
-  call accepts 1–20 items and processes them sequentially while holding one
-  gate slot, so the gate still bounds concurrent item imports. URL downloads
-  also pass through the shared remote-PDF download bounds.
-- Block images are returned as MCP image content and bounded by
-  `MCP_MAX_IMAGE_BYTES` (default 12 MiB). Private storage keys never cross the
-  MCP boundary.
-
-## Common response envelope
-
-Tools return structured JSON (as MCP structured content or serialized text):
+成功返回：
 
 ```json
-{
-  "ok": true,
-  "data": {}
-}
+{"ok": true, "data": {}}
 ```
+
+失败返回并设置 MCP `isError`：
 
 ```json
 {
@@ -87,320 +53,107 @@ Tools return structured JSON (as MCP structured content or serialized text):
 }
 ```
 
-On failure, set the MCP `isError` flag as well. Do not return raw database
-errors, storage paths, credentials, parser output, or unbounded provider
-responses.
+不得返回原始数据库错误、私有存储路径、凭据或无大小限制的外部响应。
 
-Error codes:
-
-| Code | Retryable | Meaning |
+| 错误码 | 可直接重试 | 含义 |
 | --- | --- | --- |
-| `INVALID_ARGUMENT` | no | Missing or malformed input. |
-| `FORBIDDEN` | no | Access boundary rejected the caller. |
-| `CANCELLED` | no | The request context was cancelled. |
-| `NOT_FOUND` | no | Document, note, section, or Base not found. |
-| `NOTE_NOT_FOUND` | no | The document exists but has no reading note. |
-| `REVISION_CONFLICT` | no | `expected_revision` is stale. Re-read before retrying. |
-| `UNAVAILABLE` | yes | Temporary service/queue/publication unavailability. |
-| `PAYLOAD_TOO_LARGE` | no | Response/input exceeds the MCP or backend bound. |
-| `INVALID_EVIDENCE` | no | Evidence link is malformed or targets the wrong range/Block. |
-| `CONFLICT` | no | A non-revision lifecycle conflict (processing/replacement). |
-| `INTERNAL` | maybe | Unexpected server error; do not expose internals. |
-
-## Tool annotations
-
-- `readOnlyHint: true` for search/read/metadata reads, note export, and
-  evidence validation.
-- `destructiveHint: true` for document/note/Base/reference deletion, whole-note
-  or whole-section replacement, citation replacement, and revision-fenced edits
-  that can overwrite content.
-- `idempotentHint` only where repeated identical calls are safe; note edits are
-  not treated as idempotent across revisions.
-- `openWorldHint: false` except for URL import, reference-PDF download, and
-  Base bibliography generation, which may contact external DOI/provider
-  services.
-
-## Tools
-
-### Library
-
-#### `papers_manager_library_search`
-
-Search documents or paper metadata. Read-only.
-
-Input:
-
-- `query` (string, optional): title, filename, author, or document ID;
-- `doi` (string, optional);
-- `tags` (string array, optional);
-- `page` (integer, default 1);
-- `page_size` (integer, default 10, max 50).
-
-Output: `items` with document ID, title, authors, year/venue, DOI, tags,
-processing summary, and total count. Do not include storage keys.
-
-#### `papers_manager_library_get`
-
-Read one document and its metadata. Read-only.
-
-Input: `document_id`.
-
-Output: document metadata, paper metadata, source state, and a compact
-processing summary. Missing metadata is allowed.
-
-#### `papers_manager_library_get_many`
-
-Read 1–200 documents and their paper metadata in one bounded call. Use this
-instead of issuing `library_get` once per row when the caller already has a
-list of document IDs (for example, search results or a pipeline batch).
-
-Input: `document_ids` (1–200 UUIDs; duplicates are deduplicated), optional
-`include_processing` (default `false`). When `include_processing=true`, each
-item also carries the processing view (stage states, spans, safe errors, and
-reference progress).
-
-Limits and semantics:
-
-- more than 200 IDs is rejected with `INVALID_ARGUMENT`;
-- results preserve the requested order; IDs that no longer resolve are listed
-  in `missingDocumentIds` instead of failing the whole call;
-- this is a read-only projection; it never queues work or exposes storage
-  keys/raw provider responses.
-
-Output: `items` of `{document, paperMetadata, processing?}` plus
-`missingDocumentIds` when applicable.
-
-#### `papers_manager_library_import_url`
-
-Import one HTTP(S) URL and start the normal processing pipeline.
-
-Input: `url` (URI), optional `doi`, optional `base_id`. When `base_id` is
-set, the document is added to that Base after import (idempotent).
-
-One call imports one paper. Concurrent import calls share the
-`MCP_IMPORT_CONCURRENCY` gate (default 20); calls over the limit fail with
-`RESOURCE_EXHAUSTED`.
-
-Output: document ID, created/updated state, and initial processing state. The
-tool returns quickly; do not block until recognition completes. Use
-`papers_manager_processing_status` for bounded polling.
-
-#### `papers_manager_library_import_urls`
-
-Import 1–20 HTTP(S) URLs in one bounded batch and start the normal processing
-pipeline. Uses the same resolver, SSRF validation, download limits, hash
-deduplication, and queueing as `import_url` for every item.
-
-Input: `urls` (1–20 URIs), optional `dois` (omit entirely or provide exactly
-one entry per URL; an empty string means no DOI), optional `base_id`. When
-`base_id` is set, every accepted or duplicate document is added to that Base
-(idempotent).
-
-Limits and semantics:
-
-- more than 20 URLs is rejected with `INVALID_ARGUMENT`;
-- the batch holds one `MCP_IMPORT_CONCURRENCY` slot and processes items
-  sequentially in order;
-- the whole call is bounded by `BATCH_IMPORT_TIMEOUT` (default 2 minutes);
-  on deadline the response keeps completed items, sets `stopped=true`, and
-  marks unprocessed items as failed;
-- one bad item does not discard the rest; inspect `items[].status`
-  (`accepted` / `duplicate` / `rejected` / `failed`) and
-  `items[].error`.
-
-Output: `items`, `stopped`, `error`, and `baseId` when requested. Each item
-carries its own document, queue state, and safe error category.
-
-#### `papers_manager_library_import_file`
-
-Import one regular local file and start the normal pipeline. This tool exists
-for local single-user deployments and is disabled unless
-`MCP_LOCAL_IMPORT_ROOT` is configured.
-
-Input: `path` (absolute, or relative to the configured root), optional `doi`,
-optional `base_id`. Paths outside the root, symlink escapes, directories,
-unsupported types, and files over `FILE_MAX_UPLOAD_SIZE` are rejected before
-the service is called. When `base_id` is set, the document is added to that
-Base after import (idempotent). The service stores a copy; the source file is
-not referenced afterwards.
-
-One call imports one file. It shares the `MCP_IMPORT_CONCURRENCY` gate and
-`RESOURCE_EXHAUSTED` behavior described for `import_url`.
-
-Output: the created document and initial processing state.
-
-#### `papers_manager_library_import_files`
-
-Import 1–20 regular local files in one bounded batch and start the normal
-processing pipeline. Disabled unless `MCP_LOCAL_IMPORT_ROOT` is configured.
-
-Input: `paths` (1–20 paths, absolute or relative to the root), optional `dois`
-(omit entirely or provide exactly one entry per path), optional `base_id`.
-When `base_id` is set, every accepted or duplicate document is added to that
-Base (idempotent).
-
-Limits and semantics:
-
-- all paths are validated **before any import**: root containment (including
-  symlink escapes), regular-file, supported type, and
-  `FILE_MAX_UPLOAD_SIZE`; one invalid path rejects the whole call and creates
-  nothing;
-- more than 20 paths is rejected with `INVALID_ARGUMENT`;
-- the batch holds one `MCP_IMPORT_CONCURRENCY` slot and processes items
-  sequentially in order;
-- one bad item does not discard the rest; inspect `items[].status` and
-  `items[].error`.
-
-Output: `items`, `stopped`, `error`, and `baseId` when requested.
-
-#### `papers_manager_library_update_metadata`
-
-Correct explicitly requested metadata fields.
-
-Input: `document_id`; optional `original_filename`, `doi`, `title`, `authors`,
-`abstract`, `venue`, `tags`, `source_name`, `source_url`, `published_at`,
-`volume`, `issue`, `pages`, `language`. Omitted fields are unchanged.
-`published_at` accepts `YYYY-MM-DD` or RFC3339; an empty date is not a clear
-operation (omit it to keep the current value).
-
-Output: the persisted fields and their source. Do not infer values from the
-paper text.
-
-#### `papers_manager_library_delete`
-
-Delete one document and its dependent records.
-
-Input: `document_id`, `confirm` (must be `true`).
-
-Output: deletion result. The tool must reject `confirm` omitted/false. The
-skill requires explicit user confirmation before calling it.
-
-#### `papers_manager_processing_status`
-
-Read the single processing projection for one document.
-
-Input: `document_id`.
-
-Output: stage states, active/terminal spans, safe error codes, and reference
-progress. Never expose storage paths or raw provider responses.
-
-#### `papers_manager_processing_status_many`
-
-Read processing projections for 1–200 documents in one bounded call.
-
-Input: `document_ids` (1–200 UUIDs; duplicates are deduplicated).
-
-Limits and semantics:
-
-- more than 200 IDs is rejected with `INVALID_ARGUMENT`;
-- results preserve the requested order; IDs that no longer resolve are listed
-  in `missingDocumentIds` instead of failing the whole call;
-- one call is backed by the same batch projection as
-  `papers_manager_library_get_many`, so use this tool when only status is
-  needed and the general tool when metadata is also needed.
-
-Output: `items` of processing views (`documentId`, `stageStates`, `stages`,
-`referenceProgress`, ...) plus `missingDocumentIds` when applicable. Never
-expose storage paths or raw provider responses.
-
-#### `papers_manager_processing_retry`
-
-Retry one processing lane.
-
-Input: `document_id`; `target` = `auto` (default), `markdown`, `extraction`,
-`catalog`, or `reference`. `auto` uses the document service's existing choice;
-`markdown` restarts recognition; the other targets retry exactly one
-paper-information stage. Active work returns `CONFLICT`.
-
-#### `papers_manager_processing_cancel`
-
-Cancel one processing lane.
-
-Input: `document_id`; `target` = `markdown` (default) or `paper_info`.
-Cancelling markdown does not fence paper-information work, and vice versa.
-
-### Source reading
-
-#### `papers_manager_document_structure`
-
-Read the persisted source outline. Read-only.
-
-Input: `document_id`.
-
-Output: recognition generation, source (`pdf_outline`/`markdown_headings`),
-sections with page/bbox/block-ordinal/Markdown-range hints, and diagnostics.
-Never infer a new outline in the adapter.
-
-#### `papers_manager_document_read_section`
-
-Read one section of the persisted source outline by ordinal. Read-only.
-
-Input: `document_id`, `ordinal`.
-
-Output: section title/level/parent, page range, block-ordinal range, Markdown
-slice when the outline has a Markdown range, and diagnostics. The adapter uses
-the persisted outline and parsed Markdown; it never infers a new outline. If
-only page/Block mapping exists, return those hints with a diagnostic instead of
-inventing section text. Hard response limit: 4 MiB.
-
-#### `papers_manager_document_read_markdown`
-
-Read bounded full parsed Markdown as a fallback when a section is not
-addressable through the outline. Read-only.
-
-Input: `document_id`.
-
-Output: Markdown, size, page count, recognition generation. Hard response limit:
-16 MiB; larger requests return `PAYLOAD_TOO_LARGE` and should use
-`papers_manager_document_read_section` or page/Block reads. Do not expose the
-storage key.
-
-#### `papers_manager_document_read_blocks`
-
-Read page-scoped Blocks for exact evidence. Read-only.
-
-Input: `document_id`, optional `page_number`.
-
-Output: Blocks with UUID, type, text, ordinal, page dimensions, and bbox.
-Prefer a single page; a no-page request is bounded by the adapter and may return
-`PAYLOAD_TOO_LARGE`.
-
-#### `papers_manager_document_read_block_image`
-
-Read the parser-stored PNG crop for one image or table Block. Read-only.
-
-Input: `document_id`, `block_id`.
-
-Output: JSON metadata plus an MCP image content block. The image is limited by
-`MCP_MAX_IMAGE_BYTES` (default 12 MiB); the private storage key is never
-returned. Text-only Blocks have no image and return `NOT_FOUND`.
-
-#### `papers_manager_document_read_page_image`
-
-Render one full PDF page or a normalized page region. Read-only. This is a
-synchronous direct renderer call, not an Asynq task.
-
-Input: `document_id`, `page_number`; optional `bbox`
-(`{x0,y0,x1,y1}` normalized to `[0,1]`, omitted for the full page); optional
-`dpi` (default 144, max 300).
-
-Output: JSON metadata plus an MCP image content block. Bounds come from
-`MCP_MAX_IMAGE_BYTES` and the parser render limits
-(`PARSER_RENDER_MAX_DPI`, `PARSER_RENDER_MAX_PIXELS`,
-`PARSER_RENDER_MAX_OUTPUT_BYTES`). The private storage key is never returned.
-The renderer is a PyMuPDF-only worker and never loads PyMuPDF4LLM/ONNX/CRF.
-
-### Reading notes
-
-#### `papers_manager_reading_note_outline`
-
-Read the note revision and section tree. This is a derived read model: the
-adapter reads section Markdown and parses `section-meta` descriptions; the
-backend does not provide descriptions.
-
-Input: `document_id`, optional `include_descriptions` (default true).
-
-Output:
+| `INVALID_ARGUMENT` | 否 | 缺失或不合法的输入 |
+| `FORBIDDEN` | 否 | 访问边界拒绝 |
+| `CANCELLED` | 否 | 请求上下文取消 |
+| `NOT_FOUND` | 否 | 文档、章节、引用或 Base 不存在 |
+| `NOTE_NOT_FOUND` | 否 | 文档存在但没有阅读笔记 |
+| `REVISION_CONFLICT` | 否 | 版本已变化，重新读取并规划编辑 |
+| `UNAVAILABLE` | 是 | 服务、队列或发布过程暂不可用 |
+| `RESOURCE_EXHAUSTED` | 等待后 | 并发准入已满 |
+| `PAYLOAD_TOO_LARGE` | 否 | 输入/输出超过上限，应缩小读取或写入范围 |
+| `INVALID_EVIDENCE` | 否 | 证据格式或目标范围不合法 |
+| `CONFLICT` | 否 | 处理、替换等生命周期冲突 |
+| `INTERNAL` | 视情况 | 非预期服务错误，不暴露内部细节 |
+
+工具注解中，搜索、读取、导出和证据验证使用 `readOnlyHint`；删除、替换和可能覆盖内容的
+编辑标为破坏性操作。`idempotentHint` 仅用于可以安全重复的操作，不能把跨 revision 的
+笔记修改当作幂等。URL 导入、引用 PDF 下载和书目生成可能访问外部服务。
+
+## 1. 论文库与处理状态
+
+### 查询
+
+| 工具 | 输入 | 行为与输出 |
+| --- | --- | --- |
+| `papers_manager_library_search` | 可选 `query`、`doi`、`tags`、`page`、`page_size` | 搜索标题、文件名、作者或文档 ID；默认第 1 页、每页 10 条，最多 50 条；返回文档与元数据摘要和总数 |
+| `papers_manager_library_get` | `document_id` | 读取文档、论文元数据、来源与紧凑处理状态；允许元数据缺失 |
+| `papers_manager_library_get_many` | `document_ids`；可选 `include_processing=false` | 一次读取 1–200 个 UUID，去重并保持请求顺序；不存在的 ID 放入 `missingDocumentIds` |
+| `papers_manager_processing_status` | `document_id` | 返回阶段、span、安全错误码和引用进度 |
+| `papers_manager_processing_status_many` | `document_ids` | 批量读取 1–200 项处理状态，与批量文档查询使用同一批量投影 |
+
+已知一组 ID 时优先使用批量工具，避免逐项读取。批量返回的 `items` 可包含
+`{document, paperMetadata, processing?}`，只要状态时使用状态批量工具。
+查询不发起解析或外部查询，也不返回原始提供方响应。
+
+### 导入
+
+| 工具 | 输入 | 行为 |
+| --- | --- | --- |
+| `papers_manager_library_import_url` | `url`；可选 `doi`、`base_id` | 导入单个 HTTP(S) URL 并启动正常处理 |
+| `papers_manager_library_import_urls` | `urls`；可选 `dois`、`base_id` | 顺序导入 1–20 个 URL；`dois` 省略或与输入等长 |
+| `papers_manager_library_import_file` | `path`；可选 `doi`、`base_id` | 导入受控目录中的单个普通文件；服务保存副本，不长期引用输入路径 |
+| `papers_manager_library_import_files` | `paths`；可选 `dois`、`base_id` | 导入受控目录中的 1–20 个普通文件 |
+
+指定 `base_id` 时，将接受或已存在的文档幂等加入该 Base。
+URL 只接受 HTTP(S)，下载还受远程 PDF 大小、地址、并发和重定向限制。
+本地路径可为绝对路径或相对受控根目录路径，不能越界或通过符号链接逃逸。
+本地批量导入先验证全部路径、类型和大小，一项不合法则整批拒绝，不创建文档。
+
+单项导入返回文档与初始队列状态，不等待全部识别结束；通过处理状态工具适度轮询。
+批量返回 `items`、`stopped`、`error` 和可选 `baseId`，逐项状态为
+`accepted`、`duplicate`、`rejected` 或 `failed`。单项失败不丢弃其他已完成结果。
+URL 批次受 `BATCH_IMPORT_TIMEOUT`（默认 2 分钟）限制，超时保留完成项并标记未处理项。
+
+### 更新、删除与重试
+
+`papers_manager_library_update_metadata` 输入 `document_id`，可选
+`original_filename`、`doi`、`title`、`authors`、`abstract`、`venue`、`tags`、
+`source_name`、`source_url`、`published_at`、`volume`、`issue`、`pages`、`language`。
+未提供的字段不变；`published_at` 接受 `YYYY-MM-DD` 或 RFC3339，空日期不表示清空。
+仅修改用户明确要求的值，不依据猜测填写元数据。
+
+`papers_manager_library_delete` 输入 `document_id`、`confirm=true`，删除文档及依赖记录。
+缺少确认或为 false 时拒绝；技能应先获得用户明确确认。
+
+`papers_manager_processing_retry` 输入 `document_id` 和可选 `target`：
+`auto`（默认）、`markdown`、`extraction`、`catalog`、`reference`。
+除 `auto` 使用服务现有选择逻辑外，其余只重试指定阶段；工作仍活跃时返回冲突。
+
+`papers_manager_processing_cancel` 输入 `document_id`，`target` 为
+`markdown`（默认）或 `paper_info`。两条处理链分别取消，不互相替代。
+
+## 2. 论文原文读取
+
+这些工具均为只读，不在适配器中重新推断目录或创建持久化信息。
+
+| 工具 | 输入 | 输出与边界 |
+| --- | --- | --- |
+| `papers_manager_document_structure` | `document_id` | 持久化源目录、识别 generation、来源及页码/bbox/block ordinal/Markdown 范围提示 |
+| `papers_manager_document_read_section` | `document_id`、`ordinal` | 读取源目录节信息及可用的 Markdown 切片；最多 4 MiB |
+| `papers_manager_document_read_markdown` | `document_id` | 有界的完整解析 Markdown、大小、页数和 generation；最多 16 MiB |
+| `papers_manager_document_read_blocks` | `document_id`；可选 `page_number` | Block ID、类型、文本、ordinal、页面尺寸和 bbox；优先按页，整篇可能超限 |
+| `papers_manager_document_read_block_image` | `document_id`、`block_id` | 已保存的图片/表格 PNG，返回元数据及 MCP 图片；纯文本块返回 `NOT_FOUND` |
+| `papers_manager_document_read_page_image` | `document_id`、`page_number`；可选 `bbox`、`dpi` | 按需渲染整页/区域，默认 144 DPI、最高 300；同步执行，不经过 Asynq |
+
+目录来源为 `pdf_outline` 或 `markdown_headings`。源节只有页码/Block 映射而无 Markdown
+范围时，返回位置提示和诊断，不能伪造节正文。完整 Markdown 超限后应改用分节或按页读取。
+`bbox` 使用 `[0,1]` 归一化的 `{x0,y0,x1,y1}`；省略表示整页。
+渲染还受 `PARSER_RENDER_MAX_DPI`、`PARSER_RENDER_MAX_PIXELS`、
+`PARSER_RENDER_MAX_OUTPUT_BYTES` 和 MCP 图片大小限制。
+渲染 worker 只使用 PyMuPDF，不加载识别的 Layout/ONNX/CRF 栈。
+
+## 3. 阅读笔记
+
+### 读取
+
+`papers_manager_reading_note_outline` 输入 `document_id`，可选 `include_descriptions=true`。
+返回 revision 和章节树；描述由 MCP 从章节 Markdown 的 `section-meta` 解析，不是后端字段。
+示例：
 
 ```json
 {
@@ -423,259 +176,102 @@ Output:
 }
 ```
 
-Bounds: at most 256 sections; at most 8 MiB of section Markdown read for
-descriptions. If the budget is exhausted, return the directory with
-`descriptions_complete=false` and a diagnostic, rather than silently omitting
-sections.
-
-#### `papers_manager_reading_note_read_section`
-
-Read one note section body. Read-only.
-
-Input: `document_id`, `section_id`.
-
-Output: section metadata, Markdown (including heading and section-meta),
-`line_count`, and current note revision. Hard response limit: 4 MiB; larger
-sections return `PAYLOAD_TOO_LARGE`. Do not expose the storage key.
-
-#### `papers_manager_reading_note_create`
-
-Create a reading note only when it is absent.
-
-Input: `document_id`, `markdown`, `expected_revision` (must be `0`).
-
-Output: note manifest, new revision, and section directory. If a note already
-exists, return `REVISION_CONFLICT`.
-
-#### `papers_manager_reading_note_apply_edits`
-
-Apply the existing semantic edit contract atomically against one revision.
-
-Input:
-
-- `document_id`;
-- `expected_revision` (positive integer);
-- `edits` (1–128 entries), using the same ops as HTTP
-  `POST /reading-note/edits`: `replaceText`, `replaceRange`, `insertAt`,
-  `appendText`, `replaceSection`, `addSection`, `deleteSection`.
-
-Content fields follow the HTTP contract: `replaceText` uses `old_text` and
-`new_text`; `replaceRange`, `insertAt`, `appendText`, `replaceSection`, and
-`addSection` use `content`. Inline request text is capped at 1 MiB; larger
-replacements use the raw section/HTTP path, not MCP.
-
-Output: new revision, directory, changed sections, deleted section IDs.
-
-A stale revision returns `REVISION_CONFLICT`; never auto-refresh and retry the
-same content.
-
-#### `papers_manager_reading_note_replace`
-
-Replace the entire note from Markdown, fenced by `expected_revision`. Input:
-`document_id`, `markdown`, `expected_revision`. Use this for whole-note
-import/replacement; use `apply_edits` for incremental changes. The normal note
-size and H1-H3 heading rules apply.
-
-#### `papers_manager_reading_note_delete`
-
-Delete the entire note. Input: `document_id`, `expected_revision`, `confirm`
-(must be true). The skill requires explicit user confirmation.
-
-#### `papers_manager_reading_note_export`
-
-Return the full concatenated note Markdown and revision. Input: `document_id`.
-Responses larger than 16 MiB return `PAYLOAD_TOO_LARGE`.
-
-#### `papers_manager_reading_note_replace_section`
-
-Replace one whole section with complete section Markdown, preserving its
-heading level. Input: `document_id`, `section_id`, `markdown`,
-`expected_revision`. The same revision fence and heading guard as `apply_edits`
-apply.
-
-### Evidence
-
-#### `papers_manager_evidence_validate`
-
-Parse and validate one evidence link against the current document. Read-only.
-
-Input: `document_id`, `href` (`papers-manager://...`).
-
-Output:
-
-- parsed target (`page`, rectangles, Block UUID, section hint);
-- diagnostics;
-- whether the page is within the current page count;
-- whether a Block UUID belongs to the current recognition generation;
-- normalized target data for writing.
-
-The adapter parses evidence links as a consumer. The core note service and
-storage remain evidence-agnostic.
-
-### Base
-
-The Base collection manages collections and memberships only. It never copies
-or deletes source documents.
-
-#### `papers_manager_base_list`
-
-List Bases. Input: `page`, `page_size`. Read-only.
-
-#### `papers_manager_base_get`
-
-Read one Base. Input: `base_id`; optional `include_documents`, `page`.
-Member pages use the backend's fixed page size. Read-only.
-
-#### `papers_manager_base_list_documents`
-
-List one member page. Input: `base_id`, `page`, optional `exclude_unknown`.
-The backend uses a fixed page size for this collection view. Read-only.
-
-#### `papers_manager_base_create` / `papers_manager_base_update`
-
-Create a Base (`name`, optional `description`) or rename/change one
-(`base_id`, optional `name`, `description`). Omitted update fields are
-unchanged.
-
-#### `papers_manager_base_delete`
-
-Delete a Base and its memberships. Input: `base_id`, `confirm` (must be true).
-Source documents and notes are never deleted.
-
-#### `papers_manager_base_add_document` / `papers_manager_base_remove_document`
-
-Change membership. Inputs: `base_id`, `document_id`. Membership only; no
-document copy or deletion.
-
-#### `papers_manager_base_bibliography_generate`
-
-Queue a `.bib` snapshot for a Base. Input: `base_id`. The tool returns a task
-ID immediately; it is not a blocking export.
-
-#### `papers_manager_base_bibliography_status`
-
-Read one bibliography task. Input: `base_id`, `task_id`. A completed task
-includes the snapshot, including `bibtex` and per-entry reports. Read-only.
-
-### Citation
-
-Citation tools operate on `paper_citations` rows. Each row belongs to one
-citing paper; resolving a shared work never changes another paper's row.
-
-#### `papers_manager_citation_list` / `papers_manager_citation_list_cited_by`
-
-List one document's outgoing bibliography rows, or the rows that resolve to a
-document. Input: `document_id`. Read-only.
-
-#### `papers_manager_citation_add`
-
-Add one manual row. Input: `document_id`, `raw_reference`, optional
-`cited_document_id`.
-
-#### `papers_manager_citation_replace`
-
-Replace the entire outgoing bibliography. Input: `document_id`, `citations`
-(0–500 entries of `{raw_reference, cited_document_id?}`), `confirm` (must be
-true). This can remove manual rows.
-
-#### `papers_manager_citation_remove`
-
-Delete one row by reference ID. Input: `reference_id`, `confirm` (must be
-true).
-
-#### `papers_manager_citation_update_reference`
-
-Correct one reference's source fields (`doi`, `title`, `authors`, `venue`,
-`published_at`, `volume`, `issue`, `pages`, `source_url`). Omitted fields are
-unchanged; empty text clears. Editing an unresolved row fences stale provider
-results.
-
-#### `papers_manager_citation_resolve`
-
-Manually link one row to an existing document. Input: `reference_id`,
-`resolved_document_id`.
-
-#### `papers_manager_citation_rematch`
-
-Retry local DOI/title matching against the current library. Input:
-`reference_id`. No external provider is called; the result reports `matched`.
-
-#### `papers_manager_citation_download_pdf`
-
-Queue acquisition of one reference's PDF from its trusted source URL. Input:
-`reference_id`. Success creates a document and links the row; duplicate requests
-return `CONFLICT` while the previous attempt is pending.
-
-## Deferred tools
-
-Not part of this manifest yet:
-
-- `base_summary` / `base_compare` — Phase 3B; until then the reading skill
-  composes summaries from existing read tools.
-- Native LLM generation — not a server-side MCP tool until a runner exists.
-- Local-directory imports/scanning — only explicitly listed files (up to 20
-  per call) are imported, confined to `MCP_LOCAL_IMPORT_ROOT`.
-- High-DPI whole-document pre-rendering — page/region images are rendered on
-  demand and cached by the caller; there is no bulk page-image export yet.
-
-## Mapping to existing HTTP surfaces
-
-| Tool | Existing implementation surface |
+目录最多 256 节，描述解析最多读取 8 MiB。预算不足时仍返回目录，设置
+`descriptions_complete=false` 并说明诊断，不能静默漏掉章节。
+
+`papers_manager_reading_note_read_section` 输入 `document_id`、`section_id`，返回章节
+元数据、完整 Markdown（含标题和元数据块）、`line_count` 及当前 revision；最多 4 MiB。
+
+`papers_manager_reading_note_export` 输入 `document_id`，显式拼接全篇并返回 Markdown
+和 revision；响应超过 16 MiB 则拒绝。
+
+### 写入
+
+| 工具 | 必要输入 | 行为 |
+| --- | --- | --- |
+| `papers_manager_reading_note_create` | `document_id`、`markdown`、`expected_revision=0` | 仅在笔记不存在时创建，已有笔记返回版本冲突 |
+| `papers_manager_reading_note_apply_edits` | `document_id`、`expected_revision`、`edits` | 原子应用 1–128 项语义编辑，返回新 revision、目录、变动节和删除 ID |
+| `papers_manager_reading_note_replace` | `document_id`、`markdown`、`expected_revision` | 整篇导入/替换，遵守正常大小与 H1–H3 结构约束 |
+| `papers_manager_reading_note_replace_section` | `document_id`、`section_id`、`markdown`、`expected_revision` | 替换一节，保留其标题级别 |
+| `papers_manager_reading_note_delete` | `document_id`、`expected_revision`、`confirm=true` | 删除整份笔记，需要用户明确确认 |
+
+语义编辑支持 `replaceText`、`replaceRange`、`insertAt`、`appendText`、
+`replaceSection`、`addSection`、`deleteSection`。
+`replaceText` 使用 `old_text`、`new_text`，其余内容字段使用 `content`。
+内联请求文本总预算 1 MiB；更大替换应使用后端原始章节/文件接口，不能无限增大 MCP 请求。
+行列与范围规则见[阅读笔记契约](../reading-note-agent-contract.md)。
+
+收到 `REVISION_CONFLICT` 后必须重新读取并规划编辑；不能自动刷新 revision 并原样重试。
+章节描述及证据是 Markdown 内容，后端不再单独持久化一份。
+
+## 4. 证据验证
+
+`papers_manager_evidence_validate` 是只读工具，输入 `document_id`、`href`。
+解析 `papers-manager://` 链接，返回页码、矩形、Block UUID、章节提示、诊断及规范化目标，
+检查页码范围和 Block 是否属于当前识别 generation。
+MCP 作为消费者解析证据，不改变核心笔记服务对证据内容不做解析的边界。
+
+## 5. Base 集合
+
+| 工具 | 输入 | 行为 |
+| --- | --- | --- |
+| `papers_manager_base_list` | 可选 `page`、`page_size` | 分页列出集合 |
+| `papers_manager_base_get` | `base_id`；可选 `include_documents`、`page` | 读取集合，可附一页成员 |
+| `papers_manager_base_list_documents` | `base_id`；可选 `page`、`exclude_unknown` | 按后端固定页大小列出成员 |
+| `papers_manager_base_create` | `name`；可选 `description` | 创建集合 |
+| `papers_manager_base_update` | `base_id`；可选 `name`、`description` | 修改名称/描述，未提供字段不变 |
+| `papers_manager_base_delete` | `base_id`、`confirm=true` | 删除集合与成员关系，保留源论文及笔记 |
+| `papers_manager_base_add_document` | `base_id`、`document_id` | 加入集合，不复制文档 |
+| `papers_manager_base_remove_document` | `base_id`、`document_id` | 移除关系，不删除文档 |
+| `papers_manager_base_bibliography_generate` | `base_id` | 提交书目快照任务，立即返回任务 ID |
+| `papers_manager_base_bibliography_status` | `base_id`、`task_id` | 查询任务；完成后包含 `bibtex` 与逐项报告 |
+
+## 6. 引用关系
+
+每条引用属于一篇施引论文。解析出相同被引论文，不会改变其他论文的引用行。
+
+| 工具 | 输入 | 行为 |
+| --- | --- | --- |
+| `papers_manager_citation_list` | `document_id` | 读取该论文的参考文献 |
+| `papers_manager_citation_list_cited_by` | `document_id` | 读取已解析为指向该论文的引用行 |
+| `papers_manager_citation_add` | `document_id`、`raw_reference`；可选 `cited_document_id` | 添加手动引用 |
+| `papers_manager_citation_replace` | `document_id`、`citations`、`confirm=true` | 整体替换 0–500 条引用，可能删除手动行 |
+| `papers_manager_citation_remove` | `reference_id`、`confirm=true` | 删除一条引用 |
+| `papers_manager_citation_update_reference` | `reference_id` 及需修改的来源字段 | 修改引用源信息，未提供字段不变，空文本清空 |
+| `papers_manager_citation_resolve` | `reference_id`、`resolved_document_id` | 显式关联库内文档 |
+| `papers_manager_citation_rematch` | `reference_id` | 只按本地 DOI/title 重匹配，返回 `matched`，不调用外部服务 |
+| `papers_manager_citation_download_pdf` | `reference_id` | 排队下载引用 PDF，成功创建/关联文档；已有待处理请求返回冲突 |
+
+`citations` 每项为 `{raw_reference, cited_document_id?}`。
+可编辑来源字段为 `doi`、`title`、`authors`、`venue`、`published_at`、`volume`、
+`issue`、`pages`、`source_url`。修改未解析引用会阻止旧提供方结果覆盖新值。
+
+## 7. HTTP 映射与技能
+
+MCP 直接复用应用服务，不应复制数据库写入逻辑或绕过 revision。
+
+| MCP 能力 | 现有 HTTP / 服务入口 |
 | --- | --- |
-| `papers_manager_library_search` | `GET /api/document/search`, `GET /api/paper/search` |
-| `papers_manager_library_get` | `GET /api/document/search?id=`, `GET /api/paper/:id` |
-| `papers_manager_library_get_many` | `POST /api/document/projections` (metadata; optional processing) |
-| `papers_manager_library_import_url` | `POST /api/document/import-url` |
-| `papers_manager_library_import_urls` | `POST /api/document/batch-import-url` |
-| `papers_manager_library_import_file` | `DocumentService.CreateDocumentFromLocalFile` (no HTTP equivalent; local single-user adapter) |
-| `papers_manager_library_import_files` | `DocumentService.CreateDocumentsFromLocalFiles` (no HTTP equivalent; local single-user adapter) |
-| `papers_manager_library_update_metadata` | `PATCH /api/document/:id`, `PATCH /api/paper/:id` |
-| `papers_manager_library_delete` | `DELETE /api/document/:id` |
-| `papers_manager_processing_status` | `GET /api/document/:id/processing` |
-| `papers_manager_processing_status_many` | `POST /api/document/projections` (processing only) |
-| `papers_manager_processing_retry` | `POST /api/document/:id/retry`, `POST /api/paper/:id/info/{extraction|catalog|reference}/retry` |
-| `papers_manager_processing_cancel` | `POST /api/document/:id/cancel`, `POST /api/paper/:id/info/cancel` |
-| `papers_manager_document_structure` | `GET /api/document/:id/structure` |
-| `papers_manager_document_read_section` | `GET /api/document/:id/structure` + `GET /api/document/:id/markdown` (adapter slices by outline range) |
-| `papers_manager_document_read_markdown` | `GET /api/document/:id/markdown` |
-| `papers_manager_document_read_blocks` | `GET /api/document/:id/blocks?page=N` |
-| `papers_manager_document_read_block_image` | `GET /api/document/:id/blocks/:blockID/image` |
-| `papers_manager_document_read_page_image` | `GET /api/document/:id/pages/:page/image` (direct `PdfRenderer.RenderPage`, no Asynq) |
-| `papers_manager_reading_note_outline` | `GET /api/document/:id/reading-note` + section content endpoints |
-| `papers_manager_reading_note_read_section` | `GET /api/document/:id/reading-note/sections/:sectionId` |
-| `papers_manager_reading_note_create` | `PUT /api/document/:id/reading-note` with `expectedRevision=0` |
-| `papers_manager_reading_note_apply_edits` | `POST /api/document/:id/reading-note/edits` |
-| `papers_manager_reading_note_replace` | `PUT /api/document/:id/reading-note` |
-| `papers_manager_reading_note_delete` | `DELETE /api/document/:id/reading-note` |
-| `papers_manager_reading_note_export` | `GET /api/document/:id/reading-note/export` |
-| `papers_manager_reading_note_replace_section` | `PUT /api/document/:id/reading-note/sections/:sectionId` |
-| `papers_manager_evidence_validate` | consumer-side parser + `document/:id/markdown`, `/blocks`, `/structure` |
-| `papers_manager_base_*` | `/api/document/bases` CRUD, membership, and `/bibliography` endpoints |
-| `papers_manager_citation_*` | `/api/paper/:documentID/citations*`, `/api/references/:referenceID/*` |
+| 论文库搜索/读取 | `/api/document/search`、`/api/paper/search`、`/api/paper/{id}` |
+| 批量元数据/状态 | `POST /api/document/projections` |
+| URL 导入 | `POST /api/document/import-url`、`batch-import-url` |
+| 本地文件导入 | 应用服务本地文件入口；无对应公开 HTTP 文件路径接口 |
+| 文档状态/重试/取消 | `/api/document/{id}/processing`、`retry`、`cancel` 与论文信息阶段接口 |
+| 原文结构/Markdown/Blocks/图片 | `/api/document/{id}/structure`、`markdown`、`blocks`、页/区域图片接口 |
+| 笔记读写 | `/api/document/{id}/reading-note` 及章节、`edits`、导出子路径 |
+| Base 与书目 | `/api/document/bases` 及成员、书目子路径 |
+| 引用 | `/api/paper/{documentID}/citations`、`/api/references/{referenceID}` 及子路径 |
 
-The adapter may call application services directly or compose these HTTP
-reads; it must not duplicate persistence logic or bypass revision checks.
+入库技能使用库、状态、Base 与引用工具；阅读技能使用原文、笔记、图片和证据工具。
+Base 比较目前由阅读技能组合已有读取能力，在宿主端生成独立 HTML 报告，
+默认输出 `reports/base-summary/`，模板位于
+`agent-skills/papers-manager-reading/references/html_template/`。
+尚无独立 `base_summary` / `base_compare` 或服务端 LLM 生成工具。
+不提供自动目录扫描；本地批次仅导入明确列出的文件，不提供整篇高清图片批量预渲染。
 
-## Skill mapping
+## 8. 版本与验证
 
-- `papers-manager-library` uses library, processing, Base, and citation tools
-  for ingestion and management.
-- `papers-manager-reading` uses source reading, note, image, and evidence tools.
-- Base summary uses Base/list/get plus source/note reads until Phase 3B adds a
-  dedicated tool. The reading skill renders a host-side, self-contained HTML
-  report under `reports/base-summary/` with document-level library links;
-  visual style templates live in
-  `agent-skills/papers-manager-reading/references/html_template/`. Base
-  bibliography generation is available now.
-
-## Versioning and tests
-
-- Manifest `schemaVersion: 1`. The descriptive `group` field is an additive
-  optional field; tool names themselves carry the stable collection prefix.
-- Adding optional fields/tools is backward-compatible; renaming or changing
-  semantics requires a new version or tool name.
-- Section metadata remains version 1; evidence links remain version 1.
-- Required tests: schema validation, loopback/token boundary, response bounds,
-  local-import path containment, revision conflicts, note creation only when
-  absent, section-meta parsing, evidence validation, error-code mapping, and
-  no storage paths/secrets in output.
+机器清单 `schemaVersion` 为 1。添加可选字段/工具可保持兼容；更名或改变语义需要版本规划。
+章节元数据和证据链接当前均为 v1。
+验证重点包括输入模式、token 行为、响应边界、本地路径约束、revision 冲突、仅缺失时创建、
+章节描述解析、证据验证、错误映射，以及不泄露存储路径和凭据。

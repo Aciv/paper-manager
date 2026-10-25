@@ -1,5 +1,7 @@
 # 阅读注释的通用读写契约
 
+[文档导航](README.md) · [总体架构](architecture.md) · [MCP 工具契约](mcp/papers-manager-tools.md)
+
 阅读注释不区分人类用户和 Agent。后端只暴露普通的资源接口；人类界面、Agent 宿主、MCP adapter 和 skill 都是同一组接口的消费者，不需要 `agent_profiles`、`agent_run_id` 或其他 Agent 专属记录。
 
 ## 读取
@@ -22,6 +24,35 @@ section 目录只包含 `id`、`parentId`、`order`、`level`、`title`、`conte
 - Agent 语义编辑：`POST /api/document/{id}/reading-note/edits`，按 `expectedRevision` 快照执行 `replaceText`、`replaceRange`、`insertAt`、`appendText`、`replaceSection`、`addSection`、`deleteSection`。
 
 所有写入都受 note revision 乐观锁保护。`409` 表示 revision 已变化，消费者必须重新读取，不能用旧内容重试覆盖。整篇替换期间读取可能临时返回 `503`。
+
+### 文件导入与大小
+
+整篇和单节替换都接受 raw `text/markdown` 或 multipart `file`。
+整篇创建时允许空文本/空文件，生成空目录；单节替换必须保留本节 H1–H3 标题和级别。
+每份笔记最多 60 MiB、256 节；上传会检查声明长度并限制实际读取量。
+更大的章节内容应走文件/原始 Markdown 接口，不塞入内联 JSON 编辑请求。
+
+### 原语与语义编辑的位置
+
+原语 `insertText` / `deleteText` 使用**章节内 Unicode code point 偏移**，
+每项位置相对前序操作执行后的内容。替换由删除和插入组合，不能使用 UTF-8 字节偏移代替。
+`addSection` 通过 `parentId` 指定父节、`afterId` 指定同级插入位置；顺序值为稀疏排序值，
+客户端不能依赖连续整数或自行重排已有 order。
+
+语义 `/edits` 的文本位置统一相对 `expectedRevision` 快照：
+
+- `line`、`column` 从 1 开始，列按 Unicode code point 边界计数，不是字节或 UTF-16 单元。
+- 范围为左闭右开；开始列省略表示行首，结束列省略表示换行符之前的行尾。
+- `lineCount + 1` 可表示章节末尾；`replaceText` 默认必须唯一命中，
+  可用 `lineStart` / `lineEnd` 缩小搜索窗口。
+- 同一节的文本范围不能重叠或共用起点；结构修改先于文本修改，
+  `replaceSection` 必须是该节在本请求中的唯一修改。
+- HTTP 的 `replaceText` 使用 `oldText` / `newText`；其余插入/替换正文使用 `content`。
+  `addSection` / `replaceSection` 的内容必须包含完整章节标题。
+- 单次最多 128 项语义编辑；单个内联文本字段最多 256 KiB，合计最多 1 MiB。
+
+服务端将语义修改转换为同一 revision 下的原语操作再提交。
+MCP 使用 snake_case 参数，由适配层转换，不能直接把 HTTP 的 camelCase 请求原样传给工具。
 
 ## section metadata
 

@@ -1,26 +1,17 @@
-# papersManager MCP / Skill 安装指南
+# MCP 与 Agent 技能接入
 
-Status: manual installation guide. The MCP server and skills are implemented;
-a one-click installer and downloadable agent package are not yet provided.
+[文档导航](../README.md) · [工具契约](papers-manager-tools.md) ·
+[技能源包](../../agent-skills/README.md)
 
-This document covers:
+本文说明如何连接现有 MCP 服务并安装两套技能。应用不附带 Agent 客户端或模型；
+客户端接入与模型凭据由用户自行配置。以下保留现有客户端配置示例，具体命令选项以
+本机客户端版本为准，宿主升级不改变服务端工具契约。
 
-- connecting Claude Code, Codex, OpenCode, and DeepSeek Harness to the
-  papersManager MCP server;
-- installing the two Agent skills;
-- loopback, Docker, WSL, and remote-access cases;
-- verification and troubleshooting.
+## 1. 启动 MCP
 
-The tool contract remains
-[`papers-manager-tools.md`](papers-manager-tools.md); the machine-readable
-tool list is [`papers-manager-tools.json`](papers-manager-tools.json). This
-guide only explains how a host connects to that contract.
+### 源码模式
 
-## 1. Before installing
-
-### 1.1 Start the MCP adapter
-
-The MCP server is part of the Go API process. It is disabled by default.
+在根目录 `.env` 设置：
 
 ```env
 MCP_ENABLED=true
@@ -28,76 +19,39 @@ MCP_ADDR=127.0.0.1:8090
 MCP_TOKEN=
 MCP_MAX_REQUEST_BYTES=8388608
 MCP_MAX_IMAGE_BYTES=12582912
-# Shared limit for concurrent import calls. Single and batch tools share this
-# gate; each batch call accepts 1-20 items and processes them sequentially.
 MCP_IMPORT_CONCURRENCY=20
-# Optional: enables papers_manager_library_import_file / import_files.
-# Keep it narrow.
+# 按需启用本地文件导入，目录应尽量小；省略则禁用。
 # MCP_LOCAL_IMPORT_ROOT=/absolute/path/to/import-root
 ```
 
-Start the API normally, for example:
-
-```bash
-make dev-app
-# or
-go run ./cmd/server
-```
-
-The endpoint is:
+运行 `make dev`，或在已有数据库、Redis、解析器的前提下运行 `make dev-app`。
+MCP 与 API 在同一 Go 进程中，但使用独立端口。源码默认地址为：
 
 ```text
 http://127.0.0.1:8090/mcp
 ```
 
-`MCP_ADDR` is a `host:port`, not a full URL. The listener is the same process
-as the HTTP API and shares the same DI container, services, PostgreSQL/Redis
-connections, and reading-note revision gates.
+`MCP_ADDR` 只写 `host:port`，不是完整 URL。桌面 Launcher 会生成自己的端口和 token，
+从管理页复制实际连接配置，不要照搬开发模式的固定地址。
 
-### 1.2 Transport support
+### 传输与 token
 
-papersManager currently supports **MCP Streamable HTTP only**.
+服务端只支持 **MCP Streamable HTTP**，不提供原生 stdio 或旧 HTTP+SSE。
+Claude Code、Codex、OpenCode、DeepSeek Harness 的对应客户端可直接连接 HTTP；
+仅支持 stdio 的宿主见后面的桥接说明。
 
-- There is no native stdio transport.
-- The legacy HTTP+SSE transport is not exposed.
-- Hosts that only accept stdio must use an external stdio-to-HTTP bridge; see
-  [section 2](#2-stdio-only-hosts).
-
-Claude Code, Codex, OpenCode, and DeepSeek Harness can all connect to
-Streamable HTTP directly and do not need a bridge.
-
-### 1.3 Token policy
-
-- `MCP_TOKEN` is optional; an empty token disables authentication.
-- A non-loopback bind without a token still starts, but logs a warning. Set a
-  token whenever the address is reachable by anything other than the local
-  user.
-- When `MCP_TOKEN` is set, every request must send:
+`MCP_TOKEN` 为空会关闭认证；非回环监听也只警告，不会拒绝启动。
+设置 token 后所有请求必须携带：
 
 ```http
 Authorization: Bearer <MCP_TOKEN>
 ```
 
-Use a client-side environment variable such as
-`PAPERS_MANAGER_MCP_TOKEN`; do not commit the token into `.mcp.json`,
-`config.toml`, `opencode.json`, or a DSH profile. The client variable may have a
-different name from the server's `MCP_TOKEN`, as long as the value matches.
+客户端可通过 `PAPERS_MANAGER_MCP_TOKEN` 环境变量提供同一个值，变量名不必与服务端相同。
+不要把真实 token 提交到 `.mcp.json`、`config.toml`、`opencode.json` 或 DSH 配置。
+客户端必须从设置过变量的终端启动。未启用 token 时，省略下面示例中的认证头或对应选项。
 
-For a local development machine this is sufficient:
-
-```bash
-export PAPERS_MANAGER_MCP_TOKEN=dev-token
-```
-
-and start the API with:
-
-```bash
-MCP_TOKEN=dev-token MCP_ENABLED=true make dev-app
-```
-
-### 1.4 Smoke test
-
-The standard MCP handshake is enough to verify the listener, path, and token:
+### 连通性检查
 
 ```bash
 curl -sS http://127.0.0.1:8090/mcp \
@@ -107,64 +61,24 @@ curl -sS http://127.0.0.1:8090/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke-test","version":"1"}}}'
 ```
 
-This curl command is a connectivity check only. Agent skills must use MCP tools,
-not curl, for paper and note operations.
+这只是验证地址、协议和 token。技能执行论文与笔记操作时应使用 MCP 工具，
+不能在 MCP 不可用时自行改用 curl 或数据库绕过契约。
 
-## 2. stdio-only hosts
+## 2. 客户端配置位置
 
-If a host cannot connect to Streamable HTTP, run a stdio bridge on the client
-side. This keeps papersManager's single execution boundary: the bridge forwards
-MCP calls to the same `/mcp` endpoint and does not access the database.
-
-Example with [`mcp-remote`](https://github.com/geelen/mcp-remote):
-
-```bash
-npx -y mcp-remote http://127.0.0.1:8090/mcp \
-  --header "Authorization: Bearer ${PAPERS_MANAGER_MCP_TOKEN}"
-```
-
-A typical stdio configuration:
-
-```json
-{
-  "mcpServers": {
-    "papers-manager": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "mcp-remote",
-        "http://127.0.0.1:8090/mcp",
-        "--header",
-        "Authorization: Bearer ${PAPERS_MANAGER_MCP_TOKEN}"
-      ],
-      "env": {
-        "PAPERS_MANAGER_MCP_TOKEN": "<set-locally>"
-      }
-    }
-  }
-}
-```
-
-`mcp-remote` is a third-party client-side bridge. It is not part of the
-papersManager MCP contract, and no stdio entrypoint is built into
-`cmd/server`.
-
-## 3. Host matrix
-
-| Host | MCP configuration | Skills directory |
+| 客户端 | MCP 配置 | 技能目录 |
 | --- | --- | --- |
-| Claude Code | `.mcp.json` or `claude mcp add --transport http` | `.claude/skills/` or `~/.claude/skills/` |
-| Codex | `~/.codex/config.toml` or `codex mcp add --url` | `.agents/skills/` or `~/.agents/skills/` |
-| OpenCode | `opencode.json` → `mcp` | `.opencode/skills/`, `.agents/skills/`, or `.claude/skills/` |
-| DeepSeek Harness | MCP Center plugin or `@deepseek-ai/dsh-mcp-client` | `.dsh/skills/`, `~/.dsh/skills/`, or `.agents/skills/` |
+| Claude Code | `.mcp.json` 或 CLI | `.claude/skills/`、`~/.claude/skills/` |
+| Codex | `~/.codex/config.toml` 或 CLI | `.agents/skills/`、`~/.agents/skills/` |
+| OpenCode | `opencode.json` 中的 `mcp` | `.opencode/skills/`、`.agents/skills/`、`.claude/skills/` |
+| DeepSeek Harness | MCP Center 或 MCP 客户端插件 | `.dsh/skills/`、`~/.dsh/skills/`、`.agents/skills/` |
 
-For a cross-host project layout, install the skills once under
-`.agents/skills/` and symlink them into `.claude/skills/`; see
-[section 7](#7-install-the-skills).
+服务端清单有 47 个工具。宿主可能加命名空间前缀，不必逐个手动注册工具。
+配置后重启或重新加载客户端，再检查工具是否可见。
 
-## 4. Claude Code
+## 3. Claude Code
 
-### 4.1 CLI
+CLI 示例：
 
 ```bash
 claude mcp add --transport http --scope user \
@@ -172,15 +86,8 @@ claude mcp add --transport http --scope user \
   papers-manager http://127.0.0.1:8090/mcp
 ```
 
-All flags must come before the server name. Omit `--header` when no token is
-configured.
-
-Use `--scope project` to write a shared `.mcp.json` instead of the user-level
-configuration.
-
-### 4.2 `.mcp.json`
-
-Project root:
+选项放在服务名之前；使用 `--scope project` 可生成项目配置。
+也可在项目根目录写 `.mcp.json`：
 
 ```json
 {
@@ -196,10 +103,8 @@ Project root:
 }
 ```
 
-A project-scoped `.mcp.json` is not started silently: Claude Code asks for
-approval on first use. Use `/mcp` to approve or inspect it.
-
-### 4.3 Skills
+项目级配置可能要求首次授权。使用 `claude mcp list` 或会话中的 `/mcp` 检查。
+技能可完整复制到用户目录：
 
 ```bash
 mkdir -p ~/.claude/skills
@@ -207,30 +112,11 @@ cp -R agent-skills/papers-manager-library ~/.claude/skills/
 cp -R agent-skills/papers-manager-reading ~/.claude/skills/
 ```
 
-Or use project-level `.claude/skills/`.
+也可使用项目级 `.claude/skills/`。
 
-### 4.4 Verify
+## 4. Codex
 
-```bash
-claude mcp list
-```
-
-Inside a session:
-
-```text
-/mcp
-```
-
-The host should list 47 tools in four groups: `papers_manager_library_*`,
-`papers_manager_reading_note_*`/`papers_manager_document_*`,
-`papers_manager_base_*`, and `papers_manager_citation_*`. The first skill use
-should trigger its runtime preflight.
-
-## 5. Codex
-
-Codex uses TOML, not the Claude Code `.mcp.json` format.
-
-### 5.1 CLI
+CLI 示例：
 
 ```bash
 codex mcp add papers-manager \
@@ -238,10 +124,7 @@ codex mcp add papers-manager \
   --bearer-token-env-var PAPERS_MANAGER_MCP_TOKEN
 ```
 
-### 5.2 `config.toml`
-
-User-level `~/.codex/config.toml`, or `.codex/config.toml` in a trusted
-project:
+或在用户级 `~/.codex/config.toml`（或受信任项目的 `.codex/config.toml`）添加：
 
 ```toml
 [mcp_servers.papers-manager]
@@ -251,47 +134,13 @@ enabled = true
 tool_timeout_sec = 120
 ```
 
-Set the environment variable in the shell that launches Codex:
+这是 TOML，不是 Claude Code 的 JSON。URL 导入等调用可能等待远程请求，
+`tool_timeout_sec` 可按需要设置。通过 `codex mcp list` 或会话中的 `/mcp` 检查。
+技能安装到项目 `.agents/skills/` 或用户 `~/.agents/skills/`，见下文统一安装步骤。
 
-```bash
-export PAPERS_MANAGER_MCP_TOKEN=dev-token
-```
+## 5. OpenCode
 
-`tool_timeout_sec = 120` is useful because `library_import_url`,
-`library_import_urls` (bounded by `BATCH_IMPORT_TIMEOUT`), and metadata
-operations may wait for remote downloads and queues.
-
-### 5.3 Skills
-
-Codex discovers `SKILL.md` folders under `.agents/skills/` (project) or
-`~/.agents/skills/` (user):
-
-```bash
-mkdir -p .agents/skills
-cp -R agent-skills/papers-manager-library .agents/skills/
-cp -R agent-skills/papers-manager-reading .agents/skills/
-```
-
-Codex loads a skill's name and description first and the full `SKILL.md` only
-when it is selected. Keep each skill's `references/` directory next to its
-`SKILL.md`.
-
-### 5.4 Verify
-
-```bash
-codex mcp list
-```
-
-Inside the Codex TUI, `/mcp` shows the active servers. A skill can be invoked
-with its `$skill-name` form if the host exposes it; otherwise ask for the
-reading/library workflow and let the skill description route it.
-
-## 6. OpenCode
-
-### 6.1 `opencode.json`
-
-Project `opencode.json`, or global
-`~/.config/opencode/opencode.json`:
+项目 `opencode.json` 或用户 `~/.config/opencode/opencode.json` 示例：
 
 ```json
 {
@@ -310,106 +159,21 @@ Project `opencode.json`, or global
 }
 ```
 
-OpenCode uses `{env:VAR}` for environment substitution and `timeout` in
-milliseconds. Omit the `headers` object when no token is configured.
+环境变量替换使用 `{env:VAR}`，超时单位是毫秒。无 token 时省略 `headers`。
+通过 `opencode mcp list` 和 `opencode mcp debug papers-manager` 检查。
+技能可放 `.agents/skills/`，也可放 `.opencode/skills/` 或 `.claude/skills/`；
+用户级目录为 `~/.config/opencode/skills/`。
 
-### 6.2 Skills
+## 6. DeepSeek Harness
 
-OpenCode reads all of these:
-
-```text
-.opencode/skills/<name>/SKILL.md
-~/.config/opencode/skills/<name>/SKILL.md
-.claude/skills/<name>/SKILL.md
-.agents/skills/<name>/SKILL.md
-```
-
-For a shared project installation, use `.agents/skills/`:
-
-```bash
-mkdir -p .agents/skills
-cp -R agent-skills/papers-manager-library .agents/skills/
-cp -R agent-skills/papers-manager-reading .agents/skills/
-```
-
-### 6.3 Verify
-
-```bash
-opencode mcp list
-opencode mcp debug papers-manager
-```
-
-The debug command is the quickest way to separate a configuration error from a
-server/login error.
-
-## 7. Install the skills
-
-The two source bundles are:
-
-```text
-agent-skills/
-  papers-manager-library/
-    SKILL.md
-    references/
-  papers-manager-reading/
-    SKILL.md
-    references/
-```
-
-Install the **whole directory**, not only `SKILL.md`; `references/` is loaded
-on demand for reading levels, note standards, evidence rules, and examples.
-
-### 7.1 Shared project installation
-
-```bash
-mkdir -p .agents/skills
-cp -R agent-skills/papers-manager-library .agents/skills/
-cp -R agent-skills/papers-manager-reading .agents/skills/
-```
-
-Codex, OpenCode, and DeepSeek Harness read `.agents/skills/` directly.
-
-For Claude Code:
-
-```bash
-mkdir -p .claude/skills
-ln -sfn "$PWD/.agents/skills/papers-manager-library" .claude/skills/papers-manager-library
-ln -sfn "$PWD/.agents/skills/papers-manager-reading" .claude/skills/papers-manager-reading
-```
-
-Copy the directories instead of symlinking on platforms or hosts that do not
-follow directory symlinks.
-
-### 7.2 Runtime preflight
-
-Both skills declare the papersManager MCP dependency in their descriptions and
-perform a runtime preflight:
-
-- missing/unreachable MCP tools are reported explicitly;
-- read-only analysis may continue only when read tools exist;
-- note writes stop when write tools are missing;
-- `curl`, shell scripts, and other HTTP clients must not be used as fallbacks;
-- unknown tool names are not guessed.
-
-This matters because a host may discover a skill but not have the MCP server
-configured. In that case the correct outcome is an explicit “MCP unavailable”
-report, not a silent direct-API workaround.
-
-## 8. DeepSeek Harness
-
-DSH is a developer-preview, plugin-native host. It can consume a normal MCP
-server; a papersManager-specific DSH plugin is **not required** for tool
-functionality.
-
-### 8.1 Recommended: MCP Center
-
-Install the community MCP manager into the DSH web profile:
+DSH 使用通用 MCP 客户端即可，不需要另外实现一套论文工具。
+现有示例使用社区 MCP Center 管理远程连接：
 
 ```bash
 dsh plugin --profile web add dsh-mcp-center
 ```
 
-Open **Settings → MCP Center** and add a remote server:
+在 Settings → MCP Center 中填写：
 
 ```text
 name: papers-manager
@@ -418,14 +182,10 @@ url: http://127.0.0.1:8090/mcp
 Authorization: Bearer <token>
 ```
 
-The manager exposes tools as `mcp__<server>__<tool>`. Review third-party
-plugins before installing them. MCP Center stores bearer tokens in its own
-configuration, so treat that file as a secret.
+工具可能显示为 `mcp__<server>__<tool>`。使用前自行审阅第三方插件，
+保存 token 的客户端配置应按私密文件处理。
 
-### 8.2 Direct DSH client configuration
-
-DSH profiles can mount the official MCP client package directly, for example
-in `$DSH_HOME/profiles/<profile>/cordis.patch.yml`:
+也可在 `$DSH_HOME/profiles/<profile>/cordis.patch.yml` 挂载客户端包：
 
 ```yaml
 insert:
@@ -437,44 +197,91 @@ insert:
       url: http://127.0.0.1:8090/mcp
 ```
 
-Bearer/custom headers and reload behavior depend on the current DSH preview
-version; check the installed `@deepseek-ai/dsh-mcp-client` documentation or use
-MCP Center for a UI-managed configuration.
+认证头与重载方式取决于所用 DSH 预览版本，应核对本机客户端文档。
+技能发现目录依次包括项目 `.dsh/skills/`、`.agents/skills/`，以及用户
+`~/.dsh/skills/`、`~/.agents/skills/`。
+如后续制作专用插件，它只负责分发和配置，不应重写现有 MCP 工具。
 
-### 8.3 Skills
+## 7. 安装完整技能
 
-DSH discovers skills from, in priority order:
+源码位置：
 
 ```text
-<project>/.dsh/skills/<name>/SKILL.md
-<project>/.agents/skills/<name>/SKILL.md
-~/.dsh/skills/<name>/SKILL.md
-~/.agents/skills/<name>/SKILL.md
+agent-skills/
+  papers-manager-library/
+    SKILL.md
+    references/
+  papers-manager-reading/
+    SKILL.md
+    references/
 ```
 
-If the shared `.agents/skills/` installation is already present, no extra DSH
-installation step is needed.
+必须复制整个技能目录，包括按需读取的 `references/`，不能只复制 `SKILL.md`。
+支持共享技能根目录的宿主可以使用：
 
-### 8.4 Should this be a separate DSH plugin?
+```bash
+mkdir -p .agents/skills
+cp -R agent-skills/papers-manager-library .agents/skills/
+cp -R agent-skills/papers-manager-reading .agents/skills/
+```
 
-Only as a distribution wrapper.
+Claude Code 可另复制到 `.claude/skills/`，或在支持目录符号链接的环境链接：
 
-A DSH plugin is justified if you want a one-click install, a Settings UI, or
-DSH-specific tool approval/UI. Such a plugin should register
-`@deepseek-ai/dsh-mcp-client` and the two skill directories, not reimplement
-search/read/note tools. Reimplementing the tools would bypass the MCP schema,
-revision fencing, and common error envelope.
+```bash
+mkdir -p .claude/skills
+ln -sfn "$PWD/.agents/skills/papers-manager-library" .claude/skills/papers-manager-library
+ln -sfn "$PWD/.agents/skills/papers-manager-reading" .claude/skills/papers-manager-reading
+```
 
-Until DSH is a primary distribution target, the documented MCP client + skill
-roots are the lower-maintenance integration.
+不支持符号链接时直接复制。技能目录名应与 `SKILL.md` 的 `name` 一致。
+客户端发现技能不等于已经连上 MCP；首次执行会检查工具能力。
+MCP 缺失或不可达时应明确报告，缺少写工具时停止写笔记，不猜工具名、不改走旁路。
 
-## 9. Docker, WSL, and remote hosts
+## 8. 仅支持 stdio 的客户端
 
-### 9.1 Docker
+可在客户端使用外部桥接，例如 [mcp-remote](https://github.com/geelen/mcp-remote)：
 
-`MCP_ADDR=127.0.0.1:8090` inside a container is not reachable from the host
-through a published port. Publish the port and bind the container listener to
-all interfaces:
+```bash
+npx -y mcp-remote http://127.0.0.1:8090/mcp \
+  --header "Authorization: Bearer ${PAPERS_MANAGER_MCP_TOKEN}"
+```
+
+典型配置：
+
+```json
+{
+  "mcpServers": {
+    "papers-manager": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote", "http://127.0.0.1:8090/mcp",
+        "--header", "Authorization: Bearer ${PAPERS_MANAGER_MCP_TOKEN}"
+      ],
+      "env": {"PAPERS_MANAGER_MCP_TOKEN": "<set-locally>"}
+    }
+  }
+}
+```
+
+具体变量替换方式由宿主决定。桥接需要客户端侧的 Node/npm，但不是 paper_manager
+发行应用的运行依赖；它不会为服务端新增 stdio 入口。
+
+## 9. Docker、WSL 与远程访问
+
+### Docker
+
+容器内监听 `127.0.0.1` 不能通过端口映射从宿主访问。
+本仓库 Compose 已声明 MCP 端口映射，可在根目录 `.env` 设置：
+
+```env
+MCP_ENABLED=true
+MCP_ADDR=0.0.0.0:8090
+MCP_HOST_PORT=8090
+MCP_TOKEN=<set-locally>
+```
+
+重新创建 API 容器后，宿主连接 `http://127.0.0.1:8090/mcp`。
+非本仓库 Compose 部署的等价配置为：
 
 ```yaml
 services:
@@ -487,103 +294,42 @@ services:
       - "127.0.0.1:8090:8090"
 ```
 
-The host-side mapping is restricted to loopback, but the container must bind
-`0.0.0.0` for Docker to forward traffic. Since the container listener is
-non-loopback, setting `MCP_TOKEN` is recommended; without it the server logs a
-warning and accepts unauthenticated requests from anything that can reach the
-container port.
+另一个容器中的 Agent 使用容器网络内 `http://api:8090/mcp`，并配置 token。
+本地文件导入时需挂载目标目录，`MCP_LOCAL_IMPORT_ROOT` 和输入路径按 API 容器内视图填写，
+不能直接传宿主机上 API 看不到的路径。
 
-If you enable `papers_manager_library_import_file` /
-`papers_manager_library_import_files` with Docker, mount the import directory
-into the API container and set `MCP_LOCAL_IMPORT_ROOT` to the
-**container path**, not the host path. The path check uses the API process's
-filesystem view.
+### WSL 与远程主机
 
-Agents running on the host then use:
-
-```text
-http://127.0.0.1:8090/mcp
-```
-
-If an Agent runs in another container, use the API service name
-(`http://api:8090/mcp`) in that container network and keep the token enabled.
-
-### 9.2 WSL
-
-If the API runs in WSL and the Agent runs on Windows, `localhost` usually
-forwards to WSL automatically. If it does not, use the WSL VM address and set a
-token; a non-loopback bind without `MCP_TOKEN` starts but logs a warning and
-disables authentication.
-
-### 9.3 Remote host
-
-Preferred: keep MCP loopback-only and use an SSH tunnel:
+Windows 客户端连接 WSL 服务时，先尝试 localhost 转发；不可达时检查 WSL 网络模式、
+监听地址和防火墙。使用非回环地址时应设置 token。
+远程主机可保留回环监听，通过 SSH 转发：
 
 ```bash
 ssh -L 8090:127.0.0.1:8090 user@server
 ```
 
-Then connect the Agent to `http://127.0.0.1:8090/mcp` on the local machine.
+客户端仍连接本机 `http://127.0.0.1:8090/mcp`。直接网络访问应配置可达地址和 token；
+当前没有按 Agent 或用户隔离资源的权限模型。
 
-If an Agent must connect directly over the network, bind a reachable address
-and configure a strong `MCP_TOKEN`. There is no per-user ownership model yet;
-any client with the token has the same access as a human user.
+## 10. 验证与排查
 
-## 10. Verification and troubleshooting
+先检查连接，再执行只读的 `papers_manager_library_search`，或查看 MCP `tools/list`。
+四组工具分别涉及论文库、原文/笔记、Base 和引用。
 
-### 10.1 Common checks
-
-| Symptom | Check |
+| 现象 | 检查 |
 | --- | --- |
-| `401 unauthorized` | Client header value matches `MCP_TOKEN`; token variable loaded in the host process. |
-| `connection refused` | API is running, `MCP_ENABLED=true`, and `MCP_ADDR` is exposed/published. |
-| `404` | URL must end in `/mcp`. |
-| MCP accepts requests without a token | `MCP_TOKEN` is empty; set it to require `Authorization: Bearer <token>`. |
-| Tools missing in host | Host has been restarted/reloaded; server name and URL are correct; skill preflight reports MCP availability. |
-| Tool timeout | Increase the host timeout (`tool_timeout_sec` in Codex, `timeout` in OpenCode, MCP Center timeout in DSH). |
-| Skill not discovered | Directory name matches the `name` field; `SKILL.md` is at the root; `references/` is present; host is reading the expected skills root. |
-| Docker connection fails | Port publishes to `127.0.0.1:8090`; container `MCP_ADDR=0.0.0.0:8090`; token matches when one is set. |
+| `401 unauthorized` | 服务端 token 与客户端头是否一致；环境变量是否已传入客户端进程 |
+| `connection refused` | API 是否运行、MCP 是否启用、端口是否映射/可达 |
+| `404` | URL 是否以 `/mcp` 结尾 |
+| 不带 token 也能调用 | 服务端 `MCP_TOKEN` 是否为空；空值就是关闭认证 |
+| 客户端看不到工具 | 服务名、URL、客户端重载和技能前置检查结果 |
+| 超时 | 远程请求耗时及客户端工具超时配置；不要无限堆积重试 |
+| 技能未发现 | 目录名、`SKILL.md`、`references/`、宿主实际扫描的技能根目录 |
+| Docker 连不上 | 容器监听 `0.0.0.0`、宿主端口映射、token 与容器路径 |
+| `REVISION_CONFLICT` | 重读笔记目录/章节并重新规划编辑；不能沿用旧内容盲目覆盖 |
 
-### 10.2 Tool-level checks
+Agent 可执行修改和删除，与网页操作使用同一资源权限。按宿主能力设置确认策略；
+本地导入只开放明确目录，不向客户端返回私有存储路径。
 
-Ask the host to call:
-
-```text
-papers_manager_library_search
-```
-
-or inspect the MCP server's `tools/list`. All 47 tools start with the
-`papers_manager_` prefix; Base and citation tools use their own
-`papers_manager_base_*` and `papers_manager_citation_*` collections.
-
-Note writes always require `expected_revision`. A `REVISION_CONFLICT` means the
-note changed after it was read: reload the manifest/section and re-plan; do not
-retry with the stale revision.
-
-## 11. Security notes
-
-- MCP defaults to loopback; do not expose it to a LAN or the internet without a
-  token.
-- A non-loopback bind without `MCP_TOKEN` disables authentication and only logs
-  a warning; set a token for anything beyond local use.
-- The server has no per-Agent identity or ownership model; tokens are server
-  configuration, not user accounts.
-- Agents can perform the same operations as the web UI, including deletes and
-  metadata replacement. Review tool annotations and host approval settings.
-- Keep tokens in environment variables or a host credential store; never commit
-  them to `.mcp.json`, `opencode.json`, `config.toml`, or a DSH profile.
-- URL import accepts HTTP(S) URLs only. Local-file import is a separate tool
-  and is confined to `MCP_LOCAL_IMPORT_ROOT`; leave that setting empty unless
-  you intentionally want an Agent to read selected local files. Symlinks are
-  resolved and escapes are rejected.
-- Block-image and page-image responses are bounded by `MCP_MAX_IMAGE_BYTES`;
-  they never expose the underlying storage key. Page rendering is synchronous
-  and bounded by the parser render timeout/DPI/pixel/output limits.
-
-## 12. Contract references
-
-- [MCP tool contract](papers-manager-tools.md)
-- [MCP tool manifest](papers-manager-tools.json)
-- [Skill overview](../../agent-skills/README.md)
-- [Reading-note human/Agent contract](../reading-note-agent-contract.md)
-- [Reading notes standard](../../agent-skills/papers-manager-reading/references/notes-standard.md)
+更多格式约束见[阅读笔记契约](../reading-note-agent-contract.md)和
+[笔记标准](../../agent-skills/papers-manager-reading/references/notes-standard.md)。
