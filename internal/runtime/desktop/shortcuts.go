@@ -90,8 +90,11 @@ func (m *maintenance) writeShortcuts(ctx context.Context) error {
 		powershell := filepath.Join(os.Getenv("SYSTEMROOT"), "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 		cmd := exec.CommandContext(ctx, powershell, "-NoProfile", "-NonInteractive", "-Command", code)
 		cmd.Env = append(os.Environ(), "PAPER_MANAGER_SHORTCUT="+string(payload))
-		if err := cmd.Run(); err != nil {
-			return err
+		if output, err := cmd.CombinedOutput(); err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("create Windows shortcut: %w", ctx.Err())
+			}
+			return fmt.Errorf("create Windows shortcut: %w: %s", err, strings.TrimSpace(string(output)))
 		}
 	} else if runtime.GOOS == "darwin" {
 		macOS := filepath.Join(path, "Contents", "MacOS")

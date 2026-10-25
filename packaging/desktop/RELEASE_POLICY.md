@@ -104,3 +104,6 @@ Launcher 可触发维护并展示结果，不直接查一张表或凭目录名�
 升级健康探针只开放 HTTP health 和 MCP 握手/探活，不运行 Asynq、catalog dispatcher、
 housekeeping 或中断任务恢复。它会执行数据库迁移，因此必须先完成检查点。
 公开业务入口和队列消费留到正常启动，避免验证新版本时消费已有排队任务。
+
+快捷方式为显式可选项：默认安装不创建、不查询Windows桌面目录；--create-shortcut或
+--shortcut-dir才启用。创建失败仅提示，主安装/升级验收不依赖快捷方式存在。

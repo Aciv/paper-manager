@@ -39,6 +39,7 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--temp-root", type=Path)
     parser.add_argument("--ascii-paths", action="store_true", help="Windows volumes without ASCII short aliases")
+    parser.add_argument("--test-shortcuts", action="store_true", help="also require optional shortcut creation")
     args = parser.parse_args()
     if args.ascii_paths and os.name != "nt":
         parser.error("--ascii-paths is only for the documented Windows path fallback")
@@ -97,7 +98,9 @@ def main() -> int:
             def maintain(source, operation="install", *extra, success=True):
                 command = [str(source / ("launcher" + suffix)), "--maintenance", operation,
                            "--program-dir", str(program), "--data-dir", str(data),
-                           "--source-bundle", str(source), "--shortcut-dir", str(shortcuts), *extra]
+                           "--source-bundle", str(source), *extra]
+                if args.test_shortcuts:
+                    command += ["--shortcut-dir", str(shortcuts)]
                 with (output / "operations.log").open("ab") as log:
                     child = subprocess.Popen(command, env=environment, stdout=log, stderr=log)
                     try:
@@ -149,7 +152,9 @@ def main() -> int:
             private_python = bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
             installer = [str(private_python), "-I", "-X", "utf8", "-B",
                          str(package_root / "installer/install.py"), "install", "--no-launch",
-                         "--program-dir", str(program), "--data-dir", str(data), "--shortcut-dir", str(shortcuts)]
+                         "--program-dir", str(program), "--data-dir", str(data)]
+            if args.test_shortcuts:
+                installer += ["--shortcut-dir", str(shortcuts)]
             with (output / "installer.log").open("wb") as log:
                 child = subprocess.Popen(installer, env=environment, stdout=log, stderr=log)
                 try:
@@ -160,9 +165,13 @@ def main() -> int:
                     raise
             require(child.returncode == 0, "packaged installer failed")
             original = config()
-            require(any(shortcuts.iterdir()), "platform application shortcut missing")
+            if args.test_shortcuts:
+                require(any(shortcuts.iterdir()), "requested platform application shortcut missing")
+            else:
+                require(not shortcuts.exists(), "default install created an unsolicited shortcut directory")
             maintain(bundle)  # identical installer is idempotent
-            report["steps"].append("per-user install/setup/probe, shortcut and idempotent reinstall")
+            report["shortcuts_requested"] = args.test_shortcuts
+            report["steps"].append("per-user install/setup/probe and idempotent reinstall")
             base, ready = start()
             api = ready["app_url"]
             document_id = upload_pdf(api, fixture_pdf())

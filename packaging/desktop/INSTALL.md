@@ -14,16 +14,18 @@
 | macOS arm64 | Install.command | ~/Library/Application Support/paper_manager-program | ~/Library/Application Support/papers-manager |
 | Linux x86_64 | ./Install.sh | $XDG_DATA_HOME/paper_manager-program | $XDG_DATA_HOME/papers-manager |
 
-Linux 未设置 XDG_DATA_HOME 时使用 ~/.local/share。Windows 创建桌面快捷方式，
-macOS 创建 ~/Applications/paper_manager.app，Linux 写入用户 applications 目录。
-快捷方式创建失败时保留安装，并在终端提示原因；可以使用程序目录内的固定入口。
+Linux 未设置 XDG_DATA_HOME 时使用 ~/.local/share。默认不创建桌面/应用快捷方式。
+需要时给安装入口加 --create-shortcut：Windows 写入桌面，macOS 写入 ~/Applications，
+Linux 写入用户 applications 目录；也可用 --shortcut-dir 指定目录，表示明确选择创建。
+快捷方式创建失败只提示，安装与升级继续成功；可以使用程序目录内的固定入口启动。
 
 安装器复制私有组件，以当前用户初始化本应用数据库，验证服务后启动 Launcher。
 不安装全局数据库服务，不修改系统 PATH。程序和数据目录必须独立，不能互相嵌套。
 可给入口脚本传入 --program-dir、--data-dir、--shortcut-dir，值均为绝对路径；
 --no-launch 可在安装后暂不启动。首版不自动接管开发项目或 Docker 的已有数据。
 
-安装后使用快捷方式，或程序目录内的 paper_manager（Unix）/paper_manager.ps1（Windows）。
+安装后使用程序目录内的 paper_manager（Unix）/paper_manager.ps1（Windows）；
+选用了快捷方式时，也可以从快捷方式打开。
 关闭浏览器标签不会停止后台服务，请通过管理页退出 Launcher。
 初始化失败时查看数据目录中的 logs，保留目录，排除原因后执行 retry。
 

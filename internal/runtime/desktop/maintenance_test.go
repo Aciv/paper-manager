@@ -129,6 +129,33 @@ func readInstallation(t *testing.T, program string) installation {
 	return record
 }
 
+func TestManagedInstallPreservesSuccessWhenOptionalShortcutFails(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "data")
+	program := filepath.Join(t.TempDir(), "program")
+	shortcutPath := filepath.Join(t.TempDir(), "shortcut-obstruction")
+	if err := os.WriteFile(shortcutPath, []byte("preserve this file"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	options := MaintenanceOptions{
+		Operation: "install", DataDir: root, ProgramDir: program,
+		SourceBundle: testBundle(t, "1.0.0"), ShortcutDir: shortcutPath,
+	}
+	if err := runMaintenance(context.Background(), options, fakeMaintenanceHooks(t)); err != nil {
+		t.Fatalf("optional shortcut failure aborted installation: %v", err)
+	}
+	record := readInstallation(t, program)
+	if record.Active == "" || !record.Versions[record.Active].Healthy || len(record.Shortcuts) != 0 {
+		t.Fatal("shortcut failure changed the healthy installation state")
+	}
+	content, err := os.ReadFile(shortcutPath)
+	if err != nil || string(content) != "preserve this file" {
+		t.Fatal("shortcut failure changed an existing object")
+	}
+	if err := CheckMaintenanceReady(root); err != nil {
+		t.Fatalf("shortcut failure left maintenance incomplete: %v", err)
+	}
+}
+
 func TestManagedUpgradeRestoresAllDurableDataOnCandidateFailure(t *testing.T) {
 	ctx := context.Background()
 	root := filepath.Join(t.TempDir(), "data")

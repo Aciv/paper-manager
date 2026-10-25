@@ -263,3 +263,29 @@ It no longer attempts to promise installation through 8.3 aliases. Unix Unicode
 installation remains supported. Installer validation is covered by focused Python
 tests for ASCII acceptance, non-ASCII rejection before mutation, and Unix behavior.
 The lower-level runtime's existing path checks remain as additional error reporting.
+
+
+### Run 40187549892 and optional shortcuts
+
+[Run 40187549892](https://github.com/Aciv/paper-master/actions/runs/40187549892)
+built 184fc37 and passed Windows runtime/setup/parser benchmark checks. The first
+managed installation reached healthy services, but its optional WScript/PowerShell
+shortcut process failed at the 30-second limit. The installer preserved success;
+the then-required shortcut assertion stopped D4 acceptance before upgrade testing.
+Raw reports are retained at tmp/desktop-d4/windows-184-results.zip. That run is
+not evidence of passed Windows upgrades or rollback.
+
+The maintainer explicitly requested optional shortcuts. The packaged installer
+now defaults to no shortcut; --create-shortcut or explicit --shortcut-dir opts in.
+The default Windows path never starts a desktop lookup. Requested shortcut lookup
+or creation failures warn without failing installation. Go shortcut errors now
+include timeout/error output instead of only an exit code. Native COM replacement
+was researched but not implemented after this scope decision.
+
+The default D4 probe verifies install/idempotent reinstall without creating an
+unsolicited shortcut directory, while retaining every upgrade, real SQL rollback,
+uninstall and data-preservation check. --test-shortcuts is a separate explicit
+probe option. Focused Python tests cover default/opt-in/custom directory behavior
+and optional Windows lookup failure; Go verifies an actual shortcut filesystem
+failure cannot change healthy installation state or overwrite an obstruction.
+No hosted workflow has been started for this change at this point.

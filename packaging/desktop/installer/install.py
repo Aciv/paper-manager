@@ -11,17 +11,26 @@ import subprocess
 import sys
 
 
-def default_paths() -> tuple[Path, Path, Path]:
+def default_paths(*, include_shortcut: bool = False) -> tuple[Path, Path, Path | None]:
     home = Path.home()
     if sys.platform == "win32":
         local = Path(os.environ["LOCALAPPDATA"])
         data = Path(os.environ["APPDATA"])
-        powershell = Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
-        desktop = subprocess.check_output([
-            str(powershell), "-NoProfile", "-NonInteractive", "-Command",
-            "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Environment]::GetFolderPath('Desktop')",
-        ], encoding="utf-8").strip()
-        return local / "paper_manager-program", data / "papers-manager", Path(desktop)
+        desktop = None
+        if include_shortcut:
+            powershell = Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            try:
+                value = subprocess.check_output([
+                    str(powershell), "-NoProfile", "-NonInteractive", "-Command",
+                    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; [Environment]::GetFolderPath('Desktop')",
+                ], encoding="utf-8", timeout=10).strip()
+                if value:
+                    desktop = Path(value)
+                else:
+                    print("Warning: desktop path unavailable; shortcut skipped.", file=sys.stderr)
+            except (OSError, subprocess.SubprocessError):
+                print("Warning: desktop path lookup failed; shortcut skipped.", file=sys.stderr)
+        return local / "paper_manager-program", data / "papers-manager", desktop
     if sys.platform == "darwin":
         data = home / "Library/Application Support"
         return data / "paper_manager-program", data / "papers-manager", home / "Applications"
@@ -45,16 +54,22 @@ def main() -> int:
                                              "restore", "delete-checkpoint"))
     parser.add_argument("--program-dir", type=Path)
     parser.add_argument("--data-dir", type=Path)
-    parser.add_argument("--shortcut-dir", type=Path)
+    parser.add_argument("--create-shortcut", action="store_true",
+                        help="opt in to creating a desktop/application shortcut")
+    parser.add_argument("--shortcut-dir", type=Path, help="create a shortcut in this directory (explicit opt-in)")
     parser.add_argument("--checkpoint-id")
     parser.add_argument("--confirm-restore", action="store_true")
     parser.add_argument("--confirm-delete", action="store_true")
     parser.add_argument("--no-launch", action="store_true")
     args = parser.parse_args()
-    program, data, shortcuts = default_paths()
+    program, data, default_shortcuts = default_paths(
+        include_shortcut=args.create_shortcut and args.shortcut_dir is None
+    )
     program = (args.program_dir or program).resolve()
     data = (args.data_dir or data).resolve()
-    shortcuts = (args.shortcut_dir or shortcuts).resolve()
+    shortcuts = args.shortcut_dir or (default_shortcuts if args.create_shortcut else None)
+    if shortcuts is not None:
+        shortcuts = shortcuts.resolve()
     if args.operation in ("install", "retry"):
         validate_install_paths(program, data)
     root = Path(__file__).resolve().parents[1]
@@ -62,7 +77,9 @@ def main() -> int:
     suffix = ".exe" if sys.platform == "win32" else ""
     command = [str(bundle / ("launcher" + suffix)), "--maintenance", args.operation,
                "--program-dir", str(program), "--data-dir", str(data),
-               "--source-bundle", str(bundle), "--shortcut-dir", str(shortcuts)]
+               "--source-bundle", str(bundle)]
+    if shortcuts is not None:
+        command += ["--shortcut-dir", str(shortcuts)]
     if args.checkpoint_id:
         command += ["--checkpoint-id", args.checkpoint_id]
     if args.confirm_restore:
