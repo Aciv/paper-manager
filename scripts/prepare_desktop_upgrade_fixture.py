@@ -27,6 +27,8 @@ def main():
     base, output = args.base.resolve(), args.output.resolve()
     manifest = verify(base)
     expected = {"Linux": "linux-x86_64", "Windows": "windows-x86_64", "Darwin": "macos-arm64"}[platform.system()]
+    if output.is_relative_to(base):
+        raise ValueError("fixture output must be outside the base bundle")
     if manifest["target"] != expected or output.exists():
         raise ValueError("fixture needs a native base and a new output directory")
     if not (ROOT / "web/dist/index.html").is_file():

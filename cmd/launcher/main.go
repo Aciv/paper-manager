@@ -44,7 +44,7 @@ func run() error {
 	browser := flag.Bool("open-browser", true, "open the independent management page")
 	envFile := flag.String("env-file", filepath.Join(filepath.Dir(executable), ".launcher_env"),
 		"optional Launcher-only environment file")
-	maintenance := flag.String("maintenance", "", "offline install, retry, restore, cleanup or uninstall")
+	maintenance := flag.String("maintenance", "", "offline install, retry, restore, cleanup, status, delete-checkpoint or uninstall")
 	program := flag.String("program-dir", "", "managed program directory, separate from user data")
 	source := flag.String("source-bundle", filepath.Dir(executable), "sealed directory to install or update")
 	checkpoint := flag.String("checkpoint-id", "", "managed upgrade checkpoint to restore")

@@ -159,3 +159,37 @@ case, and can target one OS. It was syntax-checked locally, not executed remotel
 
 Public licensing audit, signed installers, upgrades, relocation of existing user
 configuration and uninstall/restore workflows remain D4 work.
+
+
+## D4 acceptance snapshot: 2026-10-25
+
+Commit 07ea065 added managed version directories, installer bootstraps, shortcuts,
+complete cold checkpoints, offline upgrades, isolated migration probes, restoration,
+owned-resource retention and data-preserving uninstall. The application code is
+MIT; bundled dependencies retain their own license terms. No signing/notarization
+or official release has been performed.
+
+Local Linux ordinary-user, network-disabled, read-only-root archive acceptance
+passed at tmp/desktop-d4/linux-results-r3/upgrade.json. It installed the application,
+uploaded/parsed a PDF via Asynq, persisted a reading note, upgraded synthetic
+metadata from 1.0.0 to 1.0.1, injected an actual failing SQL migration and note/file
+mutations in synthetic 1.0.2, verified rollback, uninstalled and reinstalled with
+data retained. These synthetic versions use the same application source; they
+are not evidence of an actual prior public release or an arbitrary future payload
+migration. The reused native dependencies and local working-tree fixture are
+labelled in the manifest; this is not the final clean-commit platform build.
+
+Run [40171815263](https://github.com/Aciv/paper-master/actions/runs/40171815263)
+built Linux successfully. Windows and macOS both failed the same cleanup fixture:
+it wrote an uncanonicalized temporary DataDir into an ownership record, while the
+maintenance runtime correctly compared canonical paths. Subsequent artifact jobs
+were skipped by the old shared matrix dependency; no platform received final
+D3/D4 acceptance from that run. The fixture now uses the installation's recorded
+DataDir; Linux additionally exercises a real symlink alias. Each target now owns
+a separate reusable build/acceptance workflow, with a fresh runner for acceptance.
+Ordinary pushes and pull requests still do not launch heavy builds.
+
+Current checks and the next consolidated matrix will update this evidence;
+D3/D4 remain in progress until platform acceptance passes. Public redistribution
+review, OS download/signature prompts, antivirus and sleep/resume checks remain
+separate from automated application lifecycle tests.

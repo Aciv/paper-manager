@@ -18,6 +18,7 @@ HARNESS = (
     "check_desktop_upgrade.py",
 )
 REPORTS = ("launcher.json", "setup-failures.json", "parser-benchmark.json")
+DELIVERY_DOCS = ("README.md", "INSTALL.md", "THIRD_PARTY_NOTICES.md", "VALIDATION.md", "LICENSE")
 BOOTSTRAPS = ("Install.sh", "Uninstall.sh", "Install.cmd", "Uninstall.cmd", "Install.command", "Uninstall.command")
 
 
@@ -49,6 +50,12 @@ def package(bundle: Path, output: Path, reports: Path | None = None, failure_pro
             shutil.copy2(ROOT / "packaging/desktop/installer" / source_name, staging / name)
             if name.endswith((".sh", ".command")):
                 (staging / name).chmod(0o755)
+        for name in DELIVERY_DOCS:
+            if name == "LICENSE":
+                source = ROOT / "LICENSE"
+            else:
+                source = ROOT / "packaging/desktop" / ("INSTALL.md" if name == "README.md" else name)
+            shutil.copy2(source, staging / name)
         if reports:
             destination = staging / "reports"
             destination.mkdir()
@@ -73,7 +80,7 @@ def package(bundle: Path, output: Path, reports: Path | None = None, failure_pro
         archive = staging / "delivery.tar.gz"
         with tarfile.open(archive, "w:gz", compresslevel=6) as stream:
             stream.add(bundle, arcname="bundle")
-            for name in ("validation", "reports", "installer", "package.json", *BOOTSTRAPS):
+            for name in ("validation", "reports", "installer", "package.json", *BOOTSTRAPS, *DELIVERY_DOCS):
                 if (staging / name).exists():
                     stream.add(staging / name, arcname=name)
         # Reuse the runtime, but never export a directory modified during packing.

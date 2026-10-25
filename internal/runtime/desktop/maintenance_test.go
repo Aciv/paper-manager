@@ -242,7 +242,8 @@ func TestManagedFirstSetupRetryAndOwnershipBoundaries(t *testing.T) {
 	}
 	originalSource := options.SourceBundle
 	options.SourceBundle = testBundle(t, "1.0.0")
-	if err := os.WriteFile(filepath.Join(options.SourceBundle, "web/index.html"), []byte("different build"), 0600); err != nil {
+	changedPage := filepath.Join(options.SourceBundle, "web/index.html")
+	if err := os.WriteFile(changedPage, []byte("different build"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	sealTestBundle(t, options.SourceBundle, "1.0.0")
@@ -277,7 +278,17 @@ func TestManagedFirstSetupRetryAndOwnershipBoundaries(t *testing.T) {
 
 func TestManagedCleanupKeepsRecoveryReferencesAndUnknownFiles(t *testing.T) {
 	ctx := context.Background()
-	root := filepath.Join(t.TempDir(), "data")
+	parentDir := t.TempDir()
+	if runtime.GOOS != "windows" {
+		// Exercise canonical ownership paths even on Linux, where TempDir
+		// normally has no aliases. macOS /var and Windows short names do.
+		alias := filepath.Join(t.TempDir(), "data-parent-alias")
+		if err := os.Symlink(parentDir, alias); err != nil {
+			t.Fatal(err)
+		}
+		parentDir = alias
+	}
+	root := filepath.Join(parentDir, "data")
 	program := filepath.Join(t.TempDir(), "program")
 	options := MaintenanceOptions{Operation: "install", DataDir: root, ProgramDir: program}
 	hooks := fakeMaintenanceHooks(t)
@@ -316,7 +327,8 @@ func TestManagedCleanupKeepsRecoveryReferencesAndUnknownFiles(t *testing.T) {
 		}
 		if name == "old-owned" {
 			if err := writeRecord(filepath.Join(path, "resource.json"), stagedResource{
-				Schema: 1, DataDir: root, Created: now.Add(-48 * time.Hour), Updated: now.Add(-48 * time.Hour),
+				Schema: 1, DataDir: record.DataDir,
+				Created: now.Add(-48 * time.Hour), Updated: now.Add(-48 * time.Hour),
 			}); err != nil {
 				t.Fatal(err)
 			}

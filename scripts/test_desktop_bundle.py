@@ -107,6 +107,15 @@ class DeliveryTests(unittest.TestCase):
             destination = root / "extracted 阅读"
             extract(archive, destination)
             verify_delivery(destination)
+            guide = destination / "README.md"
+            original_guide = guide.read_bytes()
+            self.assertIn(b"1.0.0", original_guide)
+            self.assertTrue((destination / "LICENSE").is_file())
+            guide.write_bytes(b"modified installation instructions")
+            with self.assertRaises(ValueError):
+                verify_delivery(destination)
+            guide.write_bytes(original_guide)
+            verify_delivery(destination)
             package_record = json.loads((destination / "package.json").read_text(encoding="utf-8"))
             self.assertEqual(package_record["application"]["version"], "1.0.0")
             changed = json.loads(json.dumps(package_record))

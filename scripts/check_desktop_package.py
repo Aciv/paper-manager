@@ -16,6 +16,7 @@ sys.dont_write_bytecode = True
 
 from desktop_bundle import extract, inventory, sha256, verify
 
+DELIVERY_DOCS = ("README.md", "INSTALL.md", "THIRD_PARTY_NOTICES.md", "VALIDATION.md", "LICENSE")
 BOOTSTRAPS = ("Install.sh", "Uninstall.sh", "Install.cmd", "Uninstall.cmd", "Install.command", "Uninstall.command")
 
 
@@ -23,7 +24,7 @@ def verify_delivery(root: Path) -> dict:
     record = json.loads((root / "package.json").read_text(encoding="utf-8"))
     if record.get("schema_version") != 1 or record.get("distribution") != "internal-validation-only":
         raise ValueError("unsupported delivery manifest")
-    allowed = {"bundle", "validation", "reports", "installer", "package.json", *BOOTSTRAPS}
+    allowed = {"bundle", "validation", "reports", "installer", "package.json", *BOOTSTRAPS, *DELIVERY_DOCS}
     if any(path.name not in allowed for path in root.iterdir()):
         raise ValueError("unexpected delivery contents")
     manifest = verify(root / "bundle")
@@ -36,7 +37,7 @@ def verify_delivery(root: Path) -> dict:
     observed = {}
     for name in ("validation", "reports", "installer"):
         observed.update({name + "/" + key: value for key, value in inventory(root / name, exclude=()).items()})
-    for name in BOOTSTRAPS:
+    for name in (*BOOTSTRAPS, *DELIVERY_DOCS):
         path = root / name
         if path.exists():
             if not path.is_file() or path.is_symlink():

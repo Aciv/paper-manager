@@ -5,6 +5,11 @@ Read THIRD_PARTY_NOTICES.md before sharing. The bundle includes private CPython,
 PostgreSQL 17, Redis, parser source, Go entry points and prebuilt web resources.
 Users do not need Go, Node, Python, pip, Redis or PostgreSQL installed.
 
+The outer archive now provides Install.sh/Install.command/Install.cmd, installed
+shortcuts and offline upgrade/uninstall helpers. Prefer those entries and read
+the outer README.md for installation, checkpoints and maintenance commands.
+The following direct-launcher instructions remain useful for standalone testing.
+
 Run as an ordinary user. Keep this program directory separate from writable
 application data. First open `launcher` (`launcher.exe` on Windows) and choose
 “首次配置”. Configuration creates a private database and exits the setup operation;
@@ -32,6 +37,7 @@ The core parser/reading path works offline; external metadata providers require
 network access and may report their own failure independently.
 
 The system baseline is the corresponding CI runner, not every OS release.
-This is a directory bundle, not a signed installer. D4 owns installer integration,
-upgrade/backup/restore/signing and uninstall validation. Do not relocate an active
+This is a directory bundle with unsigned installation helpers. Offline upgrades,
+cold checkpoints, restoration and uninstall are implemented; final native
+acceptance and public-release/signing gates are tracked separately. Do not relocate an active
 runtime or delete database/PID files to force startup.

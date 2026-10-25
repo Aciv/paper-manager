@@ -82,7 +82,9 @@ def main() -> int:
                 "SYSTEMROOT", "WINDIR", "COMSPEC", "USERPROFILE", "HOME", "TEMP", "TMP",
                 "TMPDIR", "LOCALAPPDATA", "APPDATA", "LANG",
             }}
-            environment["PATH"] = str(Path(os.environ["SYSTEMROOT"]) / "System32") if os.name == "nt" else "/nonexistent"
+            environment["PATH"] = (
+                str(Path(os.environ["SYSTEMROOT"]) / "System32") if os.name == "nt" else "/nonexistent"
+            )
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["LOG_PATH"] = str(output / "maintenance.log")
 
@@ -215,7 +217,8 @@ def main() -> int:
             report["steps"].append("real failed SQL migration and file mutations restored from cold checkpoint")
             maintain(bundle, "cleanup")
             if os.name == "nt":
-                uninstaller = [str(Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"),
+                powershell = Path(os.environ["SYSTEMROOT"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+                uninstaller = [str(powershell),
                                "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(program / "uninstall.ps1")]
             else:
                 uninstaller = ["/bin/sh", str(program / "uninstall")]
@@ -230,7 +233,8 @@ def main() -> int:
             require(child.returncode == 0, "installed uninstaller failed")
             require((data / "runtime.json").is_file() and (data / "notes/d4-canary.md").is_file(),
                     "uninstall removed user data")
-            require(not json.loads((program / "installation.json").read_text())["active"], "uninstall left active program")
+            installed = json.loads((program / "installation.json").read_text(encoding="utf-8"))
+            require(not installed["active"], "uninstall left active program")
             maintain(newer)
             base, ready = start()
             require(http(ready["app_url"] + f"/api/document/{document_id}/markdown")[0] == 200,
