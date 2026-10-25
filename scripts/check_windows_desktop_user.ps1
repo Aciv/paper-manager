@@ -106,7 +106,7 @@ try {
             '--temp-root', ('"' + $root + '"')
         )
         if ($asciiPaths) { $upgradeArguments += '--ascii-paths' }
-        $upgrade = Start-Process -FilePath $python -ArgumentList $upgradeArguments -Credential $credential `
+        $upgradeProcess = Start-Process -FilePath $python -ArgumentList $upgradeArguments -Credential $credential `
             -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
             -RedirectStandardOutput (Join-Path $root 'upgrade-stdout.log') `
             -RedirectStandardError (Join-Path $root 'upgrade-stderr.log')
@@ -115,7 +115,7 @@ try {
         Copy-Item (Join-Path $root 'upgrade-result/*') $upgradeOutput -ErrorAction SilentlyContinue
         Copy-Item (Join-Path $root 'upgrade-*.log') $upgradeOutput -ErrorAction SilentlyContinue
         $upgradeReport = Get-Content (Join-Path $upgradeOutput 'upgrade.json') -Raw | ConvertFrom-Json
-        if ($upgrade.ExitCode -ne 0 -or $upgradeReport.status -ne 'passed' -or $upgradeReport.is_admin -ne $false) {
+        if ($upgradeProcess.ExitCode -ne 0 -or $upgradeReport.status -ne 'passed' -or $upgradeReport.is_admin -ne $false) {
             throw 'Ordinary-account upgrade probe failed; see upgrade/upgrade.json'
         }
     }

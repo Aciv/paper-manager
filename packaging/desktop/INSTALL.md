@@ -27,9 +27,11 @@ macOS 创建 ~/Applications/paper_manager.app，Linux 写入用户 applications 
 关闭浏览器标签不会停止后台服务，请通过管理页退出 Launcher。
 初始化失败时查看数据目录中的 logs，保留目录，排除原因后执行 retry。
 
-Windows PostgreSQL 的非 ASCII 路径依赖可用的 ASCII 短路径别名；若系统/卷不提供，
-请选择 ASCII 程序和数据路径。Windows runner 可能关闭 8.3 别名；验收明确记录
-中文路径拒绝后，再测试 ASCII 路径完整链路，不将其标为任意 Unicode 路径支持。
+Windows 安装器只接受完整路径均为 ASCII 的程序目录和数据目录；包含中文或其他非 ASCII
+字符时，在开始安装前提示并退出，不移动或删除现有文件。可指定
+--program-dir C:/paper_manager --data-dir C:/paper_manager_data；父目录和用户名部分也计入检测。
+这是首版明确限制，不再依赖各卷可能禁用的 8.3 短路径。Linux/macOS 保留中文路径支持。
+Windows 验收仍记录底层运行时对无短路径别名的中文目录明确拒绝，再完整验证 ASCII 安装方案。
 首次下载提示、杀毒和系统隔离仍需用户机器验证。
 
 ## 手动升级

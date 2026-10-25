@@ -34,7 +34,13 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bison flex
       - name: Bundle helper tests
-        run: python -m unittest discover -s scripts -p test_desktop_bundle.py
+        run: |
+          python -m unittest discover -s scripts -p test_desktop_bundle.py
+          python -m unittest discover -s scripts -p test_desktop_installer.py
+      - name: Windows validation wrapper regression
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/test_windows_desktop_harness.ps1
       - name: Native installation transaction and retention tests
         run: go test ./internal/runtime/desktop ./cmd/launcher ./scripts/upgrade-failure
       - name: Build sealed hybrid-profile bundle

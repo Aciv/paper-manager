@@ -238,3 +238,28 @@ notes/config and removed their temporary helper. Evidence:
 tmp/desktop-d4/windows-uninstall-focused/uninstall.json. The fixture is labelled
 local-uninstall-fix-fixture, not a clean-commit release. Full Windows Server 2022
 artifact acceptance remains pending the single-target follow-up.
+
+
+### Windows run 40185062937 and installation path policy
+
+[Run 40185062937](https://github.com/Aciv/paper-master/actions/runs/40185062937)
+built a21ddb4 successfully. Its Windows runtime, setup retry and c1/c4/20-task
+benchmark reports all passed in explicit ASCII mode, preserving the Unicode
+PostgreSQL refusal report. Artifact acceptance then failed in the CI wrapper:
+PowerShell is case-insensitive, so assigning a Process to `$upgrade` collided
+with the typed `[switch]$Upgrade` parameter. No final upgrade report was collected;
+this run cannot certify D4 upgrade acceptance.
+
+The process variable is now `$upgradeProcess`. A native PowerShell execution test
+runs the actual wrapper with fake account/process operations and real temporary
+report files, verifies ASCII fallback and runtime/upgrade report collection, and
+confirms that the original variable assignment still fails. This check runs before
+Windows packaging; it does not create real users or start application services.
+
+The maintainer accepted the Windows path limitation. The packaged installer now
+rejects non-ASCII program/data paths before invoking maintenance, with English-path
+examples; no directory is created or existing user file removed on rejection.
+It no longer attempts to promise installation through 8.3 aliases. Unix Unicode
+installation remains supported. Installer validation is covered by focused Python
+tests for ASCII acceptance, non-ASCII rejection before mutation, and Unix behavior.
+The lower-level runtime's existing path checks remain as additional error reporting.

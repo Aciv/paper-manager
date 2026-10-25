@@ -29,6 +29,16 @@ def default_paths() -> tuple[Path, Path, Path]:
     return data / "paper_manager-program", data / "papers-manager", data / "applications"
 
 
+def validate_install_paths(program: Path, data: Path) -> None:
+    """Managed Windows installs require ASCII paths; do not guess 8.3 support."""
+    if sys.platform == "win32" and not (str(program).isascii() and str(data).isascii()):
+        raise ValueError(
+            "Windows 安装目录和数据目录暂不支持中文或其他非 ASCII 字符。"
+            "请选择英文路径，例如 --program-dir C:/paper_manager "
+            "--data-dir C:/paper_manager_data。现有文件不会被移动或删除。"
+        )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("operation", choices=("install", "uninstall", "retry", "cleanup", "status",
@@ -45,6 +55,8 @@ def main() -> int:
     program = (args.program_dir or program).resolve()
     data = (args.data_dir or data).resolve()
     shortcuts = (args.shortcut_dir or shortcuts).resolve()
+    if args.operation in ("install", "retry"):
+        validate_install_paths(program, data)
     root = Path(__file__).resolve().parents[1]
     bundle = root / "bundle"
     suffix = ".exe" if sys.platform == "win32" else ""
