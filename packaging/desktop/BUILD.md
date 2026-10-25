@@ -1,5 +1,10 @@
 # D3 internal directory bundles
 
+Product naming, application versions, update checkpoints and managed cleanup
+follow [RELEASE_POLICY.md](RELEASE_POLICY.md). New bundles use product.json
+(`paper_manager`, application 1.0.0) and reject inconsistent web/MCP versions.
+This does not change dependency or schema versions, or relabel existing artifacts.
+
 These commands build private validation candidates, not public releases or
 signed installers. The maintainer has deferred the project license. See
 [third-party notices and unresolved public distribution gates](THIRD_PARTY_NOTICES.md).

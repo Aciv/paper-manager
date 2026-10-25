@@ -1063,7 +1063,7 @@ function App() {
     <aside className={`document-sidebar${sidebarCollapsed ? ' collapsed' : ''}`}>
       {!sidebarCollapsed && <>
       <div className="console-sidebar-head">
-        <div className="brand"><p className="eyebrow">Papers Manager</p><h1>论文管理端</h1><a className="library-back-link" href="#/library" target="_blank" rel="noreferrer">打开论文阅读库</a></div>
+        <div className="brand"><p className="eyebrow">paper_manager · 1.0.0</p><h1>论文管理端</h1><a className="library-back-link" href="#/library" target="_blank" rel="noreferrer">打开论文阅读库</a></div>
         <button className="console-collapse" type="button" onClick={() => setSidebarCollapsed(true)} aria-expanded="true" aria-controls="console-sidebar" title="收起左栏">«</button>
       </div>
 

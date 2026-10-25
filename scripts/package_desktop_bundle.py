@@ -49,6 +49,7 @@ def package(bundle: Path, output: Path, reports: Path | None = None) -> Path:
                 shutil.copy2(source, destination / name)
         record = {
             "schema_version": 1, "distribution": "internal-validation-only",
+            "application": manifest.get("application"),
             "revision": manifest["revision"], "target": manifest["target"], "profile": manifest["profile"],
             "bundle_manifest_sha256": sha256(bundle / "bundle.json"),
             "files": inventory(staging, exclude=()),

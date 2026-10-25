@@ -23,7 +23,7 @@ import (
 
 const (
 	serverName    = "papers-manager"
-	serverVersion = "0.1.0"
+	serverVersion = "1.0.0"
 )
 
 //go:embed manifest.json
@@ -91,7 +91,7 @@ func NewToolServer(
 	if err := json.Unmarshal(manifestJSON, &spec); err != nil {
 		return nil, fmt.Errorf("decode MCP manifest: %w", err)
 	}
-	if spec.SchemaVersion != 1 || spec.Server.Name != serverName {
+	if spec.SchemaVersion != 1 || spec.Server.Name != serverName || spec.Server.Version != serverVersion {
 		return nil, fmt.Errorf("unsupported MCP manifest")
 	}
 	if spec.Server.ToolNamePrefix != "papers_manager_" {
@@ -113,7 +113,7 @@ func NewToolServer(
 	}
 	s.registry = registry
 	s.server = sdk.NewServer(&sdk.Implementation{
-		Name: serverName, Title: "papersManager", Version: serverVersion,
+		Name: serverName, Title: "paper_manager", Version: serverVersion,
 	}, &sdk.ServerOptions{
 		Instructions: "Use papers_manager_ tools for reading notes and library operations. All note writes require expected_revision. Evidence links and section-meta are consumer-owned Markdown.",
 	})

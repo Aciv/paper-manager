@@ -1,7 +1,7 @@
 // Package main starts the shared Papers Manager server runtime.
 //
-// @title           Papers Manager API
-// @version         1.0
+// @title           paper_manager API
+// @version         1.0.0
 // @description     Paper upload and reading service API.
 // @BasePath        /
 package main

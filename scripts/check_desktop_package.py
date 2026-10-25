@@ -29,6 +29,8 @@ def verify_delivery(root: Path) -> dict:
         raise ValueError("delivery points to a different bundle manifest")
     if any(record[key] != manifest[key] for key in ("revision", "target", "profile")):
         raise ValueError("delivery identity differs from the bundle")
+    if record.get("application") != manifest.get("application"):
+        raise ValueError("delivery product metadata differs from the bundle")
     observed = {}
     for name in ("validation", "reports"):
         observed.update({name + "/" + key: value for key, value in inventory(root / name, exclude=()).items()})

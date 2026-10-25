@@ -1,4 +1,4 @@
-# Papers Manager
+# paper_manager
 
 文档上传与阅读服务的可扩展骨架。Go 负责 HTTP API、PostgreSQL 源数据和本地文件存储；Python 解析器通过 gRPC 契约接入。前端是 React + TypeScript。
 

@@ -84,6 +84,7 @@ class DeliveryTests(unittest.TestCase):
         bundle.mkdir()
         (bundle / "program").write_bytes(b"isolated runtime fixture")
         record = {"schema_version": 1, "distribution": "internal-validation-only", "target": "fixture",
+                  "application": {"id": "papers-manager", "display_name": "paper_manager", "version": "1.0.0"},
                   "revision": "test-revision", "profile": "hybrid", "files": inventory(bundle)}
         write_json(bundle / "bundle.json", record)
         checks = f"{sha256(bundle / 'program')}  program\n{sha256(bundle / 'bundle.json')}  bundle.json\n"
@@ -106,6 +107,14 @@ class DeliveryTests(unittest.TestCase):
             destination = root / "extracted 阅读"
             extract(archive, destination)
             verify_delivery(destination)
+            package_record = json.loads((destination / "package.json").read_text(encoding="utf-8"))
+            self.assertEqual(package_record["application"]["version"], "1.0.0")
+            changed = json.loads(json.dumps(package_record))
+            changed["application"]["version"] = "1.0.1"
+            write_json(destination / "package.json", changed)
+            with self.assertRaises(ValueError):
+                verify_delivery(destination)
+            write_json(destination / "package.json", package_record)
             # Exercise the real CLI with ordinary Python defaults. Importing
             # a sibling must not create an unsealed __pycache__ directory.
             environment = {key: value for key, value in os.environ.items() if key != "PYTHONDONTWRITEBYTECODE"}

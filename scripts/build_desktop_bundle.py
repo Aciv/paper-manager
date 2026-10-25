@@ -92,6 +92,11 @@ def install_windows_postgres_libraries(bundle: Path):
 
 def assemble(args):
     validate_prebuilt_inputs(args.web_dist, args.wheel_dir)
+    product = json.loads((ROOT / "packaging/desktop/product.json").read_text(encoding="utf-8"))
+    web_package = json.loads((ROOT / "web/package.json").read_text(encoding="utf-8"))
+    mcp = json.loads((ROOT / "internal/mcp/manifest.json").read_text(encoding="utf-8"))
+    if product["version"] != web_package["version"] or product["version"] != mcp["server"]["version"]:
+        raise ValueError("application versions differ; synchronize product, frontend and MCP metadata")
     machine = platform.machine().lower()
     target = {("Linux", "x86_64"): "linux-x86_64", ("Windows", "amd64"): "windows-x86_64",
               ("Darwin", "arm64"): "macos-arm64"}.get((platform.system(), machine))
@@ -261,6 +266,7 @@ def assemble(args):
         for directory in list(bundle.rglob("__pycache__")):
             shutil.rmtree(directory)
         manifest = {"schema_version": 1, "distribution": "internal-validation-only",
+                    "application": product,
                     "target": target, "profile": args.profile, "revision": args.revision,
                     "sources": lock, "public_release_approved": False,
                     "web_build": "prebuilt" if args.web_dist else "native",
