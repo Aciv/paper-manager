@@ -4,6 +4,7 @@ param(
     [string]$Bundle,
     [string]$Harness,
     [string]$OutputDirectory,
+    [string]$PostgresRecoveryTest,
     [switch]$Upgrade,
     [switch]$UserUninstall
 )
@@ -20,7 +21,8 @@ $output = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repo 'tmp
 $python = (Get-Command python).Source
 if (-not $Bundle) { $bin = Split-Path (Get-Command pg_ctl).Source }
 $savedChildEnvironment = @{}
-foreach ($name in @('TEMP', 'TMP', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA')) {
+foreach ($name in @('TEMP', 'TMP', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA',
+                    'PAPERS_MANAGER_TEST_POSTGRES_BIN')) {
     $savedChildEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
 }
 try {
@@ -54,6 +56,30 @@ try {
     foreach ($name in $childEnvironment.Keys) {
         New-Item -ItemType Directory -Path $childEnvironment[$name] -Force | Out-Null
         [Environment]::SetEnvironmentVariable($name, $childEnvironment[$name])
+    }
+    if ($PostgresRecoveryTest) {
+        if (-not $Bundle) { throw 'PostgreSQL recovery requires Bundle' }
+        $recoveryOutput = Join-Path $output 'postgres-recovery'
+        New-Item -ItemType Directory -Path $recoveryOutput -Force | Out-Null
+        $env:PAPERS_MANAGER_TEST_POSTGRES_BIN = Join-Path $Bundle 'postgres/bin'
+        $recoveryArguments = @(
+            '-test.run=^TestWindowsPostgresOwnerCrashRecovery$', '-test.v', '-test.timeout=3m'
+        )
+        $recoveryProcess = Start-Process -FilePath $PostgresRecoveryTest -ArgumentList $recoveryArguments `
+            -Credential $credential -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
+            -RedirectStandardOutput (Join-Path $root 'recovery-stdout.log') `
+            -RedirectStandardError (Join-Path $root 'recovery-stderr.log')
+        Copy-Item (Join-Path $root 'recovery-*.log') $recoveryOutput
+        $recoveryLog = [string](Get-Content (Join-Path $root 'recovery-stdout.log') -Raw)
+        $recoveryPassed = $recoveryProcess.ExitCode -eq 0 -and
+            $recoveryLog.Contains('--- PASS: TestWindowsPostgresOwnerCrashRecovery') -and
+            -not $recoveryLog.Contains('--- SKIP:')
+        @{ status = $(if ($recoveryPassed) { 'passed' } else { 'failed' })
+           exit_code = $recoveryProcess.ExitCode; account = $account } |
+            ConvertTo-Json | Set-Content (Join-Path $recoveryOutput 'recovery.json')
+        if (-not $recoveryPassed) {
+            throw 'Ordinary-account PostgreSQL recovery failed; see postgres-recovery logs'
+        }
     }
     if ($Bundle) {
         $arguments = @(

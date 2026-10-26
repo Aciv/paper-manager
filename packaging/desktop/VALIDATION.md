@@ -73,6 +73,14 @@ Windows 服务不再共享 Launcher 控制台，保留 kill-on-close Job 兜底�
 此项接入 Windows 构建后的现有完整工作流，本轮不单独触发 Actions。
 
 ```powershell
+# 使用普通 PowerShell 窗口，不能以管理员身份运行。
 $env:PAPERS_MANAGER_TEST_POSTGRES_BIN = 'C:\path\to\bundle\postgres\bin'
 go test ./internal/runtime/desktop -run '^TestWindowsPostgresOwnerCrashRecovery$' -count=1 -timeout=3m
 ```
+
+运行40280271827的Linux/macOS整包和数据库验收通过，Windows新增恢复专项
+错误地直接使用管理员runner启动PostgreSQL，因权限拒绝而失败；这发生在强杀前。
+该接线已改为构建阶段只编译测试EXE，将其作为独立验证工具传给native-test，
+通过既有普通账户包装器执行后继续完整Launcher与卸载验收。测试程序不进入用户压缩包。
+专项必须实际通过，零退出但跳过也判失败；stdout、stderr与recovery.json随
+test-results-Windows产物保留。测试自身提前拒绝管理员身份，避免等待连接超时。

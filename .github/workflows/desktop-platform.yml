@@ -64,12 +64,11 @@ jobs:
           $env:PAPERS_MANAGER_TEST_LAUNCHER = "$env:RUNNER_TEMP/desktop-bundle/launcher.exe"
           python -B -m unittest test_windows_entry.WindowsUninstallEntryTests -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Windows PostgreSQL owner crash recovery
+      - name: Compile Windows PostgreSQL recovery test for ordinary-account validation
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $env:PAPERS_MANAGER_TEST_POSTGRES_BIN = "$env:RUNNER_TEMP/desktop-bundle/postgres/bin"
-          go test ./internal/runtime/desktop -run '^TestWindowsPostgresOwnerCrashRecovery$' -count=1 -timeout=3m
+          go test -c ./internal/runtime/desktop -o "$env:RUNNER_TEMP/desktop-recovery.test.exe"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Frontend tests (reuse build dependencies)
         run: ./scripts/tests/web.sh
@@ -114,6 +113,8 @@ jobs:
               if not source.is_file():
                   source = pathlib.Path('scripts/parser') / name
               shutil.copy2(source, tools / name)
+          if os.name == 'nt':
+              shutil.copy2(root / 'desktop-recovery.test.exe', tools / 'desktop-recovery.test.exe')
       - uses: actions/upload-artifact@v4
         with:
           name: candidate-${{ inputs.runner }}
@@ -172,7 +173,8 @@ jobs:
           & "$env:RUNNER_TEMP/validation-tools/check_windows_desktop_user.ps1" `
             -Bundle "$env:RUNNER_TEMP/pm-user/bundle" `
             -Harness "$env:RUNNER_TEMP/validation-tools" `
-            -OutputDirectory "$env:RUNNER_TEMP/desktop-results" -UserUninstall
+            -OutputDirectory "$env:RUNNER_TEMP/desktop-results" -UserUninstall `
+            -PostgresRecoveryTest "$env:RUNNER_TEMP/validation-tools/desktop-recovery.test.exe"
       - name: Exercise user package on Unix
         if: runner.os != 'Windows'
         run: |

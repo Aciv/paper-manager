@@ -10,6 +10,8 @@ $wrapper = Join-Path $PSScriptRoot 'check_windows_desktop_user.ps1'
 $harnessTestState = [pscustomobject]@{
     Calls = [Collections.Generic.List[object]]::new()
     RemovedAccounts = 0
+    RecoveryExit = 0
+    RecoverySkip = $false
 }
 
 function New-LocalUser { param($Name, $Password, [switch]$AccountNeverExpires) }
@@ -31,6 +33,9 @@ function Start-Process {
           $WorkingDirectory, [switch]$Wait, [switch]$PassThru,
           $RedirectStandardOutput, $RedirectStandardError)
     $harnessTestState.Calls.Add($ArgumentList)
+    if (-not $Credential -or -not $LoadUserProfile) {
+        throw 'Probe was not launched with ordinary-account credentials'
+    }
     foreach ($name in @('TEMP', 'TMP', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA')) {
         $value = [Environment]::GetEnvironmentVariable($name)
         if (-not $value.StartsWith($WorkingDirectory + [IO.Path]::DirectorySeparatorChar)) {
@@ -39,6 +44,22 @@ function Start-Process {
         if (-not (Test-Path -LiteralPath $value -PathType Container)) {
             throw "Child environment directory missing: $name"
         }
+    }
+    if ($FilePath -like '*desktop-recovery.test.exe') {
+        if (-not (Test-Path -LiteralPath $env:PAPERS_MANAGER_TEST_POSTGRES_BIN -PathType Container)) {
+            throw 'Recovery did not receive the selected private PostgreSQL binaries'
+        }
+        if ($ArgumentList -notcontains '-test.run=^TestWindowsPostgresOwnerCrashRecovery$') {
+            throw 'Recovery test selector missing'
+        }
+        $message = if ($harnessTestState.RecoverySkip) {
+            '--- SKIP: TestWindowsPostgresOwnerCrashRecovery'
+        } else {
+            '--- PASS: TestWindowsPostgresOwnerCrashRecovery'
+        }
+        [IO.File]::WriteAllText($RedirectStandardOutput, $message)
+        [IO.File]::WriteAllText($RedirectStandardError, '')
+        return [pscustomobject]@{ ExitCode = $harnessTestState.RecoveryExit }
     }
     $outputIndex = [array]::IndexOf($ArgumentList, '--output-dir')
     if ($outputIndex -lt 0) { throw 'Output directory missing' }
@@ -70,15 +91,35 @@ try {
     $bundle = Join-Path $delivery 'bundle'
     $harness = Join-Path $delivery 'validation'
     New-Item -ItemType Directory -Path $bundle, $harness | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $bundle 'postgres/bin') -Force | Out-Null
     [IO.File]::WriteAllText((Join-Path $bundle 'bundle.json'), '{}')
     $output = Join-Path $fixture 'results'
-    & $wrapper -Bundle $bundle -Harness $harness -OutputDirectory $output -Upgrade -UserUninstall
-    if ($harnessTestState.Calls.Count -ne 3) { throw 'Expected runtime, upgrade and user uninstall probes' }
-    foreach ($name in @('launcher.json', 'upgrade/upgrade.json', 'user-uninstall/uninstall.json')) {
+    $recoveryTest = Join-Path $fixture 'desktop-recovery.test.exe'
+    & $wrapper -Bundle $bundle -Harness $harness -OutputDirectory $output -Upgrade -UserUninstall `
+        -PostgresRecoveryTest $recoveryTest
+    if ($harnessTestState.Calls.Count -ne 4) { throw 'Expected recovery, runtime, upgrade and user uninstall probes' }
+    foreach ($name in @('launcher.json', 'upgrade/upgrade.json', 'user-uninstall/uninstall.json',
+                         'postgres-recovery/recovery.json')) {
         $record = Get-Content -LiteralPath (Join-Path $output $name) -Raw | ConvertFrom-Json
         if ($record.status -ne 'passed') { throw "Missing passed result: $name" }
     }
     if ($harnessTestState.RemovedAccounts -ne 1) { throw 'Account cleanup did not run' }
+    foreach ($scenario in @('nonzero', 'skip')) {
+        $harnessTestState.RecoveryExit = if ($scenario -eq 'nonzero') { 23 } else { 0 }
+        $harnessTestState.RecoverySkip = $scenario -eq 'skip'
+        $caught = $false
+        $failureOutput = Join-Path $fixture $scenario
+        try {
+            & $wrapper -Bundle $bundle -Harness $harness -OutputDirectory $failureOutput `
+                -PostgresRecoveryTest $recoveryTest
+        } catch {
+            $caught = $_.Exception.Message -like '*Ordinary-account PostgreSQL recovery failed*'
+        }
+        if (-not $caught) { throw "Recovery $scenario was silently accepted" }
+        $record = Get-Content (Join-Path $failureOutput 'postgres-recovery/recovery.json') -Raw | ConvertFrom-Json
+        if ($record.status -ne 'failed') { throw "Recovery $scenario did not preserve its failure report" }
+    }
+    if ($harnessTestState.RemovedAccounts -ne 3) { throw 'Failed recovery did not clean up its account' }
 
     # Prove this regression test catches the original case-insensitive variable
     # collision, rather than merely exercising a different wrapper path.

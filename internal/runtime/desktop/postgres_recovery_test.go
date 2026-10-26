@@ -23,6 +23,9 @@ func TestWindowsPostgresOwnerCrashRecovery(t *testing.T) {
 	if runtime.GOOS != "windows" || bin == "" {
 		t.Skip("requires native Windows and explicitly selected PostgreSQL binaries")
 	}
+	if err := ordinaryUser(); err != nil {
+		t.Fatalf("native recovery acceptance requires an ordinary Windows account: %v", err)
+	}
 	cfg, err := OpenConfig(t.TempDir(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
