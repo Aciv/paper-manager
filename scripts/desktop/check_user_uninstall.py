@@ -63,7 +63,9 @@ def main():
             )
             environment_bytes = environment_path.read_bytes()
             command = [str(program / ("paper_manager" + suffix))]
-            subprocess.run(command + ["--configure"], env=env, check=True, capture_output=True, timeout=30)
+            with (output / "configure-console.log").open("wb") as log:
+                subprocess.run(command + ["--configure"], env=env, check=True,
+                               stdout=log, stderr=log, timeout=30)
             config_path = data / "runtime.json"
             require(config_path.is_file(), "portable Launcher did not use program/data")
             original = json.loads(config_path.read_text(encoding="utf-8"))

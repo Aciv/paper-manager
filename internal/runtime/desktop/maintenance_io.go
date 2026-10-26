@@ -114,8 +114,14 @@ func realDirectory(path string) (string, error) {
 }
 
 func fileInventory(root string, bundle bool) (map[string]bundleFile, error) {
+	// Compare resolved link targets against the same physical root. On macOS
+	// temporary paths may use /var while EvalSymlinks returns /private/var.
+	root, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return nil, err
+	}
 	result := map[string]bundleFile{}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+	err = filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
 		}

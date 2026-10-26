@@ -60,3 +60,45 @@ func TestRuntimeFileAliasesDoNotSelectAnotherBuild(t *testing.T) {
 		t.Fatal("different runtime identity accepted")
 	}
 }
+
+func TestBundleVerificationThroughParentAlias(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("Windows symlink privileges vary; macOS /var aliases are the target")
+	}
+	actual := testBundle(t, "1.0.0")
+	link := filepath.Join(actual, "python", "python-current")
+	if err := os.Symlink("bin/python3", link); err != nil {
+		t.Fatal(err)
+	}
+	sealTestBundle(t, actual, "1.0.0")
+	parent := t.TempDir()
+	alias := filepath.Join(parent, "alias")
+	if err := os.Symlink(filepath.Dir(actual), alias); err != nil {
+		t.Fatal(err)
+	}
+	selected := filepath.Join(alias, filepath.Base(actual))
+	if _, _, err := verifyBundle(selected); err != nil {
+		t.Fatalf("valid bundle through parent alias rejected: %v", err)
+	}
+	data := filepath.Join(parent, "data")
+	if err := os.Mkdir(data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenBundleConfig(data, selected); err != nil {
+		t.Fatalf("portable configuration through parent alias failed: %v", err)
+	}
+	// Canonicalizing the parent must not permit links outside the bundle.
+	outside := filepath.Join(filepath.Dir(actual), "outside.txt")
+	if err := os.WriteFile(outside, []byte("outside"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("../../outside.txt", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := verifyBundle(selected); err == nil {
+		t.Fatal("bundle with escaping relative symlink accepted")
+	}
+}
