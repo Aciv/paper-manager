@@ -51,6 +51,10 @@ const ANNOTATION_COLOR = '#e5484d';
 type PDFViewMode = 'single' | 'continuous' | 'double';
 const VIEW_MODE_STORAGE = 'papersManager.pdfViewMode';
 const NIGHT_MODE_STORAGE = 'papersManager.pdfNightMode';
+// A quick tab round-trip should feel instant. Only unload a hidden PDF after
+// the tab has stayed in the background long enough that keeping it would be a
+// real memory cost.
+const BACKGROUND_UNLOAD_DELAY_MS = 800;
 
 function initialViewMode(): PDFViewMode {
   const stored = window.localStorage.getItem(VIEW_MODE_STORAGE);
@@ -718,6 +722,13 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
   const viewerRef = useRef<PDFViewer | undefined>(undefined);
   const linkServiceRef = useRef<PDFLinkService | undefined>(undefined);
   const pdfDocumentRef = useRef<PDFDocumentProxy | undefined>(undefined);
+  // A hidden browser tab cannot show pages, but pdf.js would otherwise keep
+  // every rendered canvas (plus its GPU surface) and parsed document alive for
+  // that tab. After a short hide grace period we detach and destroy the loading
+  // task, and remember enough state to put the same page/zoom/scroll back when
+  // the tab is shown. Background tabs therefore reload from the local content
+  // endpoint on wake.
+  const pdfResumeRef = useRef<{ page: number; scale: number; scrollTop: number; scrollLeft: number } | undefined>(undefined);
   const pdfLoadGeneration = useRef(0);
   const previewCache = useRef(new Map<string, string>());
   const previewPageCache = useRef(new Map<string, Promise<HTMLCanvasElement>>());
@@ -1062,8 +1073,35 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       // switch must re-apply the device-local presentation choice here.
       viewer.scrollMode = viewModeRef.current === 'continuous' ? ScrollMode.VERTICAL : ScrollMode.PAGE;
       viewer.spreadMode = viewModeRef.current === 'double' ? SpreadMode.ODD : SpreadMode.NONE;
-      viewer.currentScaleValue = viewModeRef.current === 'continuous' ? 'page-width' : 'page-fit';
-      setZoom(viewer.currentScale);
+      const resume = pdfResumeRef.current;
+      if (resume) {
+        // Waking a background tab: keep the zoom and scroll position the user
+        // left. The exact viewport offset is restored after page views have
+        // their final size.
+        pdfResumeRef.current = undefined;
+        const generationAtInit = pdfLoadGeneration.current;
+        viewer.currentScaleValue = String(resume.scale);
+        setZoom(viewer.currentScale);
+        window.setTimeout(() => {
+          if (
+            disposed
+            || viewerRef.current !== viewer
+            || viewer.pdfDocument === undefined
+            || pdfLoadGeneration.current !== generationAtInit
+          ) return;
+          viewer.scrollPageIntoView({ pageNumber: Math.min(resume.page, viewer.pagesCount) });
+          if (scroll) {
+            scroll.scrollLeft = resume.scrollLeft;
+            scroll.scrollTop = resume.scrollTop;
+          }
+          latestPageRef.current = resume.page;
+          setCurrentPage(resume.page);
+          restoreGuard.current = false;
+        }, 120);
+      } else {
+        viewer.currentScaleValue = viewModeRef.current === 'continuous' ? 'page-width' : 'page-fit';
+        setZoom(viewer.currentScale);
+      }
       syncSlots();
     };
     const onPageChanging = (event: { pageNumber?: number }) => {
@@ -1134,6 +1172,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     restoreGuard.current = true;
     latestPageRef.current = 1;
     suppressAutoRead.current = false;
+    pdfResumeRef.current = undefined;
     window.clearTimeout(positionSaveTimer.current);
     const savedPage = readingRecord(readingKey)?.page ?? 0;
     const bus = eventBusRef.current;
@@ -1153,62 +1192,176 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
         }
       }, 120);
     };
-    bus?.on('pagesinit', onRestorePages);
+    // Only the first attach of this source restores its saved page. When a
+    // background tab wakes, onPagesInit restores the exact resume state instead.
+    bus?.on('pagesinit', onRestorePages, { once: true });
     // A page-by-page link scan can outlive its document when the user switches
     // papers; let the cleanup stop it instead of retaining old page proxies.
-    const linksAbort = new AbortController();
-    // A stored document streams from the content endpoint; a local file is read
-    // straight off disk.
-    const loading = localFile
-      ? localFile.arrayBuffer().then(data => getDocument({ data }))
-      : Promise.resolve(getDocument({ url: contentUrl(documentId ?? '') }));
-    const opened: { task?: ReturnType<typeof getDocument> } = {};
-    void loading.then(task => {
-      opened.task = task;
-      if (disposed) {
-        void task.destroy().catch(() => {});
-        return undefined;
+    let linksAbort: AbortController | undefined;
+    let linksReady = false;
+    let outlineReady = false;
+    let outlinePending = false;
+    let activeTask: ReturnType<typeof getDocument> | undefined;
+    let loadAttempt = 0;
+    const loadOutline = (pdfDocument: PDFDocumentProxy) => {
+      if (outlineReady || outlinePending) return;
+      outlinePending = true;
+      const attempt = loadAttempt;
+      void pdfDocument.getOutline().then(async nodes => {
+        if (disposed || pdfLoadGeneration.current !== generation || attempt !== loadAttempt) return;
+        if (!nodes || nodes.length === 0) {
+          setNativeOutline([]);
+          outlineReady = true;
+          return;
+        }
+        // Resolving destination → page once per load is what lets the outline
+        // follow the reader without touching the document while scrolling.
+        const entries = await annotateOutlinePages(nodes as OutlineEntry[], {
+          getDestination: dest => pdfDocument.getDestination(dest as string),
+          getPageIndex: reference => pdfDocument.getPageIndex(reference as never),
+          numPages: pdfDocument.numPages,
+        });
+        if (disposed || pdfLoadGeneration.current !== generation || attempt !== loadAttempt) return;
+        setNativeOutline(entries);
+        outlineReady = true;
+      }).catch(() => {
+        if (disposed || pdfLoadGeneration.current !== generation || attempt !== loadAttempt) return;
+        setNativeOutline([]);
+        outlineReady = true;
+      }).finally(() => {
+        if (attempt === loadAttempt) outlinePending = false;
+      });
+    };
+    const scanLinks = (pdfDocument: PDFDocumentProxy) => {
+      if (linksReady) return;
+      linksAbort?.abort();
+      const abort = new AbortController();
+      linksAbort = abort;
+      const attempt = loadAttempt;
+      void collectPDFLinkPreviews(pdfDocument, abort.signal).then(links => {
+        if (disposed || pdfLoadGeneration.current !== generation || attempt !== loadAttempt) return;
+        linksReady = true;
+        setLinks(links);
+        setLinksByPage(groupLinks(links));
+        setLinkCount(links.length);
+      }).catch(() => { /* annotations unavailable */ });
+    };
+    const attachDocument = (pdfDocument: PDFDocumentProxy) => {
+      if (disposed || pdfLoadGeneration.current !== generation) return;
+      pdfDocumentRef.current = pdfDocument;
+      setPageCount(pdfDocument.numPages);
+      if (viewer.pdfDocument === pdfDocument) return;
+      restoreGuard.current = true;
+      viewer.setDocument(pdfDocument);
+      linkServiceRef.current?.setDocument(pdfDocument);
+      loadOutline(pdfDocument);
+      scanLinks(pdfDocument);
+    };
+    const detachDocument = () => {
+      if (!viewer.pdfDocument) {
+        linksAbort?.abort();
+        linksAbort = undefined;
+        return;
       }
-      return task.promise.then(pdfDocument => {
-        if (disposed || pdfLoadGeneration.current !== generation) return;
-        pdfDocumentRef.current = pdfDocument;
-        setPageCount(pdfDocument.numPages);
-        viewer.setDocument(pdfDocument);
-        linkServiceRef.current?.setDocument(pdfDocument);
-        void pdfDocument.getOutline().then(async nodes => {
-          if (!nodes || nodes.length === 0) {
-            if (!disposed && pdfLoadGeneration.current === generation) setNativeOutline([]);
+      const scroll = scrollRef.current;
+      const page = viewer.currentPageNumber;
+      pdfResumeRef.current = {
+        page,
+        scale: viewer.currentScale,
+        scrollTop: scroll?.scrollTop ?? 0,
+        scrollLeft: scroll?.scrollLeft ?? 0,
+      };
+      latestPageRef.current = page;
+      window.clearTimeout(positionSaveTimer.current);
+      if (!restoreGuard.current) saveReadingPage(readingKey, page);
+      // The resume path restores the page itself; remove a not-yet-fired initial
+      // restore listener so a fast hide/resume cannot race two page jumps.
+      bus?.off('pagesinit', onRestorePages);
+      restoreGuard.current = true;
+      linksAbort?.abort();
+      linksAbort = undefined;
+      previewCache.current.clear();
+      previewPageCache.current.clear();
+      // Detach before destroying the task, so pdf.js cancels in-flight render
+      // jobs while its transport is still alive. Destroying the task then frees
+      // the document, page proxies and worker; keeping them would leave a
+      // hidden tab at roughly the same memory as a visible one.
+      if (viewerRef.current === viewer) viewer.setDocument(null as unknown as PDFDocumentProxy);
+      linkServiceRef.current?.setDocument(null);
+      setSlots([]);
+    };
+    const stopLoad = () => {
+      // Invalidate callbacks from the task being torn down.
+      loadAttempt += 1;
+      outlinePending = false;
+      pdfDocumentRef.current = undefined;
+      const task = activeTask;
+      activeTask = undefined;
+      if (task) void task.destroy().catch(() => {});
+    };
+    const startLoad = () => {
+      if (disposed || activeTask || window.document.visibilityState === 'hidden') return;
+      const attempt = ++loadAttempt;
+      // A stored document streams from the content endpoint; a local file is
+      // read straight off disk.
+      const opening = localFile
+        ? localFile.arrayBuffer().then(data => {
+          if (disposed || attempt !== loadAttempt) return undefined;
+          return getDocument({ data });
+        })
+        : Promise.resolve(getDocument({ url: contentUrl(documentId ?? '') }));
+      void opening.then(task => {
+        if (!task) return;
+        if (disposed || attempt !== loadAttempt) {
+          void task.destroy().catch(() => {});
+          return;
+        }
+        activeTask = task;
+        return task.promise.then(pdfDocument => {
+          if (disposed || attempt !== loadAttempt) return;
+          if (window.document.visibilityState === 'hidden') {
+            stopLoad();
             return;
           }
-          // Resolving destination → page once per load is what lets the outline
-          // follow the reader without touching the document while scrolling.
-          const entries = await annotateOutlinePages(nodes as OutlineEntry[], {
-            getDestination: dest => pdfDocument.getDestination(dest as string),
-            getPageIndex: reference => pdfDocument.getPageIndex(reference as never),
-            numPages: pdfDocument.numPages,
-          });
-          if (!disposed && pdfLoadGeneration.current === generation) setNativeOutline(entries);
-        }).catch(() => { if (!disposed) setNativeOutline([]); });
-        void collectPDFLinkPreviews(pdfDocument, linksAbort.signal).then(links => {
-          if (disposed || pdfLoadGeneration.current !== generation) return;
-          setLinks(links);
-          setLinksByPage(groupLinks(links));
-          setLinkCount(links.length);
-        }).catch(() => { /* annotations unavailable */ });
+          attachDocument(pdfDocument);
+        });
+      }).catch(error => {
+        if (disposed || attempt !== loadAttempt) return;
+        activeTask = undefined;
+        pdfDocumentRef.current = undefined;
+        restoreGuard.current = false;
+        onMessage(`PDF 加载失败：${error instanceof Error ? error.message : '未知错误'}`);
       });
-    }).catch(error => {
-      restoreGuard.current = false;
-      if (!disposed) onMessage(`PDF 加载失败：${error instanceof Error ? error.message : '未知错误'}`);
-    });
+    };
+    let backgroundUnloadTimer = 0;
+    const onVisibilityChange = () => {
+      window.clearTimeout(backgroundUnloadTimer);
+      backgroundUnloadTimer = 0;
+      if (window.document.visibilityState === 'hidden') {
+        backgroundUnloadTimer = window.setTimeout(() => {
+          backgroundUnloadTimer = 0;
+          if (disposed || window.document.visibilityState !== 'hidden') return;
+          detachDocument();
+          stopLoad();
+        }, BACKGROUND_UNLOAD_DELAY_MS);
+        return;
+      }
+      startLoad();
+    };
+    window.document.addEventListener('visibilitychange', onVisibilityChange);
+    startLoad();
 
     return () => {
       disposed = true;
-      linksAbort.abort();
+      window.document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.clearTimeout(backgroundUnloadTimer);
+      linksAbort?.abort();
       bus?.off('pagesinit', onRestorePages);
       window.clearTimeout(positionSaveTimer.current);
       // Flush the latest page of the source being left.
       if (!restoreGuard.current) saveReadingPage(readingKey, latestPageRef.current);
       restoreGuard.current = false;
+      pdfResumeRef.current = undefined;
       pdfDocumentRef.current = undefined;
       // Detach the old document before destroying its loading task. Otherwise
       // pdf.js keeps its page views and in-flight render tasks attached to a
@@ -1233,7 +1386,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       setFindMatches(null);
       setFindState(null);
       eventBusRef.current?.dispatch('findbarclose', { source: null });
-      if (opened.task) void opened.task.destroy().catch(() => {});
+      stopLoad();
     };
   }, [sourceKey, localFile, documentId, readingKey, onMessage]);
 
