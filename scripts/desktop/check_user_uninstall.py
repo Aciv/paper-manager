@@ -117,6 +117,7 @@ def main():
 
                 require(uninstall("REMOVE").returncode != 0, "active program was removed")
                 require((program / "bundle").is_dir(), "active bundle disappeared")
+                require((program / "skills/papers-manager-reading/SKILL.md").is_file(), "active skills disappeared")
                 require(request("/stop", "POST")[0] == 202, "stop refused")
                 wait_state(base, "stopped", process)
                 disk = json.loads(config_path.read_text(encoding="utf-8"))
@@ -138,6 +139,7 @@ def main():
                 removed = uninstall("REMOVE")
                 require(removed.returncode == 0, "uninstall failed: " + removed.stderr.decode(errors="replace")[-1500:])
                 require(not (program / "bundle").exists(), "bundle retained")
+                require(not (program / "skills").exists(), "unmodified shipped skills retained")
                 require(not (program / ("paper_manager" + suffix)).exists(), "native entry retained")
                 require((program / "personal.md").read_text() == "keep", "unrelated note removed")
                 require(config_path.read_bytes() == saved and (data / "postgres/PG_VERSION").is_file(),

@@ -53,5 +53,6 @@ process when `MCP_ENABLED=true`; the 47 prefixed tools are registered from the
 manifest across the `library`, `reading`, `base`, and `citation` groups. Base
 and citation operations use independent tool collections. The skill source
 bundles in this directory are usable in a project that exposes that MCP
-server. Formal skill packaging/export (installer or download artifact) is
-still pending.
+server. Desktop user archives expose both skills under the root `skills/` directory,
+including their complete references and examples; copy the skill directories
+into the Agent client, then use the Launcher management page for MCP configuration.

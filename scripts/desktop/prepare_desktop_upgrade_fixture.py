@@ -59,6 +59,9 @@ def main():
     shutil.copy2(ROOT / "LICENSE", output / "licenses/paper_manager-MIT.txt")
     (output / "README.md").unlink(missing_ok=True)
     (output / ".launcher_env").unlink(missing_ok=True)
+    shutil.rmtree(output / "skills", ignore_errors=True)
+    shutil.copytree(ROOT / "agent-skills", output / "skills")
+    shutil.copy2(ROOT / "packaging/desktop/SKILLS.md", output / "skills/README.md")
     if os.name == "nt":
         for name in ("cyggcc_s-seh-1.dll", "cygiconv-2.dll", "cygintl-8.dll", "cygstdc++-6.dll"):
             (output / "redis" / name).unlink(missing_ok=True)

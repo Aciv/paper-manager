@@ -24,3 +24,16 @@ Launcher 配置与便携布局的本机检查已通过：Go 全量测试/构建�
 本地包复用已验证原生依赖，仅作工作区 fixture，不冒充当前提交的正式发行产物。
 前端由另一个 agent 完成优化与验证；用户允许共同提交，最后集中 Full tests 覆盖完整快照。
 当前新布局仍需三平台最终原生验收，不能据旧记录标记全部通过。
+
+
+## 本轮集中 Action
+
+[40262351015](https://github.com/Aciv/paper-manager/actions/runs/40262351015)
+准确检出 `5ff4b37`；真实 PostgreSQL/Redis 的 Go race 全量通过。
+三平台的打包工具测试准备缺 `grpcio`，提前失败，尚未生成用户包；已补验证依赖，
+全新 venv 仅安装 requirements-validation 后 32 项工具测试通过。
+后续追加的根目录 skills 需要新提交验收，不能将该运行当作新包通过记录。
+
+新增 skills 的实际 Linux 便携归档已完成离线普通用户验证：运行中保护、退出后删除原样
+skills、保留 data/ 与根目录环境文件。Go 测试另覆盖修改技能和新增个人文件的保留行为。
+这仍是本机 fixture 验证，不替代新提交的原生三平台验收。

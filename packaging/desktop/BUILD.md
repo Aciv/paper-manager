@@ -23,7 +23,7 @@ Windows 使用 `.zip` 输出；Unix 使用 `.tar.gz` 保留执行权限和符号
 输出位置必须不存在。下载缓存会按锁文件校验；不复制开发环境、凭据或用户数据。
 `hybrid` 包含已授权的 header/citation 两个 CRF 小模型；`rules` 是独立降级配置。
 
-用户解压后看到原生入口、`bundle/`、`.launcher_env`、README 和当前平台的卸载入口。
+用户解压后看到原生入口、`bundle/`、`skills/`、`.launcher_env`、README 和当前平台的卸载入口。
 首次运行生成同目录 `data/`。运行组件与许可位于 bundle 内；安装器、测试程序、
 内部报告不放进用户包。归档旁的 SHA/manifest 文件供构建与发行工具验证，用户无需操作。
 

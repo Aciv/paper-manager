@@ -1,2 +1,4 @@
 # Validation tools only; do not add these to the production parser image.
 psutil==7.0.0
+grpcio==1.82.1
+protobuf==7.35.1

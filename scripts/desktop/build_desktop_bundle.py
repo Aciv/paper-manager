@@ -163,6 +163,9 @@ def assemble(args):
                 if sha256(source) != item["sha256"]:
                     raise RuntimeError(f"production model differs from pinned model: {item['file']}")
                 shutil.copy2(source, weights / source.name)
+        shutil.copytree(ROOT / "agent-skills", bundle / "skills",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        shutil.copy2(ROOT / "packaging/desktop/SKILLS.md", bundle / "skills/README.md")
         extract(archives["python"], bundle)
         python = bundle / "python" / ("python.exe" if os.name == "nt" else "bin/python3")
         wheels = work / "wheels"

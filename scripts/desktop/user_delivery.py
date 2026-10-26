@@ -72,6 +72,9 @@ def package_user(bundle: Path, output: Path) -> Path:
     manifest = verify(bundle)
     if manifest.get("unpacked_uninstall") != 1:
         raise ValueError("rebuild the native launcher for user delivery with uninstall support")
+    for name in ("papers-manager-library", "papers-manager-reading"):
+        if not (bundle / "skills" / name / "SKILL.md").is_file():
+            raise ValueError("rebuild the bundle with the shipped skills")
     target = manifest["target"]
     if target not in {"linux-x86_64", "windows-x86_64", "macos-arm64"}:
         raise ValueError("unsupported user delivery target")
@@ -88,6 +91,7 @@ def package_user(bundle: Path, output: Path) -> Path:
         (staging / name).write_bytes(script.encode("utf-8"))
         (staging / name).chmod(0o755)
         shutil.copy2(ROOT / "packaging/desktop/USER.md", staging / "README.md")
+        shutil.copytree(bundle / "skills", staging / "skills")
         (staging / ".launcher_env").write_text(
             "# Optional Launcher overrides. Restart Launcher after editing.\n"
             "# Ports and concurrency: management page > Configuration.\n"

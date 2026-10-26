@@ -40,7 +40,8 @@ Agent 阅读和总结需要自行配置支持 MCP 的客户端及模型，应用
 4. 以后从同一入口启动即可；退出时使用管理页的“退出 Launcher”。关闭浏览器不会停止服务。
 
 数据默认保存在解压目录的 `data/`，启动配置 `.launcher_env` 位于根目录。建议使用纯英文路径。
-Launcher 运行、其他服务停止时，可在管理页“配置”修改端口和并发。需要指定其他数据位置时：
+Launcher 运行、其他服务停止时，可在管理页“配置”修改端口和并发。
+`skills/` 提供可完整复制到 Agent 客户端的两套技能，MCP 配置从管理页复制。需要指定其他数据位置时：
 
 ```powershell
 .\paper_manager.exe --data-dir C:/paper_manager_data

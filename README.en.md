@@ -48,6 +48,7 @@ Full Windows/macOS acceptance of the new root-entry layout remains pending.
 
 Data defaults to `data/` inside the extracted directory; `.launcher_env` lives at its root.
 Edit ports and concurrency in the management page while Launcher is running and application services are stopped. Use full ASCII paths on Windows.
+Copy the two directories under `skills/` into your Agent client and use MCP connection settings from the management page.
 To select a data directory:
 
 ```powershell

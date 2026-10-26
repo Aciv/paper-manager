@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"strings"
 )
 
 // AcquireBundle prevents removing a runtime used by any Launcher instance,
@@ -42,10 +44,12 @@ func RemoveUnpacked(program string) error {
 	if err != nil {
 		return fmt.Errorf("exit Launcher before uninstalling: %w", err)
 	}
-	if _, _, err := verifyBundle(bundle); err != nil {
+	manifest, _, err := verifyBundle(bundle)
+	if err != nil {
 		lock.Close()
 		return fmt.Errorf("program files changed; remove the program directory manually; data preserved: %w", err)
 	}
+	removeSkills := unmodifiedDeliverySkills(program, manifest)
 	entry, script := "paper_manager", "Uninstall.sh"
 	if runtime.GOOS == "windows" {
 		entry, script = "paper_manager.exe", "Uninstall.cmd"
@@ -82,6 +86,11 @@ func RemoveUnpacked(program string) error {
 	if err := os.RemoveAll(retired); err != nil {
 		return fmt.Errorf("remove stopped program files: %w", err)
 	}
+	if removeSkills {
+		if err := os.RemoveAll(filepath.Join(program, "skills")); err != nil {
+			return err
+		}
+	}
 	for _, name := range []string{entry, script, "README.md", ".uninstalling"} {
 		if err := os.Remove(filepath.Join(program, name)); err != nil && !os.IsNotExist(err) {
 			return err
@@ -90,4 +99,24 @@ func RemoveUnpacked(program string) error {
 	// Leave any unrelated files and the directory containing them untouched.
 	_ = os.Remove(program)
 	return nil
+}
+
+// Only the exact shipped copy is disposable. Edited skill instructions and
+// newly added files belong to the user and survive program removal.
+func unmodifiedDeliverySkills(program string, manifest bundleManifest) bool {
+	path := filepath.Join(program, "skills")
+	if !realChildDirectory(path) {
+		return false
+	}
+	expected := map[string]bundleFile{}
+	for name, item := range manifest.Files {
+		if strings.HasPrefix(name, "skills/") {
+			expected[strings.TrimPrefix(name, "skills/")] = item
+		}
+	}
+	if len(expected) == 0 {
+		return false
+	}
+	observed, err := fileInventory(path, false)
+	return err == nil && reflect.DeepEqual(expected, observed)
 }
