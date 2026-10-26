@@ -84,3 +84,9 @@ go test ./internal/runtime/desktop -run '^TestWindowsPostgresOwnerCrashRecovery$
 通过既有普通账户包装器执行后继续完整Launcher与卸载验收。测试程序不进入用户压缩包。
 专项必须实际通过，零退出但跳过也判失败；stdout、stderr与recovery.json随
 test-results-Windows产物保留。测试自身提前拒绝管理员身份，避免等待连接超时。
+
+运行40282459718中，普通账户PG强杀恢复专项通过（17.03秒），所有服务也已就绪。
+Windows后续来源检查把CREATE_NO_WINDOW产生的系统控制台宿主误判为外部运行时。
+验收现在仅允许系统目录中确切的System32/conhost.exe路径，其他外部程序及
+别处同名文件仍失败；业务组件和私有DLL检查保持不变。完整进程路径在断言前
+写入报告，系统辅助进程另列system_helper_paths，失败信息包含具体外部路径。

@@ -43,6 +43,18 @@ def require(condition, message):
         raise RuntimeError(message)
 
 
+def validate_runtime_paths(paths, bundle, windows_directory=None):
+    """Accept bundled executables and the exact native Windows console host."""
+    allowed_helpers = set()
+    if windows_directory is not None:
+        allowed_helpers.add((windows_directory / "System32/conhost.exe").resolve())
+    outside = {path for path in paths if not path.is_relative_to(bundle)}
+    unexpected = outside - allowed_helpers
+    require(not unexpected, "unexpected runtime executables outside bundle: " +
+            ", ".join(sorted(map(str, unexpected))))
+    return outside
+
+
 def wait_state(base, expected, process, timeout=120):
     deadline = time.monotonic() + timeout
     last = None
@@ -280,12 +292,13 @@ def main():
                     expected = {args.server.resolve(), args.redis_server.resolve(),
                                 (args.postgres_bin / ("postgres.exe" if os.name == "nt" else "postgres")).resolve()}
                     paths = {Path(child.exe()).resolve() for child in children}
-                    require(expected <= paths, "expected private services are not running")
-                    require(all(path.is_relative_to(args.bundle) for path in paths),
-                            "a runtime process came from outside the bundle")
                     report["bundle"] = {"target": manifest["target"], "profile": manifest["profile"],
                                         "revision": manifest["revision"], "runtime_paths": sorted(map(str, paths)),
                                         "entrypoint": args.launcher.name}
+                    require(expected <= paths, "expected private services are not running")
+                    windows_directory = Path(os.environ["SYSTEMROOT"]) if os.name == "nt" else None
+                    helpers = validate_runtime_paths(paths, args.bundle, windows_directory)
+                    report["bundle"]["system_helper_paths"] = sorted(map(str, helpers))
                     if os.name == "nt":
                         postgres = next(child for child in children if Path(child.exe()).name == "postgres.exe")
                         mapped = {Path(item.path).name.lower(): Path(item.path).resolve()

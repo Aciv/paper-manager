@@ -567,3 +567,55 @@ class DesktopValidationTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RuntimeExecutablePathTests(unittest.TestCase):
+    def setUp(self):
+        from check_desktop_launcher import validate_runtime_paths
+        self.validate = validate_runtime_paths
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.bundle = self.root / 'bundle'
+        self.windows = self.root / 'Windows'
+        self.conhost = self.windows / 'System32/conhost.exe'
+
+    def test_only_exact_system_console_host_is_allowed(self):
+        paths = {self.bundle / 'server.exe', self.conhost}
+        self.assertEqual(self.validate(paths, self.bundle, self.windows), {self.conhost})
+
+    def test_foreign_runtime_and_lookalike_console_hosts_are_rejected(self):
+        for path in (self.windows / 'System32/python.exe', self.root / 'other/conhost.exe'):
+            with self.subTest(path=path), self.assertRaisesRegex(RuntimeError, path.name):
+                self.validate({path, self.conhost}, self.bundle, self.windows)
+
+    def test_unix_has_no_system_console_host_exception(self):
+        with self.assertRaisesRegex(RuntimeError, 'conhost.exe'):
+            self.validate({self.conhost}, self.bundle)
+
+    @unittest.skipUnless(os.name == 'nt', 'requires native Windows console creation')
+    def test_hidden_console_creates_a_system_helper_outside_runtime(self):
+        import psutil
+        import time
+        process = subprocess.Popen(
+            [sys.executable, '-c', 'import time; time.sleep(10)'],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        try:
+            expected = (Path(os.environ['SYSTEMROOT']) / 'System32/conhost.exe').resolve()
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                paths = {Path(child.exe()).resolve()
+                         for child in psutil.Process(process.pid).children(recursive=True)}
+                if expected in paths:
+                    break
+                time.sleep(.05)
+            self.assertIn(expected, paths, 'hidden-console fixture did not create conhost')
+            bundle = Path(sys.executable).resolve().parent
+            self.assertFalse(expected.is_relative_to(bundle))
+            self.assertEqual(self.validate(paths, bundle, Path(os.environ['SYSTEMROOT'])), {expected})
+        finally:
+            process.kill()
+            process.wait(timeout=5)
+            process.stdin.close()
