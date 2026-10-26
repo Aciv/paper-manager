@@ -17,6 +17,7 @@ import (
 
 type Config struct {
 	Version          int           `json:"version"`
+	BundleHash       string        `json:"bundle_hash,omitempty"`
 	DataDir          string        `json:"-"`
 	Server           string        `json:"server"`
 	Python           string        `json:"python"`
@@ -199,6 +200,11 @@ func (c Config) Validate() error {
 	c = c.withDefaults()
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported runtime configuration version")
+	}
+	if c.BundleHash != "" {
+		if digest, err := hex.DecodeString(c.BundleHash); err != nil || len(digest) != 32 {
+			return fmt.Errorf("invalid runtime bundle fingerprint")
+		}
 	}
 	for _, path := range []string{c.DataDir, c.Server, c.Python, c.ParserDir, c.PostgresBin, c.Redis, c.WebDir} {
 		if !filepath.IsAbs(path) {

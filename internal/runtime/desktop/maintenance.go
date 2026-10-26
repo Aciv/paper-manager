@@ -305,6 +305,11 @@ func (m *maintenance) versionPath(key string) string {
 }
 
 func configForBundle(cfg Config, bundle string, profile string) Config {
+	// Persist the sealed runtime identity independently of its absolute path so
+	// a portable directory can move without permitting an unnoticed upgrade.
+	if hash, err := fileHash(filepath.Join(bundle, "bundle.json")); err == nil {
+		cfg.BundleHash = hash
+	}
 	ext := ""
 	if runtime.GOOS == "windows" {
 		ext = ".exe"

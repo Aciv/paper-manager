@@ -29,6 +29,10 @@ func main() {
 }
 
 func run() error {
+	// Install before opening the browser or starting services: a console close
+	// during startup must follow the same shutdown path as a later interruption.
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -64,8 +68,6 @@ func run() error {
 		if *configure || *initialize {
 			return fmt.Errorf("maintenance cannot be combined with configure or initialize")
 		}
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
 		return desktop.RunMaintenance(ctx, desktop.MaintenanceOptions{
 			Operation: *maintenance, DataDir: *root, ProgramDir: *program,
 			SourceBundle: *source, Checkpoint: *checkpoint, ConfirmRestore: *confirmRestore,
@@ -144,8 +146,6 @@ func run() error {
 	app.EnableConfigReload()
 	if *initialize {
 		app.Initialize()
-		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer cancel()
 		if err := app.Wait(ctx); err != nil {
 			app.Stop()
 			drain, stop := context.WithTimeout(context.Background(), cfg.StopTimeout)
@@ -174,13 +174,13 @@ func run() error {
 	fmt.Printf("Management: %s\nConfig: %s\n",
 		app.ManagementURL(), filepath.Join(cfg.DataDir, "runtime.json"))
 	if *browser {
-		if err := openBrowser(app.ManagementURL()); err != nil {
-			fmt.Fprintln(os.Stderr, "Open the management address in your browser:", err)
-		}
+		go func() {
+			if err := openBrowser(app.ManagementURL()); err != nil {
+				fmt.Fprintln(os.Stderr, "请在浏览器打开管理地址：", app.ManagementURL(), err)
+			}
+		}()
 	}
 	app.Start()
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
 	select {
 	case <-ctx.Done():
 	case <-app.QuitRequested():

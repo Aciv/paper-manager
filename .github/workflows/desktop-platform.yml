@@ -64,6 +64,13 @@ jobs:
           $env:PAPERS_MANAGER_TEST_LAUNCHER = "$env:RUNNER_TEMP/desktop-bundle/launcher.exe"
           python -B -m unittest test_windows_entry.WindowsUninstallEntryTests -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Windows PostgreSQL owner crash recovery
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PAPERS_MANAGER_TEST_POSTGRES_BIN = "$env:RUNNER_TEMP/desktop-bundle/postgres/bin"
+          go test ./internal/runtime/desktop -run '^TestWindowsPostgresOwnerCrashRecovery$' -count=1 -timeout=3m
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Frontend tests (reuse build dependencies)
         run: ./scripts/tests/web.sh
       - name: Python tests with the bundled interpreter

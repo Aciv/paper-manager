@@ -52,3 +52,27 @@ Windows 本机原生回归已通过：旧入口复现假失败、删除后返回
 当前 Launcher 的取消/身份校验拒绝/成功删除，以及个人文件、data 和环境文件保留。
 不是用忽略退出码或放宽最终断言修复。Windows 构建后增加真实 Launcher 入口回归，
 现有完整普通账户验收继续保留。本轮未重跑 Actions，不把本机聚焦结果当成新提交全矩阵通过。
+
+## 异常退出与目录移动（2026-10-26）
+
+旧版本把 postmaster.pid 的存在直接当作活跃实例，阻断强杀后的正常恢复。
+现在 Launcher 验证私有实例标记后启动 PostgreSQL，由数据库自己检查活跃 PID、
+锁和 WAL；Launcher 不删除 PID 文件，不重建已有数据库，不接管残留活跃服务。
+Windows 服务不再共享 Launcher 控制台，保留 kill-on-close Job 兜底；
+信号处理提前注册，打开浏览器不再阻塞服务启动和退出处理。
+关闭窗口的收尾仍受 Windows 时限约束，不能用优雅退出替代崩溃恢复。
+
+便携配置增加可选 bundle_hash，记录运行包指纹；移动后重新绑定组件路径，
+不修改密码、端口或用户数据。旧配置缺少指纹时，仅在 data/ 与完整运行包一同
+移动且旧运行目录已不存在的场景引导绑定；无法确认旧版本一致性，这是旧配置
+兼容的边界。新配置通过指纹验证同一构建，外置旧数据仍保留原版本检查。
+
+新增 Windows 原生回归，使用显式选择的 PostgreSQL 和全新临时数据库：
+两次强杀管理进程、Job 回收、残留 PID 的原生恢复、SQL 数据保留、活跃实例拒绝、
+数据目录改名后恢复及最后正常停库。它验证进程崩溃，不模拟真实磁盘损坏或断电。
+此项接入 Windows 构建后的现有完整工作流，本轮不单独触发 Actions。
+
+```powershell
+$env:PAPERS_MANAGER_TEST_POSTGRES_BIN = 'C:\path\to\bundle\postgres\bin'
+go test ./internal/runtime/desktop -run '^TestWindowsPostgresOwnerCrashRecovery$' -count=1 -timeout=3m
+```

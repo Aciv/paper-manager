@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -76,6 +77,10 @@ func lockBundleFile(f *os.File) (*InstanceLock, error) {
 
 var jobs sync.Map // cmd pointer -> private kill-on-close job
 func prepareProcess(cmd *exec.Cmd) (func(), func(), error) {
+	// Services belong to the Launcher job, not its console. Closing the console
+	// must give the Launcher a chance to shut them down instead of broadcasting
+	// CTRL_CLOSE_EVENT to PostgreSQL and Python at the same time.
+	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return nil, nil, err

@@ -105,12 +105,10 @@ func (r *Runtime) postgresData(ctx context.Context, initialize bool) (string, er
 	if err := checkIdentity(data, r.cfg.DatabasePassword); err != nil {
 		return "", fmt.Errorf("private PostgreSQL directory: %w", err)
 	}
-	if _, err = os.Stat(filepath.Join(data, "postmaster.pid")); err == nil {
-		return "", fmt.Errorf("existing PostgreSQL has postmaster.pid; stop the previous instance " +
-			"or verify crash recovery manually; refusing to take ownership")
-	}
-	// Listener overrides are command arguments. Existing cluster configuration
-	// and PID files are never replaced or deleted to force a successful launch.
+	// A PID file also survives power loss or forced termination. PostgreSQL owns
+	// the live-process/lock checks and WAL recovery; let it distinguish a stale
+	// lock from an active instance. Never unlink the PID file in the Launcher.
+	// Identity checks above and port reservations still precede process startup.
 	return data, nil
 }
 

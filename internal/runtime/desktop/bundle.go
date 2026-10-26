@@ -81,6 +81,9 @@ func OpenBundleConfig(root, bundle string) (Config, error) {
 	expected := configForBundle(cfg, selected, engine)
 	currentPaths := configForBundle(cfg, selected, cfg.ExtractionEngine)
 	if sameRuntimeFiles(cfg, currentPaths) {
+		if cfg.BundleHash != "" && cfg.BundleHash != expected.BundleHash {
+			return cfg, fmt.Errorf("运行包已被其他版本替换，请使用原版本或显式升级；原有数据已保留")
+		}
 		// macOS may spell the same directory through /var and /private/var.
 		// Keep persisted paths rather than treating this alias as a new build.
 		expected.Server, expected.Python = cfg.Server, cfg.Python
@@ -90,10 +93,25 @@ func OpenBundleConfig(root, bundle string) (Config, error) {
 	}
 	old := filepath.Dir(cfg.Server)
 	// Identical, intact copies may be switched without migrating user data.
-	// A missing old bundle or a different build requires explicit maintenance.
+	// A recorded fingerprint also works after a directory rename, when the old
+	// absolute path no longer exists. Verify the complete selected inventory.
 	_, previousHash, previousErr := verifyBundle(old)
 	_, selectedHash, selectedErr := verifyBundle(selected)
-	if cfg == configForBundle(cfg, old, cfg.ExtractionEngine) &&
+	if selectedErr == nil && cfg.BundleHash != "" && cfg.BundleHash == selectedHash &&
+		usesBundlePaths(cfg, old) {
+		return expected, nil
+	}
+	// Older portable configurations have no fingerprint. Only bootstrap one
+	// when data travelled with the bundle and the old runtime is absent. An
+	// external data directory still requires evidence of the original build.
+	_, oldErr := os.Stat(old)
+	portableData := filepath.Join(DeliveryDirectory(selected), "data")
+	if selectedErr == nil && cfg.BundleHash == "" && os.IsNotExist(oldErr) &&
+		filepath.Clean(cfg.DataDir) == filepath.Clean(portableData) &&
+		usesBundlePaths(cfg, old) {
+		return expected, nil
+	}
+	if usesBundlePaths(cfg, old) &&
 		previousErr == nil && selectedErr == nil && previousHash == selectedHash {
 		return expected, nil
 	}
@@ -102,6 +120,7 @@ func OpenBundleConfig(root, bundle string) (Config, error) {
 }
 
 func sameRuntimeFiles(a, b Config) bool {
+	b.BundleHash = a.BundleHash
 	for _, pair := range [][2]*string{
 		{&a.Server, &b.Server}, {&a.Python, &b.Python}, {&a.ParserDir, &b.ParserDir},
 		{&a.PostgresBin, &b.PostgresBin}, {&a.Redis, &b.Redis}, {&a.WebDir, &b.WebDir},
@@ -113,4 +132,10 @@ func sameRuntimeFiles(a, b Config) bool {
 		}
 	}
 	return a == b
+}
+
+func usesBundlePaths(cfg Config, bundle string) bool {
+	expected := configForBundle(cfg, bundle, cfg.ExtractionEngine)
+	expected.BundleHash = cfg.BundleHash
+	return cfg == expected
 }

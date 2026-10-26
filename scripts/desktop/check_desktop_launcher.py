@@ -408,6 +408,29 @@ def main():
                     raise RuntimeError("interrupted task did not produce Markdown after explicit retry")
                 report["steps"].append(
                     "API crash cleaned dependencies; interrupted task failed visibly and retry succeeded")
+                if os.name == "nt":
+                    # Unlike the API-only crash above, this bypasses every
+                    # Launcher defer. Windows must reap the private jobs, and
+                    # the next Launcher must permit PostgreSQL WAL recovery.
+                    process.kill()
+                    process.wait(timeout=15)
+                    deadline = time.monotonic() + 20
+                    while not service_ports_closed(config) and time.monotonic() < deadline:
+                        time.sleep(0.1)
+                    require(service_ports_closed(config), "killed Launcher left service listeners running")
+                    require((root / "postgres/postmaster.pid").exists(),
+                            "owner crash fixture did not retain a database PID file")
+                    process = start()
+                    wait_state(base, "ready", process)
+                    require(http(base)[0] == 200, "management page unavailable after owner crash")
+                    code, data, _ = http(markdown_url)
+                    require(code == 200 and b"Desktop lifecycle probe" in data,
+                            "PDF/Markdown lost after owner crash")
+                    code, note, _ = http(note_url)
+                    require(code == 200 and b"Methods" in note, "notes lost after owner crash")
+                    require(init_log.read_bytes() == initialized_log, "crash recovery reran initdb")
+                    report["steps"].append(
+                        "forced Launcher exit reaped jobs; PostgreSQL/Redis/API/parser recovered with PDF and notes")
                 quit_launcher()
                 process = None
 

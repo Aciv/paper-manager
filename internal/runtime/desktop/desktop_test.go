@@ -3,6 +3,7 @@ package desktop
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -92,6 +93,11 @@ func TestUnpackedBundleRefusesSilentVersionChangeAndMissingOldBundle(t *testing.
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
+	// Legacy external configurations have no portable runtime fingerprint.
+	cfg.BundleHash = ""
+	if err := SaveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
 	before, err := os.ReadFile(filepath.Join(data, "runtime.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -112,6 +118,81 @@ func TestUnpackedBundleRefusesSilentVersionChangeAndMissingOldBundle(t *testing.
 	after, err := os.ReadFile(filepath.Join(data, "runtime.json"))
 	if err != nil || string(after) != string(before) {
 		t.Fatal("rejected runtime switch modified existing identity")
+	}
+}
+
+func TestPortableBundleRenameRetainsDataAndSettings(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		t.Run(fmt.Sprint("legacy=", legacy), func(t *testing.T) {
+			program := filepath.Join(t.TempDir(), "original program")
+			bundle := filepath.Join(program, "bundle")
+			if err := os.MkdirAll(program, 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := copyTree(testBundle(t, "1.0.0"), bundle, true); err != nil {
+				t.Fatal(err)
+			}
+			data := filepath.Join(program, "data")
+			if err := os.MkdirAll(data, 0700); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := OpenBundleConfig(data, bundle)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if legacy {
+				cfg.BundleHash = ""
+			}
+			if err := SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			moved := program + " renamed"
+			if err := os.Rename(program, moved); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := OpenBundleConfig(filepath.Join(moved, "data"), filepath.Join(moved, "bundle"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := configForBundle(cfg, filepath.Join(moved, "bundle"), cfg.ExtractionEngine)
+			want.DataDir = filepath.Join(moved, "data")
+			if reopened != want || reopened.BundleHash == "" {
+				t.Fatal("rename lost runtime identity, credentials or settings")
+			}
+			if err := SaveConfig(reopened); err != nil {
+				t.Fatal(err)
+			}
+			other := testBundle(t, "1.0.1")
+			if _, err := OpenBundleConfig(reopened.DataDir, other); err == nil {
+				t.Fatal("another build silently replaced the portable runtime")
+			}
+		})
+	}
+}
+
+func TestPostgresStalePIDIsPreservedForNativeRecovery(t *testing.T) {
+	cfg := testConfig(t)
+	// Path encoding is covered independently; this fixture tests lock handling.
+	cfg.DataDir = t.TempDir()
+	dir := filepath.Join(cfg.DataDir, "postgres")
+	for name, content := range map[string]string{
+		"PG_VERSION": "17\n", "global/pg_control": "control",
+		"postgresql.conf": "config", "pg_hba.conf": "auth",
+		"postmaster.pid": "123\n", ".papers-manager-instance": fmt.Sprintf("%x\n", sha256.Sum256([]byte(cfg.DatabasePassword))),
+	} {
+		path := filepath.Join(dir, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := New(cfg).preparePostgres(context.Background()); err != nil {
+		t.Fatalf("native recovery was blocked: %v", err)
+	}
+	if pid, err := os.ReadFile(filepath.Join(dir, "postmaster.pid")); err != nil || string(pid) != "123\n" {
+		t.Fatal("Launcher altered the database lock")
 	}
 }
 
