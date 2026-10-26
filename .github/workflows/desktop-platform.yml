@@ -56,6 +56,14 @@ jobs:
           python scripts/desktop/build_desktop_bundle.py --profile hybrid
           --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/desktop-bundle"
           --cache "$RUNNER_TEMP/desktop-downloads"
+      - name: Real Windows uninstall entry regression
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = "$env:GITHUB_WORKSPACE/scripts/desktop;$env:GITHUB_WORKSPACE/scripts/desktop/tests"
+          $env:PAPERS_MANAGER_TEST_LAUNCHER = "$env:RUNNER_TEMP/desktop-bundle/launcher.exe"
+          python -B -m unittest test_windows_entry.WindowsUninstallEntryTests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Frontend tests (reuse build dependencies)
         run: ./scripts/tests/web.sh
       - name: Python tests with the bundled interpreter

@@ -14,6 +14,20 @@ from desktop_bundle import inventory, sha256, verify
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def windows_uninstall_command(script: str) -> str:
+    """Release CMD's batch context before PowerShell deletes the entry file."""
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    return (
+        '@echo off\r\nset "PM_UNINSTALL_ROOT=%~dp0"\r\n'
+        # A command group or trailing exit still resumes the deleted batch.
+        # The no-target goto ends that context; the remaining native command
+        # runs synchronously and supplies the final process exit status.
+        '(goto) 2>nul & '
+        f'"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
+        f'-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}\r\n'
+    )
+
+
 def uninstall_entry(target: str) -> tuple[str, str]:
     if target == "windows-x86_64":
         # The helper runs outside the program directory so Windows can remove
@@ -39,12 +53,7 @@ if ($code -eq 0) { Write-Host 'Program removed. User data kept.' }
 Read-Host 'Press Enter to close' | Out-Null
 exit $code
 """
-        encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-        return "Uninstall.cmd", (
-            '@echo off\r\nsetlocal\r\nset "PM_UNINSTALL_ROOT=%~dp0"\r\n'
-            f'"%SystemRoot%\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
-            f'-NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded}\r\n'
-        )
+        return "Uninstall.cmd", windows_uninstall_command(script)
     name = "Uninstall.command" if target == "macos-arm64" else "Uninstall.sh"
     return name, """#!/bin/sh
 set -eu

@@ -37,3 +37,18 @@ Launcher 配置与便携布局的本机检查已通过：Go 全量测试/构建�
 新增 skills 的实际 Linux 便携归档已完成离线普通用户验证：运行中保护、退出后删除原样
 skills、保留 data/ 与根目录环境文件。Go 测试另覆盖修改技能和新增个人文件的保留行为。
 这仍是本机 fixture 验证，不替代新提交的原生三平台验收。
+
+
+## Windows 自删除入口修复（2026-10-26）
+
+[40263361301](https://github.com/Aciv/paper-manager/actions/runs/40263361301)
+检出 `ad55edd`，三平台构建、数据库 Go race、Linux/macOS 原生测试通过。
+Windows 已通过主服务、PDF/笔记、停服配置和并发参数检查，最后确认卸载返回非零：
+记录先显示 `Program removed. User data kept.`，随后 `The batch file cannot be found`。
+根因是卸载子进程删除正在执行的 CMD 后，CMD 继续读取该文件。
+
+修复入口先结束批处理文件上下文，再同步执行 PowerShell，保留其真实退出码。
+Windows 本机原生回归已通过：旧入口复现假失败、删除后返回 0/23 的准确传递、
+当前 Launcher 的取消/身份校验拒绝/成功删除，以及个人文件、data 和环境文件保留。
+不是用忽略退出码或放宽最终断言修复。Windows 构建后增加真实 Launcher 入口回归，
+现有完整普通账户验收继续保留。本轮未重跑 Actions，不把本机聚焦结果当成新提交全矩阵通过。
