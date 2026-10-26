@@ -193,7 +193,7 @@ func TestBundleReplacementInPlaceRetainsConfiguration(t *testing.T) {
 }
 
 func TestInvalidCurrentBundlePreservesExistingConfiguration(t *testing.T) {
-	for _, invalid := range []string{"modified", "incompatible", "malformed", "wrong-platform", "missing-manifest"} {
+	for _, invalid := range []string{"missing-entry", "incompatible", "malformed", "wrong-platform", "missing-manifest"} {
 		t.Run(invalid, func(t *testing.T) {
 			data := t.TempDir()
 			cfg, err := OpenBundleConfig(data, testBundle(t, "1.0.0"))
@@ -213,8 +213,8 @@ func TestInvalidCurrentBundlePreservesExistingConfiguration(t *testing.T) {
 				t.Fatal(err)
 			}
 			switch invalid {
-			case "modified":
-				err = os.WriteFile(filepath.Join(selected, "web", "index.html"), []byte("partial update"), 0600)
+			case "missing-entry":
+				err = os.Remove(filepath.Join(selected, "web", "index.html"))
 			case "incompatible":
 				manifest.Compatibility.DataFormat = 2
 				err = writeRecord(filepath.Join(selected, "bundle.json"), manifest)
@@ -666,6 +666,20 @@ func TestManagedCleanupKeepsRecoveryReferencesAndUnknownFiles(t *testing.T) {
 		cp.Created = cp.Created.Add(-40 * 24 * time.Hour)
 		if err := writeRecord(path, cp); err != nil {
 			t.Fatal(err)
+		}
+		// An expired owned backup is disposable even if its contents changed.
+		// Cleanup must not hash every old database/PDF before deleting it.
+		if version := cp.Installation.Versions[cp.Installation.Active]; version.Product.Version == "1.0.0" {
+			if err := os.WriteFile(filepath.Join(filepath.Dir(path), "data", "notes", "chapter.md"), []byte("changed backup"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	for key, version := range record.Versions {
+		if version.Product.Version == "1.0.0" {
+			if err := os.WriteFile(filepath.Join(program, "versions", key, "web", "index.html"), []byte("old program"), 0600); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	for _, name := range []string{"old-owned", "unknown"} {

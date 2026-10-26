@@ -173,7 +173,8 @@ func fileInventory(root string, bundle bool) (map[string]bundleFile, error) {
 	return result, err
 }
 
-func verifyBundle(root string) (bundleManifest, string, error) {
+// readBundleManifest identifies a build without reading its component contents.
+func readBundleManifest(root string) (bundleManifest, string, error) {
 	var record bundleManifest
 	if !realChildDirectory(root) {
 		return record, "", fmt.Errorf("bundle root must be a real directory")
@@ -198,16 +199,40 @@ func verifyBundle(root string) (bundleManifest, string, error) {
 	if _, err := parseVersion(record.Application.Version); err != nil {
 		return record, "", err
 	}
+	ext := ""
+	python := "python/bin/python3"
+	if runtime.GOOS == "windows" {
+		ext, python = ".exe", "python/python.exe"
+	}
+	for _, name := range []string{"launcher" + ext, "server" + ext, python,
+		"redis/redis-server" + ext, "postgres/bin/postgres" + ext, "postgres/bin/initdb" + ext,
+		"postgres/bin/pg_ctl" + ext, "postgres/bin/pg_controldata" + ext,
+		"web/index.html", "pdf_parser/papers_parser/server.py"} {
+		info, err := os.Stat(filepath.Join(root, filepath.FromSlash(name)))
+		if err != nil || !info.Mode().IsRegular() {
+			return record, "", fmt.Errorf("missing required bundled component %s", name)
+		}
+	}
+	hash, err := fileHash(filepath.Join(root, "bundle.json"))
+	if err != nil {
+		return record, "", err
+	}
+	return record, hash, nil
+}
+
+// verifyBundle is reserved for explicit installation/recovery verification.
+// Ordinary startup reads only the manifest and required entry paths.
+func verifyBundle(root string) (bundleManifest, string, error) {
+	record, hash, err := readBundleManifest(root)
+	if err != nil {
+		return record, "", err
+	}
 	observed, err := fileInventory(root, true)
 	if err != nil {
 		return record, "", err
 	}
 	if !reflect.DeepEqual(observed, record.Files) {
 		return record, "", fmt.Errorf("bundle differs from sealed file inventory")
-	}
-	hash, err := fileHash(filepath.Join(root, "bundle.json"))
-	if err != nil {
-		return record, "", err
 	}
 	expected := map[string]string{"bundle.json": hash}
 	for name, item := range record.Files {
@@ -229,20 +254,6 @@ func verifyBundle(root string) (bundleManifest, string, error) {
 	}
 	if len(seen) != len(expected) {
 		return record, "", fmt.Errorf("bundle checksum index is incomplete")
-	}
-	ext := ""
-	python := "python/bin/python3"
-	if runtime.GOOS == "windows" {
-		ext, python = ".exe", "python/python.exe"
-	}
-	for _, name := range []string{"launcher" + ext, "server" + ext, python,
-		"redis/redis-server" + ext, "postgres/bin/postgres" + ext, "postgres/bin/initdb" + ext,
-		"postgres/bin/pg_ctl" + ext, "postgres/bin/pg_controldata" + ext,
-		"web/index.html", "pdf_parser/papers_parser/server.py"} {
-		info, err := os.Stat(filepath.Join(root, filepath.FromSlash(name)))
-		if err != nil || !info.Mode().IsRegular() {
-			return record, "", fmt.Errorf("missing required bundled component %s", name)
-		}
 	}
 	return record, hash, nil
 }

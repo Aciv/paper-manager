@@ -129,7 +129,7 @@ func run() (runErr error) {
 		}
 	}
 	var cfg desktop.Config
-	err = desktop.RunWithProgress(ctx, "校验程序文件、检查数据兼容性并适配已有配置", func() error {
+	err = desktop.RunWithProgress(ctx, "读取版本清单、检查数据兼容性并适配配置", func() error {
 		var configErr error
 		cfg, configErr = openConfig(*root, *install)
 		return configErr

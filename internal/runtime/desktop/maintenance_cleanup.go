@@ -70,11 +70,8 @@ func (m *maintenance) cleanup(ctx context.Context, now time.Time) error {
 			}
 			continue
 		}
-		// Unknown/corrupt snapshots are never silently classified as disposable.
-		if _, _, err := m.loadCheckpointData(record.ID); err != nil {
-			logger.Warn(ctx, "unverified checkpoint preserved", "checkpoint_id", record.ID, "error", err)
-			continue
-		}
+		// Retention and ownership metadata above identify this disposable backup.
+		// Do not reread every database/PDF byte just to delete an expired copy.
 		if err := os.RemoveAll(item.path); err != nil {
 			return err
 		}
@@ -102,9 +99,9 @@ func (m *maintenance) cleanup(ctx context.Context, now time.Time) error {
 			within(m.versionPath(key), executable) {
 			continue
 		}
-		_, hash, err := verifyBundle(m.versionPath(key))
+		hash, err := fileHash(filepath.Join(m.versionPath(key), "bundle.json"))
 		if err != nil || hash != record.Manifest {
-			logger.Warn(ctx, "modified old program preserved", "version", record.Product.Version)
+			logger.Warn(ctx, "unrecognized old program preserved", "version", record.Product.Version)
 			continue
 		}
 		if err := os.RemoveAll(m.versionPath(key)); err != nil {

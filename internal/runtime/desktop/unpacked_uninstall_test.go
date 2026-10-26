@@ -46,6 +46,19 @@ func TestUnpackedUninstallPreservesDataAndRejectsActiveRuntime(t *testing.T) {
 	if _, _, err := verifyBundle(bundle); err != nil {
 		t.Fatalf("admission lock prevented reading sealed files: %v", err)
 	}
+	// Program removal needs only the recognized layout, not a content hash of
+	// every dependency. Same-size edits inside the disposable bundle are fine.
+	index := filepath.Join(bundle, "web", "index.html")
+	original, err := os.ReadFile(index)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range original {
+		original[i] = 'X'
+	}
+	if err := os.WriteFile(index, original, 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := RemoveUnpacked(program); err == nil {
 		t.Fatal("removed an active runtime")
 	}

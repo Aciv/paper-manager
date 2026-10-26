@@ -36,8 +36,8 @@ type StoredFile struct {
 	ContentType string
 	Size        int64
 	// SHA256 is the lowercase digest of the bytes consumed by Save. It is
-	// optional for legacy/custom backends; upload orchestration computes its own
-	// digest before persistence when duplicate detection requires it.
+	// optional for legacy/custom backends; upload orchestration falls back to
+	// hashing the stored object only when this digest is absent.
 	SHA256 string
 }
 

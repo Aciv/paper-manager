@@ -6,6 +6,36 @@ import (
 	"testing"
 )
 
+func TestPortableStartupReadsManifestWithoutScanningComponentContents(t *testing.T) {
+	bundle := testBundle(t, "1.0.0")
+	data := t.TempDir()
+	// Runtime startup is not a package-integrity audit. Even the checksum
+	// index and extra non-entry files are irrelevant to opening the config.
+	if err := os.Remove(filepath.Join(bundle, "SHA256SUMS")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "web", "index.html"), []byte("changed content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bundle, "extra.bin"), []byte("not scanned"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	first, err := OpenBundleConfig(data, bundle)
+	if err != nil {
+		t.Fatalf("first startup required a full audit: %v", err)
+	}
+	if err := SaveConfig(first); err != nil {
+		t.Fatal(err)
+	}
+	second, err := OpenBundleConfig(data, bundle)
+	if err != nil || first != second {
+		t.Fatalf("repeat startup changed identity or audited contents: %v", err)
+	}
+	if _, _, err := verifyBundle(bundle); err == nil {
+		t.Fatal("explicit full verification stopped checking contents")
+	}
+}
+
 func TestPortableDefaultsUseDeliveryRootRatherThanWorkingDirectory(t *testing.T) {
 	root := t.TempDir()
 	bundle := filepath.Join(root, "bundle")

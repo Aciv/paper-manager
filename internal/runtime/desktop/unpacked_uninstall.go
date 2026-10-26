@@ -32,7 +32,7 @@ func AcquireBundle(bundle string) (*InstanceLock, error) {
 	return lock, nil
 }
 
-// RemoveUnpacked removes only an intact, recognized application's program
+// RemoveUnpacked removes only a recognized application's program
 // files. User data and unrelated files beside the program are preserved.
 func RemoveUnpacked(program string) error {
 	program, err := filepath.Abs(program)
@@ -44,7 +44,10 @@ func RemoveUnpacked(program string) error {
 	if err != nil {
 		return fmt.Errorf("exit Launcher before uninstalling: %w", err)
 	}
-	manifest, _, err := verifyBundle(bundle)
+	manifest, _, err := readBundleManifest(bundle)
+	if err == nil {
+		err = checkUninstallLayout(bundle, manifest)
+	}
 	if err != nil {
 		lock.Close()
 		return fmt.Errorf("program files changed; remove the program directory manually; data preserved: %w", err)
@@ -61,8 +64,7 @@ func RemoveUnpacked(program string) error {
 		native += ".exe"
 	}
 	a, errA := fileHash(filepath.Join(program, entry))
-	b, errB := fileHash(filepath.Join(bundle, native))
-	if errA != nil || errB != nil || a != b {
+	if errA != nil || a != manifest.Files[native].SHA256 {
 		lock.Close()
 		return fmt.Errorf("unrecognized program directory; data preserved")
 	}
@@ -99,6 +101,49 @@ func RemoveUnpacked(program string) error {
 	// Leave any unrelated files and the directory containing them untouched.
 	_ = os.Remove(program)
 	return nil
+}
+
+// Uninstall checks names/types/sizes to preserve unexpected files, without
+// hashing the entire Python/PostgreSQL distribution before deleting it.
+func checkUninstallLayout(root string, manifest bundleManifest) error {
+	seen := 0
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		name := filepath.ToSlash(relative)
+		if name == "bundle.json" || name == "SHA256SUMS" {
+			return nil
+		}
+		expected, ok := manifest.Files[name]
+		if !ok {
+			return fmt.Errorf("unexpected program file %s", name)
+		}
+		if expected.Symlink != "" {
+			link, err := os.Readlink(path)
+			if err != nil || link != expected.Symlink {
+				return fmt.Errorf("changed program link %s", name)
+			}
+		} else {
+			info, err := entry.Info()
+			if err != nil || !info.Mode().IsRegular() || info.Size() != expected.Bytes {
+				return fmt.Errorf("changed program file %s", name)
+			}
+		}
+		seen++
+		return nil
+	})
+	if err == nil && seen != len(manifest.Files) {
+		return fmt.Errorf("program files are missing")
+	}
+	return err
 }
 
 // Only the exact shipped copy is disposable. Edited skill instructions and

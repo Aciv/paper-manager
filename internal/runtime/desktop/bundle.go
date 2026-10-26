@@ -68,12 +68,12 @@ func OpenBundleConfig(root, bundle string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	// Validate the current package and its platform/data/queue compatibility
+	// Read build identity and platform/data/queue compatibility
 	// before creating or replacing any configuration. The old package need not
 	// exist: users can copy all of data/ or replace the stopped program files.
-	manifest, digest, err := verifyBundle(selected)
+	manifest, digest, err := readBundleManifest(selected)
 	if err != nil {
-		return Config{}, fmt.Errorf("当前运行包不完整或不兼容，原有数据已保留: %w", err)
+		return Config{}, fmt.Errorf("当前程序的版本清单、必要入口或兼容性异常，原有数据已保留: %w", err)
 	}
 	_, configErr := os.Stat(filepath.Join(root, "runtime.json"))
 	fresh := os.IsNotExist(configErr)

@@ -197,9 +197,8 @@ func (s *documentService) createDocumentFromSource(
 	if source.Open == nil {
 		return nil, errors.New("file source is required")
 	}
-	// Reject cheaply before the full SHA-256 pass. The handler performs the
-	// same checks for an early 413/415; this keeps batch and future callers
-	// from hashing an invalid file.
+	// Reject cheaply before writing the stream. Handlers perform the same
+	// checks early; batch and local-file callers share these limits.
 	if _, supported := fileservice.SupportedContentType(source.Filename); !supported {
 		return nil, fileservice.ErrUnsupportedFileType
 	}
@@ -217,19 +216,6 @@ func (s *documentService) createDocumentFromSource(
 			logger.Warn(ctx, "duplicate document DOI rejected", "doi", doi)
 			return &page.Items[0], ErrDuplicateDOI
 		}
-	}
-	fileHash, err := sourceSHA256(source)
-	if err != nil {
-		return nil, err
-	}
-	page, searchErr := s.repo.Search(ctx, types.DocumentSearch{FileSHA256: fileHash, Page: 1, PageSize: 1})
-	if searchErr != nil {
-		logger.Error(ctx, "check document file hash failed", "error", searchErr)
-		return nil, fmt.Errorf("%w: %w", errDocumentDuplicateLookup, searchErr)
-	}
-	if page.Total > 0 {
-		logger.Warn(ctx, "duplicate document file hash rejected", "file_sha256", fileHash)
-		return &page.Items[0], types.ErrDuplicateFileHash
 	}
 	input, err := source.Open()
 	if err != nil {
@@ -251,15 +237,32 @@ func (s *documentService) createDocumentFromSource(
 	if closeErr != nil {
 		logger.Warn(ctx, "close uploaded file failed", "filename", source.Filename, "error", closeErr)
 	}
-	if stored.SHA256 != "" && !strings.EqualFold(stored.SHA256, fileHash) {
-		logger.Error(ctx, "stored document hash differs from uploaded bytes",
-			"storage_key", stored.Key,
-			"uploaded_file_sha256", fileHash,
-			"stored_file_sha256", stored.SHA256)
+	// Save computes the digest while streaming to disk. Reuse it instead of
+	// opening and hashing the entire source once before saving it again.
+	discardStored := func() {
 		if cleanupErr := s.storage.Delete(context.WithoutCancel(ctx), stored.Key); cleanupErr != nil {
-			logger.Warn(ctx, "remove hash-mismatched stored file failed", "storage_key", stored.Key, "error", cleanupErr)
+			logger.Warn(ctx, "remove unused document file failed", "storage_key", stored.Key, "error", cleanupErr)
 		}
-		return nil, errors.New("stored file hash differs from uploaded file hash")
+	}
+	fileHash := stored.SHA256
+	if fileHash == "" {
+		// Legacy/custom stores may omit the digest; hash their stored object only
+		// in that case, so deduplication still uses the persisted bytes.
+		fileHash, err = storedFileSHA256(ctx, s.storage, stored.Key)
+		if err != nil {
+			discardStored()
+			return nil, err
+		}
+	}
+	page, searchErr := s.repo.Search(ctx, types.DocumentSearch{FileSHA256: fileHash, Page: 1, PageSize: 1})
+	if searchErr != nil {
+		discardStored()
+		logger.Error(ctx, "check document file hash failed", "error", searchErr)
+		return nil, fmt.Errorf("%w: %w", errDocumentDuplicateLookup, searchErr)
+	}
+	if page.Total > 0 {
+		discardStored()
+		return &page.Items[0], types.ErrDuplicateFileHash
 	}
 	doc := types.Document{ID: uuid.New(), OriginalFilename: stored.Filename, ContentType: stored.ContentType,
 		SizeBytes: stored.Size, DOI: doi, FileSHA256: fileHash, StorageKey: stored.Key,
@@ -325,15 +328,15 @@ func (s *documentService) loadCreatedDocumentAfterQueue(
 	return persisted
 }
 
-func sourceSHA256(source documentUploadSource) (string, error) {
-	input, err := source.Open()
+func storedFileSHA256(ctx context.Context, storage interfaces.FileStorage, key string) (string, error) {
+	input, err := storage.Open(ctx, key)
 	if err != nil {
-		return "", fmt.Errorf("open uploaded file for hash: %w", err)
+		return "", fmt.Errorf("open stored file for hash: %w", err)
 	}
 	defer input.Close()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, input); err != nil {
-		return "", fmt.Errorf("hash uploaded file: %w", err)
+		return "", fmt.Errorf("hash stored file: %w", err)
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
