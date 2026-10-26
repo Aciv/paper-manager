@@ -417,3 +417,18 @@ body { margin: 0; background: #7fd5fa; }
   .document-details { grid-template-columns: 1fr; gap: 5px; }
   .document-details dd { margin-bottom: 10px; }
 }
+
+.batch-results article { display: grid; gap: 8px; min-width: 0; padding: 12px 0; border-top: 1px solid var(--ui-border); }
+.batch-results article h3 { margin: 0; font-size: 13px; overflow-wrap: anywhere; }
+.batch-results article > small { overflow-wrap: anywhere; color: var(--ui-faint); }
+.batch-results article progress { width: 100%; }
+.batch-results article > button { justify-self: start; }
+
+.document-sidebar .batch-results {
+  padding: 12px;
+  border: 1px solid var(--ui-border);
+  border-radius: 8px;
+  background: rgb(6 28 46 / 92%);
+  color: var(--ui-text);
+}
+.batch-results summary { cursor: pointer; margin-bottom: 8px; font-size: 12px; }

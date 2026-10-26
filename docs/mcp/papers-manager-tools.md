@@ -108,7 +108,7 @@ URL 只接受 HTTP(S)，下载还受远程 PDF 大小、地址、并发和重定
 URL 工具返回 `id/state/total`，提交后用 `papers_manager_library_import_status(task_id=id)` 有界轮询。
 客户端断开不会取消已接收的 Asynq 下载任务。可选 `request_id` 为 UUID，原输入连同相同 ID 重发会返回原任务；
 同一 ID 不允许换输入。后台结果逐项持久化，并立即把 accepted/duplicate 文档加入 Base。
-查询返回 `queued/running/succeeded/failed`、`completed/total` 和 `result`；`succeeded` 不代表每项成功。
+查询返回 `queued/running/succeeded/partial/failed/stopped`、`completed/total` 和 `result`；`succeeded` 表示所有项已新增或已存在；`partial` 表示部分失败，`stopped` 表示提前停止。返回 `summary` 计数和 `retryUrls`（仅失败/未处理项，保留 DOI/文件名）。
 `result.items` 的逐项状态为 `accepted/duplicate/rejected/failed`；后台 `BATCH_IMPORT_TIMEOUT` 默认 2 分钟，
 到期返回部分结果、`stopped=true` 及未处理项。完成结果在队列保留 24 小时，之后查询返回 NOT_FOUND。
 文档 ID 出现后，使用 processing_status 查询解析状态，不把下载任务完成当作论文解析就绪。

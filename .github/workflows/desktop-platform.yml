@@ -43,9 +43,10 @@ jobs:
         run: >-
           python -m pip install --only-binary=:all:
           -r packaging/desktop/requirements-validation.txt
-      - name: Packaging and Go tests
+      - name: Packaging, URL import helpers and Go tests
         run: |
           ./scripts/desktop/run_tests.sh --python-only
+          node --experimental-strip-types --test web/tests/urlImports.test.ts
           go test ./...
       - name: Windows ordinary-account wrapper regression
         if: runner.os == 'Windows'

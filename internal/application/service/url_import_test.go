@@ -31,15 +31,131 @@ func (d *urlImportDocuments) CreateDocumentFromURL(
 
 type urlImportBases struct {
 	interfaces.DocumentBaseService
-	added []string
+	added   []string
+	baseIDs []string
+}
+
+type failingURLImportBases struct{ urlImportBases }
+
+func (b *failingURLImportBases) AddDocumentToBase(ctx context.Context, baseID, id string) error {
+	_ = b.urlImportBases.AddDocumentToBase(ctx, baseID, id)
+	if len(b.baseIDs) == 1 {
+		return errors.New("injected Base failure")
+	}
+	return nil
+}
+
+func TestURLImportBaseFailureKeepsDocumentAndAttemptsOtherBases(t *testing.T) {
+	bases := &failingURLImportBases{}
+	document := &types.Document{ID: uuid.New()}
+	documents := &urlImportDocuments{create: func(context.Context, types.DocumentURLImportCommand) (*types.Document, error) {
+		return document, nil
+	}}
+	s := NewURLImportService(documents, bases, nil, nil, config.Config{}).(*urlImportService)
+	payload := types.URLImportPayload{RequestID: uuid.NewString(), BaseIDs: []string{uuid.NewString(), uuid.NewString()},
+		Commands: []types.DocumentURLImportCommand{{URL: "https://example.org/1"}}}
+	var result types.DocumentBatchResult
+	err := s.processURLImport(context.Background(), payload, progressWriter{write: func(data []byte) error {
+		return json.Unmarshal(data, &result)
+	}})
+	if err != nil || len(bases.baseIDs) != 2 || len(result.Items) != 1 || result.Items[0].Status != types.DocumentImportItemFailed ||
+		result.Items[0].Document == nil || result.Items[0].Document.ID != document.ID {
+		t.Fatalf("Base failure lost imported document or skipped another Base: %#v %v", result, err)
+	}
 }
 
 func (b *urlImportBases) GetBase(context.Context, string) (*types.DocumentBase, error) {
 	return &types.DocumentBase{}, nil
 }
-func (b *urlImportBases) AddDocumentToBase(_ context.Context, _, id string) error {
+func (b *urlImportBases) AddDocumentToBase(_ context.Context, baseID, id string) error {
 	b.added = append(b.added, id)
+	b.baseIDs = append(b.baseIDs, baseID)
 	return nil
+}
+
+func TestURLImportAttachesAllSelectedBasesBeforeNextDownload(t *testing.T) {
+	baseIDs := []string{uuid.NewString(), uuid.NewString()}
+	bases := &urlImportBases{}
+	queue := &urlImportQueue{records: make(map[string]types.TaskRecord)}
+	calls := 0
+	documents := &urlImportDocuments{create: func(context.Context, types.DocumentURLImportCommand) (*types.Document, error) {
+		if len(bases.added) != calls*2 {
+			t.Fatal("next URL started before all Base attachments")
+		}
+		calls++
+		return &types.Document{ID: uuid.New()}, nil
+	}}
+	s := NewURLImportService(documents, bases, queue, queue, config.Config{}).(*urlImportService)
+	commands := []types.DocumentURLImportCommand{{URL: "https://example.org/1.pdf"}, {URL: "https://example.org/2.pdf"}}
+	requestID := uuid.NewString()
+	job, err := s.EnqueueURLsToBases(context.Background(), commands, baseIDs, requestID)
+	if err != nil || calls != 0 {
+		t.Fatalf("queue did work or failed: %v", err)
+	}
+	if _, err := s.EnqueueURLsToBases(context.Background(), commands, baseIDs, requestID); err != nil {
+		t.Fatalf("idempotent multi-Base enqueue failed: %v", err)
+	}
+	var payload types.URLImportPayload
+	_ = json.Unmarshal(queue.records[job.ID].Payload, &payload)
+	if err := s.processURLImport(context.Background(), payload, progressWriter{write: func([]byte) error { return nil }}); err != nil {
+		t.Fatal(err)
+	}
+	if len(bases.baseIDs) != 4 || bases.baseIDs[0] != baseIDs[0] || bases.baseIDs[1] != baseIDs[1] {
+		t.Fatalf("wrong Base assignments: %v", bases.baseIDs)
+	}
+	// Empty browser baseIds serialize identically on idempotent replay.
+	noBaseID := uuid.NewString()
+	for i := 0; i < 2; i++ {
+		if _, err := s.EnqueueURLsToBases(context.Background(), commands, []string{}, noBaseID); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestURLImportOutcomesAndRetrySubset(t *testing.T) {
+	for _, test := range []struct {
+		name, queueState, want string
+		statuses               []types.DocumentImportItemStatus
+		stopped                bool
+		retries                int
+	}{
+		{"success", "completed", "succeeded", []types.DocumentImportItemStatus{"accepted", "duplicate"}, false, 0},
+		{"partial", "completed", "partial", []types.DocumentImportItemStatus{"accepted", "failed", "rejected"}, false, 1},
+		{"all_failed", "completed", "failed", []types.DocumentImportItemStatus{"failed", "rejected"}, false, 1},
+		{"stopped", "completed", "stopped", []types.DocumentImportItemStatus{"accepted", "failed", "failed"}, true, 2},
+		{"archived", "archived", "failed", []types.DocumentImportItemStatus{"accepted"}, false, 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			requestID := uuid.NewString()
+			id := urlImportTaskPrefix + requestID
+			commands := []types.DocumentURLImportCommand{
+				{URL: "https://example.org/1", DOI: "10.1000/1"},
+				{URL: "https://example.org/2", Filename: "two.pdf"},
+				{URL: "https://example.org/3"},
+			}
+			if test.name != "archived" {
+				commands = commands[:len(test.statuses)]
+			}
+			result := types.DocumentBatchResult{Stopped: test.stopped}
+			for index, status := range test.statuses {
+				result.Items = append(result.Items, types.DocumentBatchItemResult{Index: index, URL: commands[index].URL, Status: status})
+			}
+			encoded, _ := json.Marshal(result)
+			payload, _ := json.Marshal(types.URLImportPayload{RequestID: requestID, Commands: commands})
+			q := &urlImportQueue{records: map[string]types.TaskRecord{id: {Type: types.TypeLibraryImportURLs, State: test.queueState, Payload: payload, Result: encoded}}}
+			s := NewURLImportService(nil, nil, q, q, config.Config{})
+			job, err := s.GetURLImportTask(context.Background(), id)
+			if err != nil || job.State != test.want || len(job.RetryURLs) != test.retries {
+				t.Fatalf("incorrect outcome/retries: %#v, %v", job, err)
+			}
+			if job.Summary.Accepted+job.Summary.Duplicate+job.Summary.Rejected+job.Summary.Failed != len(test.statuses) {
+				t.Fatal("summary does not match recorded results")
+			}
+			if test.name == "partial" && (job.RetryURLs[0].Filename != "two.pdf" || job.RetryURLs[0].URL != commands[1].URL) {
+				t.Fatal("retry lost explicit filename or included successful/rejected URLs")
+			}
+		})
+	}
 }
 
 type urlImportQueue struct{ records map[string]types.TaskRecord }

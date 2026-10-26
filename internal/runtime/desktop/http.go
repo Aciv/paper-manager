@@ -107,7 +107,7 @@ func (r *Runtime) Handler() http.Handler {
 		case req.Method == http.MethodGet && req.URL.Path == "/logs":
 			name := req.URL.Query().Get("service")
 			switch name {
-			case "api", "parser", "postgres", "redis":
+			case "launcher", "api", "parser", "postgres", "redis":
 			default:
 				http.Error(w, "unknown service", http.StatusBadRequest)
 				return

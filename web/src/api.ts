@@ -213,6 +213,24 @@ export type DocumentBatchResult = {
   error?: string;
 };
 
+export type URLImportRequest = {
+  urls: DocumentURLImport[];
+  baseIds: string[];
+  requestId: string;
+};
+export type URLImportTask = {
+  id: string;
+  state: 'queued' | 'running' | 'succeeded' | 'partial' | 'failed' | 'stopped';
+  baseId?: string;
+  baseIds?: string[];
+  total: number;
+  completed: number;
+  summary: { accepted: number; duplicate: number; rejected: number; failed: number };
+  result?: DocumentBatchResult;
+  retryUrls?: DocumentURLImport[];
+  error?: string;
+};
+
 export type PDFBlockLocation = {
   pageNumber?: number;
   pageWidth?: number;
@@ -416,6 +434,13 @@ function normalizeReadingNoteEditResult(result: ReadingNoteEditResult): ReadingN
 }
 
 export const api = {
+  enqueueURLImport: (payload: URLImportRequest): Promise<URLImportTask> => request<URLImportTask>(
+    '/url-imports',
+    { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+  ),
+  getURLImportTask: (id: string, signal?: AbortSignal): Promise<URLImportTask> => request<URLImportTask>(
+    `/url-imports/${encodeURIComponent(id)}`, { signal },
+  ),
   searchDocuments: (search: DocumentSearch): Promise<DocumentPage> => {
     const query = new URLSearchParams();
     if (search.id) query.set('id', search.id);

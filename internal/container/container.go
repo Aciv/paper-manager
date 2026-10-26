@@ -80,7 +80,7 @@ func Build() *dig.Container {
 	must(dependencies.Provide(mcpadapter.NewToolServerWithURLImports))
 	must(dependencies.Provide(repository.NewTaskDeadLetterRepository))
 	must(dependencies.Provide(fileservice.NewStorage))
-	must(dependencies.Provide(handler.NewDocumentHandler))
+	must(dependencies.Provide(handler.NewDocumentHandlerWithURLImports))
 	must(dependencies.Provide(handler.NewDocumentReadingHandler))
 	must(dependencies.Provide(handler.NewNoteReadingHandler))
 	must(dependencies.Provide(handler.NewDocumentProcessHandlerWithProcessingViewQuery))

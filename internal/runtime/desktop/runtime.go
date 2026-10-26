@@ -24,13 +24,15 @@ import (
 )
 
 type Snapshot struct {
-	Initialized  bool              `json:"initialized"`
-	State        string            `json:"state"`
-	Error        string            `json:"error,omitempty"`
-	Services     map[string]string `json:"services"`
-	AppURL       string            `json:"app_url"`
-	MCPURL       string            `json:"mcp_url"`
-	CanConfigure bool              `json:"can_configure"`
+	ProgressStage     string            `json:"progress_stage,omitempty"`
+	ProgressStartedAt *time.Time        `json:"progress_started_at,omitempty"`
+	Initialized       bool              `json:"initialized"`
+	State             string            `json:"state"`
+	Error             string            `json:"error,omitempty"`
+	Services          map[string]string `json:"services"`
+	AppURL            string            `json:"app_url"`
+	MCPURL            string            `json:"mcp_url"`
+	CanConfigure      bool              `json:"can_configure"`
 }
 
 type managed struct {
@@ -437,7 +439,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 }
 
 func (r *Runtime) ready(ctx context.Context, stage string, c *child, check func(context.Context) error) error {
-	return RunWithProgress(ctx, stage, func() error {
+	return r.runProgress(ctx, stage, func() error {
 		return r.waitReady(ctx, c, check)
 	})
 }

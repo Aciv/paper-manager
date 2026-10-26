@@ -245,6 +245,11 @@ async function refresh() {
     state.textContent = states[status.state] || status.state;
     state.dataset.state = status.state;
     element('state-copy').textContent = stateCopy[status.state] || '';
+    if (status.progress_stage) {
+      const elapsed = Math.max(0, Math.floor((Date.now() - Date.parse(status.progress_started_at)) / 1000));
+      element('state-copy').textContent = `${status.progress_stage}；已等待 ${Number.isFinite(elapsed) ? elapsed : 0} 秒。`;
+    }
+    if (!panels.overview.hidden) void loadActivityLog();
 
     if (status.error && status.state !== 'setup_required') {
       showError(status.error);
@@ -289,7 +294,7 @@ async function refresh() {
 
 async function loadActivityLog() {
   try {
-    const result = await request('/logs?service=api');
+    const result = await request('/logs?service=launcher');
     const text = (result.text || '').trimEnd();
     const lines = text ? text.split('\n').slice(-24) : [];
     element('activity-log').textContent = lines.length ? lines.join('\n') : '（暂无日志）';
@@ -352,8 +357,8 @@ element('initialization-log').addEventListener('click', () => {
 
 element('open-logs').addEventListener('click', () => {
   activateTab('logs');
-  element('log-service').value = 'api';
-  loadLogs('/logs?service=api');
+  element('log-service').value = 'launcher';
+  loadLogs('/logs?service=launcher');
 });
 
 element('copy-mcp').addEventListener('click', async () => {

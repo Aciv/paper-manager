@@ -32,8 +32,17 @@ const (
 
 type DocumentHandler struct {
 	documents          interfaces.DocumentService
+	urlImports         interfaces.URLImportService
 	maxUploadSize      int64
 	batchImportTimeout time.Duration
+}
+
+func NewDocumentHandlerWithURLImports(
+	cfg config.Config, documents interfaces.DocumentService, imports interfaces.URLImportService,
+) *DocumentHandler {
+	h := NewDocumentHandler(cfg, documents)
+	h.urlImports = imports
+	return h
 }
 
 type updateDocumentRequest struct {

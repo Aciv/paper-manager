@@ -2,6 +2,8 @@ import './browserPolyfills.ts';
 import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ErrorBoundary } from './ErrorBoundary';
+import { URLImportJobs } from './URLImportJobs';
+import { useURLImportJobs } from './useURLImportJobs';
 import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, PaperReference, ProcessingSpan, ProcessingSpanStatus } from './api';
 import {
   CITATION_STATUS_LABELS,
@@ -240,6 +242,7 @@ function App() {
   const [formBaseIDs, setFormBaseIDs] = useState<string[]>([]);
   const [message, setMessage] = useState('');
   const [batchResults, setBatchResults] = useState<DocumentBatchItemResult[]>([]);
+  const urlImportJobs = useURLImportJobs(() => { void load(filters, baseFilterID, true); });
   const [busy, setBusy] = useState(false);
   // Library-wide reference aggregation, opened from the workspace header.
   const [citationProgressOpen, setCitationProgressOpen] = useState(false);
@@ -608,46 +611,24 @@ function App() {
       return;
     }
     setBusy(true);
-    setBatchResults([]);
-    if (remoteURLs.length > 1) {
-      setMessage(`正在批量验证并下载 ${remoteURLs.length} 个远程 PDF…`);
-      try {
-        const payload: DocumentURLImport[] = remoteURLs.map((url) => ({ url }));
-        const result = await api.importFromURLs(payload);
-        const selectedImportBases = bases.filter((base) => formBaseIDs.includes(base.id));
-        const baseNote = await attachBatchDocumentsToBases(result, selectedImportBases);
-        await presentBatchResult(result, 'URL 批量导入', baseNote);
-        setRemoteURL('');
-        setFormBaseIDs([]);
-      } catch (error) {
-        setMessage(error instanceof Error ? `URL 批量导入失败：${error.message}` : 'URL 批量导入失败。');
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
-    setMessage('正在验证并下载远程 PDF…');
+    setMessage('正在提交后台导入任务…');
     try {
-      const { document: imported } = await api.importFromURL({
-        url: remoteURLs[0],
-        doi: remoteDOI.trim() || undefined,
-        filename: remoteFilename.trim() || undefined,
-      });
-      const selectedImportBases = bases.filter((base) => formBaseIDs.includes(base.id));
-      const baseAttachmentFailures = await attachDocumentToBases(imported, selectedImportBases);
-      setSelected(imported);
-      setRemoteURL('');
-      setRemoteDOI('');
-      setRemoteFilename('');
-      setFormBaseIDs([]);
-      watchQueuedProcessing(imported.id);
-      setMessage(`远程 PDF 已导入并提交处理：${imported.originalFilename}（${imported.id}）${baseAttachmentSummary(selectedImportBases, baseAttachmentFailures)}。`);
-      await load({ page: 1 });
+      const commands: DocumentURLImport[] = remoteURLs.map((url) => ({
+        url,
+        doi: remoteURLs.length === 1 ? remoteDOI.trim() || undefined : undefined,
+        filename: remoteURLs.length === 1 ? remoteFilename.trim() || undefined : undefined,
+      }));
+      const task = await urlImportJobs.enqueue(commands, formBaseIDs);
+      if (task) {
+        setRemoteURL('');
+        setRemoteDOI('');
+        setRemoteFilename('');
+        setFormBaseIDs([]);
+        setMessage('已提交后台导入，可继续操作；下方任务显示下载、入库和 Base 归档结果。');
+      }
     } catch (error) {
-      setMessage(error instanceof Error ? `远程导入失败：${error.message}` : '远程导入失败。');
-    } finally {
-      setBusy(false);
-    }
+      setMessage(error instanceof Error ? error.message : '提交未确认，请查看下方任务。');
+    } finally { setBusy(false); }
   }
 
   async function deleteSelected() {
@@ -1117,9 +1098,14 @@ function App() {
         <label htmlFor="remote-filename">保存文件名（可选）</label>
         <input id="remote-filename" value={remoteFilename} onChange={(event) => setRemoteFilename(event.target.value)} placeholder="paper.pdf" disabled={busy || remoteURLs.length > 1} />
         {renderBasePicker()}
-        <button className="primary" type="submit" disabled={busy || remoteURLs.length === 0}>{remoteURLs.length > 1 ? `批量导入 ${remoteURLs.length} 个 URL` : '验证、下载并处理'}</button>
+        <button className="primary" type="submit" disabled={busy || urlImportJobs.submitting || remoteURLs.length === 0}>{remoteURLs.length > 1 ? `批量导入 ${remoteURLs.length} 个 URL` : '提交后台导入'}</button>
         <p className="hint" title="普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。多行 URL 会逐项受理，单项 DOI 和文件名仅适用于单行导入；所选 Base 会应用到本次导入的全部文档。">支持显式 PDF URL、arXiv 页面与 DOI URL（每行一个）；所选 Base 会应用到全部导入文档。</p>
       </form>}
+
+      <URLImportJobs jobs={urlImportJobs} onOpen={(document) => {
+        setSelected(document);
+        watchQueuedProcessing(document.id);
+      }} />
 
       {batchResults.length > 0 && <section className="batch-results" aria-live="polite">
         <h2>批量导入结果</h2>

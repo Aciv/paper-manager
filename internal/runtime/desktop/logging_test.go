@@ -3,15 +3,51 @@ package desktop
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 )
+
+func TestManagementExposesLauncherProgressAndRedactedLauncherLog(t *testing.T) {
+	cfg := testConfig(t)
+	app := New(cfg)
+	if err := os.MkdirAll(filepath.Join(cfg.DataDir, "logs"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, "logs", "launcher.log"), []byte("phase "+cfg.MCPToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err := app.runProgress(context.Background(), "数据恢复", func() error {
+		request := httptest.NewRequest("GET", app.ManagementURL()+"/status", nil)
+		response := httptest.NewRecorder()
+		app.Handler().ServeHTTP(response, request)
+		var state Snapshot
+		if err := json.Unmarshal(response.Body.Bytes(), &state); err != nil {
+			t.Fatal(err)
+		}
+		if state.ProgressStage != "数据恢复" || state.ProgressStartedAt == nil {
+			t.Fatal("active stage absent from status")
+		}
+		return nil
+	})
+	if err != nil || app.Snapshot().ProgressStage != "" || app.Snapshot().ProgressStartedAt != nil {
+		t.Fatal("finished stage was retained")
+	}
+	response := httptest.NewRecorder()
+	app.Handler().ServeHTTP(response, httptest.NewRequest("GET", app.ManagementURL()+"/logs?service=launcher", nil))
+	if response.Code != 200 || strings.Contains(response.Body.String(), cfg.MCPToken) || !strings.Contains(response.Body.String(), "redacted") {
+		t.Fatalf("Launcher log unavailable or exposed secret: %d %s", response.Code, response.Body)
+	}
+}
 
 func TestLauncherProgressReportsWaitingAndStopsAfterCompletion(t *testing.T) {
 	var output bytes.Buffer

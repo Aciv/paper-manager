@@ -175,7 +175,8 @@ revision 规则。MCP 不为 Agent 建立第二套业务对象，token 也不是
 
 URL 导入通过现有 Asynq `download` 队列执行，MCP 立即返回任务 ID；
 `papers_manager_library_import_status` 复用共享任务 Inspector 查询进度和结果。
-每个文件完成导入即加入指定 Base，完成结果保留 24 小时；下载后的解析仍沿用文档处理流水线。
+每个文件完成导入即加入指定 Base，网页可选择多个 Base；HTTP `POST /api/document/url-imports` 和 `GET /api/document/url-imports/:taskID` 复用同一队列。完成结果保留 24 小时，浏览器缓存任务句柄以恢复查询；下载后的解析仍沿用文档处理流水线。
+批次区分全部成功、部分失败、全部失败和提前停止，返回计数与仅失败项重试输入；旧同步 URL HTTP 接口保留兼容。
 本地文件导入先同步保存，再异步解析，批量导入也逐项加入 Base。
 
 技能负责入库和 L0–L4 阅读策略、笔记模板、批量笔记编排、证据和报告质量。Agent 及模型

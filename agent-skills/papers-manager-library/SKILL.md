@@ -96,7 +96,7 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 可选 `request_id` 使用稳定 UUID；若提交响应丢失，原参数连同同一个 request_id 重发即可取得原任务，不能用同一 request_id 提交不同输入；
 - 后台按顺序导入，受 `BATCH_IMPORT_TIMEOUT`（默认 2 分钟）约束；通过状态工具读取 `result.items`、`result.stopped` 和 `result.error`；后台截止后保留已完成项及未处理项的失败状态；完成结果保留 24 小时；
 - 批次结果必须逐项检查 `status`（accepted/duplicate/rejected/failed）和 `error`，不能只看整体成功；
-- 状态工具返回 `queued/running/succeeded/failed`、`completed/total`；`succeeded` 仅表示任务执行完成，仍要逐项检查结果。每个 accepted/duplicate 项带 document ID，并在该项结束时加入请求的 Base；
+- 状态工具返回 `queued/running/succeeded/partial/failed/stopped`、`completed/total`；`succeeded` 表示所有项已入库或已存在，`partial` 为部分失败，`stopped` 为提前停止；读取 `summary` 和 `retryUrls`，仍要逐项检查结果。每个 accepted/duplicate 项带 document ID，并在该项结束时加入请求的 Base；
 - URL 下载复用现有队列及下载并发限制；不要为催促任务重复提交整批。仅对结果中失败/未处理的项按用户要求新建重试任务；
 - 不要无限等待解析完成；使用 `papers_manager_processing_status` 做有界轮询，或把轮询留给用户界面；
 - 若结果已包含 document ID 但 Base 附加失败，优先补 Base 成员关系，不重新下载；失败时报告阶段和可重试入口，不要重复盲目提交。

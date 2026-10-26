@@ -241,7 +241,7 @@
     {
       "name": "papers_manager_library_import_status",
       "title": "Get URL import progress",
-      "description": "Read queued/running/succeeded/failed URL import state, per-item results and document IDs. Poll after submitting import_url/import_urls. Import completion is separate from PDF parsing; query processing_status for created documents. A succeeded batch may contain failed/rejected items or stopped=true; inspect every item. Results expire 24 hours after completion.",
+      "description": "Read queued/running/succeeded/partial/failed/stopped URL import state, per-item results and document IDs. Poll after submitting import_url/import_urls. Import completion is separate from PDF parsing; query processing_status for created documents. succeeded means every item was accepted or already existed; partial means mixed results; stopped means early termination. summary counts outcomes; retryUrls contains only failed/unprocessed inputs, preserving DOI/filename. Inspect every item. Results expire 24 hours after completion.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

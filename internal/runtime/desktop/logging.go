@@ -92,3 +92,17 @@ func (w *consoleWriter) Write(p []byte) (int, error) {
 	}
 	return len(p), nil
 }
+
+// runProgress also exposes the current Launcher phase to the management page.
+func (r *Runtime) runProgress(ctx context.Context, stage string, operation func() error) error {
+	now := time.Now()
+	r.mu.Lock()
+	r.state.ProgressStage, r.state.ProgressStartedAt = stage, &now
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.state.ProgressStage, r.state.ProgressStartedAt = "", nil
+		r.mu.Unlock()
+	}()
+	return RunWithProgress(ctx, stage, operation)
+}

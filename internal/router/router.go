@@ -111,6 +111,8 @@ func ServerFile(
 		router.POST("/api/document/import-url", documentHandler.ImportURL)
 		router.POST("/api/document/batch-upload", documentHandler.UploadBatch)
 		router.POST("/api/document/batch-import-url", documentHandler.ImportURLBatch)
+		router.POST("/api/document/url-imports", documentHandler.EnqueueURLImport)
+		router.GET("/api/document/url-imports/:taskID", documentHandler.URLImportStatus)
 		router.POST("/api/references/:referenceID/download-pdf", documentHandler.DownloadReferencePDF)
 		router.GET("/api/document/search", documentHandler.Search)
 		router.PATCH("/api/document/:id", documentHandler.UpdateDocument)
