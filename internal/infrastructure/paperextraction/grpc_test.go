@@ -29,6 +29,9 @@ func (stub *extractorClientStub) Extract(
 	return stub.result, stub.err
 }
 
+// TestGRPCExtractorMapsRequestResponseAndEvidence verifies that extraction
+// forwards markdown, blocks, and the storage key, then maps candidates, references,
+// and evidence back to the domain types.
 func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 	markdown := []byte("# **Mapped Paper**\n\n### **Ada Lovelace**\n")
 	location := completeTestLocation(len([]rune(string(markdown))))
@@ -91,6 +94,8 @@ func TestGRPCExtractorMapsRequestResponseAndEvidence(t *testing.T) {
 	}
 }
 
+// TestGRPCExtractorRejectsInvalidRequestBeforeRPC verifies that missing required
+// extraction input fails validation without invoking the gRPC client.
 func TestGRPCExtractorRejectsInvalidRequestBeforeRPC(t *testing.T) {
 	client := &extractorClientStub{}
 	extractor := NewGRPCExtractorWithClient(client)
@@ -106,6 +111,8 @@ func TestGRPCExtractorRejectsInvalidRequestBeforeRPC(t *testing.T) {
 	}
 }
 
+// TestGRPCExtractorRejectsInvalidResponse verifies that an out-of-range candidate
+// confidence from the parser invalidates the whole extraction response.
 func TestGRPCExtractorRejectsInvalidResponse(t *testing.T) {
 	markdown := []byte("# Paper")
 	client := &extractorClientStub{result: &papersv1.PaperExtractionResult{

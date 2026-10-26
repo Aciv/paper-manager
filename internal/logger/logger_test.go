@@ -27,6 +27,9 @@ func (h *recordHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 
 func (h *recordHandler) WithGroup(string) slog.Handler { return h }
 
+// TestInfoRecordsApplicationCaller verifies that Info logs through the context
+// logger and attributes the record to the calling application file rather than
+// the logger wrapper.
 func TestInfoRecordsApplicationCaller(t *testing.T) {
 	handler := &recordHandler{}
 	ctx := context.WithValue(context.Background(), ContextLoggerKey, slog.New(handler))

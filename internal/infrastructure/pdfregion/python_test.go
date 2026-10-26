@@ -19,6 +19,8 @@ import (
 	"paperMaster/internal/types"
 )
 
+// TestPythonRendererRendersValidatedTemporaryPNG verifies that a valid region
+// request returns PNG bytes whose temporary file is removed when the artifact is closed.
 func TestPythonRendererRendersValidatedTemporaryPNG(t *testing.T) {
 	renderer, sourceKey := newTestRenderer(t, 1<<20)
 	result, err := renderer.Render(context.Background(), testRequest(sourceKey))
@@ -45,6 +47,8 @@ func TestPythonRendererRendersValidatedTemporaryPNG(t *testing.T) {
 	}
 }
 
+// TestPythonRendererRejectsEscapingSourceKey verifies that a parent-directory
+// source key is rejected as an invalid region request.
 func TestPythonRendererRejectsEscapingSourceKey(t *testing.T) {
 	renderer, sourceKey := newTestRenderer(t, 1<<20)
 	request := testRequest(sourceKey)
@@ -54,6 +58,8 @@ func TestPythonRendererRejectsEscapingSourceKey(t *testing.T) {
 	}
 }
 
+// TestPythonRendererRejectsSymlinkOutsideUploadRoot verifies that a source
+// symlink resolving outside the upload root is rejected as invalid.
 func TestPythonRendererRejectsSymlinkOutsideUploadRoot(t *testing.T) {
 	renderer, sourceKey := newTestRenderer(t, 1<<20)
 	outside := filepath.Join(filepath.Dir(renderer.uploadDirectory), "outside.pdf")
@@ -71,6 +77,8 @@ func TestPythonRendererRejectsSymlinkOutsideUploadRoot(t *testing.T) {
 	}
 }
 
+// TestPythonRendererWaitingForSlotHonorsCancellation verifies that a render
+// waiting for a concurrency slot returns the caller's deadline error.
 func TestPythonRendererWaitingForSlotHonorsCancellation(t *testing.T) {
 	renderer, sourceKey := newTestRenderer(t, 1<<20)
 	renderer.slots <- struct{}{}
@@ -82,6 +90,8 @@ func TestPythonRendererWaitingForSlotHonorsCancellation(t *testing.T) {
 	}
 }
 
+// TestPythonRendererRejectsOversizedOutput verifies that renderer output
+// exceeding the configured byte limit is rejected with a size-limit error.
 func TestPythonRendererRejectsOversizedOutput(t *testing.T) {
 	renderer, sourceKey := newTestRenderer(t, 8)
 	if _, err := renderer.Render(context.Background(), testRequest(sourceKey)); err == nil ||

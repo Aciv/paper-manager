@@ -23,6 +23,8 @@ func (stubCatalogProvider) Search(
 	return nil, nil
 }
 
+// TestRegistryPreservesOrderAndReturnsCopy verifies that registry enumeration
+// keeps insertion order, returns a defensive copy, and supports normalized lookup.
 func TestRegistryPreservesOrderAndReturnsCopy(t *testing.T) {
 	registry, err := NewRegistry(
 		stubCatalogProvider("first"),
@@ -46,6 +48,8 @@ func TestRegistryPreservesOrderAndReturnsCopy(t *testing.T) {
 	}
 }
 
+// TestRegistryRejectsDuplicateProvider verifies that provider names are
+// normalized before duplicate detection, so case and spacing cannot bypass it.
 func TestRegistryRejectsDuplicateProvider(t *testing.T) {
 	_, err := NewRegistry(
 		stubCatalogProvider("same"),
@@ -56,6 +60,8 @@ func TestRegistryRejectsDuplicateProvider(t *testing.T) {
 	}
 }
 
+// TestNewRegistryFromConfigSelectsProviders verifies that configured provider
+// names are constructed in the declared order.
 func TestNewRegistryFromConfigSelectsProviders(t *testing.T) {
 	registry, err := NewRegistryFromConfig(config.Config{
 		PaperCatalogProviders: []string{OpenAlexProvider, CrossrefProvider},
@@ -73,6 +79,8 @@ func TestNewRegistryFromConfigSelectsProviders(t *testing.T) {
 	}
 }
 
+// TestNewRegistryFromConfigRejectsUnknownProvider verifies that an unrecognized
+// provider name fails registry construction instead of being ignored.
 func TestNewRegistryFromConfigRejectsUnknownProvider(t *testing.T) {
 	_, err := NewRegistryFromConfig(config.Config{
 		PaperCatalogProviders: []string{"unknown"},
@@ -83,6 +91,8 @@ func TestNewRegistryFromConfigRejectsUnknownProvider(t *testing.T) {
 	}
 }
 
+// TestNewRegistryFromConfigRejectsUnboundedClient verifies that configuration
+// without a positive catalog timeout is rejected to keep HTTP clients bounded.
 func TestNewRegistryFromConfigRejectsUnboundedClient(t *testing.T) {
 	_, err := NewRegistryFromConfig(config.Config{
 		PaperCatalogProviders: []string{OpenAlexProvider},

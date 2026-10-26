@@ -24,12 +24,13 @@ import (
 )
 
 type Snapshot struct {
-	Initialized bool              `json:"initialized"`
-	State       string            `json:"state"`
-	Error       string            `json:"error,omitempty"`
-	Services    map[string]string `json:"services"`
-	AppURL      string            `json:"app_url"`
-	MCPURL      string            `json:"mcp_url"`
+	Initialized  bool              `json:"initialized"`
+	State        string            `json:"state"`
+	Error        string            `json:"error,omitempty"`
+	Services     map[string]string `json:"services"`
+	AppURL       string            `json:"app_url"`
+	MCPURL       string            `json:"mcp_url"`
+	CanConfigure bool              `json:"can_configure"`
 }
 
 type managed struct {
@@ -47,9 +48,11 @@ type Runtime struct {
 	cycleDone        chan struct{}
 	quit             chan struct{}
 	quitOnce         sync.Once
+	reloadConfig     bool
 }
 
 func New(cfg Config) *Runtime {
+	cfg = cfg.withDefaults()
 	done := make(chan struct{})
 	close(done)
 	r := &Runtime{
@@ -72,6 +75,7 @@ func (r *Runtime) Snapshot() Snapshot {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := r.state
+	s.CanConfigure = r.canConfigureLocked()
 	s.Services = map[string]string{}
 	for k, v := range r.state.Services {
 		s.Services[k] = v
@@ -114,6 +118,13 @@ func (r *Runtime) begin(initialize bool) bool {
 	case <-r.cycleDone:
 	default:
 		return false
+	}
+	if r.reloadConfig {
+		if err := r.reloadConfigLocked(); err != nil {
+			r.state.State = "failed"
+			r.state.Error = err.Error()
+			return false
+		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
@@ -159,7 +170,6 @@ func (r *Runtime) Quit()                          { r.quitOnce.Do(func() { close
 func (r *Runtime) QuitRequested() <-chan struct{} { return r.quit }
 
 func (r *Runtime) run(ctx context.Context, done chan struct{}) {
-	defer close(done)
 	var owned []managed
 	var release []func()
 	var failure error
@@ -179,12 +189,12 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 			closeResource()
 		}
 		if errors.Is(failure, errSetupRequired) {
-			r.setState("setup_required", failure.Error())
+			r.finishCycle(done, "setup_required", failure.Error())
 		} else if failure != nil {
-			r.setState("failed", failure.Error())
 			logger.Error(context.Background(), "local runtime failed", "error", r.cfg.redact(failure.Error()))
+			r.finishCycle(done, "failed", failure.Error())
 		} else {
-			r.setState("stopped", "")
+			r.finishCycle(done, "stopped", "")
 		}
 	}()
 	fail := func(err error) {

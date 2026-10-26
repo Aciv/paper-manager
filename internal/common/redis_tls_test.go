@@ -12,6 +12,8 @@ func resetRedisTLSEnv(t *testing.T) {
 	t.Setenv("REDIS_TLS_INSECURE_SKIP_VERIFY", "")
 }
 
+// TestRedisTLSConfig_DisabledByDefault verifies that no TLS configuration is
+// returned unless REDIS_USE_TLS is explicitly enabled.
 func TestRedisTLSConfig_DisabledByDefault(t *testing.T) {
 	resetRedisTLSEnv(t)
 
@@ -25,6 +27,9 @@ func TestRedisTLSConfig_DisabledByDefault(t *testing.T) {
 	}
 }
 
+// TestRedisTLSConfig_EnabledSecureByDefault verifies that enabling Redis TLS
+// requires at least TLS 1.2 and keeps certificate verification enabled with no
+// server name override.
 func TestRedisTLSConfig_EnabledSecureByDefault(t *testing.T) {
 	resetRedisTLSEnv(t)
 	t.Setenv("REDIS_USE_TLS", "true")
@@ -44,6 +49,9 @@ func TestRedisTLSConfig_EnabledSecureByDefault(t *testing.T) {
 	}
 }
 
+// TestRedisTLSConfig_Options verifies that TLS enablement is case-insensitive
+// and that a custom server name and skipped verification are honored when
+// explicitly requested.
 func TestRedisTLSConfig_Options(t *testing.T) {
 	resetRedisTLSEnv(t)
 	t.Setenv("REDIS_USE_TLS", "TRUE") // case-insensitive

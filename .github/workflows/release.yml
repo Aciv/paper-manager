@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Require successful Full tests for this exact source
+        id: source
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          gh api "repos/$GH_REPO/actions/runs?head_sha=$GITHUB_SHA&per_page=100" > "$RUNNER_TEMP/runs.json"
+          run_id=$(python scripts/desktop/prepare_release.py --revision "$GITHUB_SHA" --runs "$RUNNER_TEMP/runs.json")
+          version=$(python -c 'import json; print(json.load(open("packaging/desktop/product.json"))["version"])')
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Source: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Reusing tested artifacts: https://github.com/$GH_REPO/actions/runs/$run_id" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ steps.source.outputs.run_id }}
+          pattern: paper_manager-*
+          path: ${{ runner.temp }}/release-artifacts
+      - name: Verify all user archives and create a draft Release
+        shell: bash
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          python scripts/desktop/prepare_release.py --revision "$GITHUB_SHA" \
+            --version "$VERSION" --artifacts "$RUNNER_TEMP/release-artifacts" > "$RUNNER_TEMP/archives.txt"
+          mapfile -t archives < "$RUNNER_TEMP/archives.txt"
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists; refusing to replace its assets."
+            exit 1
+          fi
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          paper_manager $VERSION
+
+          Source commit: $GITHUB_SHA
+          Tested run: https://github.com/$GH_REPO/actions/runs/${{ steps.source.outputs.run_id }}
+
+          Download the archive for your platform and extract the entire folder.
+          Run paper_manager.exe (Windows) or ./paper_manager (Linux/macOS).
+          Use ASCII program/data paths. Linux/macOS must run as an ordinary user.
+          EOF
+          gh release create "$tag" --draft --target "$GITHUB_SHA" \
+            --title "paper_manager $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" "${archives[@]}"
+          echo "Draft Release: https://github.com/$GH_REPO/releases" >> "$GITHUB_STEP_SUMMARY"

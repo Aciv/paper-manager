@@ -1,11 +1,20 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
 )
 
+// ---------------------------------------------------------------------------
+// Consolidated from config_test.go.
+// ---------------------------------------------------------------------------
+
+// TestLoadPaperCatalogDefaults verifies that catalog provider, timeout,
+// concurrency, and task retry settings fall back to the documented defaults
+// when unset.
 func TestLoadPaperCatalogDefaults(t *testing.T) {
 	for _, key := range []string{
 		"PAPER_CATALOG_PROVIDERS",
@@ -44,6 +53,8 @@ func TestLoadPaperCatalogDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadBibliographyDefaults verifies that bibliography limits, DOI lookup
+// settings, caches, and task controls use their documented defaults when unset.
 func TestLoadBibliographyDefaults(t *testing.T) {
 	for _, key := range []string{
 		"BIBLIOGRAPHY_MAX_ENTRIES", "BIBLIOGRAPHY_DOI_CONCURRENCY", "BIBLIOGRAPHY_DOI_TIMEOUT",
@@ -70,6 +81,9 @@ func TestLoadBibliographyDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadPaperCatalogConfiguration verifies that catalog environment variables
+// are parsed, including provider list normalization, provider credentials, and
+// task timing overrides.
 func TestLoadPaperCatalogConfiguration(t *testing.T) {
 	t.Setenv("PAPER_CATALOG_PROVIDERS", " OpenAlex, crossref,openalex ")
 	t.Setenv("PAPER_CATALOG_TIMEOUT", "2500ms")
@@ -104,6 +118,8 @@ func TestLoadPaperCatalogConfiguration(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsInvalidPaperCatalogConcurrency verifies that a non-positive
+// catalog concurrency is rejected at startup.
 func TestLoadRejectsInvalidPaperCatalogConcurrency(t *testing.T) {
 	t.Setenv("PAPER_CATALOG_CONCURRENCY", "0")
 	if _, err := Load(); err == nil {
@@ -111,6 +127,8 @@ func TestLoadRejectsInvalidPaperCatalogConcurrency(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsInvalidPaperCatalogTimeout verifies that a non-positive catalog
+// timeout fails configuration loading.
 func TestLoadRejectsInvalidPaperCatalogTimeout(t *testing.T) {
 	t.Setenv("PAPER_CATALOG_TIMEOUT", "0s")
 	if _, err := Load(); err == nil {
@@ -118,6 +136,8 @@ func TestLoadRejectsInvalidPaperCatalogTimeout(t *testing.T) {
 	}
 }
 
+// TestLoadRuntimeLimits verifies that HTTP, batch import, worker concurrency,
+// and database pool limits are read from the environment as configured.
 func TestLoadRuntimeLimits(t *testing.T) {
 	t.Setenv("HTTP_READ_TIMEOUT", "3m")
 	t.Setenv("HTTP_WRITE_TIMEOUT", "7m")
@@ -164,6 +184,8 @@ func TestLoadRuntimeLimits(t *testing.T) {
 	}
 }
 
+// TestLoadDocumentTaskConcurrencyDefaults verifies that document recognition
+// and extraction concurrency both default to four when unset.
 func TestLoadDocumentTaskConcurrencyDefaults(t *testing.T) {
 	t.Setenv("DOCUMENT_RECOGNITION_CONCURRENCY", "")
 	t.Setenv("DOCUMENT_EXTRACTION_CONCURRENCY", "")
@@ -180,6 +202,8 @@ func TestLoadDocumentTaskConcurrencyDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsInvalidDocumentTaskConcurrency verifies that zero concurrency
+// for either document recognition or extraction is rejected.
 func TestLoadRejectsInvalidDocumentTaskConcurrency(t *testing.T) {
 	t.Setenv("DOCUMENT_RECOGNITION_CONCURRENCY", "0")
 	if _, err := Load(); err == nil {
@@ -193,6 +217,8 @@ func TestLoadRejectsInvalidDocumentTaskConcurrency(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsIdlePoolLargerThanOpenPool verifies that startup fails rather
+// than silently configuring an unusable database pool.
 func TestLoadRejectsIdlePoolLargerThanOpenPool(t *testing.T) {
 	t.Setenv("DB_MAX_OPEN_CONNS", "10")
 	t.Setenv("DB_MAX_IDLE_CONNS", "11")
@@ -201,6 +227,8 @@ func TestLoadRejectsIdlePoolLargerThanOpenPool(t *testing.T) {
 	}
 }
 
+// TestLoadRejectsInvalidJSONBodyLimit verifies that a non-positive JSON request
+// body limit is rejected during configuration loading.
 func TestLoadRejectsInvalidJSONBodyLimit(t *testing.T) {
 	t.Setenv("HTTP_MAX_JSON_BYTES", "0")
 	if _, err := Load(); err == nil {
@@ -208,6 +236,8 @@ func TestLoadRejectsInvalidJSONBodyLimit(t *testing.T) {
 	}
 }
 
+// TestLoadMCPMediaAndLocalImportDefaults verifies the default MCP image byte cap
+// and that local file imports remain disabled without an explicit root.
 func TestLoadMCPMediaAndLocalImportDefaults(t *testing.T) {
 	t.Setenv("MCP_MAX_IMAGE_BYTES", "")
 	t.Setenv("MCP_LOCAL_IMPORT_ROOT", "")
@@ -223,6 +253,8 @@ func TestLoadMCPMediaAndLocalImportDefaults(t *testing.T) {
 	}
 }
 
+// TestLoadMCPConfiguration verifies that the MCP image limit and local import
+// root are honored from the environment and that zero image bytes is rejected.
 func TestLoadMCPConfiguration(t *testing.T) {
 	t.Setenv("MCP_MAX_IMAGE_BYTES", "2048")
 	t.Setenv("MCP_LOCAL_IMPORT_ROOT", "/tmp/import-root")
@@ -238,4 +270,71 @@ func TestLoadMCPConfiguration(t *testing.T) {
 	if _, err := Load(); err == nil {
 		t.Fatal("expected invalid MCP image limit error")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from dotenv_test.go.
+// ---------------------------------------------------------------------------
+
+// TestLoadDotEnvLoadsUnsetValuesAndPreservesProcessEnvironment verifies that
+// dotenv loading fills unset variables and parses quoted values while leaving
+// existing process values intact.
+func TestLoadDotEnvLoadsUnsetValuesAndPreservesProcessEnvironment(t *testing.T) {
+	const (
+		loadedKey   = "PAPERS_MANAGER_DOTENV_TEST_LOADED"
+		existingKey = "PAPERS_MANAGER_DOTENV_TEST_EXISTING"
+		quotedKey   = "PAPERS_MANAGER_DOTENV_TEST_QUOTED"
+	)
+	unsetEnvForTest(t, loadedKey)
+	unsetEnvForTest(t, quotedKey)
+	t.Setenv(existingKey, "from-process")
+
+	path := filepath.Join(t.TempDir(), ".env")
+	content := "# local configuration\n" +
+		loadedKey + "=from-file\n" +
+		existingKey + "=must-not-replace\n" +
+		quotedKey + "=\"quoted value\" # comment\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write dotenv fixture: %v", err)
+	}
+
+	if err := LoadDotEnv(path); err != nil {
+		t.Fatalf("LoadDotEnv() error = %v", err)
+	}
+	if got := os.Getenv(loadedKey); got != "from-file" {
+		t.Errorf("loaded value = %q, want %q", got, "from-file")
+	}
+	if got := os.Getenv(existingKey); got != "from-process" {
+		t.Errorf("existing value = %q, want process value", got)
+	}
+	if got := os.Getenv(quotedKey); got != "quoted value" {
+		t.Errorf("quoted value = %q, want %q", got, "quoted value")
+	}
+}
+
+// TestLoadDotEnvRejectsMalformedLine verifies that a dotenv line without an
+// assignment produces an error instead of being silently ignored.
+func TestLoadDotEnvRejectsMalformedLine(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".env")
+	if err := os.WriteFile(path, []byte("NOT_A_SETTING\n"), 0o600); err != nil {
+		t.Fatalf("write dotenv fixture: %v", err)
+	}
+	if err := LoadDotEnv(path); err == nil {
+		t.Fatal("LoadDotEnv() error = nil, want malformed-line error")
+	}
+}
+
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	previous, existed := os.LookupEnv(key)
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(key, previous)
+			return
+		}
+		_ = os.Unsetenv(key)
+	})
 }

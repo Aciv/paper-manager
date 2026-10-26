@@ -6,6 +6,26 @@ import (
 	"path/filepath"
 )
 
+// DeliveryDirectory is outside the sealed runtime so writable state and the
+// operator's environment file survive removal of program components.
+func DeliveryDirectory(bundle string) string {
+	if filepath.Base(bundle) == "bundle" {
+		return filepath.Dir(bundle)
+	}
+	return bundle
+}
+
+// DefaultBundleDataDir keeps portable deliveries self-contained. Standalone
+// development launchers retain the original per-user default.
+func DefaultBundleDataDir(bundle string) (string, error) {
+	if info, err := os.Stat(filepath.Join(bundle, "bundle.json")); err == nil && !info.IsDir() {
+		return filepath.Join(DeliveryDirectory(bundle), "data"), nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return "", err
+	}
+	return DefaultDataDir()
+}
+
 // BundleDirectory supports both an unpacked delivery's root executable and
 // the original launcher inside bundle/. It never depends on the current cwd.
 func BundleDirectory(executable string) (string, error) {
@@ -60,7 +80,12 @@ func OpenBundleConfig(root, bundle string) (Config, error) {
 	}
 	expected := configForBundle(cfg, selected, engine)
 	currentPaths := configForBundle(cfg, selected, cfg.ExtractionEngine)
-	if cfg == currentPaths {
+	if sameRuntimeFiles(cfg, currentPaths) {
+		// macOS may spell the same directory through /var and /private/var.
+		// Keep persisted paths rather than treating this alias as a new build.
+		expected.Server, expected.Python = cfg.Server, cfg.Python
+		expected.ParserDir, expected.PostgresBin = cfg.ParserDir, cfg.PostgresBin
+		expected.Redis, expected.WebDir = cfg.Redis, cfg.WebDir
 		return expected, nil
 	}
 	old := filepath.Dir(cfg.Server)
@@ -74,4 +99,18 @@ func OpenBundleConfig(root, bundle string) (Config, error) {
 	}
 	return cfg, fmt.Errorf("existing data uses another runtime directory; " +
 		"open the original launcher or perform an explicit maintenance upgrade; data preserved")
+}
+
+func sameRuntimeFiles(a, b Config) bool {
+	for _, pair := range [][2]*string{
+		{&a.Server, &b.Server}, {&a.Python, &b.Python}, {&a.ParserDir, &b.ParserDir},
+		{&a.PostgresBin, &b.PostgresBin}, {&a.Redis, &b.Redis}, {&a.WebDir, &b.WebDir},
+	} {
+		for _, path := range pair {
+			if resolved, err := filepath.EvalSymlinks(*path); err == nil {
+				*path = resolved
+			}
+		}
+	}
+	return a == b
 }

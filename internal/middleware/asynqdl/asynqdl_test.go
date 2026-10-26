@@ -83,6 +83,8 @@ func runMiddleware(repo *fakeRepo, taskType string, payload []byte, handlerErr e
 	return wrapped.ProcessTask(context.Background(), t)
 }
 
+// TestMiddleware_NilHandlerErr_NoInsert verifies that a successfully handled
+// task does not write a dead-letter row.
 func TestMiddleware_NilHandlerErr_NoInsert(t *testing.T) {
 	repo := &fakeRepo{}
 	if err := runMiddleware(repo, "any:task", []byte(`{"tenant_id":1}`), nil); err != nil {
@@ -93,6 +95,9 @@ func TestMiddleware_NilHandlerErr_NoInsert(t *testing.T) {
 	}
 }
 
+// TestMiddleware_FailureWithoutAsynqCtx_RecordsRow verifies that a failed task
+// processed outside an Asynq worker context still records one dead-letter row
+// with the inferred scope, related ID, and error while propagating the task error.
 func TestMiddleware_FailureWithoutAsynqCtx_RecordsRow(t *testing.T) {
 	repo := &fakeRepo{}
 	payload, _ := json.Marshal(map[string]any{
@@ -130,6 +135,9 @@ func TestMiddleware_FailureWithoutAsynqCtx_RecordsRow(t *testing.T) {
 	}
 }
 
+// TestMiddleware_BibliographyFailureUsesDocumentBaseScope verifies that a
+// bibliography task failure is filed under the document-base scope identified
+// by its payload.
 func TestMiddleware_BibliographyFailureUsesDocumentBaseScope(t *testing.T) {
 	repo := &fakeRepo{}
 	payload, err := json.Marshal(types.BibliographyTaskPayload{
@@ -155,6 +163,8 @@ func TestMiddleware_BibliographyFailureUsesDocumentBaseScope(t *testing.T) {
 	}
 }
 
+// TestMiddleware_SkipRetryIsFinalAttempt verifies that an error wrapping
+// asynq.SkipRetry is preserved and immediately produces a dead-letter record.
 func TestMiddleware_SkipRetryIsFinalAttempt(t *testing.T) {
 	repo := &fakeRepo{}
 	err := runMiddleware(repo, "document:process", []byte(`{"document_id":"doc-1"}`),
@@ -167,6 +177,8 @@ func TestMiddleware_SkipRetryIsFinalAttempt(t *testing.T) {
 	}
 }
 
+// TestMiddleware_RevokeTaskDoesNotCreateDeadLetter verifies that revoked tasks
+// are not archived as dead letters while the asynq.RevokeTask error is propagated.
 func TestMiddleware_RevokeTaskDoesNotCreateDeadLetter(t *testing.T) {
 	repo := &fakeRepo{}
 	err := runMiddleware(
@@ -183,6 +195,9 @@ func TestMiddleware_RevokeTaskDoesNotCreateDeadLetter(t *testing.T) {
 	}
 }
 
+// TestMiddleware_UnknownPayload_StillRecords verifies that a failure with no
+// recognizable scope identifier still creates a dead-letter row, using unknown
+// scope and preserving the raw payload.
 func TestMiddleware_UnknownPayload_StillRecords(t *testing.T) {
 	repo := &fakeRepo{}
 	// Payload that doesn't carry any of the well-known identifier keys.
@@ -203,6 +218,8 @@ func TestMiddleware_UnknownPayload_StillRecords(t *testing.T) {
 	}
 }
 
+// TestMiddleware_NilPayload_DefaultsToEmptyObject verifies that a nil task
+// payload is stored as an empty JSON object instead of NULL.
 func TestMiddleware_NilPayload_DefaultsToEmptyObject(t *testing.T) {
 	repo := &fakeRepo{}
 	_ = runMiddleware(repo, "any:task", nil, errors.New("err"))
@@ -215,6 +232,8 @@ func TestMiddleware_NilPayload_DefaultsToEmptyObject(t *testing.T) {
 	}
 }
 
+// TestMiddleware_LongErrorTruncated verifies that oversized failure messages
+// are capped and carry an explicit truncation suffix.
 func TestMiddleware_LongErrorTruncated(t *testing.T) {
 	repo := &fakeRepo{}
 	long := make([]byte, 16384)
@@ -232,6 +251,8 @@ func TestMiddleware_LongErrorTruncated(t *testing.T) {
 	}
 }
 
+// TestMiddleware_RepoFailure_DoesNotMaskTaskError verifies that a dead-letter
+// repository failure never replaces the original task error returned to the worker.
 func TestMiddleware_RepoFailure_DoesNotMaskTaskError(t *testing.T) {
 	repo := &fakeRepo{fail: errors.New("db down")}
 	wantErr := errors.New("task boom")
@@ -241,6 +262,9 @@ func TestMiddleware_RepoFailure_DoesNotMaskTaskError(t *testing.T) {
 	}
 }
 
+// TestInferScope_Priority verifies that scope inference prefers the document
+// base over an individual document and falls back to unknown when no identifier
+// is present.
 func TestInferScope_Priority(t *testing.T) {
 	tests := []struct {
 		name      string

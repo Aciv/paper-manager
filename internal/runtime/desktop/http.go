@@ -3,6 +3,7 @@ package desktop
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,7 +17,7 @@ var managementPage string
 // Handler is a local management page with no login. Host and same-origin write
 // checks prevent other websites from controlling the application's lifecycle.
 func (r *Runtime) Handler() http.Handler {
-	host := address(r.cfg.Ports.Manager)
+	host := address(r.configSnapshot().Ports.Manager)
 	origin := "http://" + host
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -52,13 +53,55 @@ func (r *Runtime) Handler() http.Handler {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
+		case req.Method == http.MethodGet && req.URL.Path == "/configuration":
+			_ = json.NewEncoder(w).Encode(r.Settings())
+		case req.Method == http.MethodPut && req.URL.Path == "/configuration":
+			req.Body = http.MaxBytesReader(w, req.Body, 64<<10)
+			var settings Settings
+			decoder := json.NewDecoder(req.Body)
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&settings); err != nil {
+				http.Error(w, "invalid configuration JSON", http.StatusBadRequest)
+				return
+			}
+			if err := decoder.Decode(new(any)); err != io.EOF {
+				http.Error(w, "unexpected trailing configuration", http.StatusBadRequest)
+				return
+			}
+			if err := r.UpdateSettings(settings); err != nil {
+				configurationError(w, err)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(r.Settings())
+		case req.Method == http.MethodPost && req.URL.Path == "/configuration/reload":
+			if err := r.ReloadConfiguration(); err != nil {
+				configurationError(w, err)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(r.Settings())
+		case req.Method == http.MethodPost && req.URL.Path == "/configuration/open":
+			if err := r.OpenConfiguration(req.Context()); err != nil {
+				configurationError(w, err)
+				return
+			}
+			w.WriteHeader(http.StatusAccepted)
+		case req.Method == http.MethodGet && req.URL.Path == "/configuration/file":
+			file, err := os.Open(filepath.Join(r.configSnapshot().DataDir, "runtime.json"))
+			if err != nil {
+				http.Error(w, "configuration file unavailable", http.StatusNotFound)
+				return
+			}
+			defer file.Close()
+			w.Header().Set("Content-Disposition", `inline; filename="runtime.json"`)
+			_, _ = io.Copy(w, io.LimitReader(file, 64<<10))
 		case req.Method == http.MethodGet && req.URL.Path == "/status":
 			_ = json.NewEncoder(w).Encode(r.Snapshot())
 		case req.Method == http.MethodGet && req.URL.Path == "/mcp-config":
+			cfg := r.configSnapshot()
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"mcpServers": map[string]any{"papers-manager": map[string]any{
 					"type": "http", "url": r.Snapshot().MCPURL,
-					"headers": map[string]string{"Authorization": "Bearer " + r.cfg.MCPToken},
+					"headers": map[string]string{"Authorization": "Bearer " + cfg.MCPToken},
 				}},
 			})
 		case req.Method == http.MethodGet && req.URL.Path == "/logs":
@@ -107,7 +150,8 @@ func (r *Runtime) Handler() http.Handler {
 }
 
 func (r *Runtime) logTail(name string) (string, error) {
-	file, err := os.Open(filepath.Join(r.cfg.DataDir, "logs", name+".log"))
+	cfg := r.configSnapshot()
+	file, err := os.Open(filepath.Join(cfg.DataDir, "logs", name+".log"))
 	if err != nil {
 		return "", err
 	}
@@ -123,12 +167,20 @@ func (r *Runtime) logTail(name string) (string, error) {
 		}
 	}
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
-	return r.cfg.redact(string(data)), err
+	return cfg.redact(string(data)), err
 }
 
 // ManagementURL contains no credential and is stable across restarts.
 func (r *Runtime) ManagementURL() string {
-	return fmt.Sprintf("http://%s", address(r.cfg.Ports.Manager))
+	return fmt.Sprintf("http://%s", address(r.configSnapshot().Ports.Manager))
+}
+
+func configurationError(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	if errors.Is(err, errConfigBusy) {
+		status = http.StatusConflict
+	}
+	http.Error(w, err.Error(), status)
 }
 
 //go:embed management.js

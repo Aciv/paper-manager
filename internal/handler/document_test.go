@@ -6,12 +6,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
+	"image"
+	"image/color"
+	"image/png"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
-	"strings"
-	"testing"
-
+	"net/textproto"
 	"paperMaster/internal/application/service"
 	fileservice "paperMaster/internal/application/service/file"
 	"paperMaster/internal/config"
@@ -19,10 +22,14 @@ import (
 	"paperMaster/internal/router"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
-
-	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
+	"strconv"
+	"strings"
+	"testing"
 )
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_test.go.
+// ---------------------------------------------------------------------------
 
 type failingDocumentTaskEnqueuer struct{}
 
@@ -209,6 +216,9 @@ func newDocumentReadingHandler(storage *fileservice.LocalStorage, repo *document
 	return handler.NewDocumentReadingHandler(service.NewDocumentReadingService(repo, storage, nil))
 }
 
+// TestUploadRouteStoresDocument verifies that a multipart upload persists its
+// metadata, serves search, content, range, HEAD, and conditional reads, and
+// deletes both the record and the stored file.
 func TestUploadRouteStoresDocument(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
 	if err != nil {
@@ -336,6 +346,9 @@ func (s *projectionDocumentServiceStub) GetDocumentProjections(
 	return s.items, nil
 }
 
+// TestProjectionRouteReturnsBatchedReadModel verifies that the projections
+// endpoint returns documents with metadata and processing views and forwards
+// both include flags to the service.
 func TestProjectionRouteReturnsBatchedReadModel(t *testing.T) {
 	documentID := uuid.New()
 	stub := &projectionDocumentServiceStub{items: []types.DocumentProjection{{
@@ -388,6 +401,9 @@ func multipartUploadRequest(t *testing.T, path, field, filename string, content 
 	return request
 }
 
+// TestUploadRejectsUnsupportedAndOversizedFilesBeforeService verifies that
+// single and batch uploads reject unsupported extensions with 415 and files
+// over the size limit with 413 before reaching the document service.
 func TestUploadRejectsUnsupportedAndOversizedFilesBeforeService(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 4)
 	if err != nil {
@@ -420,6 +436,8 @@ func TestUploadRejectsUnsupportedAndOversizedFilesBeforeService(t *testing.T) {
 	}
 }
 
+// TestBlockImageRouteSupportsRangeAndHead verifies that block image requests
+// honor byte ranges with 206 responses and serve HEAD with a length but no body.
 func TestBlockImageRouteSupportsRangeAndHead(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
 	if err != nil {
@@ -463,6 +481,9 @@ func TestBlockImageRouteSupportsRangeAndHead(t *testing.T) {
 	}
 }
 
+// TestUploadRouteReturnsCreatedDocumentWhenInitialQueueFails verifies that an
+// upload still persists the document, reports a retryable failed markdown
+// stage, and keeps the source file available when initial enqueueing fails.
 func TestUploadRouteReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
 	if err != nil {
@@ -526,6 +547,8 @@ func TestUploadRouteReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
 	}
 }
 
+// TestUploadRouteRejectsDuplicateFileHash verifies that uploading identical
+// file content a second time returns 409.
 func TestUploadRouteRejectsDuplicateFileHash(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
 	if err != nil {
@@ -565,6 +588,9 @@ func TestUploadRouteRejectsDuplicateFileHash(t *testing.T) {
 	}
 }
 
+// TestUploadBatchRouteReportsAcceptedDuplicateAndRejectedItems verifies that a
+// batch upload returns one accepted, one duplicate, and one rejected item with
+// the corresponding per-item details.
 func TestUploadBatchRouteReportsAcceptedDuplicateAndRejectedItems(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
 	if err != nil {
@@ -620,6 +646,8 @@ func TestUploadBatchRouteReportsAcceptedDuplicateAndRejectedItems(t *testing.T) 
 	}
 }
 
+// TestDocumentHandlerUsesCustomErrorResponse verifies that a request without a
+// multipart file returns the custom JSON error envelope with code 1000.
 func TestDocumentHandlerUsesCustomErrorResponse(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
 	if err != nil {
@@ -636,5 +664,148 @@ func TestDocumentHandlerUsesCustomErrorResponse(t *testing.T) {
 	}
 	if !strings.Contains(response.Body.String(), `"code":1000`) {
 		t.Fatalf("expected custom error response, body = %s", response.Body.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_selection_test.go.
+// ---------------------------------------------------------------------------
+
+func selectionTestEngine(repo *documentCreatorStub) *routerFixture {
+	processor := service.NewDocumentSelectionProcessor(repo)
+	selectionHandler := handler.NewDocumentSelectionHandler(processor)
+	return &routerFixture{engine: router.NewRouter(router.RouterParams{DocumentSelectionHandler: selectionHandler})}
+}
+
+type routerFixture struct{ engine http.Handler }
+
+func (f *routerFixture) post(t *testing.T, documentID uuid.UUID, fields map[string]string, imageData []byte, imageType string) *httptest.ResponseRecorder {
+	t.Helper()
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if _, exists := fields["document_id"]; !exists {
+		if err := writer.WriteField("document_id", documentID.String()); err != nil {
+			t.Fatalf("write document_id: %v", err)
+		}
+	}
+	for key, value := range fields {
+		if err := writer.WriteField(key, value); err != nil {
+			t.Fatalf("write %s: %v", key, err)
+		}
+	}
+	if imageData != nil {
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", `form-data; name="image"; filename="selection.png"`)
+		header.Set("Content-Type", imageType)
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			t.Fatalf("create image part: %v", err)
+		}
+		if _, err := part.Write(imageData); err != nil {
+			t.Fatalf("write image: %v", err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/document/"+documentID.String()+"/selection/process", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	response := httptest.NewRecorder()
+	f.engine.ServeHTTP(response, request)
+	return response
+}
+
+func selectionPNG(t *testing.T, width, height int) []byte {
+	t.Helper()
+	var data bytes.Buffer
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
+	canvas.Set(0, 0, color.RGBA{R: 255, A: 255})
+	if err := png.Encode(&data, canvas); err != nil {
+		t.Fatalf("encode PNG: %v", err)
+	}
+	return data.Bytes()
+}
+
+func areaFields() map[string]string {
+	return map[string]string{"kind": "area", "page_number": "2", "x0": "0.1", "y0": "0.2", "x1": "0.6", "y1": "0.8"}
+}
+
+// TestDocumentSelectionAcceptsValidAreaCapture verifies that a normalized area
+// selection with a PNG image is processed and returns the image dimensions.
+func TestDocumentSelectionAcceptsValidAreaCapture(t *testing.T) {
+	documentID := uuid.New()
+	fixture := selectionTestEngine(&documentCreatorStub{document: types.Document{ID: documentID}})
+	response := fixture.post(t, documentID, areaFields(), selectionPNG(t, 24, 16), "image/png")
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"imageWidth":24`) {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// TestDocumentSelectionRejectsBlockFromAnotherDocument verifies that a block
+// selection referencing a block owned by another document returns 404.
+func TestDocumentSelectionRejectsBlockFromAnotherDocument(t *testing.T) {
+	documentID := uuid.New()
+	otherDocumentID := uuid.New()
+	blockID := uuid.New()
+	fixture := selectionTestEngine(&documentCreatorStub{document: types.Document{ID: documentID}, blocks: []types.Block{{ID: blockID, DocumentID: otherDocumentID}}})
+	response := fixture.post(t, documentID, map[string]string{"kind": "block", "block_id": blockID.String()}, nil, "")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// TestDocumentSelectionRejectsInvalidCoordinates verifies that area
+// coordinates outside the normalized 0-1 range are rejected with 400.
+func TestDocumentSelectionRejectsInvalidCoordinates(t *testing.T) {
+	documentID := uuid.New()
+	fields := areaFields()
+	fields["x1"] = "1.5"
+	response := selectionTestEngine(&documentCreatorStub{document: types.Document{ID: documentID}}).post(t, documentID, fields, selectionPNG(t, 10, 10), "image/png")
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// TestDocumentSelectionRejectsUnsupportedMIME verifies that selection images
+// with a non-PNG content type are rejected with 415.
+func TestDocumentSelectionRejectsUnsupportedMIME(t *testing.T) {
+	documentID := uuid.New()
+	response := selectionTestEngine(&documentCreatorStub{document: types.Document{ID: documentID}}).post(t, documentID, areaFields(), selectionPNG(t, 10, 10), "image/jpeg")
+	if response.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// TestDocumentSelectionRejectsOversizedUpload verifies that a selection image
+// larger than the size limit is rejected with 413.
+func TestDocumentSelectionRejectsOversizedUpload(t *testing.T) {
+	documentID := uuid.New()
+	oversized := bytes.Repeat([]byte{'x'}, types.MaxDocumentSelectionImageSize+1)
+	response := selectionTestEngine(&documentCreatorStub{document: types.Document{ID: documentID}}).post(t, documentID, areaFields(), oversized, "image/png")
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
+// TestDocumentSelectionRejectsExcessiveImageDimensions verifies that a PNG
+// wider than the dimension limit is rejected with 413.
+func TestDocumentSelectionRejectsExcessiveImageDimensions(t *testing.T) {
+	documentID := uuid.New()
+	width := types.MaxDocumentSelectionDimension + 1
+	response := selectionTestEngine(&documentCreatorStub{document: types.Document{ID: documentID}}).post(t, documentID, areaFields(), selectionPNG(t, width, 1), "image/png")
+	if response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("width=%s status=%d body=%s", strconv.Itoa(width), response.Code, response.Body.String())
+	}
+}
+
+// TestDocumentSelectionProcessorHonorsCancellation verifies that an already
+// cancelled context makes selection processing return context.Canceled.
+func TestDocumentSelectionProcessorHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	processor := service.NewDocumentSelectionProcessor(&documentCreatorStub{})
+	_, err := processor.ProcessSelection(ctx, types.DocumentSelectionInput{DocumentID: uuid.New(), Kind: types.DocumentSelectionText, Text: "selected"})
+	if err != context.Canceled {
+		t.Fatalf("error=%v, want context.Canceled", err)
 	}
 }

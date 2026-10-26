@@ -1,4 +1,4 @@
-name: Desktop platform bundle and validation
+name: Native user-package tests
 
 on:
   workflow_call:
@@ -10,17 +10,18 @@ on:
 permissions:
   contents: read
 
-# Each platform owns its build dependency so another platform cannot skip its
-# artifact validation. Keep validation on a fresh runner without a checkout.
+defaults:
+  run:
+    shell: bash
+
 jobs:
   build:
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 45
-    defaults:
-      run:
-        shell: bash
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -30,114 +31,151 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install native build tools (not runtime dependencies)
+      - name: Record exact source revision
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          echo "Source: $GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          echo "Commit: https://github.com/$GITHUB_REPOSITORY/commit/$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Install native build tools
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y bison flex
-      - name: Bundle helper tests
+      - name: Install validation dependencies outside the runtime
+        run: >-
+          python -m pip install --only-binary=:all:
+          -r packaging/desktop/requirements-validation.txt
+      - name: Packaging and Go tests
         run: |
-          python -m unittest discover -s scripts -p test_desktop_bundle.py
-          python -m unittest discover -s scripts -p test_desktop_installer.py
-      - name: Windows validation wrapper regression
+          ./scripts/desktop/run_tests.sh --python-only
+          go test ./...
+      - name: Windows ordinary-account wrapper regression
         if: runner.os == 'Windows'
         shell: pwsh
-        run: ./scripts/test_windows_desktop_harness.ps1
-      - name: Native installation transaction and retention tests
-        run: go test ./internal/runtime/desktop ./cmd/launcher ./scripts/upgrade-failure
-      - name: Build sealed hybrid-profile bundle
-        # Exact archives and wheels are SHA-256 verified; no developer venv,
-        # global database install, or post-install pip downloads are used.
+        run: ./scripts/desktop/test_windows_desktop_harness.ps1
+      - name: Build one sealed hybrid runtime
         run: >-
-          python scripts/build_desktop_bundle.py --profile hybrid
+          python scripts/desktop/build_desktop_bundle.py --profile hybrid
           --revision "$GITHUB_SHA" --output "$RUNNER_TEMP/desktop-bundle"
           --cache "$RUNNER_TEMP/desktop-downloads"
-      - name: Build guarded synthetic migration failure tool
-        run: >-
-          CGO_ENABLED=0 go build -trimpath -o "$RUNNER_TEMP/upgrade-failure" ./scripts/upgrade-failure
-      - name: Archive bundle and standalone validation harness
+      - name: Frontend tests (reuse build dependencies)
+        run: ./scripts/tests/web.sh
+      - name: Python tests with the bundled interpreter
         shell: python
+        env:
+          PARSER_LAYOUT_THREADS: '2'
+          PYTHONDONTWRITEBYTECODE: '1'
         run: |
           import os, pathlib, subprocess, sys
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          site = root / 'validation-site'
+          subprocess.run([sys.executable, '-m', 'pip', 'install', '--only-binary=:all:',
+                          '--target', str(site), 'psutil==7.0.0'], check=True)
+          python = root / 'desktop-bundle/python' / ('python.exe' if os.name == 'nt' else 'bin/python3')
+          env = {**os.environ, 'PYTHONPATH': str(site), 'PYTHONDONTWRITEBYTECODE': '1'}
+          subprocess.run([str(python), '-B', '-m', 'unittest', 'discover',
+                          '-s', 'papers_parser/test', '-p', 'test_*.py'],
+                         cwd='pdf_parser', env=env, check=True)
+      - name: Export minimal user archive and separate validation tools
+        shell: python
+        run: |
+          import json, os, pathlib, shutil, subprocess, sys
+          root = pathlib.Path(os.environ['RUNNER_TEMP'])
+          bundle = root / 'desktop-bundle'
+          manifest = json.loads((bundle / 'bundle.json').read_text(encoding='utf-8'))
+          if manifest['revision'] != os.environ['GITHUB_SHA']:
+              raise ValueError('Runtime revision differs from checked-out source')
           suffix = 'zip' if os.name == 'nt' else 'tar.gz'
-          subprocess.run([sys.executable, 'scripts/package_desktop_bundle.py',
-                          '--bundle', str(root / 'desktop-bundle'),
-                          '--output', str(root / ('desktop.' + suffix)),
-                          '--failure-probe', str(root / 'upgrade-failure')], check=True)
+          version, target = manifest['application']['version'], manifest['target']
+          archive = root / 'candidate' / f'paper_manager-{version}-{target}.{suffix}'
+          subprocess.run([sys.executable, 'scripts/desktop/package_desktop_bundle.py',
+                          '--bundle', str(bundle), '--output', str(archive)], check=True)
+          subprocess.run([sys.executable, 'scripts/desktop/check_desktop_package.py',
+                          '--archive', str(archive), '--verify-only'], check=True)
+          tools = root / 'validation-tools'
+          tools.mkdir()
+          for name in ['desktop_bundle.py', 'check_desktop_package.py', 'check_desktop_launcher.py',
+                       'check_desktop_setup_failures.py', 'check_windows_desktop_user.ps1',
+                       'check_user_uninstall.py', 'benchmark_parser_shared.py']:
+              source = pathlib.Path('scripts/desktop') / name
+              if not source.is_file():
+                  source = pathlib.Path('scripts/parser') / name
+              shutil.copy2(source, tools / name)
       - uses: actions/upload-artifact@v4
         with:
-          name: internal-desktop-${{ inputs.runner }}
-          path: ${{ runner.temp }}/desktop.*
-          if-no-files-found: error
+          name: candidate-${{ inputs.runner }}
+          path: ${{ runner.temp }}/candidate/*
+          compression-level: 0
+          retention-days: 1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: validation-tools-${{ inputs.runner }}
+          path: ${{ runner.temp }}/validation-tools
           retention-days: 1
 
-
-  artifact-test:
-    if: ${{ !cancelled() && needs.build.result == 'success' }}
+  native-test:
     needs: build
     runs-on: ${{ inputs.runner }}
     timeout-minutes: 30
     steps:
-      # Deliberately no checkout, no setup-go/node/PostgreSQL/Redis, and no
-      # parser wheels installed on this clean job. Test orchestration uses
-      # psutil, while the app's controlled PATH has no installed developer tools.
+      # No application checkout, Go/Node installation or global database.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: python -m pip install psutil==7.0.0 grpcio==1.82.1 protobuf==7.35.1
       - uses: actions/download-artifact@v4
         with:
-          name: internal-desktop-${{ inputs.runner }}
-          path: ${{ runner.temp }}/download
-      - name: Extract into relocated Unicode path
+          name: candidate-${{ inputs.runner }}
+          path: ${{ runner.temp }}/candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: validation-tools-${{ inputs.runner }}
+          path: ${{ runner.temp }}/validation-tools
+      - name: Extract and verify the actual user package into an ASCII directory
         shell: python
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
         run: |
-          import hashlib, os, pathlib, subprocess, sys, tarfile, zipfile
+          import json, os, pathlib, sys
           root = pathlib.Path(os.environ['RUNNER_TEMP'])
-          sources = [root / 'download' / name for name in ('desktop.zip', 'desktop.tar.gz')]
-          sources = [path for path in sources if path.is_file()]
-          if len(sources) != 1:
-              raise ValueError('Expected one platform archive')
-          source = sources[0]
-          with source.open('rb') as stream:
-              digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-          expected = digest + '  ' + source.name + chr(10)
-          if source.with_name(source.name + '.sha256').read_text(encoding='utf-8') != expected:
-              raise ValueError('Downloaded archive checksum differs')
-          destination = root / 'pm bundle 阅读'
-          if zipfile.is_zipfile(source):
-              with zipfile.ZipFile(source) as archive:
-                  archive.extractall(destination)
-          else:
-              with tarfile.open(source) as archive:
-                  archive.extractall(destination, filter='data')
-          subprocess.run([sys.executable, '-B', str(destination / 'validation/check_desktop_package.py'),
-                          '--directory', str(destination), '--verify-only'], check=True)
-      - name: Exercise only the downloaded bundle
-        if: runner.os != 'Windows'
-        shell: bash
-        run: >-
-          python "$RUNNER_TEMP/pm bundle 阅读/validation/check_desktop_launcher.py"
-          --bundle "$RUNNER_TEMP/pm bundle 阅读/bundle"
-          --output-dir "$RUNNER_TEMP/desktop-results"
-      - name: Exercise bundle as an ordinary Windows user
+          sys.path.insert(0, str(root / 'validation-tools'))
+          from desktop_bundle import extract
+          from check_desktop_package import verify_checksum, verify_delivery
+          records = list((root / 'candidate').glob('*.manifest.json'))
+          if len(records) != 1:
+              raise ValueError('Expected exactly one user archive manifest')
+          record = records[0]
+          archive = record.with_name(record.name.removesuffix('.manifest.json'))
+          verify_checksum(archive)
+          destination = root / 'pm-user'
+          extract(archive, destination)
+          metadata = verify_delivery(destination, record)
+          if metadata['revision'] != os.environ['EXPECTED_SHA']:
+              raise ValueError('Downloaded archive has a stale source revision')
+      - name: Exercise user package as an ordinary Windows account
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          & "$env:RUNNER_TEMP/pm bundle 阅读/validation/check_windows_desktop_user.ps1" `
-            -Bundle "$env:RUNNER_TEMP/pm bundle 阅读/bundle" `
-            -Harness "$env:RUNNER_TEMP/pm bundle 阅读/validation" `
-            -OutputDirectory "$env:RUNNER_TEMP/desktop-results" -Upgrade
-      - name: Exercise installed upgrades and real migration rollback
+          & "$env:RUNNER_TEMP/validation-tools/check_windows_desktop_user.ps1" `
+            -Bundle "$env:RUNNER_TEMP/pm-user/bundle" `
+            -Harness "$env:RUNNER_TEMP/validation-tools" `
+            -OutputDirectory "$env:RUNNER_TEMP/desktop-results" -UserUninstall
+      - name: Exercise user package on Unix
         if: runner.os != 'Windows'
-        shell: bash
-        run: >-
-          python "$RUNNER_TEMP/pm bundle 阅读/validation/check_desktop_upgrade.py"
-          --bundle "$RUNNER_TEMP/pm bundle 阅读/bundle"
-          --output-dir "$RUNNER_TEMP/desktop-results/upgrade"
+        run: |
+          python "$RUNNER_TEMP/validation-tools/check_desktop_launcher.py" \
+            --bundle "$RUNNER_TEMP/pm-user/bundle" --output-dir "$RUNNER_TEMP/desktop-results"
+          python "$RUNNER_TEMP/validation-tools/check_user_uninstall.py" \
+            --delivery "$RUNNER_TEMP/pm-user" --output-dir "$RUNNER_TEMP/desktop-results/uninstall"
+      - name: User downloads (uploaded only after native tests succeed)
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper_manager-${{ inputs.runner }}
+          path: ${{ runner.temp }}/candidate/*
+          compression-level: 0
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: internal-desktop-results-${{ inputs.runner }}
+          name: test-results-${{ inputs.runner }}
           path: ${{ runner.temp }}/desktop-results
           if-no-files-found: warn
           retention-days: 7

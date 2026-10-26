@@ -11,6 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// TestRecoveryHandlesPanicWithoutRequestIDContextValue verifies that a panicking
+// handler yields a 500 response without leaking the panic value or requiring a
+// request ID in the context.
 func TestRecoveryHandlesPanicWithoutRequestIDContextValue(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

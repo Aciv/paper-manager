@@ -46,15 +46,16 @@ Full Windows/macOS acceptance of the new root-entry layout remains pending.
 4. Reuse the same entry on subsequent launches. Select “退出 Launcher” to exit;
    closing the browser does not stop the services.
 
-Program files and user data are stored separately. Use full ASCII paths on Windows.
+Data defaults to `data/` inside the extracted directory; `.launcher_env` lives at its root.
+Edit ports and concurrency in the management page while Launcher is running and application services are stopped. Use full ASCII paths on Windows.
 To select a data directory:
 
 ```powershell
 .\paper_manager.exe --data-dir C:/paper_manager_data
 ```
 
-See [usage and maintenance](packaging/desktop/INSTALL.md) for default data locations,
-optional installation, update limitations, and removal; see [building packages](packaging/desktop/BUILD.md)
+See [usage and maintenance](packaging/desktop/USER.md) for default data locations,
+update limitations and removal; see [building packages](packaging/desktop/BUILD.md)
 for producing your own bundle. Supporting documentation is maintained in Chinese, except existing
 packaging reference materials.
 

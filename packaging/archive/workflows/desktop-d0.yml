@@ -1,0 +1,201 @@
+name: Desktop native validation (D0-D2)
+
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: 'bundle: selected D3 target; native-all: full D0-D2 matrix'
+        type: choice
+        default: bundle
+        options: [bundle, native-all]
+      target:
+        description: 'D3 target (only used by bundle suite)'
+        type: choice
+        default: windows-crf
+        options: [windows-crf, ubuntu-22.04, windows-2022, macos-14, all]
+
+permissions:
+  contents: read
+
+jobs:
+  internal-bundle:
+    # This file already exists on main, so it can dispatch the selected
+    # branch's D3 reusable workflow without merging unvalidated code first.
+    if: inputs.suite != 'native-all'
+    uses: ./.github/workflows/desktop-d3.yml
+    with:
+      target: ${{ inputs.target || 'windows-crf' }}
+
+  windows-worker:
+    if: inputs.suite == 'native-all'
+    # Fast native feedback for IPC/model startup; no Go/DB installation needed.
+    runs-on: windows-2022
+    timeout-minutes: 10
+    env:
+      PARSER_LAYOUT_THREADS: '2'
+      PARSER_WORKER_STARTUP_TRACE: '1'
+      PYTHONUNBUFFERED: '1'
+      LOG_PATH: ${{ github.workspace }}/tmp/desktop-d0/windows-worker.log
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Native parser wheels
+        run: |
+          python -m pip install --only-binary=:all: -r pdf_parser/requirements.txt -r packaging/desktop/requirements-validation.txt
+      - name: Real model worker startup and idle cleanup
+        timeout-minutes: 4
+        run: python -m unittest discover -s pdf_parser/papers_parser/test -t pdf_parser -p 'test_*worker*.py'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-d0-windows-worker
+          path: tmp/desktop-d0/windows-worker.log
+          if-no-files-found: error
+  native:
+    if: inputs.suite == 'native-all'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            architecture: x64
+          - runner: windows-2022
+            architecture: x64
+          - runner: macos-14
+            architecture: arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      PARSER_LAYOUT_THREADS: '2'
+      MALLOC_ARENA_MAX: '2'
+      PYTHONUNBUFFERED: '1'
+      PARSER_WORKER_STARTUP_TRACE: '1'
+      LOG_PATH: ${{ github.workspace }}/tmp/desktop-d0/python-tests.log
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: ${{ matrix.architecture }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Start private native PostgreSQL 17
+        uses: ikalnytskyi/action-setup-postgres@c4dda34aae1c821e3a771b68b73b13af3198a7ee # v8
+        id: postgres
+        with:
+          postgres-version: '17'
+          port: 55432
+          username: papers_test
+          password: papers_ci_only
+          database: papers_test
+      - name: Obtain pinned native Redis 7.4.11
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            curl -fL --retry 3 https://github.com/redis-windows/redis-windows/releases/download/7.4.11/Redis-7.4.11-Windows-x64-cygwin-with-Service.zip -o "$RUNNER_TEMP/redis.zip"
+            echo '2289eca02c25e96a918812c3b05083c3a8bc9440f1b268cc48e14bd93ed2acb0 *'"$RUNNER_TEMP/redis.zip" | sha256sum -c -
+            unzip -q "$RUNNER_TEMP/redis.zip" -d "$RUNNER_TEMP/redis-native"
+            binary=$(find "$RUNNER_TEMP/redis-native" -name redis-server.exe -print -quit)
+          else
+            curl -fL --retry 3 https://download.redis.io/releases/redis-7.4.11.tar.gz -o "$RUNNER_TEMP/redis.tar.gz"
+            echo '3c266ece0abd54ed3b1c912c6eb86b7508cf382cb690ee6649d3843f018f6357 *'"$RUNNER_TEMP/redis.tar.gz" | shasum -a 256 -c -
+            tar -xzf "$RUNNER_TEMP/redis.tar.gz" -C "$RUNNER_TEMP"
+            make -C "$RUNNER_TEMP/redis-7.4.11" -j2 MALLOC=libc BUILD_TLS=no
+            binary="$RUNNER_TEMP/redis-7.4.11/src/redis-server"
+          fi
+          echo "PAPERS_TEST_REDIS_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Resolve native parser wheels (no source-build fallback)
+        run: |
+          python -m pip install --only-binary=:all: -r pdf_parser/requirements.txt -r packaging/desktop/requirements-validation.txt
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Record dependency versions and missing model artifacts
+        if: always()
+        run: python scripts/desktop/check_desktop_dependencies.py --output tmp/desktop-d0/dependencies.json
+      - name: Validation tool regression tests
+        if: always()
+        shell: bash
+        run: ./scripts/desktop/run_tests.sh --python-only
+      - name: Go build
+        if: always()
+        run: go build ./...
+      - name: Native PostgreSQL and Redis integration (no skipped DB coverage)
+        if: always()
+        env:
+          PAPERS_MANAGER_TEST_POSTGRES_DSN: ${{ steps.postgres.outputs.connection-uri }}
+        run: python scripts/desktop/run_desktop_integration.py --redis-server "$PAPERS_TEST_REDIS_BINARY" --output-dir tmp/desktop-d0
+      - name: Python tests and real worker lifecycle
+        if: always()
+        timeout-minutes: 5
+        working-directory: pdf_parser
+        run: python -m unittest discover -s papers_parser/test -p 'test_*.py'
+      - name: Preserve worker startup diagnostics immediately
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-d0-python-${{ matrix.runner }}-${{ matrix.architecture }}
+          path: tmp/desktop-d0/python-tests.log
+          if-no-files-found: error
+      - name: Real stored-PDF recognition and lazy bytes fallback
+        if: always()
+        run: python scripts/parser/check_recognition_storage_key.py --output-dir tmp/desktop-d0/recognition-key
+      - name: Web checks
+        if: always()
+        working-directory: web
+        run: |
+          npm ci --include=optional
+          npm run build
+          npm run test:reading-note
+      - name: Build desktop entry points
+        if: always()
+        run: |
+          suffix=""
+          if [ "$RUNNER_OS" = "Windows" ]; then suffix=".exe"; fi
+          mkdir -p tmp/desktop-d0/bin
+          go build -o "tmp/desktop-d0/bin/launcher$suffix" ./cmd/launcher
+          go build -o "tmp/desktop-d0/bin/server$suffix" ./cmd/server
+      - name: Real Launcher stack under an ordinary account
+        if: always()
+        timeout-minutes: 10
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            redis_native=$(cygpath -w "$PAPERS_TEST_REDIS_BINARY")
+            pwsh -File scripts/desktop/check_windows_desktop_user.ps1 -RedisServer "$redis_native"
+          else
+            python scripts/desktop/check_desktop_launcher.py \
+              --launcher tmp/desktop-d0/bin/launcher --server tmp/desktop-d0/bin/server \
+              --postgres-bin "$(dirname "$(command -v pg_ctl)")" \
+              --redis-server "$PAPERS_TEST_REDIS_BINARY" --output-dir tmp/desktop-d0/launcher
+          fi
+      - name: Shared architecture and performance baseline
+        if: always()
+        # CI has no git-ignored CRF weights. This is a rules-engine smoke
+        # baseline only; local hybrid/model baseline remains a D1 gate.
+        run: python scripts/parser/benchmark_parser_shared.py --engine rules --jobs 8 --mixed-jobs 20 --idle-seconds 15 --output tmp/desktop-d0/shared.json
+      - name: Private PostgreSQL initialize, persist, restart, stop
+        if: always()
+        timeout-minutes: 5
+        # Tests native binaries, not a self-contained redistributable install.
+        # A missing runner dependency fails visibly; do not fall back to a
+        # different major version or an existing Windows service.
+        run: python scripts/desktop/check_private_postgres.py --output tmp/desktop-d0/postgres.json
+      - name: Windows PostgreSQL under a real non-administrator account
+        if: always() && runner.os == 'Windows'
+        shell: pwsh
+        timeout-minutes: 5
+        run: ./scripts/desktop/check_windows_postgres_user.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: desktop-d0-${{ matrix.runner }}-${{ matrix.architecture }}
+          path: |
+            tmp/desktop-d0/
+            !tmp/desktop-d0/bin/
+          if-no-files-found: warn

@@ -4,18 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/google/uuid"
 	"io/fs"
+	fileservice "paperMaster/internal/application/service/file"
+	"paperMaster/internal/types"
+	"paperMaster/internal/types/interfaces"
 	"path/filepath"
 	"strings"
 	"testing"
 	"unicode/utf8"
-
-	fileservice "paperMaster/internal/application/service/file"
-	"paperMaster/internal/types"
-	"paperMaster/internal/types/interfaces"
-
-	"github.com/google/uuid"
 )
+
+// ---------------------------------------------------------------------------
+// Consolidated from note_reading_test.go.
+// ---------------------------------------------------------------------------
 
 type memoryReadingNoteRepository struct {
 	notes map[uuid.UUID]types.DocumentReadingNote
@@ -78,6 +80,8 @@ func newReadingNoteTestService(t *testing.T) (interfaces.NoteReadingService, *me
 	return NewNoteReadingService(notes, storage), notes
 }
 
+// TestReadingNoteSectionKeysArePrivateAndDocumentScoped verifies that section
+// storage keys round-trip their IDs and reject malformed or out-of-scope paths.
 func TestReadingNoteSectionKeysArePrivateAndDocumentScoped(t *testing.T) {
 	documentID, sectionID := uuid.New(), uuid.New()
 	document, section, err := parseReadingNoteSectionKey(noteSectionStorageKey(documentID, sectionID))
@@ -97,6 +101,8 @@ func TestReadingNoteSectionKeysArePrivateAndDocumentScoped(t *testing.T) {
 	}
 }
 
+// TestNoteReadingServiceUsesOptimisticRevision verifies that a note starts at
+// revision 1, stale writes and deletes conflict, and successful updates advance it.
 func TestNoteReadingServiceUsesOptimisticRevision(t *testing.T) {
 	id := uuid.New()
 	notes := &memoryReadingNoteRepository{notes: make(map[uuid.UUID]types.DocumentReadingNote)}
@@ -137,6 +143,8 @@ func TestNoteReadingServiceUsesOptimisticRevision(t *testing.T) {
 	}
 }
 
+// TestNoteReadingOperationsApplyAsOneSequence verifies that a batch of text and
+// structural operations commits atomically and yields the matching result.
 func TestNoteReadingOperationsApplyAsOneSequence(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -189,6 +197,8 @@ func TestNoteReadingOperationsApplyAsOneSequence(t *testing.T) {
 	}
 }
 
+// TestNoteReadingAddSectionHonorsParentAndSiblingPosition verifies that added
+// sections honor explicit parent/after anchors and inherit a parent when omitted.
 func TestNoteReadingAddSectionHonorsParentAndSiblingPosition(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -246,6 +256,8 @@ func TestNoteReadingAddSectionHonorsParentAndSiblingPosition(t *testing.T) {
 	}
 }
 
+// TestNoteReadingEmptyNoteCanBeCreatedAndStarted verifies that empty notes
+// round-trip with no sections, accept a first section, and clear to zero files.
 func TestNoteReadingEmptyNoteCanBeCreatedAndStarted(t *testing.T) {
 	id := uuid.New()
 	notes := &memoryReadingNoteRepository{notes: make(map[uuid.UUID]types.DocumentReadingNote)}
@@ -289,6 +301,8 @@ func TestNoteReadingEmptyNoteCanBeCreatedAndStarted(t *testing.T) {
 	}
 }
 
+// TestNoteReadingApplyEditsRejectsOversizedInlineText verifies that inline
+// replaceText edits above the byte budget fail instead of being applied.
 func TestNoteReadingApplyEditsRejectsOversizedInlineText(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -312,6 +326,8 @@ func TestNoteReadingApplyEditsRejectsOversizedInlineText(t *testing.T) {
 	}
 }
 
+// TestNoteReadingRawSectionReplaceBypassesInlineEditBudget verifies that raw
+// whole-section replacement accepts content larger than the inline edit limit.
 func TestNoteReadingRawSectionReplaceBypassesInlineEditBudget(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -334,6 +350,8 @@ func TestNoteReadingRawSectionReplaceBypassesInlineEditBudget(t *testing.T) {
 	}
 }
 
+// TestNoteReadingOperationsDoNotRenumberExistingOrderKeys verifies that
+// structural batches preserve existing order keys and slot new ones between them.
 func TestNoteReadingOperationsDoNotRenumberExistingOrderKeys(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -404,6 +422,8 @@ func TestNoteReadingOperationsDoNotRenumberExistingOrderKeys(t *testing.T) {
 	}
 }
 
+// TestReadingNoteOperationsUseCodePointOffsetsSequentially verifies that batched
+// edits address code points and compose in order on the section text.
 func TestReadingNoteOperationsUseCodePointOffsetsSequentially(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -433,6 +453,8 @@ func TestReadingNoteOperationsUseCodePointOffsetsSequentially(t *testing.T) {
 	}
 }
 
+// TestReadingNoteOperationsRejectInvalidRangesAndFinalHeadings verifies that
+// out-of-range edits and trailing heading insertions are rejected atomically.
 func TestReadingNoteOperationsRejectInvalidRangesAndFinalHeadings(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -462,6 +484,8 @@ func TestReadingNoteOperationsRejectInvalidRangesAndFinalHeadings(t *testing.T) 
 	}
 }
 
+// TestReadingNoteOperationsRejectStaleRevision verifies that a second batch
+// using an already consumed revision is rejected with a conflict.
 func TestReadingNoteOperationsRejectStaleRevision(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -489,6 +513,8 @@ func TestReadingNoteOperationsRejectStaleRevision(t *testing.T) {
 	}
 }
 
+// TestReadingNoteOperationsDeletePreambleWithoutDeletingHeadings verifies that
+// removing the preamble keeps the first heading and its body.
 func TestReadingNoteOperationsDeletePreambleWithoutDeletingHeadings(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -513,6 +539,8 @@ func TestReadingNoteOperationsDeletePreambleWithoutDeletingHeadings(t *testing.T
 	}
 }
 
+// TestReadingNoteOperationsDeleteSubtree verifies that deleting a parent removes
+// its descendant sections and leaves later top-level sections intact.
 func TestReadingNoteOperationsDeleteSubtree(t *testing.T) {
 	id := uuid.New()
 	service, _ := newReadingNoteTestService(t)
@@ -534,5 +562,330 @@ func TestReadingNoteOperationsDeleteSubtree(t *testing.T) {
 	loaded, err := service.Export(context.Background(), id.String())
 	if err != nil || loaded.Markdown != "# C\nc" {
 		t.Fatalf("note after subtree delete = %#v, error=%v", loaded, err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from note_reading_edits_test.go.
+// ---------------------------------------------------------------------------
+
+// TestReadingNoteEditsUseSnapshotPositions verifies that mixed range, insert,
+// and text edits resolve against the original snapshot rather than intermediate text.
+func TestReadingNoteEditsUseSnapshotPositions(t *testing.T) {
+	id := uuid.New()
+	service, _ := newReadingNoteTestService(t)
+	if _, err := service.Put(context.Background(), id.String(), 0, "# H\nalpha\nbeta\ngamma\n"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sectionID := manifest.Directory.Sections[0].ID
+	section, err := service.ReadSection(context.Background(), id.String(), sectionID.String())
+	if err != nil || section.LineCount != 4 {
+		t.Fatalf("section = %#v, error=%v", section, err)
+	}
+
+	result, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{
+			{
+				Op:        types.ReadingNoteEditOpReplaceRange,
+				SectionID: &sectionID,
+				Start:     &types.ReadingNotePosition{Line: 2, Column: 1},
+				End:       &types.ReadingNotePosition{Line: 2},
+				Content:   "alpha changed\nalpha two",
+			},
+			{
+				Op:        types.ReadingNoteEditOpInsertAt,
+				SectionID: &sectionID,
+				Position:  &types.ReadingNotePosition{Line: 4, Column: 1},
+				Content:   "inserted\n",
+			},
+			{
+				Op:        types.ReadingNoteEditOpReplaceText,
+				SectionID: &sectionID,
+				OldText:   "beta",
+				NewText:   "beta2",
+				LineStart: 3,
+				LineEnd:   3,
+			},
+		},
+	})
+	if err != nil || result.Revision != 2 || len(result.ChangedSections) != 1 {
+		t.Fatalf("edits = %#v, error=%v", result, err)
+	}
+	updated, err := service.ReadSection(context.Background(), id.String(), sectionID.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "# H\nalpha changed\nalpha two\nbeta2\ninserted\ngamma\n"
+	if updated.Markdown != want || updated.LineCount != 6 {
+		t.Fatalf("markdown = %q, lineCount=%d, want %q (6 lines)", updated.Markdown, updated.LineCount, want)
+	}
+}
+
+// TestReadingNoteEditsUseCodePointColumns verifies that line and column
+// positions count code points so CJK characters are replaced at the correct spot.
+func TestReadingNoteEditsUseCodePointColumns(t *testing.T) {
+	id := uuid.New()
+	service, _ := newReadingNoteTestService(t)
+	if _, err := service.Put(context.Background(), id.String(), 0, "# 标题\n甲乙丙\n"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sectionID := manifest.Directory.Sections[0].ID
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{{
+			Op:        types.ReadingNoteEditOpReplaceRange,
+			SectionID: &sectionID,
+			Start:     &types.ReadingNotePosition{Line: 2, Column: 2},
+			End:       &types.ReadingNotePosition{Line: 2, Column: 3},
+			Content:   "X",
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	section, err := service.ReadSection(context.Background(), id.String(), sectionID.String())
+	if err != nil || section.Markdown != "# 标题\n甲X丙\n" {
+		t.Fatalf("section = %#v, error=%v", section, err)
+	}
+}
+
+// TestReadingNoteEditsRejectAmbiguousText verifies that ambiguous or missing
+// replaceText targets fail unless a line window narrows the match.
+func TestReadingNoteEditsRejectAmbiguousText(t *testing.T) {
+	id := uuid.New()
+	service, _ := newReadingNoteTestService(t)
+	if _, err := service.Put(context.Background(), id.String(), 0, "# H\nsame\nsame\n"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sectionID := manifest.Directory.Sections[0].ID
+
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{{
+			Op: types.ReadingNoteEditOpReplaceText, SectionID: &sectionID, OldText: "same", NewText: "changed",
+		}},
+	}); !errors.Is(err, types.ErrInvalidReadingNote) || !strings.Contains(err.Error(), "matched multiple times") {
+		t.Fatalf("ambiguous replace error = %v", err)
+	}
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{{
+			Op: types.ReadingNoteEditOpReplaceText, SectionID: &sectionID, OldText: "same", NewText: "changed",
+			LineStart: 2, LineEnd: 2,
+		}},
+	}); err != nil {
+		t.Fatalf("windowed replace: %v", err)
+	}
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 2,
+		Edits: []types.ReadingNoteEdit{{
+			Op: types.ReadingNoteEditOpReplaceText, SectionID: &sectionID, OldText: "missing", NewText: "x",
+		}},
+	}); !errors.Is(err, types.ErrInvalidReadingNote) || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing replace error = %v", err)
+	}
+	section, err := service.ReadSection(context.Background(), id.String(), sectionID.String())
+	if err != nil || section.Markdown != "# H\nchanged\nsame\n" || section.Revision != 2 {
+		t.Fatalf("section after rejected edits = %#v, error=%v", section, err)
+	}
+}
+
+// TestReadingNoteEditsRejectOverlappingRanges verifies that overlapping ranges
+// and conflicting same-start appends are rejected without changing the note.
+func TestReadingNoteEditsRejectOverlappingRanges(t *testing.T) {
+	id := uuid.New()
+	service, _ := newReadingNoteTestService(t)
+	if _, err := service.Put(context.Background(), id.String(), 0, "# H\nalpha\nbeta\n"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sectionID := manifest.Directory.Sections[0].ID
+
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{
+			{
+				Op: types.ReadingNoteEditOpReplaceRange, SectionID: &sectionID,
+				Start:   &types.ReadingNotePosition{Line: 2, Column: 1},
+				End:     &types.ReadingNotePosition{Line: 3, Column: 1},
+				Content: "first",
+			},
+			{
+				Op: types.ReadingNoteEditOpReplaceRange, SectionID: &sectionID,
+				Start:   &types.ReadingNotePosition{Line: 2, Column: 2},
+				End:     &types.ReadingNotePosition{Line: 2},
+				Content: "second",
+			},
+		},
+	}); !errors.Is(err, types.ErrInvalidReadingNote) || !strings.Contains(err.Error(), "overlap") {
+		t.Fatalf("overlap error = %v", err)
+	}
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{
+			{Op: types.ReadingNoteEditOpAppendText, SectionID: &sectionID, Content: "one"},
+			{Op: types.ReadingNoteEditOpAppendText, SectionID: &sectionID, Content: "two"},
+		},
+	}); !errors.Is(err, types.ErrInvalidReadingNote) || !strings.Contains(err.Error(), "share start") {
+		t.Fatalf("same-start error = %v", err)
+	}
+	loaded, err := service.Export(context.Background(), id.String())
+	if err != nil || loaded.Markdown != "# H\nalpha\nbeta\n" || loaded.Revision != 1 {
+		t.Fatalf("note after rejected ranges = %#v, error=%v", loaded, err)
+	}
+}
+
+// TestReadingNoteEditsResolveStructureBeforeText verifies that structural edits
+// resolve first and a text edit to a deleted section invalidates the whole batch.
+func TestReadingNoteEditsResolveStructureBeforeText(t *testing.T) {
+	id := uuid.New()
+	service, _ := newReadingNoteTestService(t)
+	if _, err := service.Put(context.Background(), id.String(), 0, "# A\na\n## B\nb\n# C\nc"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rootID, childID, otherID uuid.UUID
+	for _, section := range manifest.Directory.Sections {
+		switch section.Title {
+		case "A":
+			rootID = section.ID
+		case "B":
+			childID = section.ID
+		case "C":
+			otherID = section.ID
+		}
+	}
+	if rootID == uuid.Nil || childID == uuid.Nil || otherID == uuid.Nil {
+		t.Fatalf("directory = %#v", manifest.Directory)
+	}
+
+	result, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{
+			{
+				Op: types.ReadingNoteEditOpReplaceText, SectionID: &childID, OldText: "b", NewText: "b changed",
+			},
+			{
+				Op: types.ReadingNoteEditOpAddSection, ParentID: &rootID, Content: "### New\nnew body",
+			},
+			{Op: types.ReadingNoteEditOpDeleteSection, SectionID: &otherID},
+		},
+	})
+	if err != nil || len(result.DeletedSectionIDs) != 1 || result.DeletedSectionIDs[0] != otherID {
+		t.Fatalf("edits = %#v, error=%v", result, err)
+	}
+	loaded, err := service.Export(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(loaded.Markdown, "b changed") ||
+		!strings.Contains(loaded.Markdown, "### New\nnew body") ||
+		strings.Contains(loaded.Markdown, "# C") {
+		t.Fatalf("note after structural edits = %q", loaded.Markdown)
+	}
+
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 2,
+		Edits: []types.ReadingNoteEdit{
+			{Op: types.ReadingNoteEditOpDeleteSection, SectionID: &childID},
+			{Op: types.ReadingNoteEditOpReplaceText, SectionID: &childID, OldText: "b changed", NewText: "lost"},
+		},
+	}); !errors.Is(err, types.ErrInvalidReadingNote) {
+		t.Fatalf("edit deleted section error = %v", err)
+	}
+	if loaded, err := service.Export(context.Background(), id.String()); err != nil || loaded.Revision != 2 ||
+		!strings.Contains(loaded.Markdown, "b changed") {
+		t.Fatalf("note changed after rejected deleted-section edit = %#v, error=%v", loaded, err)
+	}
+}
+
+// TestReadingNoteEditsReplaceWholeSection verifies that replaceSection keeps the
+// heading level, must stand alone in its batch, and updates title and body.
+func TestReadingNoteEditsReplaceWholeSection(t *testing.T) {
+	id := uuid.New()
+	service, _ := newReadingNoteTestService(t)
+	if _, err := service.Put(context.Background(), id.String(), 0, "# H\nold body"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sectionID := manifest.Directory.Sections[0].ID
+
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{{
+			Op: types.ReadingNoteEditOpReplaceSection, SectionID: &sectionID, Content: "## Other\nnew body",
+		}},
+	}); !errors.Is(err, types.ErrInvalidReadingNote) {
+		t.Fatalf("level-changing replaceSection error = %v", err)
+	}
+	result, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{{
+			Op: types.ReadingNoteEditOpReplaceSection, SectionID: &sectionID, Content: "# H2\nnew body",
+		}},
+	})
+	if err != nil || result.Revision != 2 || result.Directory.Sections[0].Title != "H2" {
+		t.Fatalf("replaceSection = %#v, error=%v", result, err)
+	}
+	if _, err := service.ApplyEdits(context.Background(), id.String(), types.ReadingNoteEdits{
+		ExpectedRevision: 2,
+		Edits: []types.ReadingNoteEdit{
+			{Op: types.ReadingNoteEditOpReplaceSection, SectionID: &sectionID, Content: "# H3\nnew body"},
+			{Op: types.ReadingNoteEditOpAppendText, SectionID: &sectionID, Content: "\nextra"},
+		},
+	}); !errors.Is(err, types.ErrInvalidReadingNote) || !strings.Contains(err.Error(), "only edit") {
+		t.Fatalf("mixed replaceSection error = %v", err)
+	}
+	section, err := service.ReadSection(context.Background(), id.String(), sectionID.String())
+	if err != nil || section.Markdown != "# H2\nnew body" || section.Revision != 2 {
+		t.Fatalf("section after replaceSection = %#v, error=%v", section, err)
+	}
+}
+
+// TestReadingNoteEditsRejectStaleRevision verifies that replaying the same
+// snapshot-relative edit against an advanced note returns a conflict.
+func TestReadingNoteEditsRejectStaleRevision(t *testing.T) {
+	id := uuid.New()
+	service, _ := newReadingNoteTestService(t)
+	if _, err := service.Put(context.Background(), id.String(), 0, "# H\nbody"); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := service.GetManifest(context.Background(), id.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sectionID := manifest.Directory.Sections[0].ID
+	request := types.ReadingNoteEdits{
+		ExpectedRevision: 1,
+		Edits: []types.ReadingNoteEdit{{
+			Op: types.ReadingNoteEditOpAppendText, SectionID: &sectionID, Content: "\nmore",
+		}},
+	}
+	if _, err := service.ApplyEdits(context.Background(), id.String(), request); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ApplyEdits(context.Background(), id.String(), request); !errors.Is(err, types.ErrReadingNoteConflict) {
+		t.Fatalf("stale edit error = %v", err)
 	}
 }

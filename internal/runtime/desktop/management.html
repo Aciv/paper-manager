@@ -3,44 +3,192 @@
   <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <meta name="theme-color" content="#000000">
     <title>paper_manager · 本地服务</title>
     <link rel="stylesheet" href="/management.css">
     <script src="/management.js" defer></script>
   </head>
   <body>
-    <main>
-      <p class="eyebrow">paper_manager · 1.0.0</p>
-      <h1>本地服务</h1>
-      <p>首次使用请先初始化数据，再启动服务。数据独立保存在用户目录；关闭此页面不会停止应用。</p>
-      <section aria-live="polite">
-        <h2 id="state">正在读取状态</h2>
-        <p id="error" role="alert"></p>
-        <ul id="services"></ul>
-      </section>
-      <div class="actions">
-        <a id="open" target="_blank" rel="noreferrer" hidden>打开论文库 ↗</a>
-        <button data-action="initialize">首次初始化 / 重试</button>
-        <button data-action="start">启动 / 重试</button>
-        <button data-action="stop">停止服务</button>
-        <button data-action="quit">退出 Launcher</button>
+    <header class="masthead">
+      <div class="masthead-inner">
+        <a class="brand" href="/" aria-label="paper_manager 本地服务">
+          <span class="brand-mark" aria-hidden="true">PM</span>
+          <span class="brand-name">paper_manager</span>
+        </a>
+        <div class="masthead-right">
+          <strong id="state" class="masthead-state" data-state="loading" role="status" aria-live="polite">正在读取状态</strong>
+          <button id="refresh-status" class="masthead-link" type="button">刷新状态</button>
+        </div>
       </div>
-      <section>
-        <h2>MCP 连接</h2>
-        <p>地址保持稳定。复制配置后自行加入 Agent，不会覆盖已有设置。</p>
-        <code id="mcp-address"></code>
-        <button id="copy-mcp">复制 MCP 配置</button>
-      </section>
-      <section>
-        <h2>运行日志</h2>
-        <label for="log-service">服务</label>
-        <select id="log-service">
-          <option>api</option><option>parser</option><option>postgres</option>
-          <option>redis</option>
-        </select>
-        <button id="refresh-log">刷新</button>
-        <button id="initialization-log">查看初始化日志</button>
-        <pre id="logs">可查看最近 64 KiB 日志。</pre>
-      </section>
-    </main>
+    </header>
+
+    <section class="banner">
+      <div class="banner-inner">
+        <p class="banner-meta">paper_manager · 本地服务 · Launcher 1.0.0</p>
+        <h1>本地服务</h1>
+      </div>
+    </section>
+
+    <div class="page">
+      <p id="error" class="alert" role="alert"></p>
+
+      <div class="layout">
+        <nav class="side-nav" role="tablist" aria-label="管理页面">
+          <button class="nav-link active" id="tab-overview" type="button" role="tab" aria-selected="true" aria-controls="panel-overview" data-tab="overview">概览</button>
+          <button class="nav-link" id="tab-mcp" type="button" role="tab" aria-selected="false" aria-controls="panel-mcp" data-tab="mcp" tabindex="-1">MCP</button>
+          <button class="nav-link" id="tab-configuration" type="button" role="tab" aria-selected="false" aria-controls="panel-configuration" data-tab="configuration" tabindex="-1">配置</button>
+          <button class="nav-link" id="tab-logs" type="button" role="tab" aria-selected="false" aria-controls="panel-logs" data-tab="logs" tabindex="-1">日志</button>
+        </nav>
+
+        <div class="card">
+          <main class="content">
+            <section id="panel-overview" class="panel-view" role="tabpanel" aria-labelledby="tab-overview">
+              <h2 class="page-title">运行概览</h2>
+              <p id="state-copy" class="lede">正在读取本地服务状态。</p>
+
+              <h3>服务状态</h3>
+              <div class="table-wrap">
+                <table class="status-table">
+                  <thead>
+                    <tr><th scope="col">服务</th><th scope="col">用途</th><th scope="col">状态</th></tr>
+                  </thead>
+                  <tbody id="services"></tbody>
+                </table>
+              </div>
+
+              <h3>最近日志</h3>
+              <pre id="activity-log" class="code-block log-preview">正在读取最近日志…</pre>
+              <p><button id="open-logs" class="text-link" type="button">查看完整日志</button></p>
+
+              <p class="note">数据独立保存在用户目录；关闭页面不会停止应用，退出 Launcher 才会停止服务。</p>
+            </section>
+
+            <section id="panel-mcp" class="panel-view" role="tabpanel" aria-labelledby="tab-mcp" hidden>
+              <h2 class="page-title">MCP 连接</h2>
+              <p class="lede">地址保持稳定，重启后无需重新配置。复制配置后可加入支持 MCP 的 Agent。</p>
+
+              <h3>连接地址</h3>
+              <div class="address-row">
+                <code id="mcp-address" class="code-block inline-code">读取中…</code>
+                <button id="copy-mcp" class="button secondary" type="button">复制配置</button>
+              </div>
+              <p id="notice" class="notice" role="status" aria-live="polite"></p>
+              <p class="note">复制内容包含访问令牌，请只保存在本机。</p>
+
+              <h3>接入说明</h3>
+              <ol class="steps">
+                <li>点击「复制配置」，得到包含地址和 Authorization 头的 JSON。</li>
+                <li>粘贴到支持 MCP 的 Agent 配置中；不会覆盖已有设置。</li>
+                <li>地址固定，重启 Launcher 后仍可继续使用。</li>
+              </ol>
+
+              <h3>配置格式</h3>
+              <pre id="mcp-preview" class="code-block">正在读取配置格式…</pre>
+            </section>
+
+            <section id="panel-configuration" class="panel-view" role="tabpanel" aria-labelledby="tab-configuration" hidden>
+              <h2 class="page-title">服务配置</h2>
+              <p id="configuration-state" class="lede">Launcher 保持运行；初始化之前或业务服务停止后可以修改。</p>
+              <form id="configuration-form">
+                <fieldset id="configuration-fields" disabled>
+                  <legend>端口</legend>
+                  <div class="configuration-grid">
+                    <label>论文库 / API<input name="api" type="number" min="1" max="65535" required></label>
+                    <label>MCP<input name="mcp" type="number" min="1" max="65535" required></label>
+                    <label>PDF 解析器<input name="parser" type="number" min="1" max="65535" required></label>
+                    <label>PostgreSQL<input name="postgres" type="number" min="1" max="65535" required></label>
+                    <label>Redis<input name="redis" type="number" min="1" max="65535" required></label>
+                  </div>
+                  <p class="note">端口不能重复。管理网页端口为 <code id="configuration-manager">—</code>，修改它需要重启 Launcher。</p>
+                  <h3>并行度</h3>
+                  <div class="configuration-grid">
+                    <label>Go 任务 worker<input name="tasks" type="number" min="1" max="512" required></label>
+                    <label>PDF 识别<input name="recognition" type="number" min="1" max="32" required></label>
+                    <label>信息提取<input name="extraction" type="number" min="1" max="32" required></label>
+                    <label>图片渲染<input name="render" type="number" min="1" max="32" required></label>
+                    <label>共享 RPC 总预算<input name="rpcs" type="number" min="1" max="128" required></label>
+                  </div>
+                  <p class="note">识别、提取和渲染共享 RPC 总预算。并行度越高，CPU 和内存使用可能越高。</p>
+                  <label class="configuration-engine">提取模式
+                    <select name="extraction_engine" class="select">
+                      <option value="hybrid">hybrid</option><option value="rules">rules</option>
+                      <option value="crf">crf</option><option value="shadow">shadow</option>
+                    </select>
+                  </label>
+                  <button class="button primary" type="submit">保存配置</button>
+                </fieldset>
+              </form>
+              <p id="configuration-message" class="notice" role="status" aria-live="polite"></p>
+              <h3>完整配置文件</h3>
+              <p class="note">修改 JSON 后点击「重新读取」，或直接初始化 / 启动服务。组件路径、凭据和管理端口的修改需要退出并重启 Launcher。</p>
+              <p class="configuration-file"><code id="configuration-path">读取中…</code></p>
+              <div class="log-toolbar">
+                <button id="configuration-open" class="button secondary" type="button">在本机编辑器打开 JSON</button>
+                <button id="configuration-reload" class="button secondary" type="button">重新读取</button>
+                <a class="text-link" href="/configuration/file" target="_blank" rel="noreferrer">查看完整 runtime.json</a>
+              </div>
+            </section>
+
+            <section id="panel-logs" class="panel-view" role="tabpanel" aria-labelledby="tab-logs" hidden>
+              <h2 class="page-title">运行日志</h2>
+              <p class="lede">查看本地服务最近 64 KiB 日志。</p>
+
+              <div class="log-toolbar">
+                <label for="log-service">服务</label>
+                <select id="log-service" class="select">
+                  <option>api</option>
+                  <option>parser</option>
+                  <option>postgres</option>
+                  <option>redis</option>
+                </select>
+                <button id="refresh-log" class="button secondary" type="button">刷新</button>
+                <button id="initialization-log" class="button secondary" type="button">初始化日志</button>
+              </div>
+              <pre id="logs" class="code-block log-view">选择服务后点击「刷新」查看最近 64 KiB 日志。</pre>
+            </section>
+          </main>
+
+          <aside class="info-panel" aria-label="服务信息">
+            <h2 class="info-title">服务信息</h2>
+
+            <section class="info-section">
+              <h3 class="info-label">状态</h3>
+              <p id="info-state-row" class="info-state" data-state="loading">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="info-state">正在读取状态</span>
+              </p>
+            </section>
+
+            <section class="info-section">
+              <h3 class="info-label">操作</h3>
+              <a id="open" class="button primary" target="_blank" rel="noreferrer" hidden>打开论文库</a>
+              <button id="primary-action" class="button primary" type="button" data-action="start" hidden>启动服务</button>
+              <ul class="info-links">
+                <li><button id="stop-action" class="text-link" type="button" data-action="stop" hidden>停止服务</button></li>
+                <li><button class="text-link danger" type="button" data-action="quit">退出 Launcher</button></li>
+              </ul>
+            </section>
+
+            <section class="info-section info-meta">
+              <h3 class="info-label">本地地址</h3>
+              <p class="info-value"><a id="app-link" class="info-link" href="#">读取中…</a></p>
+            </section>
+
+            <section class="info-section info-meta">
+              <h3 class="info-label">MCP 地址</h3>
+              <p class="info-value"><code id="info-mcp" class="info-code">读取中…</code></p>
+            </section>
+
+            <section class="info-section info-meta">
+              <h3 class="info-label">版本</h3>
+              <p class="info-text">paper_manager Launcher 1.0.0</p>
+            </section>
+
+            <p class="info-note">关闭此页面不会停止服务。使用「退出 Launcher」才会关闭本地服务。</p>
+          </aside>
+        </div>
+      </div>
+    </div>
   </body>
 </html>

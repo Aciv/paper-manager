@@ -1,18 +1,23 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
+	"paperMaster/internal/config"
+	"paperMaster/internal/types"
 	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"paperMaster/internal/config"
-	"paperMaster/internal/types"
-
-	"github.com/google/uuid"
 )
+
+// ---------------------------------------------------------------------------
+// Consolidated from bibliography_test.go.
+// ---------------------------------------------------------------------------
 
 type bibliographyRepositoryStub struct {
 	snapshot types.BibliographySnapshotSource
@@ -67,6 +72,8 @@ func (stub *doiCitationStub) FetchBibTeX(ctx context.Context, doi string) (types
 	return stub.responses[doi], stub.errors[doi]
 }
 
+// TestGenerateBaseBibliographyPreservesOrderAndFallsBack verifies that entries keep their
+// source order despite out-of-order DOI completion and that colliding keys get local suffixes.
 func TestGenerateBaseBibliographyPreservesOrderAndFallsBack(t *testing.T) {
 	baseID := uuid.New()
 	published := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
@@ -113,6 +120,8 @@ func TestGenerateBaseBibliographyPreservesOrderAndFallsBack(t *testing.T) {
 	}
 }
 
+// TestGenerateBaseBibliographyFallsBackAfterDOIFailure verifies that a failed DOI lookup
+// produces a local @misc fallback while recording the provider error code.
 func TestGenerateBaseBibliographyFallsBackAfterDOIFailure(t *testing.T) {
 	baseID := uuid.New()
 	source := types.BibliographySource{DocumentID: uuid.New(), DOI: "10.1000/fail", SourceState: types.DocumentSourceAvailable, Metadata: types.PaperMetadata{Title: "Local title"}}
@@ -134,6 +143,8 @@ func TestGenerateBaseBibliographyFallsBackAfterDOIFailure(t *testing.T) {
 	}
 }
 
+// TestGenerateBaseBibliographyAllocatesStableLocalCollisionSuffixes verifies that documents
+// with identical metadata receive deterministic, ordered citation-key suffixes.
 func TestGenerateBaseBibliographyAllocatesStableLocalCollisionSuffixes(t *testing.T) {
 	baseID := uuid.New()
 	metadata := types.PaperMetadata{Title: "Same title", Authors: []types.PaperAuthor{{Name: "Ada Smith"}}}
@@ -157,6 +168,8 @@ func TestGenerateBaseBibliographyAllocatesStableLocalCollisionSuffixes(t *testin
 	}
 }
 
+// TestGenerateBaseBibliographyRejectsInvalidBaseAndLargeOutput verifies that a malformed
+// base ID and output exceeding the configured byte limit are both rejected.
 func TestGenerateBaseBibliographyRejectsInvalidBaseAndLargeOutput(t *testing.T) {
 	service := NewBibliographyService(&bibliographyRepositoryStub{}, &doiCitationStub{}, config.Config{BibliographyMaxEntries: 1, BibliographyDOIConcurrency: 1, BibliographyTotalTimeout: time.Second, BibliographyMaxOutputBytes: 1})
 	if _, err := service.generateBaseBibliography(context.Background(), "not-a-uuid"); err == nil {
@@ -173,6 +186,8 @@ func TestGenerateBaseBibliographyRejectsInvalidBaseAndLargeOutput(t *testing.T) 
 	}
 }
 
+// TestGenerateBaseBibliographyBoundsConcurrencyAndTotalBudget verifies that DOI lookups
+// respect the concurrency limit and total timeout, falling back once the budget expires.
 func TestGenerateBaseBibliographyBoundsConcurrencyAndTotalBudget(t *testing.T) {
 	baseID := uuid.New()
 	sources := make([]types.BibliographySource, 6)
@@ -209,6 +224,8 @@ func TestGenerateBaseBibliographyBoundsConcurrencyAndTotalBudget(t *testing.T) {
 	}
 }
 
+// TestGenerateBaseBibliographyReportsUnavailableAndInsufficientEntries verifies that
+// deleting documents are skipped and entries without usable metadata are reported as failed.
 func TestGenerateBaseBibliographyReportsUnavailableAndInsufficientEntries(t *testing.T) {
 	baseID := uuid.New()
 	service := NewBibliographyService(
@@ -237,6 +254,8 @@ func TestGenerateBaseBibliographyReportsUnavailableAndInsufficientEntries(t *tes
 	}
 }
 
+// TestGenerateBaseBibliographyPropagatesParentCancellation verifies that an already
+// cancelled parent context aborts generation with context.Canceled.
 func TestGenerateBaseBibliographyPropagatesParentCancellation(t *testing.T) {
 	baseID := uuid.New()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -251,6 +270,8 @@ func TestGenerateBaseBibliographyPropagatesParentCancellation(t *testing.T) {
 	}
 }
 
+// TestGenerateBaseBibliographyBoundsJSONResponse verifies that a result exceeding the JSON
+// response byte budget is rejected with ErrBibliographyOutputTooLarge.
 func TestGenerateBaseBibliographyBoundsJSONResponse(t *testing.T) {
 	baseID := uuid.New()
 	service := NewBibliographyService(
@@ -260,5 +281,202 @@ func TestGenerateBaseBibliographyBoundsJSONResponse(t *testing.T) {
 	)
 	if _, err := service.generateBaseBibliography(context.Background(), baseID.String()); !errors.Is(err, types.ErrBibliographyOutputTooLarge) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from bibliography_render_test.go.
+// ---------------------------------------------------------------------------
+
+// TestRenderLocalBibliographyEntryEscapesFieldsAndBuildsStableKey verifies that local
+// entries use a stable key and escape BibTeX-special characters in every field.
+func TestRenderLocalBibliographyEntryEscapesFieldsAndBuildsStableKey(t *testing.T) {
+	published := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	metadata := types.PaperMetadata{
+		Title: "Design & Code_100%", Authors: []types.PaperAuthor{{Name: "Ada Lovelace"}},
+		PublishedAt: &published, Venue: "UI {Systems}", SourceURL: "https://example.test/a?x=1&y=2",
+	}
+	if key := bibliographyLocalKeyBase(metadata); key != "lovelace2024design" {
+		t.Fatalf("key = %q", key)
+	}
+	entry, err := renderLocalBibliographyEntry("lovelace2024design", "10.1000/example", metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fragment := range []string{
+		`@misc{lovelace2024design,`, `Design \& Code\_100\%`,
+		`UI \{Systems\}`, `10.1000/example`, `x=1\&y=2`,
+	} {
+		if !strings.Contains(entry, fragment) {
+			t.Fatalf("entry missing %q:\n%s", fragment, entry)
+		}
+	}
+}
+
+// TestRenderLocalBibliographyEntryRequiresTitle verifies that rendering fails when the
+// metadata has no title.
+func TestRenderLocalBibliographyEntryRequiresTitle(t *testing.T) {
+	if _, err := renderLocalBibliographyEntry("missing", "", types.PaperMetadata{}); err == nil {
+		t.Fatal("expected missing-title failure")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from bibliography_task_test.go.
+// ---------------------------------------------------------------------------
+
+type bibliographyTaskEnqueuerStub struct {
+	task *asynq.Task
+	err  error
+}
+
+func (stub *bibliographyTaskEnqueuerStub) EnqueueContext(
+	_ context.Context, task *asynq.Task, _ ...asynq.Option,
+) (*asynq.TaskInfo, error) {
+	stub.task = task
+	if stub.err != nil {
+		return nil, stub.err
+	}
+	return &asynq.TaskInfo{ID: bibliographyTaskIDPrefix + uuid.NewString()}, nil
+}
+
+type taskResultInspectorStub struct {
+	record types.TaskRecord
+	err    error
+	queue  string
+}
+
+func (stub *taskResultInspectorStub) GetTask(
+	_ context.Context, queue, _ string,
+) (types.TaskRecord, error) {
+	stub.queue = queue
+	return stub.record, stub.err
+}
+
+// TestEnqueueBaseBibliographyPublishesProjectTask verifies that enqueueing publishes a
+// bibliography-generation task carrying the base, request ID, and a positive attempt number.
+func TestEnqueueBaseBibliographyPublishesProjectTask(t *testing.T) {
+	baseID := uuid.New()
+	enqueuer := &bibliographyTaskEnqueuerStub{}
+	service := newBibliographyService(
+		&bibliographyRepositoryStub{snapshot: types.BibliographySnapshotSource{Base: types.DocumentBase{ID: baseID}}},
+		&doiCitationStub{}, enqueuer, nil, nil,
+		config.Config{BibliographyMaxEntries: 10, BibliographyDOIConcurrency: 1},
+	)
+	result, err := service.EnqueueBaseBibliography(context.Background(), baseID.String(), "request-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != types.BibliographyTaskQueued || !validBibliographyTaskID(result.ID) {
+		t.Fatalf("result = %#v", result)
+	}
+	if enqueuer.task == nil || enqueuer.task.Type() != types.TypeBibliographyGenerate {
+		t.Fatalf("task = %#v", enqueuer.task)
+	}
+	var payload types.BibliographyTaskPayload
+	if err := json.Unmarshal(enqueuer.task.Payload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.DocumentBaseID != baseID.String() || payload.RequestID != "request-1" || payload.Attempt < 1 {
+		t.Fatalf("payload = %#v", payload)
+	}
+}
+
+// TestGetBaseBibliographyTaskReturnsRetainedResult verifies that a completed task's snapshot
+// is read from the low queue, while cross-base and wrong-type lookups are rejected.
+func TestGetBaseBibliographyTaskReturnsRetainedResult(t *testing.T) {
+	baseID := uuid.New()
+	runID := uuid.New()
+	taskID := bibliographyTaskIDPrefix + runID.String()
+	payload, _ := json.Marshal(types.BibliographyTaskPayload{
+		DocumentBaseID: baseID.String(), RunID: runID.String(), Attempt: 1,
+	})
+	snapshot := types.BibliographySnapshot{BaseID: baseID, BaseName: "Base", BibTeX: "@misc{x}"}
+	encoded, _ := json.Marshal(snapshot)
+	inspector := &taskResultInspectorStub{record: types.TaskRecord{
+		ID: taskID, Type: types.TypeBibliographyGenerate, State: "completed", Payload: payload, Result: encoded,
+	}}
+	service := newBibliographyService(&bibliographyRepositoryStub{}, &doiCitationStub{}, nil, inspector, nil, config.Config{})
+	result, err := service.GetBaseBibliographyTask(context.Background(), baseID.String(), taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != types.BibliographyTaskSucceeded || result.Snapshot == nil || result.Snapshot.BibTeX != "@misc{x}" {
+		t.Fatalf("result = %#v", result)
+	}
+	if inspector.queue != types.QueueLow {
+		t.Fatalf("inspector queue = %q", inspector.queue)
+	}
+	if _, err := service.GetBaseBibliographyTask(context.Background(), uuid.NewString(), taskID); err == nil {
+		t.Fatal("expected cross-base task lookup rejection")
+	}
+	inspector.record.Type = types.TypeDocumentRecognize
+	if _, err := service.GetBaseBibliographyTask(context.Background(), baseID.String(), taskID); !errors.Is(err, types.ErrBibliographyTaskNotFound) {
+		t.Fatalf("wrong task type error = %v", err)
+	}
+}
+
+// TestGetBaseBibliographyTaskMapsGenericInspectorErrors verifies that inspector failures are
+// translated to ErrBibliographyTaskUnavailable and ErrBibliographyTaskNotFound.
+func TestGetBaseBibliographyTaskMapsGenericInspectorErrors(t *testing.T) {
+	baseID := uuid.New()
+	taskID := bibliographyTaskIDPrefix + uuid.NewString()
+	inspector := &taskResultInspectorStub{err: types.ErrTaskInspectorUnavailable}
+	service := newBibliographyService(&bibliographyRepositoryStub{}, &doiCitationStub{}, nil, inspector, nil, config.Config{})
+	if _, err := service.GetBaseBibliographyTask(context.Background(), baseID.String(), taskID); !errors.Is(err, types.ErrBibliographyTaskUnavailable) {
+		t.Fatalf("unavailable error = %v", err)
+	}
+	inspector.err = types.ErrTaskNotFound
+	if _, err := service.GetBaseBibliographyTask(context.Background(), baseID.String(), taskID); !errors.Is(err, types.ErrBibliographyTaskNotFound) {
+		t.Fatalf("not found error = %v", err)
+	}
+}
+
+// TestProcessBaseBibliographyWritesResultAndFinishesDocumentSpans verifies that processing
+// writes the snapshot and records per-document spans with matching terminal statuses.
+func TestProcessBaseBibliographyWritesResultAndFinishesDocumentSpans(t *testing.T) {
+	baseID := uuid.New()
+	firstID, secondID := uuid.New(), uuid.New()
+	spans := &paperInfoSpanStub{}
+	service := newBibliographyService(
+		&bibliographyRepositoryStub{snapshot: types.BibliographySnapshotSource{
+			Base: types.DocumentBase{ID: baseID, Name: "Async"},
+			Entries: []types.BibliographySource{
+				{DocumentID: firstID, SourceState: types.DocumentSourceAvailable, Metadata: types.PaperMetadata{Title: "First"}},
+				{DocumentID: secondID, SourceState: types.DocumentSourceAvailable},
+			},
+		}},
+		&doiCitationStub{responses: map[string]types.DOICitation{}, errors: map[string]error{}, delays: map[string]time.Duration{}},
+		nil, nil, spans,
+		config.Config{BibliographyMaxEntries: 10, BibliographyDOIConcurrency: 1, BibliographyTotalTimeout: time.Second, BibliographyMaxOutputBytes: 1 << 20},
+	)
+	payload := types.BibliographyTaskPayload{
+		DocumentBaseID: baseID.String(), RunID: uuid.NewString(), Attempt: 7,
+	}
+	var output bytes.Buffer
+	if err := service.processBaseBibliographyPayload(context.Background(), payload, &output); err != nil {
+		t.Fatal(err)
+	}
+	var snapshot types.BibliographySnapshot
+	if err := json.Unmarshal(output.Bytes(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Generated != 1 || snapshot.Failed != 1 {
+		t.Fatalf("snapshot = %#v", snapshot)
+	}
+	if len(spans.starts) != 2 || len(spans.finishes) != 2 {
+		t.Fatalf("span starts=%#v finishes=%#v", spans.starts, spans.finishes)
+	}
+	for _, started := range spans.starts {
+		if started.kind != types.ProcessingSpanBibliographyExport || started.scope != types.ProcessingSpanScopeBibliographyExport || started.attempt != 7 {
+			t.Fatalf("span start = %#v", started)
+		}
+	}
+	statuses := map[types.ProcessingSpanStatus]int{}
+	for _, finished := range spans.finishes {
+		statuses[finished.status]++
+	}
+	if statuses[types.ProcessingSpanSucceeded] != 1 || statuses[types.ProcessingSpanFailed] != 1 {
+		t.Fatalf("span statuses = %#v", statuses)
 	}
 }

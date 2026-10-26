@@ -1,0 +1,57 @@
+name: Full tests
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'validation/test-*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-tests-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  database-tests:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: papers
+          POSTGRES_PASSWORD: papers_ci_only
+          POSTGRES_DB: papers_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U papers -d papers_test"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Go tests with real PostgreSQL and Redis
+        env:
+          PAPERS_MANAGER_TEST_POSTGRES_DSN: postgres://papers:papers_ci_only@127.0.0.1:5432/papers_test?sslmode=disable
+          PAPERS_MANAGER_TEST_REDIS_ADDR: 127.0.0.1:6379
+        run: go test -race ./...
+
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, windows-2022, macos-14]
+    uses: ./.github/workflows/desktop-platform.yml
+    with:
+      runner: ${{ matrix.runner }}

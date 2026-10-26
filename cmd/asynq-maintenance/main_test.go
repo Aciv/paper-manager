@@ -2,6 +2,8 @@ package main
 
 import "testing"
 
+// TestLegacyTaskTypesIncludesRetiredCatalogNames verifies that maintenance targets the
+// retired catalog task types for purge while leaving all active pipeline task types untouched.
 func TestLegacyTaskTypesIncludesRetiredCatalogNames(t *testing.T) {
 	for _, taskType := range []string{
 		"paper:catalog_resolve",

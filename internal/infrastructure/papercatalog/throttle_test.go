@@ -9,6 +9,8 @@ import (
 	"paperMaster/internal/limit"
 )
 
+// TestMemoryProviderThrottleWaitsForSpacingCooldownAndLease verifies that a
+// concurrent acquire blocks until the host cooldown expires and the active slot is released.
 func TestMemoryProviderThrottleWaitsForSpacingCooldownAndLease(t *testing.T) {
 	throttle := newProviderThrottle(limit.NewMemoryEngine())
 	release, err := throttle.Acquire(context.Background(), "crossref", 20*time.Millisecond, 1, time.Second)
@@ -51,6 +53,8 @@ func TestMemoryProviderThrottleWaitsForSpacingCooldownAndLease(t *testing.T) {
 	}
 }
 
+// TestMemoryProviderThrottleWaitHonorsCancellation verifies that a blocked
+// acquire aborts with context cancellation instead of waiting for a lease.
 func TestMemoryProviderThrottleWaitHonorsCancellation(t *testing.T) {
 	throttle := newProviderThrottle(limit.NewMemoryEngine())
 	release, err := throttle.Acquire(context.Background(), "crossref", 0, 1, time.Second)

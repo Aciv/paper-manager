@@ -26,19 +26,22 @@ Compose 栈和开发栈，也不要让多个实例直接共用同一套私有数
 Launcher 会管理私有数据库、Redis、解析器和 API；用户不需要安装开发工具。
 关闭浏览器不会退出后台服务，结束使用应点击“退出 Launcher”。
 
-| 平台 | 默认数据位置 |
-| --- | --- |
-| Linux | `$XDG_DATA_HOME/papers-manager`；未设置时为 `~/.local/share/papers-manager` |
-| macOS | `~/Library/Application Support/papers-manager` |
-| Windows | `%APPDATA%/papers-manager` |
+免安装包的数据默认保存在解压目录的 `data/`，不写入用户的 AppData 或用户主目录。
+已有旧版数据不自动搬迁，可用 `--data-dir` 指定原目录。源码单独运行 Launcher 时仍保留用户目录默认值。
 
 管理页、API 和 MCP 使用首次选择并持久化的端口，不一定是开发模式的 `8080/8090`。
 从管理页取得实际地址。数据目录含 `runtime.json`、数据库、文件、笔记和日志；
 `runtime.json` 含私有凭据，不能删除后用一份新配置强行打开原数据库。
 
+Launcher 保持运行、业务服务全部停止（包括首次初始化之前）时，可在管理页“配置”
+修改业务端口、Asynq 并发及 Python 识别/提取/截图并发和 RPC 预算。
+保存到 `data/runtime.json`，下次初始化或启动立即生效；无需退出管理网页。
+完整 JSON 可在同一页面查看、打开本机编辑器或重新读取。
+管理页自身端口、组件路径和身份凭据需重启 Launcher；业务运行中拒绝修改。
+
 ### 自定义 Launcher
 
-Launcher 不读取仓库根目录 `.env`。可选配置文件默认位于 `bundle/.launcher_env`：
+Launcher 不读取仓库根目录 `.env`。可选配置文件默认位于 解压根目录的 `.launcher_env`：
 
 ```env
 LAUNCHER_DATA_DIR=C:/paper_manager_data
@@ -53,10 +56,10 @@ LAUNCHER_EXTRACTION_ENGINE=hybrid
 `--open-browser=false` 禁止自动打开浏览器。命令行优先于对应环境变量，
 进程环境优先于配置文件。更多选项见 [.launcher_env.example](../.launcher_env.example)。
 
-程序目录和数据目录独立；当前免安装模式没有原地升级和自动接管其他构建数据的功能。
+解压目录的 `bundle/` 保存程序资源，`data/` 保存可写数据；当前免安装模式没有原地升级和自动接管其他构建数据的功能。
 不要直接覆盖正在使用的程序，也不要移动运行中的数据库。
-可选 Install 脚本及受管理安装的升级、回滚和卸载见
-[维护说明](../packaging/desktop/INSTALL.md)。
+用户包只保留对应平台的 Uninstall 入口，移除程序并保留数据，见
+[使用说明](../packaging/desktop/USER.md)。原有受管理维护工具仅用于内部验证。
 
 ### 自行构建包
 

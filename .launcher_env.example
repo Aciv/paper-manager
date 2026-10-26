@@ -3,7 +3,8 @@
 # Paths must be absolute. Leave settings unset to keep saved/bundle defaults.
 # No passwords/tokens belong here; Launcher generates private runtime.json.
 
-# LAUNCHER_DATA_DIR=/home/your-user/.local/share/papers-manager
+# Portable default: data/ beside paper_manager; use an absolute override if needed.
+# LAUNCHER_DATA_DIR=/home/your-user/paper-manager-data
 # LAUNCHER_INSTALL_DIR=/opt/papers-manager
 # LAUNCHER_SERVER=/opt/papers-manager/server
 # LAUNCHER_PYTHON=/opt/papers-manager/python/bin/python3
@@ -13,7 +14,7 @@
 # LAUNCHER_WEB_DIR=/opt/papers-manager/web
 
 # Windows paths: use single quotes and forward slashes to avoid escape sequences.
-# LAUNCHER_DATA_DIR='C:/Users/your-user/AppData/Local/papers-manager'
+# LAUNCHER_DATA_DIR='C:/paper-manager-data'
 # LAUNCHER_PYTHON='C:/Program Files/papers-manager/python/python.exe'
 
 # Omit ports for automatic first selection; chosen ports remain stable on restart.

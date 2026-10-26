@@ -31,6 +31,23 @@ type Config struct {
 	MCPToken         string        `json:"mcp_token"`
 	StartupTimeout   time.Duration `json:"startup_timeout"`
 	StopTimeout      time.Duration `json:"stop_timeout"`
+	Concurrency      Concurrency   `json:"concurrency"`
+}
+
+type Concurrency struct {
+	Tasks       int `json:"tasks"`
+	Recognition int `json:"recognition"`
+	Extraction  int `json:"extraction"`
+	Render      int `json:"render"`
+	RPCs        int `json:"rpcs"`
+}
+
+func (c Config) withDefaults() Config {
+	// Old runtime.json files predate configurable admission limits.
+	if c.Concurrency == (Concurrency{}) {
+		c.Concurrency = Concurrency{Tasks: 32, Recognition: 4, Extraction: 4, Render: 4, RPCs: 8}
+	}
+	return c
 }
 
 type Ports struct {
@@ -82,6 +99,7 @@ func OpenConfig(root, install string) (Config, error) {
 			return cfg, fmt.Errorf("invalid runtime.json; restore configuration from backup: %w", err)
 		}
 		cfg.DataDir = root
+		cfg = cfg.withDefaults()
 		return cfg, cfg.Validate()
 	}
 	if !os.IsNotExist(err) {
@@ -117,6 +135,7 @@ func OpenConfig(root, install string) (Config, error) {
 		MCPToken:         secret(),
 		StartupTimeout:   90 * time.Second,
 		StopTimeout:      75 * time.Second,
+		Concurrency:      Concurrency{Tasks: 32, Recognition: 4, Extraction: 4, Render: 4, RPCs: 8},
 	}
 	// Ports are selected once, then persisted. An occupied persisted port is an
 	// error, never permission to attach to another application's service.
@@ -149,6 +168,7 @@ func OpenConfig(root, install string) (Config, error) {
 }
 
 func SaveConfig(cfg Config) error {
+	cfg = cfg.withDefaults()
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -176,6 +196,7 @@ func SaveConfig(cfg Config) error {
 }
 
 func (c Config) Validate() error {
+	c = c.withDefaults()
 	if c.Version != 1 {
 		return fmt.Errorf("unsupported runtime configuration version")
 	}
@@ -201,6 +222,14 @@ func (c Config) Validate() error {
 	}
 	if c.StartupTimeout < time.Second || c.StopTimeout < time.Second {
 		return fmt.Errorf("runtime timeouts must be at least one second")
+	}
+	for _, limit := range []struct{ value, maximum int }{
+		{c.Concurrency.Tasks, 512}, {c.Concurrency.Recognition, 32},
+		{c.Concurrency.Extraction, 32}, {c.Concurrency.Render, 32}, {c.Concurrency.RPCs, 128},
+	} {
+		if limit.value < 1 || limit.value > limit.maximum {
+			return fmt.Errorf("invalid concurrency limit")
+		}
 	}
 	switch c.ExtractionEngine {
 	case "hybrid", "rules", "crf", "shadow":

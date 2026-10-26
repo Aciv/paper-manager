@@ -29,10 +29,6 @@ func main() {
 }
 
 func run() error {
-	defaultRoot, err := desktop.DefaultDataDir()
-	if err != nil {
-		return err
-	}
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -41,12 +37,16 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defaultRoot, err := desktop.DefaultBundleDataDir(bundle)
+	if err != nil {
+		return err
+	}
 	root := flag.String("data-dir", defaultRoot, "private writable application directory")
 	install := flag.String("install-dir", bundle, "read-only runtime bundle directory")
 	initialize := flag.Bool("initialize", false, "perform explicit first-time setup and exit")
 	configure := flag.Bool("configure", false, "create/validate runtime.json and exit")
 	browser := flag.Bool("open-browser", true, "open the independent management page")
-	envFile := flag.String("env-file", filepath.Join(bundle, ".launcher_env"),
+	envFile := flag.String("env-file", filepath.Join(desktop.DeliveryDirectory(bundle), ".launcher_env"),
 		"optional Launcher-only environment file")
 	maintenance := flag.String("maintenance", "", "offline install, retry, restore, cleanup, status, delete-checkpoint or uninstall")
 	program := flag.String("program-dir", "", "managed program directory, separate from user data")
@@ -55,7 +55,11 @@ func run() error {
 	confirmRestore := flag.Bool("confirm-restore", false, "confirm replacement of managed user data")
 	shortcuts := flag.String("shortcut-dir", "", "optional per-user desktop/application shortcut directory")
 	confirmDelete := flag.Bool("confirm-delete", false, "confirm explicit deletion of a managed checkpoint")
+	uninstallDir := flag.String("uninstall-dir", "", "remove a stopped unpacked program; retain user data")
 	flag.Parse()
+	if *uninstallDir != "" {
+		return desktop.RemoveUnpacked(*uninstallDir)
+	}
 	if *maintenance != "" {
 		if *configure || *initialize {
 			return fmt.Errorf("maintenance cannot be combined with configure or initialize")
@@ -95,6 +99,13 @@ func run() error {
 		}
 		*browser = parsed
 	}
+	if _, err := os.Stat(filepath.Join(*install, "bundle.json")); err == nil {
+		bundleLock, err := desktop.AcquireBundle(*install)
+		if err != nil {
+			return err
+		}
+		defer bundleLock.Close()
+	}
 	lock, err := desktop.Acquire(*root)
 	if err != nil {
 		return fmt.Errorf("lock runtime: %w; see %s", err, filepath.Join(*root, "runtime.json"))
@@ -130,6 +141,7 @@ func run() error {
 		return nil
 	}
 	app := desktop.New(cfg)
+	app.EnableConfigReload()
 	if *initialize {
 		app.Initialize()
 		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

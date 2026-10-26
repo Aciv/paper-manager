@@ -6,13 +6,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"paperMaster/internal/types"
+	"paperMaster/internal/types/interfaces"
 	"strings"
 	"testing"
 	"time"
-
-	"paperMaster/internal/types"
 )
 
+// ---------------------------------------------------------------------------
+// Consolidated from providers_test.go.
+// ---------------------------------------------------------------------------
+
+// TestSemanticScholarSearchNormalizesResponse verifies that a title search sends
+// the bounded query and API key and normalizes DOI, venue, and duplicate topics.
 func TestSemanticScholarSearchNormalizesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/graph/v1/paper/search" {
@@ -71,6 +78,8 @@ func TestSemanticScholarSearchNormalizesResponse(t *testing.T) {
 	}
 }
 
+// TestSemanticScholarDOILookup verifies that a DOI-based lookup targets the
+// exact paper endpoint and returns a maximum-confidence candidate.
 func TestSemanticScholarDOILookup(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/graph/v1/paper/DOI:10.1000/example" {
@@ -100,6 +109,9 @@ func TestSemanticScholarDOILookup(t *testing.T) {
 	}
 }
 
+// TestOpenAlexSearchNormalizesResponse verifies that OpenAlex search bounds
+// pagination and year, omits authors from filters, and reconstructs the abstract
+// from the inverted index while keeping institutional affiliations.
 func TestOpenAlexSearchNormalizesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
@@ -165,6 +177,9 @@ func TestOpenAlexSearchNormalizesResponse(t *testing.T) {
 	}
 }
 
+// TestCrossrefSearchNormalizesResponse verifies that Crossref search sends the
+// bounded bibliographic query and mailto parameter while stripping JATS markup
+// and preserving publication metadata.
 func TestCrossrefSearchNormalizesResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
@@ -231,6 +246,8 @@ func TestCrossrefSearchNormalizesResponse(t *testing.T) {
 	}
 }
 
+// TestArXivSearchNormalizesAtomResponse verifies that a title search parses the
+// Atom feed and normalizes the versionless ID, author affiliation, and journal DOI.
 func TestArXivSearchNormalizesAtomResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
@@ -292,6 +309,8 @@ func TestArXivSearchNormalizesAtomResponse(t *testing.T) {
 	}
 }
 
+// TestArXivSearchUsesExactIDForNativeURL verifies that an arxiv.org PDF URL is
+// resolved through the exact id_list query rather than a title search.
 func TestArXivSearchUsesExactIDForNativeURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		query := request.URL.Query()
@@ -327,6 +346,8 @@ func TestArXivSearchUsesExactIDForNativeURL(t *testing.T) {
 	}
 }
 
+// TestArXivCandidateDerivesDataCiteDOIWhenEntryHasNoDOI verifies that an arXiv
+// entry without a publisher DOI receives its deterministic DataCite DOI.
 func TestArXivCandidateDerivesDataCiteDOIWhenEntryHasNoDOI(t *testing.T) {
 	candidate := (arXivEntry{
 		ID:    "https://arxiv.org/abs/2512.19918v2",
@@ -341,6 +362,8 @@ func TestArXivCandidateDerivesDataCiteDOIWhenEntryHasNoDOI(t *testing.T) {
 	}
 }
 
+// TestArXivCandidateKeepsExplicitJournalDOI verifies that an entry's explicit
+// journal DOI takes precedence over the derived DataCite DOI.
 func TestArXivCandidateKeepsExplicitJournalDOI(t *testing.T) {
 	candidate := (arXivEntry{
 		ID:    "https://arxiv.org/abs/2512.19918v2",
@@ -353,6 +376,8 @@ func TestArXivCandidateKeepsExplicitJournalDOI(t *testing.T) {
 	}
 }
 
+// TestParseArXivIdentifier verifies extraction of arXiv IDs from abs, PDF,
+// arXiv:, and DataCite DOI forms while rejecting unrelated URLs and strings.
 func TestParseArXivIdentifier(t *testing.T) {
 	tests := map[string]string{
 		"https://arxiv.org/abs/2401.01234v2":              "2401.01234v2",
@@ -370,6 +395,8 @@ func TestParseArXivIdentifier(t *testing.T) {
 	}
 }
 
+// TestNonArXivProviderRejectsURLOnlyQuery verifies that providers lacking arXiv
+// ID support reject source-URL-only queries as invalid data.
 func TestNonArXivProviderRejectsURLOnlyQuery(t *testing.T) {
 	provider, err := newOpenAlexProvider(
 		"https://example.test",
@@ -388,6 +415,8 @@ func TestNonArXivProviderRejectsURLOnlyQuery(t *testing.T) {
 	}
 }
 
+// TestHTTPAdapterClassifiesRateLimit verifies that a 429 response becomes a
+// retryable ProviderError with Retry-After seconds and without leaking body text.
 func TestHTTPAdapterClassifiesRateLimit(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Retry-After", "7")
@@ -415,6 +444,8 @@ func TestHTTPAdapterClassifiesRateLimit(t *testing.T) {
 	}
 }
 
+// TestHTTPAdapterRejectsOversizedResponse verifies that responses beyond the
+// catalog body limit fail as a non-retryable ProviderError.
 func TestHTTPAdapterRejectsOversizedResponse(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = io.WriteString(writer, strings.Repeat("x", maxCatalogBodyBytes+1))
@@ -432,6 +463,8 @@ func TestHTTPAdapterRejectsOversizedResponse(t *testing.T) {
 	}
 }
 
+// TestRequestGateHonorsCancellation verifies that a throttled request gate
+// returns context cancellation instead of waiting for the next allowed slot.
 func TestRequestGateHonorsCancellation(t *testing.T) {
 	gate := &requestGate{interval: time.Minute}
 	if err := gate.Wait(context.Background()); err != nil {
@@ -441,5 +474,140 @@ func TestRequestGateHonorsCancellation(t *testing.T) {
 	cancel()
 	if err := gate.Wait(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context cancellation, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from providers_live_test.go.
+// ---------------------------------------------------------------------------
+
+const liveCatalogTestEnv = "PAPER_CATALOG_LIVE_TEST"
+
+// TestLivePaperCatalogProviders exercises the real public provider APIs.
+//
+// It is deliberately opt-in so normal test runs remain deterministic:
+//
+//	PAPER_CATALOG_LIVE_TEST=1 go test \
+//	  ./internal/infrastructure/papercatalog \
+//	  -run '^TestLivePaperCatalogProviders$' -v
+//
+// Optional credentials are read from the same environment variables as the
+// application. Never place API keys directly in this file.
+func TestLivePaperCatalogProviders(t *testing.T) {
+	if os.Getenv(liveCatalogTestEnv) != "1" {
+		t.Skip("set PAPER_CATALOG_LIVE_TEST=1 to call real catalog APIs")
+	}
+
+	const userAgent = "papersManager-live-test/1.0"
+	newClient := func() *http.Client {
+		return &http.Client{Timeout: 20 * time.Second}
+	}
+
+	arXiv, err := NewArXivProvider(newClient(), userAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	semanticScholar, err := NewSemanticScholarProvider(
+		newClient(),
+		os.Getenv("SEMANTIC_SCHOLAR_API_KEY"),
+		userAgent,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	openAlex, err := NewOpenAlexProvider(
+		newClient(),
+		os.Getenv("OPENALEX_API_KEY"),
+		userAgent,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crossref, err := NewCrossrefProvider(
+		newClient(),
+		os.Getenv("CROSSREF_MAILTO"),
+		userAgent,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name          string
+		provider      interfaces.PaperCatalogProvider
+		query         types.PaperLookupQuery
+		titleContains string
+	}{
+		{
+			name:     ArXivProvider,
+			provider: arXiv,
+			query: types.PaperLookupQuery{
+				SourceURL: "https://arxiv.org/abs/1706.03762",
+				Limit:     3,
+			},
+			titleContains: "attention is all you need",
+		},
+		{
+			name:     SemanticScholarProvider,
+			provider: semanticScholar,
+			query: types.PaperLookupQuery{
+				DOI:   "10.18653/v1/2020.acl-main.447",
+				Limit: 3,
+			},
+			titleContains: "s2orc",
+		},
+		{
+			name:     OpenAlexProvider,
+			provider: openAlex,
+			query: types.PaperLookupQuery{
+				DOI:   "10.1038/nature14539",
+				Limit: 3,
+			},
+			titleContains: "deep learning",
+		},
+		{
+			name:     CrossrefProvider,
+			provider: crossref,
+			query: types.PaperLookupQuery{
+				DOI:   "10.1038/nature14539",
+				Limit: 3,
+			},
+			titleContains: "deep learning",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+			defer cancel()
+
+			candidates, err := test.provider.Search(ctx, test.query)
+			if err != nil {
+				t.Fatalf("live %s search failed: %v", test.name, err)
+			}
+			if len(candidates) == 0 {
+				t.Fatalf("live %s search returned no candidates", test.name)
+			}
+			candidate := candidates[0]
+			if !strings.Contains(
+				strings.ToLower(candidate.Title),
+				test.titleContains,
+			) {
+				t.Fatalf(
+					"live %s first title = %q, want text containing %q",
+					test.name,
+					candidate.Title,
+					test.titleContains,
+				)
+			}
+			t.Logf(
+				"provider=%s provider_id=%s doi=%s score=%.3f title=%q",
+				candidate.Provider,
+				candidate.ProviderID,
+				candidate.DOI,
+				candidate.ProviderScore,
+				candidate.Title,
+			)
+		})
 	}
 }

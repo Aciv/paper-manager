@@ -6,22 +6,40 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
-	"path/filepath"
-	"strings"
-	"testing"
-
+	papersv1 "paperMaster/gen/papers/v1"
+	"paperMaster/internal/application/repository"
 	fileservice "paperMaster/internal/application/service/file"
+	"paperMaster/internal/config"
+	"paperMaster/internal/infrastructure/docrecognition"
+	"paperMaster/internal/infrastructure/paperurl"
 	"paperMaster/internal/types"
 	"paperMaster/internal/types/interfaces"
-
-	"github.com/google/uuid"
-	"github.com/hibiken/asynq"
+	"paperMaster/internal/utils"
+	"path/filepath"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
 )
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_test.go.
+// ---------------------------------------------------------------------------
 
 type documentTaskInspectorStub struct {
 	calledWith string
@@ -144,6 +162,8 @@ func (s *documentStatusRepoStub) AllowsStageWork(_ context.Context, _ uuid.UUID,
 	return err == nil && state.Generation == generation && state.Status == types.DocumentStageRunning, err
 }
 
+// TestDocumentSelectionProcessorReloadsOwnedBlock verifies that a block
+// selection is reloaded from the owning document and returns that stored block ID.
 func TestDocumentSelectionProcessorReloadsOwnedBlock(t *testing.T) {
 	documentID, blockID := uuid.New(), uuid.New()
 	repository := &documentStatusRepoStub{
@@ -164,6 +184,8 @@ func TestDocumentSelectionProcessorReloadsOwnedBlock(t *testing.T) {
 	}
 }
 
+// TestDocumentSelectionProcessorHonorsCancelledContext verifies that a canceled
+// context aborts selection processing before any work and is surfaced as context.Canceled.
 func TestDocumentSelectionProcessorHonorsCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -297,6 +319,9 @@ func (s *documentStatusRepoStub) ReplaceOlderDocument(
 	return types.DocumentFileKeys{}, nil
 }
 
+// TestCancelDocumentParseFencesMarkdownGenerationAndDequeuesExactTask verifies
+// that cancelling a queued parse marks the markdown stage cancelled and asks the
+// inspector to cancel only that document, stage, and generation.
 func TestCancelDocumentParseFencesMarkdownGenerationAndDequeuesExactTask(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageQueued, MarkdownGeneration: 7}}
 	inspector := &documentTaskInspectorStub{}
@@ -317,6 +342,8 @@ func TestCancelDocumentParseFencesMarkdownGenerationAndDequeuesExactTask(t *test
 	}
 }
 
+// TestCancelDocumentParseRejectsFinishedDocument verifies that a completed
+// markdown stage cannot be cancelled and that no repository mutation occurs.
 func TestCancelDocumentParseRejectsFinishedDocument(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageSucceeded, MarkdownGeneration: 1}}
 	svc := NewDocumentService(repo, nil)
@@ -330,6 +357,9 @@ func TestCancelDocumentParseRejectsFinishedDocument(t *testing.T) {
 	}
 }
 
+// TestCancelDocumentParseKeepsFenceWhenInspectorFails verifies that a queue
+// inspection error does not roll back the cancellation fence, so a late worker
+// for the old generation is still rejected.
 func TestCancelDocumentParseKeepsFenceWhenInspectorFails(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageRunning, MarkdownGeneration: 3}}
 	svc := NewDocumentServiceWithTaskInspector(repo, nil, &documentTaskInspectorStub{err: errors.New("redis unavailable")})
@@ -346,6 +376,9 @@ func TestCancelDocumentParseKeepsFenceWhenInspectorFails(t *testing.T) {
 	}
 }
 
+// TestRetryDocumentParseQueuesNewAttemptAfterFailure verifies that retrying a
+// failed parse increments the markdown generation and enqueues one recognition
+// task carrying the new generation.
 func TestRetryDocumentParseQueuesNewAttemptAfterFailure(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageFailed, MarkdownGeneration: 1}}
 	tasks := &documentTaskEnqueuerStub{}
@@ -363,6 +396,9 @@ func TestRetryDocumentParseQueuesNewAttemptAfterFailure(t *testing.T) {
 	}
 }
 
+// TestRetryDocumentProcessMarksMarkdownFailedWhenQueueFails verifies that a
+// retry enqueue failure leaves the markdown stage failed with a safe error
+// instead of reporting it as queued.
 func TestRetryDocumentProcessMarksMarkdownFailedWhenQueueFails(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageFailed, MarkdownGeneration: 1}}
 	svc := &documentService{
@@ -382,6 +418,9 @@ func TestRetryDocumentProcessMarksMarkdownFailedWhenQueueFails(t *testing.T) {
 	}
 }
 
+// TestCreateDocumentFromFileReturnsCreatedDocumentWhenInitialQueueFails verifies
+// that a queue failure after upload still returns the persisted document marked
+// failed, with its source retained for a later retry.
 func TestCreateDocumentFromFileReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
 	repo := &documentStatusRepoStub{}
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
@@ -414,6 +453,9 @@ func TestCreateDocumentFromFileReturnsCreatedDocumentWhenInitialQueueFails(t *te
 	_ = reader.Close()
 }
 
+// TestCreateDocumentFromLocalFileStoresAndQueues verifies that importing a
+// local regular file persists its bytes, records the supplied DOI, and queues
+// markdown recognition.
 func TestCreateDocumentFromLocalFileStoresAndQueues(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "local-paper.pdf")
@@ -448,6 +490,8 @@ func TestCreateDocumentFromLocalFileStoresAndQueues(t *testing.T) {
 	_ = reader.Close()
 }
 
+// TestCreateDocumentFromLocalFileRejectsNonRegularFile verifies that local
+// import rejects a directory path rather than attempting to store it.
 func TestCreateDocumentFromLocalFileRejectsNonRegularFile(t *testing.T) {
 	svc := &documentService{}
 	if _, err := svc.CreateDocumentFromLocalFile(context.Background(), t.TempDir(), ""); err == nil {
@@ -455,6 +499,9 @@ func TestCreateDocumentFromLocalFileRejectsNonRegularFile(t *testing.T) {
 	}
 }
 
+// TestCreateDocumentsFromLocalFilesProcessesEachItem verifies that a batch local
+// import processes every file independently and keeps each optional DOI aligned
+// with its corresponding item.
 func TestCreateDocumentsFromLocalFilesProcessesEachItem(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(dir, "first.pdf")
@@ -493,6 +540,8 @@ func TestCreateDocumentsFromLocalFilesProcessesEachItem(t *testing.T) {
 	}
 }
 
+// TestCreateDocumentsFromLocalFilesEnforcesBatchLimits verifies that batch local
+// import rejects oversized batches and DOI lists that do not match the file count.
 func TestCreateDocumentsFromLocalFilesEnforcesBatchLimits(t *testing.T) {
 	svc := &documentService{}
 	paths := make([]string, types.MaxDocumentBatchItems+1)
@@ -531,6 +580,8 @@ func documentUploadFileHeader(t *testing.T, filename string, content []byte) *mu
 	return request.MultipartForm.File["file"][0]
 }
 
+// TestRetryDocumentParseRejectsActiveDocument verifies that a document whose
+// markdown stage never ran is not retryable and returns ErrDocumentParseFinished.
 func TestRetryDocumentParseRejectsActiveDocument(t *testing.T) {
 	repo := &documentStatusRepoStub{document: types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}}
 	svc := &documentService{repo: repo, taskEnqueuer: &documentTaskEnqueuerStub{}}
@@ -541,6 +592,8 @@ func TestRetryDocumentParseRejectsActiveDocument(t *testing.T) {
 	}
 }
 
+// TestDeleteDocumentDeletesSourceAndMarkdownFiles verifies that deleting an
+// available document removes both its stored source and parsed Markdown objects.
 func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -574,6 +627,9 @@ func TestDeleteDocumentDeletesSourceAndMarkdownFiles(t *testing.T) {
 	}
 }
 
+// TestCreateDocumentFromFileRejectsBeforeHashingOrLookup verifies that unsupported
+// file types and oversized uploads are rejected before hashing or duplicate
+// lookup runs.
 func TestCreateDocumentFromFileRejectsBeforeHashingOrLookup(t *testing.T) {
 	repo := &documentBatchRepoStub{}
 	service := &documentService{repo: repo, maxUploadSize: 8}
@@ -597,6 +653,9 @@ func TestCreateDocumentFromFileRejectsBeforeHashingOrLookup(t *testing.T) {
 	}
 }
 
+// TestCreateDocumentsFromURLsStopsAtRequestDeadline verifies that a canceled
+// request stops a URL batch import and reports every item as failed without
+// returning a separate error.
 func TestCreateDocumentsFromURLsStopsAtRequestDeadline(t *testing.T) {
 	service := &documentService{}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -618,6 +677,9 @@ func TestCreateDocumentsFromURLsStopsAtRequestDeadline(t *testing.T) {
 	}
 }
 
+// TestGetDocumentProjectionsBatchesMetadataAndProcessing verifies that a projection
+// read deduplicates requested IDs and batch-loads metadata and processing state
+// into a single item.
 func TestGetDocumentProjectionsBatchesMetadataAndProcessing(t *testing.T) {
 	documentID := uuid.New()
 	repo := &documentStatusRepoStub{document: types.Document{
@@ -657,6 +719,8 @@ func TestGetDocumentProjectionsBatchesMetadataAndProcessing(t *testing.T) {
 	}
 }
 
+// TestNonAvailableDocumentHasNoSourceFile verifies that a document fenced for
+// deletion cannot serve its source file even when a storage key is recorded.
 func TestNonAvailableDocumentHasNoSourceFile(t *testing.T) {
 	documentID := uuid.New()
 	repo := &documentStatusRepoStub{
@@ -758,6 +822,9 @@ func (s *recognitionStub) Read(context.Context, *types.RecognitionRequest) (*typ
 	return s.result, s.err
 }
 
+// TestRecognizeDocumentRejectsCancelledStageBeforeExternalIO verifies that a
+// cancelled markdown stage is revoked before the recognizer performs any
+// external I/O.
 func TestRecognizeDocumentRejectsCancelledStageBeforeExternalIO(t *testing.T) {
 	documentID := uuid.New()
 	repo := &documentStatusRepoStub{document: types.Document{
@@ -781,6 +848,9 @@ func TestRecognizeDocumentRejectsCancelledStageBeforeExternalIO(t *testing.T) {
 	}
 }
 
+// TestRecognizeDocumentRetryKeepsGeneration verifies that a transient recognizer
+// failure leaves the markdown stage queued at the same generation so Asynq can
+// retry it.
 func TestRecognizeDocumentRetryKeepsGeneration(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -818,6 +888,9 @@ func TestRecognizeDocumentRetryKeepsGeneration(t *testing.T) {
 	}
 }
 
+// TestProcessDocumentPersistsMarkdownAndPDFBlocks verifies that successful PDF
+// recognition stores Markdown and page blocks, records the generation, and
+// hands off only to metadata extraction.
 func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -890,6 +963,8 @@ func TestProcessDocumentPersistsMarkdownAndPDFBlocks(t *testing.T) {
 	}
 }
 
+// TestProcessDocumentStoresRenderedImageBlock verifies that recognition image
+// crops are persisted as block assets with the document-scoped image URL.
 func TestProcessDocumentStoresRenderedImageBlock(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -940,6 +1015,8 @@ func TestProcessDocumentStoresRenderedImageBlock(t *testing.T) {
 	}
 }
 
+// TestDeleteDocumentRemovesRenderedBlockImages verifies that document deletion
+// cancels queued work and removes rendered block image assets.
 func TestDeleteDocumentRemovesRenderedBlockImages(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -975,6 +1052,8 @@ func TestDeleteDocumentRemovesRenderedBlockImages(t *testing.T) {
 	}
 }
 
+// TestDeleteDocumentRemovesReadingNoteFile verifies that document deletion also
+// removes its stored reading-note section files.
 func TestDeleteDocumentRemovesReadingNoteFile(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -1007,6 +1086,9 @@ func TestDeleteDocumentRemovesReadingNoteFile(t *testing.T) {
 	}
 }
 
+// TestProcessDocumentCopiesDirectoryRecognizerMarkdown verifies that directory-mode
+// recognizer output is copied into Markdown storage while the original recognizer
+// package remains untouched.
 func TestProcessDocumentCopiesDirectoryRecognizerMarkdown(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -1069,6 +1151,9 @@ func TestProcessDocumentCopiesDirectoryRecognizerMarkdown(t *testing.T) {
 	}
 }
 
+// TestProcessDocumentDiscardsOutputCancelledDuringRecognition verifies that output
+// from recognition is discarded when the markdown stage was cancelled while the
+// recognizer was running.
 func TestProcessDocumentDiscardsOutputCancelledDuringRecognition(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -1109,6 +1194,9 @@ func TestProcessDocumentDiscardsOutputCancelledDuringRecognition(t *testing.T) {
 	}
 }
 
+// TestRecognizeDocumentDiscardsOutputWhenStageCancelledDuringRecognition verifies
+// that a stage cancelled mid-recognition yields a revoke and does not persist the
+// late Markdown result.
 func TestRecognizeDocumentDiscardsOutputWhenStageCancelledDuringRecognition(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -1150,6 +1238,9 @@ func TestRecognizeDocumentDiscardsOutputWhenStageCancelledDuringRecognition(t *t
 	}
 }
 
+// TestProcessDocumentMarksUnsupportedRecognitionFailedWithoutRetry verifies that
+// unsupported source content permanently fails the markdown stage and is
+// classified for Asynq as skip-retry.
 func TestProcessDocumentMarksUnsupportedRecognitionFailedWithoutRetry(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -1181,6 +1272,9 @@ func TestProcessDocumentMarksUnsupportedRecognitionFailedWithoutRetry(t *testing
 	}
 }
 
+// TestProcessDocumentMarksUnavailableRecognizerFailedWithoutRetry verifies that a
+// required recognizer outage fails the markdown stage with a bounded safe message
+// and asks Asynq to skip retries.
 func TestProcessDocumentMarksUnavailableRecognizerFailedWithoutRetry(t *testing.T) {
 	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
 	if err != nil {
@@ -1212,5 +1306,1852 @@ func TestProcessDocumentMarksUnavailableRecognizerFailedWithoutRetry(t *testing.
 	}
 	if repo.document.MarkdownErrorMessage == nil || *repo.document.MarkdownErrorMessage != "a required processing service is unavailable" {
 		t.Fatalf("Markdown error message = %v", repo.document.MarkdownErrorMessage)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_housekeeping_test.go.
+// ---------------------------------------------------------------------------
+
+type documentQueueProbeStub struct {
+	queued map[string]bool
+	errs   map[string]error
+}
+
+func (s *documentQueueProbeStub) HasQueuedTaskForStage(_ context.Context, documentID string, _ types.DocumentStage, _ int64) (bool, error) {
+	return s.queued[documentID], s.errs[documentID]
+}
+
+func (*documentQueueProbeStub) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
+	return false, nil
+}
+
+func (s *documentQueueProbeStub) SnapshotQueuedWork(context.Context) (types.QueuedWorkSnapshot, error) {
+	snapshot := types.NewQueuedWorkSnapshot()
+	for _, err := range s.errs {
+		if err != nil {
+			return snapshot, err
+		}
+	}
+	for documentID, queued := range s.queued {
+		if queued {
+			snapshot.StageTasks[types.QueuedStageKey(documentID, types.DocumentStageMarkdown, 1)] = struct{}{}
+		}
+	}
+	return snapshot, nil
+}
+
+func (*documentQueueProbeStub) CancelTasksForDocument(context.Context, string) (int, int, error) {
+	return 0, 0, nil
+}
+func (*documentQueueProbeStub) CancelTasksForStage(context.Context, string, types.DocumentStage, int64) (int, int, error) {
+	return 0, 0, nil
+}
+func (s *documentQueueProbeStub) HasQueuedTasksForDocument(_ context.Context, documentID string) (bool, error) {
+	return s.queued[documentID], s.errs[documentID]
+}
+
+func (s *documentQueueProbeStub) HasQueuedTaskTypeForDocument(
+	_ context.Context,
+	documentID string,
+	_ string,
+) (bool, error) {
+	return s.queued[documentID], s.errs[documentID]
+}
+
+// TestDocumentHousekeepingStageProbeStub verifies that the housekeeping queue probe
+// distinguishes a live queued task, an orphaned stage, and an inspection error.
+func TestDocumentHousekeepingStageProbeStub(t *testing.T) {
+	queuedDocument := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	orphanedDocument := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	probeFailureDocument := types.Document{ID: uuid.New(), SourceState: types.DocumentSourceAvailable}
+	service := &DocumentHousekeepingService{inspector: &documentQueueProbeStub{
+		queued: map[string]bool{queuedDocument.ID.String(): true},
+		errs:   map[string]error{probeFailureDocument.ID.String(): errors.New("redis unavailable")},
+	}}
+
+	queued, err := service.inspector.HasQueuedTaskForStage(context.Background(), queuedDocument.ID.String(), types.DocumentStageMarkdown, 1)
+	if err != nil || !queued {
+		t.Fatalf("queued stage = %t, error=%v", queued, err)
+	}
+	queued, err = service.inspector.HasQueuedTaskForStage(context.Background(), orphanedDocument.ID.String(), types.DocumentStageMarkdown, 1)
+	if err != nil || queued {
+		t.Fatalf("orphaned stage = %t, error=%v", queued, err)
+	}
+	if _, err = service.inspector.HasQueuedTaskForStage(context.Background(), probeFailureDocument.ID.String(), types.DocumentStageMarkdown, 1); err == nil {
+		t.Fatal("queue probe error was lost")
+	}
+}
+
+// TestDocumentStageColumnMapping verifies that each document stage maps to its
+// dedicated status column and that an unknown stage maps to no column.
+func TestDocumentStageColumnMapping(t *testing.T) {
+	cases := map[types.DocumentStage]string{
+		types.DocumentStageMarkdown:           "markdown_status",
+		types.DocumentStageMetadataExtraction: "metadata_extraction_status",
+		types.DocumentStageSourceLookup:       "source_lookup_status",
+		types.DocumentStageReferenceLookup:    "reference_lookup_status",
+	}
+	for stage, want := range cases {
+		if got := stageStateColumn(stage); got != want {
+			t.Fatalf("stageStateColumn(%s) = %q, want %q", stage, got, want)
+		}
+	}
+	if got := stageStateColumn("unknown"); got != "" {
+		t.Fatalf("unknown stage column = %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_housekeeping_postgres_integration_test.go.
+// ---------------------------------------------------------------------------
+
+// TestFailInterruptedWorkPostgres verifies the restart policy for durable
+// stage rows: running work from the dead process is failed, queued work is
+// left for Asynq redelivery, and active spans are closed.
+func TestFailInterruptedWorkPostgres(t *testing.T) {
+	db, cleanup := openServicePostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	staleAt := time.Now().UTC().Add(-time.Hour)
+
+	runningID := uuid.New()
+	queuedID := uuid.New()
+	deletingID := uuid.New()
+	targetID := uuid.New()
+	for _, document := range []struct {
+		id    uuid.UUID
+		state types.DocumentSourceState
+	}{
+		{runningID, types.DocumentSourceAvailable},
+		{queuedID, types.DocumentSourceAvailable},
+		{deletingID, types.DocumentSourceDeleting},
+		{targetID, types.DocumentSourceAvailable},
+	} {
+		if err := db.Exec(`INSERT INTO documents
+			(id, original_filename, content_type, size_bytes, storage_key, source_state, updated_at)
+			VALUES (?, 'startup.pdf', 'application/pdf', 1, ?, ?, ?)`,
+			document.id, "startup/"+document.id.String(), document.state, staleAt).Error; err != nil {
+			t.Fatalf("insert document: %v", err)
+		}
+	}
+
+	// The interrupted document has every stage running, each at its own
+	// generation. The queued document distinguishes queued (keep) from
+	// catalog queued (fail).
+	if err := db.Exec(`UPDATE documents SET
+		markdown_status = 'running', markdown_generation = 2, markdown_updated_at = ?,
+		metadata_extraction_status = 'running', metadata_extraction_generation = 3, metadata_extraction_updated_at = ?,
+		source_lookup_status = 'running', source_lookup_generation = 4, source_lookup_updated_at = ?,
+		reference_lookup_status = 'running', reference_lookup_generation = 5, reference_lookup_updated_at = ?
+		WHERE id = ?`, staleAt, staleAt, staleAt, staleAt, runningID).Error; err != nil {
+		t.Fatalf("mark interrupted document running: %v", err)
+	}
+	if err := db.Exec(`UPDATE documents SET
+		markdown_status = 'queued', markdown_generation = 1, markdown_updated_at = ?,
+		metadata_extraction_status = 'succeeded', metadata_extraction_generation = 1, metadata_extraction_updated_at = ?,
+		source_lookup_status = 'queued', source_lookup_generation = 1, source_lookup_updated_at = ?,
+		reference_lookup_status = 'queued', reference_lookup_generation = 1, reference_lookup_updated_at = ?
+		WHERE id = ?`, staleAt, staleAt, staleAt, staleAt, queuedID).Error; err != nil {
+		t.Fatalf("mark queued document: %v", err)
+	}
+	if err := db.Exec(`UPDATE documents SET
+		markdown_status = 'running', markdown_generation = 1, markdown_updated_at = ?
+		WHERE id = ?`, staleAt, deletingID).Error; err != nil {
+		t.Fatalf("mark deleting document running: %v", err)
+	}
+
+	// One unresolved running reference and one already-resolved reference.
+	// Only the unresolved row may transition to failed.
+	unresolvedReferenceID := uuid.New()
+	resolvedReferenceID := uuid.New()
+	for _, reference := range []struct {
+		id       uuid.UUID
+		key      string
+		resolved *uuid.UUID
+	}{
+		{unresolvedReferenceID, "ref-unresolved", nil},
+		{resolvedReferenceID, "ref-resolved", &targetID},
+	} {
+		if err := db.Exec(`INSERT INTO paper_citations
+			(id, citing_document_id, reference_key, raw_reference, resolution_status,
+			 resolution_generation, resolution_updated_at, cited_document_id, updated_at)
+			VALUES (?, ?, ?, 'reference', 'running', 2, ?, ?, ?)`,
+			reference.id, runningID, reference.key, staleAt, reference.resolved, staleAt).Error; err != nil {
+			t.Fatalf("insert reference: %v", err)
+		}
+	}
+
+	// Active spans from the dead process. A running non-stage span (for
+	// example a remote download) is owned by a task Asynq will redeliver and
+	// must be left untouched.
+	spanIDs := map[string]uuid.UUID{}
+	for _, span := range []struct {
+		key    string
+		kind   string
+		status string
+	}{
+		{"recognition", string(types.ProcessingSpanRecognition), "running"},
+		{"metadata", string(types.ProcessingSpanMetadataExtract), "running"},
+		{"catalog_source", string(types.ProcessingSpanCatalogSource), "running"},
+		{"catalog_reference", string(types.ProcessingSpanCatalogReference), "queued"},
+		{"catalog_provider", string(types.ProcessingSpanCatalogProvider), "running"},
+		{"download", string(types.ProcessingSpanDownloadPDF), "running"},
+		{"finished", string(types.ProcessingSpanRecognition), "succeeded"},
+	} {
+		id := uuid.New()
+		spanIDs[span.key] = id
+		if err := db.Exec(`INSERT INTO document_processing_spans
+			(id, document_id, attempt, kind, scope, scope_id, status, started_at, finished_at, updated_at)
+			VALUES (?, ?, 1, ?, 'document', ?, ?, ?, ?, ?)`,
+			id, runningID, span.kind, span.key, span.status, staleAt,
+			nullableFinished(span.status, staleAt), staleAt).Error; err != nil {
+			t.Fatalf("insert span %s: %v", span.key, err)
+		}
+	}
+
+	housekeeping := NewDocumentHousekeepingService(db, config.Config{}, nil, nil)
+	if err := housekeeping.FailInterruptedWork(ctx); err != nil {
+		t.Fatalf("FailInterruptedWork: %v", err)
+	}
+
+	var stages struct {
+		MarkdownStatus      string
+		MarkdownGeneration  int64
+		MetadataStatus      string
+		MetadataGeneration  int64
+		SourceStatus        string
+		SourceGeneration    int64
+		ReferenceStatus     string
+		ReferenceGeneration int64
+	}
+	if err := db.Raw(`SELECT
+		markdown_status AS markdown_status, markdown_generation AS markdown_generation,
+		metadata_extraction_status AS metadata_status, metadata_extraction_generation AS metadata_generation,
+		source_lookup_status AS source_status, source_lookup_generation AS source_generation,
+		reference_lookup_status AS reference_status, reference_lookup_generation AS reference_generation
+		FROM documents WHERE id = ?`, runningID).Scan(&stages).Error; err != nil {
+		t.Fatalf("load interrupted stages: %v", err)
+	}
+	if stages.MarkdownStatus != string(types.DocumentStageFailed) || stages.MarkdownGeneration != 2 ||
+		stages.MetadataStatus != string(types.DocumentStageFailed) || stages.MetadataGeneration != 3 ||
+		stages.SourceStatus != string(types.DocumentStageFailed) || stages.SourceGeneration != 4 ||
+		stages.ReferenceStatus != string(types.DocumentStageFailed) || stages.ReferenceGeneration != 5 {
+		t.Fatalf("interrupted stages = %#v", stages)
+	}
+
+	var queued struct {
+		MarkdownStatus  string
+		MetadataStatus  string
+		SourceStatus    string
+		ReferenceStatus string
+	}
+	if err := db.Raw(`SELECT markdown_status, metadata_extraction_status AS metadata_status,
+		source_lookup_status AS source_status, reference_lookup_status AS reference_status
+		FROM documents WHERE id = ?`, queuedID).Scan(&queued).Error; err != nil {
+		t.Fatalf("load queued stages: %v", err)
+	}
+	if queued.MarkdownStatus != string(types.DocumentStageQueued) ||
+		queued.MetadataStatus != string(types.DocumentStageSucceeded) ||
+		queued.SourceStatus != string(types.DocumentStageFailed) ||
+		queued.ReferenceStatus != string(types.DocumentStageFailed) {
+		t.Fatalf("queued stages = %#v", queued)
+	}
+
+	var deletingMarkdown string
+	if err := db.Raw(`SELECT markdown_status FROM documents WHERE id = ?`, deletingID).Scan(&deletingMarkdown).Error; err != nil {
+		t.Fatalf("load deleting stage: %v", err)
+	}
+	if deletingMarkdown != string(types.DocumentStageRunning) {
+		t.Fatalf("deleting document markdown status = %q", deletingMarkdown)
+	}
+
+	var citations []struct {
+		ID     uuid.UUID
+		Status string
+	}
+	if err := db.Raw(`SELECT id, resolution_status AS status FROM paper_citations
+		WHERE citing_document_id = ? ORDER BY reference_key`, runningID).Scan(&citations).Error; err != nil {
+		t.Fatalf("load citations: %v", err)
+	}
+	if len(citations) != 2 ||
+		citations[0].ID != resolvedReferenceID || citations[0].Status != string(types.DocumentStageRunning) ||
+		citations[1].ID != unresolvedReferenceID || citations[1].Status != string(types.DocumentStageFailed) {
+		t.Fatalf("citations = %#v", citations)
+	}
+
+	for key, want := range map[string]string{
+		"recognition":       string(types.ProcessingSpanCancelled),
+		"metadata":          string(types.ProcessingSpanCancelled),
+		"catalog_source":    string(types.ProcessingSpanCancelled),
+		"catalog_reference": string(types.ProcessingSpanCancelled),
+		"catalog_provider":  string(types.ProcessingSpanCancelled),
+		"download":          string(types.ProcessingSpanRunning),
+		"finished":          string(types.ProcessingSpanSucceeded),
+	} {
+		var span struct {
+			Status     string
+			FinishedAt *time.Time
+		}
+		if err := db.Raw(`SELECT status, finished_at FROM document_processing_spans WHERE id = ?`, spanIDs[key]).Scan(&span).Error; err != nil {
+			t.Fatalf("load span %s: %v", key, err)
+		}
+		if span.Status != want {
+			t.Fatalf("span %s status = %q, want %q", key, span.Status, want)
+		}
+		if want == string(types.ProcessingSpanCancelled) && span.FinishedAt == nil {
+			t.Fatalf("cancelled span %s has no finished_at", key)
+		}
+	}
+}
+
+// TestRecoverStaleStagesLeavesCandidateOnProbeErrorPostgres covers P1-3: a
+// failed queue probe is not evidence that the task disappeared, so the row
+// must stay running until a successful probe reports no matching task.
+func TestRecoverStaleStagesLeavesCandidateOnProbeErrorPostgres(t *testing.T) {
+	db, cleanup := openServicePostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	staleAt := time.Now().UTC().Add(-2 * time.Hour)
+	documentID := uuid.New()
+	if err := db.Exec(`INSERT INTO documents
+		(id, original_filename, content_type, size_bytes, storage_key, source_state, updated_at)
+		VALUES (?, 'probe.pdf', 'application/pdf', 1, ?, 'available', ?)`,
+		documentID, "probe/"+documentID.String(), staleAt).Error; err != nil {
+		t.Fatalf("insert document: %v", err)
+	}
+	if err := db.Exec(`UPDATE documents SET
+		markdown_status = 'running', markdown_generation = 1, markdown_updated_at = ?
+		WHERE id = ?`, staleAt, documentID).Error; err != nil {
+		t.Fatalf("mark stage running: %v", err)
+	}
+
+	inspector := &scriptedTaskInspector{}
+	housekeeping := NewDocumentHousekeepingService(db, config.Config{}, inspector, nil)
+	markdownStatus := func() types.DocumentStageStatus {
+		t.Helper()
+		var status string
+		if err := db.Raw(`SELECT markdown_status FROM documents WHERE id = ?`, documentID).Scan(&status).Error; err != nil {
+			t.Fatalf("load markdown status: %v", err)
+		}
+		return types.DocumentStageStatus(status)
+	}
+
+	inspector.snapshotErr = errors.New("redis timeout")
+	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
+	if got := markdownStatus(); got != types.DocumentStageRunning {
+		t.Fatalf("markdown status after snapshot error = %q, want running", got)
+	}
+
+	inspector.snapshotErr = nil
+	inspector.queuedStage = types.QueuedStageKey(documentID.String(), types.DocumentStageMarkdown, 1)
+	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
+	if got := markdownStatus(); got != types.DocumentStageRunning {
+		t.Fatalf("markdown status with queued task = %q, want running", got)
+	}
+
+	inspector.queuedStage = ""
+	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
+	if got := markdownStatus(); got != types.DocumentStageFailed {
+		t.Fatalf("markdown status without queued task = %q, want failed", got)
+	}
+}
+
+// TestRecoverStaleStagesUsesOneSnapshotForManyCandidatesPostgres verifies that
+// stale-stage recovery scans queued work once for all candidates and fails at
+// most the bounded 200 candidates per pass.
+func TestRecoverStaleStagesUsesOneSnapshotForManyCandidatesPostgres(t *testing.T) {
+	db, cleanup := openServicePostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+	staleAt := time.Now().UTC().Add(-2 * time.Hour)
+	if err := db.Exec(`INSERT INTO documents
+		(id, original_filename, content_type, size_bytes, storage_key, source_state, updated_at,
+		 markdown_status, markdown_generation, markdown_updated_at)
+		SELECT gen_random_uuid(), 'stale.pdf', 'application/pdf', 1,
+		       'stale/' || gen_random_uuid(), 'available', ?,
+		       'running', 1, ?
+		FROM generate_series(1, 250)`, staleAt, staleAt).Error; err != nil {
+		t.Fatalf("insert stale documents: %v", err)
+	}
+	inspector := &scriptedTaskInspector{}
+	housekeeping := NewDocumentHousekeepingService(db, config.Config{}, inspector, nil)
+	housekeeping.recoverStaleStages(ctx, time.Now().UTC())
+	if inspector.snapshotCalls != 1 {
+		t.Fatalf("snapshot calls = %d, want one bounded scan", inspector.snapshotCalls)
+	}
+	var failed int64
+	if err := db.Raw(`SELECT COUNT(*) FROM documents WHERE markdown_status = 'failed'`).Scan(&failed).Error; err != nil {
+		t.Fatalf("count failed documents: %v", err)
+	}
+	if failed != 200 {
+		t.Fatalf("failed documents = %d, want the 200-candidate limit", failed)
+	}
+}
+
+// scriptedTaskInspector lets the housekeeping test drive snapshot outcomes.
+type scriptedTaskInspector struct {
+	queuedStage   string
+	snapshotErr   error
+	snapshotCalls int
+}
+
+func (*scriptedTaskInspector) CancelTasksForStage(context.Context, string, types.DocumentStage, int64) (int, int, error) {
+	return 0, 0, nil
+}
+
+func (*scriptedTaskInspector) CancelTasksForDocument(context.Context, string) (int, int, error) {
+	return 0, 0, nil
+}
+
+func (*scriptedTaskInspector) HasQueuedTasksForDocument(context.Context, string) (bool, error) {
+	return false, nil
+}
+
+func (*scriptedTaskInspector) HasQueuedTaskTypeForDocument(context.Context, string, string) (bool, error) {
+	return false, nil
+}
+
+func (*scriptedTaskInspector) HasQueuedTaskForStage(context.Context, string, types.DocumentStage, int64) (bool, error) {
+	return false, nil
+}
+
+func (*scriptedTaskInspector) HasQueuedQueryApplyForReference(context.Context, string, int64) (bool, error) {
+	return false, nil
+}
+
+func (i *scriptedTaskInspector) SnapshotQueuedWork(context.Context) (types.QueuedWorkSnapshot, error) {
+	i.snapshotCalls++
+	snapshot := types.NewQueuedWorkSnapshot()
+	if i.snapshotErr != nil {
+		return snapshot, i.snapshotErr
+	}
+	if i.queuedStage != "" {
+		snapshot.StageTasks[i.queuedStage] = struct{}{}
+	}
+	return snapshot, nil
+}
+
+func nullableFinished(status string, at time.Time) interface{} {
+	if status == "succeeded" {
+		return at
+	}
+	return nil
+}
+
+// ensureServiceTrgmExtension matches the repository test helper: pg_trgm must
+// live in public so dropping a per-test schema cannot remove the operator
+// class used by another concurrently running package's indexes.
+func ensureServiceTrgmExtension(t *testing.T, db *gorm.DB) {
+	t.Helper()
+	if err := db.Connection(func(tx *gorm.DB) error {
+		if err := tx.Exec("SELECT pg_advisory_lock(?)", int64(2026101901)).Error; err != nil {
+			return err
+		}
+		defer func() { _ = tx.Exec("SELECT pg_advisory_unlock(?)", int64(2026101901)).Error }()
+		var schema string
+		if err := tx.Raw(`SELECT n.nspname FROM pg_extension e
+			JOIN pg_namespace n ON n.oid = e.extnamespace
+			WHERE e.extname = 'pg_trgm'`).Scan(&schema).Error; err != nil {
+			return err
+		}
+		if schema == "" {
+			return tx.Exec("CREATE EXTENSION pg_trgm SCHEMA public").Error
+		}
+		if schema != "public" {
+			return tx.Exec("ALTER EXTENSION pg_trgm SET SCHEMA public").Error
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("ensure pg_trgm extension: %v", err)
+	}
+}
+
+func openServicePostgresTestDatabase(t *testing.T) (*gorm.DB, func()) {
+	t.Helper()
+	dsn := strings.TrimSpace(os.Getenv("PAPERS_MANAGER_TEST_POSTGRES_DSN"))
+	if dsn == "" {
+		t.Skip("PAPERS_MANAGER_TEST_POSTGRES_DSN is not configured")
+	}
+	admin, err := gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open PostgreSQL test database: %v", err)
+	}
+	ensureServiceTrgmExtension(t, admin)
+	adminSQL, err := admin.DB()
+	if err != nil {
+		t.Fatalf("get PostgreSQL admin sql.DB: %v", err)
+	}
+	schema := "papers_manager_service_test_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+	if err := admin.Exec("CREATE SCHEMA " + schema).Error; err != nil {
+		adminSQL.Close()
+		t.Fatalf("create test schema: %v", err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		_ = admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error
+		adminSQL.Close()
+		t.Fatalf("parse PostgreSQL DSN: %v", err)
+	}
+	query := parsed.Query()
+	query.Set("search_path", schema)
+	parsed.RawQuery = query.Encode()
+	db, err := gorm.Open(postgres.Open(parsed.String()), &gorm.Config{})
+	if err != nil {
+		_ = admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error
+		adminSQL.Close()
+		t.Fatalf("open scoped PostgreSQL database: %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("get scoped PostgreSQL sql.DB: %v", err)
+	}
+	sqlDB.SetMaxOpenConns(4)
+	sqlDB.SetMaxIdleConns(4)
+	if err := repository.Migrate(context.Background(), db); err != nil {
+		sqlDB.Close()
+		_ = admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error
+		adminSQL.Close()
+		t.Fatalf("migrate scoped PostgreSQL database: %v", err)
+	}
+	cleanup := func() {
+		sqlDB.Close()
+		if err := admin.Exec("DROP SCHEMA " + schema + " CASCADE").Error; err != nil {
+			t.Errorf("drop test schema: %v", err)
+		}
+		adminSQL.Close()
+	}
+	return db, cleanup
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_projections_postgres_integration_test.go.
+// ---------------------------------------------------------------------------
+
+// TestReadModelScalePostgres seeds 1,000 documents with metadata, citations,
+// and spans, then verifies one 200-document projection batch stays bounded.
+// It is the P2-7 scale check for the fan-out fix.
+func TestReadModelScalePostgres(t *testing.T) {
+	db, cleanup := openServicePostgresTestDatabase(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	if err := db.Exec(`INSERT INTO documents
+		(id, original_filename, content_type, size_bytes, storage_key, source_state, updated_at,
+		 markdown_status, metadata_extraction_status)
+		SELECT gen_random_uuid(), 'scale-' || lpad(n::text, 4, '0') || '.pdf',
+		       'application/pdf', 1, 'scale/' || n, 'available', now(),
+		       'succeeded', 'succeeded'
+		FROM generate_series(1, 1000) AS n`).Error; err != nil {
+		t.Fatalf("seed documents: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO paper_metadata (document_id, title, authors, tags)
+		SELECT id, 'Scale Paper ' || original_filename, '[]'::jsonb, '[]'::jsonb
+		FROM documents`).Error; err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO paper_citations
+		(id, citing_document_id, reference_key, raw_reference, resolution_status,
+		 resolution_updated_at, origin, created_at, updated_at)
+		SELECT gen_random_uuid(), d.id, 'reference-' || n, 'Reference ' || n,
+		       'not_started', now(), 'extraction', now(), now()
+		FROM documents d CROSS JOIN generate_series(1, 5) AS n`).Error; err != nil {
+		t.Fatalf("seed citations: %v", err)
+	}
+	if err := db.Exec(`INSERT INTO document_processing_spans
+		(id, document_id, attempt, kind, scope, scope_id, status, started_at)
+		SELECT gen_random_uuid(), id, 1, 'recognition', 'document', '', 'succeeded', now()
+		FROM documents`).Error; err != nil {
+		t.Fatalf("seed spans: %v", err)
+	}
+
+	var ids []uuid.UUID
+	if err := db.Raw(`SELECT id FROM documents ORDER BY original_filename LIMIT 200`).Scan(&ids).Error; err != nil {
+		t.Fatalf("load ids: %v", err)
+	}
+	documentIDs := make([]string, 0, len(ids))
+	for _, id := range ids {
+		documentIDs = append(documentIDs, id.String())
+	}
+
+	documents := repository.NewDocumentRepository(db)
+	metadata := repository.NewPaperMetadataRepository(db)
+	citations := repository.NewPaperCitationRepository(db)
+	spans := repository.NewDocumentProcessingSpanRepository(db)
+	service := &documentService{
+		repo:       documents,
+		papers:     NewPaperService(documents, metadata, citations),
+		processing: NewSpanTracker(spans),
+	}
+
+	started := time.Now()
+	items, err := service.GetDocumentProjections(ctx, types.DocumentProjectionQuery{
+		DocumentIDs: documentIDs, IncludeMetadata: true, IncludeProcessing: true,
+	})
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatalf("GetDocumentProjections() error = %v", err)
+	}
+	if len(items) != 200 {
+		t.Fatalf("projection count = %d, want 200", len(items))
+	}
+	for index, item := range items {
+		if item.Document.ID != ids[index] {
+			t.Fatalf("item %d document = %s, want %s", index, item.Document.ID, ids[index])
+		}
+		if item.Metadata == nil || item.Metadata.Title == "" {
+			t.Fatalf("item %d metadata = %#v", index, item.Metadata)
+		}
+		if item.Processing == nil || item.Processing.ReferenceProgress == nil {
+			t.Fatalf("item %d processing = %#v", index, item.Processing)
+		}
+		if item.Processing.ReferenceProgress.Queued != 5 {
+			t.Fatalf("item %d queued progress = %d, want 5",
+				index, item.Processing.ReferenceProgress.Queued)
+		}
+		if len(item.Processing.Stages) != 1 {
+			t.Fatalf("item %d span count = %d, want 1", index, len(item.Processing.Stages))
+		}
+	}
+	t.Logf("200-document projection over 1,000 documents: %s", elapsed)
+	if elapsed > 10*time.Second {
+		t.Fatalf("projection batch took %s, want under 10s", elapsed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_reading_test.go.
+// ---------------------------------------------------------------------------
+
+type documentPageRendererStub struct {
+	request types.PDFPageRenderRequest
+	result  *types.RenderedPDFPage
+	err     error
+}
+
+func (stub *documentPageRendererStub) RenderPage(
+	_ context.Context, request types.PDFPageRenderRequest,
+) (*types.RenderedPDFPage, error) {
+	stub.request = request
+	return stub.result, stub.err
+}
+
+// TestDocumentReadingServiceRendersPage verifies that page rendering resolves an
+// available source and forwards the page, bbox, DPI, and recognition generation
+// to the renderer.
+func TestDocumentReadingServiceRendersPage(t *testing.T) {
+	documentID := uuid.New()
+	renderer := &documentPageRendererStub{result: &types.RenderedPDFPage{
+		PNG:         []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'},
+		ContentType: "image/png", Width: 10, Height: 20,
+	}}
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, SourceState: types.DocumentSourceAvailable,
+		StorageKey: "pdf/paper.pdf", MarkdownGeneration: 7,
+	}}
+	service := NewDocumentReadingServiceWithRenderer(repo, nil, nil, renderer)
+	bbox := &types.NormalizedPDFRect{X0: 0.1, Y0: 0.2, X1: 0.8, Y1: 0.9}
+	result, err := service.RenderPage(context.Background(), documentID.String(), 3, bbox, 144)
+	if err != nil {
+		t.Fatalf("RenderPage() error = %v", err)
+	}
+	if result.Width != 10 || result.Height != 20 {
+		t.Fatalf("result = %#v", result)
+	}
+	if renderer.request.SourceStorageKey != "pdf/paper.pdf" ||
+		renderer.request.PageNumber != 3 ||
+		renderer.request.DPI != 144 ||
+		renderer.request.FullPage ||
+		renderer.request.RecognitionGeneration != 7 {
+		t.Fatalf("renderer request = %#v", renderer.request)
+	}
+	if renderer.request.BBox == nil || renderer.request.BBox.X0 != 0.1 {
+		t.Fatalf("renderer bbox = %#v", renderer.request.BBox)
+	}
+}
+
+// TestDocumentReadingServiceRejectsOversizedRenderedPage verifies that a rendered
+// page exceeding the pixel budget is rejected with ErrPDFRenderTooLarge.
+func TestDocumentReadingServiceRejectsOversizedRenderedPage(t *testing.T) {
+	documentID := uuid.New()
+	renderer := &documentPageRendererStub{result: &types.RenderedPDFPage{
+		PNG:         []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'},
+		ContentType: "image/png", Width: types.MaxPDFRenderPixels + 1, Height: 1,
+	}}
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, SourceState: types.DocumentSourceAvailable, StorageKey: "pdf/paper.pdf",
+	}}
+	service := NewDocumentReadingServiceWithRenderer(repo, nil, nil, renderer)
+	if _, err := service.RenderPage(context.Background(), documentID.String(), 1, nil, 144); !errors.Is(err, types.ErrPDFRenderTooLarge) {
+		t.Fatalf("oversized page error = %v", err)
+	}
+}
+
+// TestDocumentReadingServiceRejectsUnavailableRendererAndInvalidBBox verifies that
+// page rendering reports ErrPDFRenderUnavailable without a renderer and rejects
+// an inverted bbox as invalid.
+func TestDocumentReadingServiceRejectsUnavailableRendererAndInvalidBBox(t *testing.T) {
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{
+		ID: documentID, SourceState: types.DocumentSourceAvailable, StorageKey: "pdf/paper.pdf",
+	}}
+	service := NewDocumentReadingService(repo, nil, nil)
+	if _, err := service.RenderPage(context.Background(), documentID.String(), 1, nil, 0); !errors.Is(err, types.ErrPDFRenderUnavailable) {
+		t.Fatalf("unavailable renderer error = %v", err)
+	}
+	renderer := &documentPageRendererStub{}
+	service = NewDocumentReadingServiceWithRenderer(repo, nil, nil, renderer)
+	bbox := &types.NormalizedPDFRect{X0: 0.8, Y0: 0.2, X1: 0.1, Y1: 0.9}
+	if _, err := service.RenderPage(context.Background(), documentID.String(), 1, bbox, 144); !errors.Is(err, types.ErrInvalidPDFRenderRequest) {
+		t.Fatalf("invalid bbox error = %v", err)
+	}
+}
+
+// TestDocumentReadingServiceReadsMarkdownAndBlocks verifies that reading returns
+// stored Markdown metadata and page-filtered blocks, and rejects a negative page
+// number.
+func TestDocumentReadingServiceReadsMarkdownAndBlocks(t *testing.T) {
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), fileservice.DefaultMaxUploadSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedMarkdown, err := storage.Save(context.Background(), interfaces.FileUpload{
+		Filename: "parsed.md", ContentType: "text/markdown", Category: interfaces.StorageCategoryMarkdown,
+		Content: strings.NewReader("# Paper\nbody"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := 1
+	documentID, blockID := uuid.New(), uuid.New()
+	repo := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable, OriginalFilename: "paper.pdf"},
+		markdown: types.DocumentMarkdown{
+			DocumentID: documentID, StorageKey: storedMarkdown.Key, Filename: "parsed.md",
+			ContentType: "text/markdown", SizeBytes: storedMarkdown.Size, PageCount: 2, RecognitionGeneration: 3,
+		},
+		blocks: []types.Block{{
+			ID: blockID, DocumentID: documentID, Ordinal: 0, Type: "text", Text: "# Paper",
+			Location: &types.PDFBlockLocation{PageNumber: &page},
+		}},
+	}
+	service := NewDocumentReadingService(repo, storage, nil)
+
+	content, err := service.GetDocumentMarkdown(context.Background(), documentID.String())
+	if err != nil || string(content.Markdown) != "# Paper\nbody" ||
+		content.PageCount != 2 || content.RecognitionGeneration != 3 || content.Filename != "parsed.md" {
+		t.Fatalf("Markdown content = %#v, error=%v", content, err)
+	}
+	blocks, err := service.GetDocumentBlocks(context.Background(), documentID.String(), 1)
+	if err != nil || len(blocks) != 1 || blocks[0].ID != blockID {
+		t.Fatalf("blocks = %#v, error=%v", blocks, err)
+	}
+	if _, err := service.GetDocumentBlocks(context.Background(), documentID.String(), -1); err == nil {
+		t.Fatal("negative page was accepted")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_recognition_enqueue_test.go.
+// ---------------------------------------------------------------------------
+
+// TestEnqueueDocumentRecognitionUsesStageGeneration verifies that first recognition
+// enqueue creates the queued markdown stage and sends its initial generation in
+// the task payload.
+func TestEnqueueDocumentRecognitionUsesStageGeneration(t *testing.T) {
+	documentID := uuid.New()
+	documents := &documentStatusRepoStub{document: types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable}}
+	enqueuer := &documentTaskEnqueuerStub{}
+	enqueuer.onEnqueue = func(task *asynq.Task) {
+		var payload types.DocumentProcessPayload
+		if err := json.Unmarshal(task.Payload(), &payload); err != nil {
+			t.Fatal(err)
+		}
+		if task.Type() != types.TypeDocumentRecognize || payload.Stage != types.DocumentStageMarkdown || payload.Generation != 1 {
+			t.Fatalf("new recognition payload = %#v type=%s", payload, task.Type())
+		}
+	}
+	service := &documentService{repo: documents, taskEnqueuer: enqueuer}
+	if err := service.enqueueDocumentRecognition(context.Background(), documentID); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestEnqueueDocumentRecognitionMarksStageFailedWhenEnqueueFails verifies that a
+// recognition enqueue failure marks the newly queued markdown stage failed after
+// a single attempt.
+func TestEnqueueDocumentRecognitionMarksStageFailedWhenEnqueueFails(t *testing.T) {
+	documentID := uuid.New()
+	documents := &documentStatusRepoStub{document: types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable}}
+	enqueuer := &documentTaskEnqueuerStub{enqueueErr: errors.New("queue unavailable")}
+	service := &documentService{repo: documents, taskEnqueuer: enqueuer}
+	if err := service.enqueueDocumentRecognition(context.Background(), documentID); err == nil {
+		t.Fatal("enqueueDocumentRecognition() error = nil")
+	}
+	if len(enqueuer.tasks) != 1 {
+		t.Fatalf("enqueued task attempts = %d, want 1", len(enqueuer.tasks))
+	}
+	if documents.document.MarkdownStatus != types.DocumentStageFailed {
+		t.Fatalf("document after queue failure = %#v", documents.document)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_recognition_parser_integration_test.go.
+// ---------------------------------------------------------------------------
+
+type recordingLiveRecognitionClient struct {
+	papersv1.DocumentParserClient
+	requests []*papersv1.RecognitionRequest
+}
+
+func (c *recordingLiveRecognitionClient) Recognize(ctx context.Context, request *papersv1.RecognitionRequest, options ...grpc.CallOption) (*papersv1.RecognitionResult, error) {
+	c.requests = append(c.requests, request)
+	return c.DocumentParserClient.Recognize(ctx, request, options...)
+}
+
+// scripts/parser/check_recognition_storage_key.py owns the server and shared root.
+// This exercises Go service -> gRPC proxy -> actual shared worker -> PDF.
+func TestStoredPDFRecognitionParserIntegration(t *testing.T) {
+	address, root := os.Getenv("PAPERS_MANAGER_TEST_PARSER_ADDR"), os.Getenv("PAPERS_MANAGER_TEST_PARSER_UPLOAD_DIR")
+	if address == "" || root == "" {
+		t.Skip("private parser integration environment is not configured")
+	}
+	content, err := os.ReadFile(os.Getenv("PAPERS_MANAGER_TEST_PARSER_PDF"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection, err := grpc.NewClient(address, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(16<<20)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer connection.Close()
+	for _, shared := range []bool{true, false} {
+		name := "key"
+		directory := root
+		if !shared {
+			name = "bytes-fallback"
+			directory = t.TempDir()
+		}
+		t.Run(name, func(t *testing.T) {
+			storage, err := fileservice.NewLocalStorage(directory, 16<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := storage.SaveBytes(context.Background(), "source.pdf", content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			counted := &recognitionSourceStorage{FileStorage: storage}
+			client := &recordingLiveRecognitionClient{DocumentParserClient: papersv1.NewDocumentParserClient(connection)}
+			documentID := uuid.New()
+			repo := &documentStatusRepoStub{document: types.Document{ID: documentID, StorageKey: source.Key, OriginalFilename: "source.pdf", ContentType: "application/pdf", SizeBytes: source.Size, SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageQueued, MarkdownGeneration: 1}}
+			svc := &documentService{repo: repo, storage: counted, recognizer: docrecognition.NewBuiltinRecognizerWithClient(client), taskEnqueuer: &documentTaskEnqueuerStub{}}
+			payload, _ := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
+			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			defer cancel()
+			if err := svc.RecognizeDocument(ctx, asynq.NewTask(types.TypeDocumentRecognize, payload)); err != nil {
+				t.Fatal(err)
+			}
+			wantCalls, wantOpens, wantMode := 1, 0, types.RecognitionInputStorageKey
+			if !shared {
+				wantCalls, wantOpens, wantMode = 2, 1, types.RecognitionInputBytes
+			}
+			if len(client.requests) != wantCalls || counted.opens != wantOpens || repo.markdown.InputMode != string(wantMode) || repo.markdown.PageCount != 2 || len(repo.blocks) == 0 {
+				t.Fatalf("calls=%d opens=%d input=%s pages=%d blocks=%d", len(client.requests), counted.opens, repo.markdown.InputMode, repo.markdown.PageCount, len(repo.blocks))
+			}
+			if client.requests[0].GetSourceStorageKey() != source.Key || len(client.requests[0].GetContent()) != 0 {
+				t.Fatal("initial request transmitted PDF bytes")
+			}
+			if !shared && len(client.requests[1].GetContent()) != len(content) {
+				t.Fatal("fallback content missing")
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_recognition_source_test.go.
+// ---------------------------------------------------------------------------
+
+type recognitionSourceStorage struct {
+	interfaces.FileStorage
+	content       []byte
+	opens, closes int
+	err           error
+}
+
+func (s *recognitionSourceStorage) Open(ctx context.Context, key string) (io.ReadCloser, error) {
+	s.opens++
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.FileStorage != nil {
+		return s.FileStorage.Open(ctx, key)
+	}
+	return &recognitionSourceReader{Reader: bytes.NewReader(s.content), close: func() { s.closes++ }}, nil
+}
+
+type recognitionSourceReader struct {
+	*bytes.Reader
+	close func()
+}
+
+func (r *recognitionSourceReader) Close() error { r.close(); return nil }
+
+type sourceRequestRecorder struct {
+	requests []types.RecognitionRequest
+	read     func(context.Context, *types.RecognitionRequest) (*types.RecognitionResult, error)
+}
+
+func (r *sourceRequestRecorder) Read(ctx context.Context, request *types.RecognitionRequest) (*types.RecognitionResult, error) {
+	if err := request.Validate(); err != nil {
+		return nil, err
+	}
+	r.requests = append(r.requests, *request)
+	if r.read != nil {
+		return r.read(ctx, request)
+	}
+	return &types.RecognitionResult{OutputMode: types.RecognitionOutputMarkdownBytes, Markdown: []byte("# Read\n"), Metadata: types.RecognitionMetadata{MarkdownFilename: "paper.md", ContentType: "text/markdown", SizeBytes: 7}}, nil
+}
+
+type storageKeyRequestRecorder struct{ *sourceRequestRecorder }
+
+func (*storageKeyRequestRecorder) SupportsStorageKey() bool { return true }
+
+// TestRecognitionSourcePrefersKeyAndLoadsBytesOnlyOnFallback verifies that
+// storage-key-capable recognizers receive the source key without reading bytes,
+// falling back to bounded source bytes only when required or when the shared file
+// is missing.
+func TestRecognitionSourcePrefersKeyAndLoadsBytesOnlyOnFallback(t *testing.T) {
+	for _, test := range []struct {
+		name, contentType    string
+		keyCapable           bool
+		firstError           error
+		wantMode             types.RecognitionInputMode
+		wantCalls, wantOpens int
+	}{
+		{"saved pdf", "application/pdf; charset=binary", true, nil, types.RecognitionInputStorageKey, 1, 0},
+		{"missing shared file", "application/pdf", true, types.ErrRecognitionStoredSourceUnavailable, types.RecognitionInputBytes, 2, 1},
+		{"text input", "text/plain", true, nil, types.RecognitionInputBytes, 1, 1},
+		{"bytes-only provider", "application/pdf", false, nil, types.RecognitionInputBytes, 1, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			storage := &recognitionSourceStorage{content: []byte("%PDF")}
+			recorder := &sourceRequestRecorder{}
+			recorder.read = func(_ context.Context, req *types.RecognitionRequest) (*types.RecognitionResult, error) {
+				if req.InputMode == types.RecognitionInputStorageKey && test.firstError != nil {
+					return nil, test.firstError
+				}
+				return &types.RecognitionResult{}, nil
+			}
+			var recognizer interfaces.DocumentRecognizer = recorder
+			if test.keyCapable {
+				recognizer = &storageKeyRequestRecorder{recorder}
+			}
+			svc := &documentService{storage: storage, recognizer: recognizer}
+			document := types.Document{ID: uuid.New(), OriginalFilename: "paper.pdf", ContentType: test.contentType, SizeBytes: 4, StorageKey: "pdf/source.pdf"}
+			_, mode, err := svc.readStoredRecognitionSource(context.Background(), document, types.DocumentProcessPayload{})
+			if err != nil || mode != test.wantMode || len(recorder.requests) != test.wantCalls || storage.opens != test.wantOpens || storage.closes != test.wantOpens {
+				t.Fatalf("mode=%s err=%v requests=%+v opens=%d closes=%d", mode, err, recorder.requests, storage.opens, storage.closes)
+			}
+			if recorder.requests[0].InputMode == types.RecognitionInputStorageKey && (recorder.requests[0].Content != nil || recorder.requests[0].SourceStorageKey != document.StorageKey) {
+				t.Fatal("key request carried bytes or wrong key")
+			}
+			if mode == types.RecognitionInputBytes && string(recorder.requests[len(recorder.requests)-1].Content) != "%PDF" {
+				t.Fatal("bytes fallback lost source content")
+			}
+		})
+	}
+}
+
+// TestRecognitionSourceDoesNotFallbackOnParseTransportOrCancellationErrors verifies
+// that parse, transport, and cancellation failures from a storage-key request are
+// returned directly instead of triggering a bytes fallback.
+func TestRecognitionSourceDoesNotFallbackOnParseTransportOrCancellationErrors(t *testing.T) {
+	for _, failure := range []error{errors.New("parse failed"), types.ErrRecognitionServiceUnavailable, context.Canceled, context.DeadlineExceeded} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			storage := &recognitionSourceStorage{err: errors.New("unexpected source read")}
+			recorder := &sourceRequestRecorder{read: func(context.Context, *types.RecognitionRequest) (*types.RecognitionResult, error) {
+				return nil, failure
+			}}
+			svc := &documentService{storage: storage, recognizer: &storageKeyRequestRecorder{recorder}}
+			_, _, err := svc.readStoredRecognitionSource(context.Background(), types.Document{ID: uuid.New(), OriginalFilename: "paper.pdf", ContentType: "application/pdf", SizeBytes: 4, StorageKey: "pdf/source.pdf"}, types.DocumentProcessPayload{})
+			if !errors.Is(err, failure) || storage.opens != 0 || len(recorder.requests) != 1 {
+				t.Fatalf("err=%v opens=%d calls=%d", err, storage.opens, len(recorder.requests))
+			}
+		})
+	}
+}
+
+// TestRecognitionSourceRechecksCancellationBeforeBytesFallback verifies that
+// cancellation occurring during the key request is checked before any bytes
+// fallback read.
+func TestRecognitionSourceRechecksCancellationBeforeBytesFallback(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	storage := &recognitionSourceStorage{}
+	recorder := &sourceRequestRecorder{read: func(context.Context, *types.RecognitionRequest) (*types.RecognitionResult, error) {
+		cancel()
+		return nil, types.ErrRecognitionStoredSourceUnavailable
+	}}
+	svc := &documentService{storage: storage, recognizer: &storageKeyRequestRecorder{recorder}}
+	_, _, err := svc.readStoredRecognitionSource(ctx, types.Document{ID: uuid.New(), OriginalFilename: "paper.pdf", ContentType: "application/pdf", StorageKey: "pdf/source.pdf"}, types.DocumentProcessPayload{})
+	if !errors.Is(err, context.Canceled) || storage.opens != 0 {
+		t.Fatalf("err=%v opens=%d", err, storage.opens)
+	}
+}
+
+// TestRecognitionSourceFallbackStillEnforcesRecordedSize verifies that the bytes
+// fallback enforces the recorded source size limit and closes the opened file
+// when it is exceeded.
+func TestRecognitionSourceFallbackStillEnforcesRecordedSize(t *testing.T) {
+	storage := &recognitionSourceStorage{content: []byte("too large")}
+	recorder := &sourceRequestRecorder{read: func(context.Context, *types.RecognitionRequest) (*types.RecognitionResult, error) {
+		return nil, types.ErrRecognitionStoredSourceUnavailable
+	}}
+	svc := &documentService{storage: storage, recognizer: &storageKeyRequestRecorder{recorder}}
+	_, _, err := svc.readStoredRecognitionSource(context.Background(), types.Document{ID: uuid.New(), OriginalFilename: "paper.pdf", ContentType: "application/pdf", SizeBytes: 4, StorageKey: "pdf/source.pdf"}, types.DocumentProcessPayload{})
+	if err == nil || storage.closes != 1 || len(recorder.requests) != 1 {
+		t.Fatalf("err=%v closes=%d calls=%d", err, storage.closes, len(recorder.requests))
+	}
+}
+
+// TestRecognitionSourceRechecksStageGenerationBeforeFallback verifies that the
+// stage generation fence is rechecked before bytes fallback, so cancelled work is
+// revoked instead of reading the source.
+func TestRecognitionSourceRechecksStageGenerationBeforeFallback(t *testing.T) {
+	document := types.Document{ID: uuid.New(), OriginalFilename: "paper.pdf", ContentType: "application/pdf", StorageKey: "pdf/source.pdf", MarkdownStatus: types.DocumentStageRunning, MarkdownGeneration: 1}
+	repo := &documentStatusRepoStub{document: document}
+	storage := &recognitionSourceStorage{}
+	recorder := &sourceRequestRecorder{read: func(context.Context, *types.RecognitionRequest) (*types.RecognitionResult, error) {
+		repo.document.MarkdownStatus = types.DocumentStageCancelled
+		return nil, types.ErrRecognitionStoredSourceUnavailable
+	}}
+	svc := &documentService{repo: repo, storage: storage, recognizer: &storageKeyRequestRecorder{recorder}}
+	_, _, err := svc.readStoredRecognitionSource(context.Background(), document, types.DocumentProcessPayload{Stage: types.DocumentStageMarkdown, Generation: 1})
+	if !errors.Is(err, asynq.RevokeTask) || storage.opens != 0 {
+		t.Fatalf("error=%v opens=%d", err, storage.opens)
+	}
+}
+
+// TestRecognizeDocumentPersistsActualStorageKeyInputMode verifies that successful
+// storage-key recognition records the actual input mode on the Markdown row
+// without opening the source file.
+func TestRecognizeDocumentPersistsActualStorageKeyInputMode(t *testing.T) {
+	local, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage := &recognitionSourceStorage{FileStorage: local}
+	documentID := uuid.New()
+	repo := &documentStatusRepoStub{document: types.Document{ID: documentID, OriginalFilename: "paper.pdf", ContentType: "application/pdf", StorageKey: "pdf/shared.pdf", SizeBytes: 4, SourceState: types.DocumentSourceAvailable, MarkdownStatus: types.DocumentStageQueued, MarkdownGeneration: 1}}
+	recorder := &sourceRequestRecorder{}
+	svc := &documentService{repo: repo, storage: storage, recognizer: &storageKeyRequestRecorder{recorder}, taskEnqueuer: &documentTaskEnqueuerStub{}}
+	payload, _ := json.Marshal(types.DocumentProcessPayload{DocumentID: documentID.String(), Stage: types.DocumentStageMarkdown, Generation: 1})
+	if err := svc.RecognizeDocument(context.Background(), asynq.NewTask(types.TypeDocumentRecognize, payload)); err != nil {
+		t.Fatal(err)
+	}
+	if repo.markdown.InputMode != string(types.RecognitionInputStorageKey) || storage.opens != 0 {
+		t.Fatalf("input=%s opens=%d", repo.markdown.InputMode, storage.opens)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_remote_test.go.
+// ---------------------------------------------------------------------------
+
+type documentBatchRepoStub struct {
+	documentStatusRepoStub
+	documents    map[uuid.UUID]types.Document
+	searchCalls  int
+	failSearchAt int
+	searchErr    error
+}
+
+func (*documentBatchRepoStub) CitationTargetProgress(context.Context, uuid.UUID) (types.PaperReferenceProgress, error) {
+	return types.PaperReferenceProgress{}, nil
+}
+
+func (s *documentBatchRepoStub) ReplaceOlderDocument(context.Context, uuid.UUID, uuid.UUID) (types.DocumentFileKeys, error) {
+	return types.DocumentFileKeys{}, nil
+}
+
+func (s *documentBatchRepoStub) Create(_ context.Context, document types.Document) (types.Document, error) {
+	if s.documents == nil {
+		s.documents = make(map[uuid.UUID]types.Document)
+	}
+	s.documents[document.ID] = document
+	return document, nil
+}
+
+func (s *documentBatchRepoStub) Get(_ context.Context, id uuid.UUID) (types.Document, error) {
+	document, ok := s.documents[id]
+	if !ok {
+		return types.Document{}, os.ErrNotExist
+	}
+	return document, nil
+}
+
+func (s *documentBatchRepoStub) Search(_ context.Context, search types.DocumentSearch) (types.DocumentPage, error) {
+	s.searchCalls++
+	if s.failSearchAt > 0 && s.searchCalls >= s.failSearchAt {
+		return types.DocumentPage{}, s.searchErr
+	}
+	result := types.DocumentPage{Page: search.Page, PageSize: search.PageSize, Items: []types.Document{}}
+	for _, document := range s.documents {
+		if search.DOI != "" && strings.EqualFold(document.DOI, search.DOI) ||
+			search.FileSHA256 != "" && strings.EqualFold(document.FileSHA256, search.FileSHA256) {
+			result.Items = append(result.Items, document)
+		}
+	}
+	result.Total = int64(len(result.Items))
+	return result, nil
+}
+
+// TestCreateDocumentsFromFilesPreservesPriorResultsWhenDeduplicationFails verifies
+// that a duplicate-lookup failure stops a file batch, preserves the previously
+// accepted item, and reports the current item as failed.
+func TestCreateDocumentsFromFilesPreservesPriorResultsWhenDeduplicationFails(t *testing.T) {
+	repo := &documentBatchRepoStub{failSearchAt: 2, searchErr: errors.New("database unavailable")}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{repo: repo, storage: storage}
+
+	result, err := service.CreateDocumentsFromFiles(context.Background(), []*multipart.FileHeader{
+		documentUploadFileHeader(t, "first.txt", []byte("first")),
+		documentUploadFileHeader(t, "second.txt", []byte("second")),
+		documentUploadFileHeader(t, "not-processed.txt", []byte("third")),
+	}, nil)
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromFiles() error = %v", err)
+	}
+	if !result.Stopped || result.Error == "" || len(result.Items) != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Items[0].Status != types.DocumentImportItemAccepted || result.Items[0].Document == nil {
+		t.Fatalf("accepted item = %#v", result.Items[0])
+	}
+	if result.Items[1].Index != 1 || result.Items[1].Status != types.DocumentImportItemFailed || result.Items[1].Error == "" {
+		t.Fatalf("failed item = %#v", result.Items[1])
+	}
+	if len(repo.documents) != 1 {
+		t.Fatalf("created documents = %#v, want only the first file", repo.documents)
+	}
+	if repo.searchCalls != 2 {
+		t.Fatalf("duplicate lookup count = %d, want one lookup per processed file", repo.searchCalls)
+	}
+}
+
+// TestCreateDocumentsFromURLsStopsWhenDeduplicationFails verifies that a
+// duplicate-lookup failure stops a URL batch after preserving the accepted first
+// import and marking the second item failed.
+func TestCreateDocumentsFromURLsStopsWhenDeduplicationFails(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := &documentBatchRepoStub{failSearchAt: 2, searchErr: errors.New("database unavailable")}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{repo: repo, storage: storage, urlResolver: paperurl.NewResolver()}
+
+	result, err := service.CreateDocumentsFromURLs(context.Background(), []types.DocumentURLImportCommand{
+		{URL: server.URL + "/first.pdf"},
+		{URL: server.URL + "/second.pdf"},
+		{URL: server.URL + "/not-processed.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromURLs() error = %v", err)
+	}
+	if !result.Stopped || result.Error == "" || len(result.Items) != 2 {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Items[0].Status != types.DocumentImportItemAccepted || result.Items[0].Document == nil {
+		t.Fatalf("accepted item = %#v", result.Items[0])
+	}
+	if result.Items[1].Index != 1 || result.Items[1].Status != types.DocumentImportItemFailed || result.Items[1].Error == "" {
+		t.Fatalf("failed item = %#v", result.Items[1])
+	}
+	if len(repo.documents) != 1 {
+		t.Fatalf("created documents = %#v, want only the first URL", repo.documents)
+	}
+}
+
+// TestCreateDocumentsFromURLsReportsPartialResultsAndContentDuplicates verifies
+// that URL batch import reports an invalid URL, queues a valid import, and maps
+// repeated content to the same accepted document as a duplicate.
+func TestCreateDocumentsFromURLsReportsPartialResultsAndContentDuplicates(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := &documentBatchRepoStub{}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{repo: repo, storage: storage, urlResolver: paperurl.NewResolver()}
+
+	result, err := service.CreateDocumentsFromURLs(context.Background(), []types.DocumentURLImportCommand{
+		{URL: "ftp://example.invalid/paper.pdf"},
+		{URL: server.URL + "/paper.pdf"},
+		{URL: server.URL + "/paper.pdf"},
+	})
+	if err != nil {
+		t.Fatalf("CreateDocumentsFromURLs() error = %v", err)
+	}
+	if len(result.Items) != 3 {
+		t.Fatalf("items = %#v", result.Items)
+	}
+	if result.Items[0].Status != types.DocumentImportItemRejected {
+		t.Fatalf("invalid URL item = %#v", result.Items[0])
+	}
+	if result.Items[1].Status != types.DocumentImportItemAccepted || result.Items[1].Document == nil ||
+		result.Items[1].ProcessingQueued == nil || !*result.Items[1].ProcessingQueued {
+		t.Fatalf("accepted item = %#v", result.Items[1])
+	}
+	if result.Items[2].Status != types.DocumentImportItemDuplicate || result.Items[2].Document == nil ||
+		result.Items[2].Document.ID != result.Items[1].Document.ID {
+		t.Fatalf("duplicate item = %#v", result.Items[2])
+	}
+}
+
+// TestCreateDocumentFromURLStoresPDFAndStartsPipeline verifies that importing a
+// remote PDF normalizes the DOI, stores the file, records its hash, and queues
+// markdown recognition.
+func TestCreateDocumentFromURLStoresPDFAndStartsPipeline(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := &documentStatusRepoStub{}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := &documentTaskEnqueuerStub{}
+	papers := newPaperInfoPaperServiceStub()
+	service := &documentService{
+		repo: repo, storage: storage, taskEnqueuer: tasks,
+		papers: papers, urlResolver: paperurl.NewResolver(),
+	}
+	created, err := service.CreateDocumentFromURL(context.Background(), types.DocumentURLImportCommand{
+		URL: server.URL + "/paper.pdf", DOI: "https://doi.org/10.1000/Remote",
+	})
+	if err != nil {
+		t.Fatalf("CreateDocumentFromURL() error = %v", err)
+	}
+	if created.DOI != "10.1000/remote" || created.FileSHA256 == "" || created.SourceState != types.DocumentSourceAvailable || created.MarkdownStatus != types.DocumentStageQueued {
+		t.Fatalf("created = %#v", created)
+	}
+	if len(tasks.documents) != 1 || tasks.documents[0].DocumentID != created.ID.String() {
+		t.Fatalf("queued tasks = %#v", tasks.documents)
+	}
+	opened, err := storage.Open(context.Background(), created.StorageKey)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	_ = opened.Close()
+}
+
+// TestCreateDocumentFromURLReturnsCreatedDocumentWhenInitialQueueFails verifies
+// that a queue failure after a remote download still returns a persisted,
+// retryable document marked failed with a safe error.
+func TestCreateDocumentFromURLReturnsCreatedDocumentWhenInitialQueueFails(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := &documentStatusRepoStub{}
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := &documentService{
+		repo: repo, storage: storage,
+		taskEnqueuer: &documentTaskEnqueuerStub{enqueueErr: errors.New("redis unavailable")},
+		urlResolver:  paperurl.NewResolver(),
+	}
+
+	created, err := service.CreateDocumentFromURL(context.Background(), types.DocumentURLImportCommand{
+		URL: server.URL + "/paper.pdf",
+	})
+	if !errors.Is(err, ErrDocumentProcessQueue) {
+		t.Fatalf("CreateDocumentFromURL() error = %v, want ErrDocumentProcessQueue", err)
+	}
+	if created == nil || created.ID == uuid.Nil || created.MarkdownStatus != types.DocumentStageFailed {
+		t.Fatalf("created = %#v, want durable failed document", created)
+	}
+	if created.MarkdownErrorMessage == nil || *created.MarkdownErrorMessage != "processing task could not be queued" {
+		t.Fatalf("safe queue failure message = %#v", created.MarkdownErrorMessage)
+	}
+	opened, openErr := storage.Open(context.Background(), created.StorageKey)
+	if openErr != nil {
+		t.Fatalf("stored remote PDF must remain available for retry: %v", openErr)
+	}
+	_ = opened.Close()
+}
+
+// TestRequestReferencePDFDownloadQueuesOnlyExplicitTarget verifies that requesting
+// a reference PDF enqueues exactly one remote-import task for that reference and
+// records the download attempt on the reference row.
+func TestRequestReferencePDFDownloadQueuesOnlyExplicitTarget(t *testing.T) {
+	referenceID := uuid.New()
+	repo := newPaperDocumentRepoStub()
+	papers := newPaperInfoPaperServiceStub()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "Downloadable reference",
+		SourceURL:        "https://example.test/paper.pdf",
+		ResolutionStatus: types.DocumentStageNotStarted, ResolutionGeneration: 2,
+	}
+	tasks := &documentTaskEnqueuerStub{}
+	service := &documentService{repo: repo, papers: papers, taskEnqueuer: tasks}
+	if err := service.RequestReferencePDFDownload(context.Background(), referenceID.String()); err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks.tasks) != 1 || tasks.tasks[0].Type() != types.TypeDocumentRemoteImport {
+		t.Fatalf("queued tasks = %#v", tasks.tasks)
+	}
+	var payload types.DocumentRemoteImportPayload
+	if err := json.Unmarshal(tasks.tasks[0].Payload(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.ReferenceID != referenceID.String() {
+		t.Fatalf("payload reference = %q, want %s", payload.ReferenceID, referenceID)
+	}
+	if payload.DownloadAttempt == "" {
+		t.Fatal("download attempt was not recorded")
+	}
+	stored := papers.references[referenceID]
+	if stored.DownloadAttempt == nil || stored.DownloadAttempt.String() != payload.DownloadAttempt {
+		t.Fatalf("reference download attempt = %v, payload = %q", stored.DownloadAttempt, payload.DownloadAttempt)
+	}
+	if stored.DownloadRequestedAt == nil {
+		t.Fatal("reference download request time was not recorded")
+	}
+}
+
+// TestRequestReferencePDFDownloadRejectsDuplicateInFlightRequest verifies that a
+// second download request while one is in flight is rejected and does not enqueue
+// another task.
+func TestRequestReferencePDFDownloadRejectsDuplicateInFlightRequest(t *testing.T) {
+	referenceID := uuid.New()
+	repo := newPaperDocumentRepoStub()
+	papers := newPaperInfoPaperServiceStub()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "Downloadable reference",
+		SourceURL:        "https://example.test/paper.pdf",
+		ResolutionStatus: types.DocumentStageNotStarted, ResolutionGeneration: 1,
+	}
+	tasks := &documentTaskEnqueuerStub{}
+	service := &documentService{repo: repo, papers: papers, taskEnqueuer: tasks}
+	if err := service.RequestReferencePDFDownload(context.Background(), referenceID.String()); err != nil {
+		t.Fatalf("first request: %v", err)
+	}
+	if err := service.RequestReferencePDFDownload(context.Background(), referenceID.String()); !errors.Is(err, types.ErrReferenceDownloadInProgress) {
+		t.Fatalf("duplicate request error = %v, want ErrReferenceDownloadInProgress", err)
+	}
+	if len(tasks.tasks) != 1 {
+		t.Fatalf("queued tasks = %d, want one", len(tasks.tasks))
+	}
+}
+
+// TestImportRemoteDocumentRecordsTerminalDownloadFailure verifies that a remote
+// import lacking a downloadable URL records a terminal, safe download error and
+// skips retries.
+func TestImportRemoteDocumentRecordsTerminalDownloadFailure(t *testing.T) {
+	referenceID := uuid.New()
+	attempt := uuid.New()
+	papers := newPaperInfoPaperServiceStub()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "No source URL",
+		DownloadAttempt: &attempt,
+	}
+	service := &documentService{papers: papers, urlResolver: paperurl.NewResolver()}
+	payload, err := json.Marshal(types.DocumentRemoteImportPayload{
+		ReferenceID: referenceID.String(), Generation: 1, DownloadAttempt: attempt.String(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	err = service.ImportRemoteDocument(context.Background(), asynq.NewTask(types.TypeDocumentRemoteImport, payload))
+	if !errors.Is(err, asynq.SkipRetry) {
+		t.Fatalf("ImportRemoteDocument() error = %v, want SkipRetry", err)
+	}
+	stored := papers.references[referenceID]
+	if stored.DownloadErrorCode == nil || *stored.DownloadErrorCode != types.ProcessingErrorServiceUnavailable {
+		t.Fatalf("download error code = %v", stored.DownloadErrorCode)
+	}
+	if stored.DownloadErrorMessage == nil || *stored.DownloadErrorMessage != "reference has no downloadable PDF" {
+		t.Fatalf("download error message = %v", stored.DownloadErrorMessage)
+	}
+}
+
+// TestImportRemoteDocumentIgnoresStaleDownloadAttempt verifies that a remote-import
+// payload for an older download attempt cannot overwrite the reference's current
+// download state.
+func TestImportRemoteDocumentIgnoresStaleDownloadAttempt(t *testing.T) {
+	referenceID := uuid.New()
+	currentAttempt := uuid.New()
+	staleAttempt := uuid.New()
+	papers := newPaperInfoPaperServiceStub()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "No source URL",
+		DownloadAttempt: &currentAttempt,
+	}
+	service := &documentService{papers: papers, urlResolver: paperurl.NewResolver()}
+	payload, err := json.Marshal(types.DocumentRemoteImportPayload{
+		ReferenceID: referenceID.String(), Generation: 1, DownloadAttempt: staleAttempt.String(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	if err := service.ImportRemoteDocument(context.Background(), asynq.NewTask(types.TypeDocumentRemoteImport, payload)); err == nil {
+		t.Fatal("ImportRemoteDocument() error = nil, want terminal failure")
+	}
+	if stored := papers.references[referenceID]; stored.DownloadErrorMessage != nil {
+		t.Fatalf("stale attempt wrote download error: %v", stored.DownloadErrorMessage)
+	}
+}
+
+func remotePDFTestServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	t.Setenv("SSRF_WHITELIST", "127.0.0.1")
+	utils.ResetSSRFWhitelistForTest()
+	t.Cleanup(utils.ResetSSRFWhitelistForTest)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/pdf")
+		_, _ = writer.Write([]byte("%PDF-1.7\nremote paper"))
+	}))
+	t.Cleanup(server.Close)
+	return server
+}
+
+// TestImportReferencePDFCreatesDocumentOnlyAfterDownload verifies that a successful
+// reference-PDF download creates an available source document, links the reference,
+// and queues recognition only after the file is stored.
+func TestImportReferencePDFCreatesDocumentOnlyAfterDownload(t *testing.T) {
+	server := remotePDFTestServer(t)
+	repo := newPaperDocumentRepoStub()
+	storage, err := fileservice.NewLocalStorage(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tasks := &documentTaskEnqueuerStub{}
+	papers := newPaperInfoPaperServiceStub()
+	referenceID := uuid.New()
+	papers.references[referenceID] = types.PaperReference{
+		ReferenceID: referenceID, CitingDocumentID: uuid.New(), RawReference: "Downloadable reference",
+		Title: "Downloadable reference", SourceURL: server.URL + "/paper.pdf",
+		ResolutionStatus: types.DocumentStageNotStarted, ResolutionGeneration: 1,
+	}
+	service := &documentService{
+		repo: repo, storage: storage, taskEnqueuer: tasks,
+		papers: papers, urlResolver: paperurl.NewResolver(),
+	}
+	payload, err := json.Marshal(types.DocumentRemoteImportPayload{
+		ReferenceID: referenceID.String(), Generation: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.ImportRemoteDocument(context.Background(), asynq.NewTask(types.TypeDocumentRemoteImport, payload)); err != nil {
+		t.Fatalf("ImportRemoteDocument() error = %v", err)
+	}
+	if len(repo.documents) != 1 {
+		t.Fatalf("created documents = %d, want 1", len(repo.documents))
+	}
+	var created types.Document
+	for _, document := range repo.documents {
+		created = document
+	}
+	if created.SourceState != types.DocumentSourceAvailable || created.FileSHA256 == "" {
+		t.Fatalf("created document = %#v", created)
+	}
+	linked := papers.references[referenceID]
+	if linked.CitedDocumentID == nil || *linked.CitedDocumentID != created.ID {
+		t.Fatalf("reference was not linked to the created document: %#v", linked)
+	}
+	if len(tasks.documents) != 1 || tasks.documents[0].DocumentID != created.ID.String() {
+		t.Fatalf("recognition tasks = %#v", tasks.documents)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_stage_stub_test.go.
+// ---------------------------------------------------------------------------
+
+func queueStubDocumentStage(document *types.Document, stage types.DocumentStage) (types.DocumentStageState, bool, error) {
+	state, err := document.StageState(stage)
+	if err != nil {
+		return state, false, err
+	}
+	if state.Status == "" {
+		state.Status = types.DocumentStageNotStarted
+	}
+	if state.Status.Active() {
+		return state, false, nil
+	}
+	state.Status = types.DocumentStageQueued
+	state.Generation++
+	state.UpdatedAt = time.Now().UTC()
+	state.ErrorCode, state.ErrorMessage = nil, nil
+	setStubDocumentStage(document, state)
+	return state, true, nil
+}
+
+func transitionStubDocumentStage(document *types.Document, stage types.DocumentStage, generation int64, from []types.DocumentStageStatus, to types.DocumentStageStatus) (types.DocumentStageState, bool, error) {
+	state, err := document.StageState(stage)
+	if err != nil {
+		return state, false, err
+	}
+	allowed := false
+	for _, status := range from {
+		allowed = allowed || state.Status == status
+	}
+	if state.Generation != generation || !allowed {
+		return state, false, nil
+	}
+	state.Status, state.UpdatedAt = to, time.Now().UTC()
+	state.ErrorCode, state.ErrorMessage = nil, nil
+	setStubDocumentStage(document, state)
+	return state, true, nil
+}
+
+func setStubDocumentStage(document *types.Document, state types.DocumentStageState) {
+	switch state.Stage {
+	case types.DocumentStageMarkdown:
+		document.MarkdownStatus, document.MarkdownGeneration, document.MarkdownUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.MarkdownErrorCode, document.MarkdownErrorMessage = state.ErrorCode, state.ErrorMessage
+	case types.DocumentStageMetadataExtraction:
+		document.MetadataExtractionStatus, document.MetadataExtractionGeneration, document.MetadataExtractionUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.MetadataExtractionErrorCode, document.MetadataExtractionErrorMessage = state.ErrorCode, state.ErrorMessage
+	case types.DocumentStageSourceLookup:
+		document.SourceLookupStatus, document.SourceLookupGeneration, document.SourceLookupUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.SourceLookupErrorCode, document.SourceLookupErrorMessage = state.ErrorCode, state.ErrorMessage
+	case types.DocumentStageReferenceLookup:
+		document.ReferenceLookupStatus, document.ReferenceLookupGeneration, document.ReferenceLookupUpdatedAt = state.Status, state.Generation, state.UpdatedAt
+		document.ReferenceLookupErrorCode, document.ReferenceLookupErrorMessage = state.ErrorCode, state.ErrorMessage
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_stage_test.go.
+// ---------------------------------------------------------------------------
+
+// TestClassifyTaskError verifies the task disposition contract: transient failures
+// retry, known terminal inputs skip, and stale or cancelled work is revoked, with
+// an explicit skip marker taking precedence.
+func TestClassifyTaskError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want TaskDisposition
+	}{
+		{name: "nil retries", err: nil, want: TaskDispositionRetry},
+		{name: "catalog unavailable skips", err: ErrPaperInfoCatalogUnavailable, want: TaskDispositionSkip},
+		{name: "missing match skips", err: ErrPaperCatalogNoMatch, want: TaskDispositionSkip},
+		{name: "invalid payload skips", err: types.ErrInvalidPaperInfoTaskPayload, want: TaskDispositionSkip},
+		{name: "unsupported recognizer skips", err: types.ErrUnsupportedRecognitionContentType, want: TaskDispositionSkip},
+		{name: "grpc invalid argument skips", err: status.Error(codes.InvalidArgument, "bad input"), want: TaskDispositionSkip},
+		{name: "grpc unavailable retries", err: status.Error(codes.Unavailable, "offline"), want: TaskDispositionRetry},
+		{name: "database error retries", err: errors.New("database unavailable"), want: TaskDispositionRetry},
+		{name: "stale work revokes", err: ErrStalePaperInfo, want: TaskDispositionRevoke},
+		{name: "cancelled work revokes", err: context.Canceled, want: TaskDispositionRevoke},
+		{name: "missing row revokes", err: sql.ErrNoRows, want: TaskDispositionRevoke},
+		{name: "explicit skip wins", err: errors.Join(errors.New("x"), asynq.SkipRetry), want: TaskDispositionSkip},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := ClassifyTaskError(test.err); got != test.want {
+				t.Fatalf("ClassifyTaskError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+// TestFinishDocumentStageTaskMatchesRouterClassification verifies that stage finish
+// handling matches router classification: terminal errors fail, retryable errors
+// requeue, and stale generations leave the running stage untouched.
+func TestFinishDocumentStageTaskMatchesRouterClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want types.DocumentStageStatus
+	}{
+		{name: "skip retry fails stage", err: ErrPaperInfoCatalogUnavailable, want: types.DocumentStageFailed},
+		{name: "terminal grpc fails stage", err: status.Error(codes.InvalidArgument, "bad input"), want: types.DocumentStageFailed},
+		{name: "retryable grpc requeues stage", err: status.Error(codes.Unavailable, "offline"), want: types.DocumentStageQueued},
+		{name: "database error requeues stage", err: errors.New("database unavailable"), want: types.DocumentStageQueued},
+		{name: "stale generation leaves stage running", err: ErrStalePaperInfo, want: types.DocumentStageRunning},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			documentID := uuid.New()
+			repo := &documentStatusRepoStub{document: types.Document{
+				ID: documentID, SourceState: types.DocumentSourceAvailable,
+				MarkdownStatus: types.DocumentStageRunning, MarkdownGeneration: 1,
+			}}
+			finishDocumentStageTask(
+				context.Background(), repo, documentID,
+				types.DocumentStageMarkdown, 1, test.err,
+			)
+			if repo.document.MarkdownStatus != test.want {
+				t.Fatalf("markdown status = %q, want %q", repo.document.MarkdownStatus, test.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Consolidated from document_structure_test.go.
+// ---------------------------------------------------------------------------
+
+// TestDocumentStructureRebuildsMissingCorruptAndStaleCache verifies that the
+// structure cache is rebuilt on a miss, corruption, schema mismatch, stale
+// generation, or removed cache file while preserving stable fingerprints where
+// applicable.
+func TestDocumentStructureRebuildsMissingCorruptAndStaleCache(t *testing.T) {
+	documentID := uuid.New()
+	cacheDir := t.TempDir()
+	outlineJSON, err := (types.DocumentOutline{SchemaVersion: 1, Source: types.DocumentOutlineNone,
+		Sections: []types.DocumentOutlineSection{}, Diagnostics: []string{"empty"}}).JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, FileSHA256: "abc", SourceState: types.DocumentSourceAvailable},
+		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/current.md",
+			DocumentOutline: outlineJSON, RecognitionGeneration: 3},
+		blocks: []types.Block{{ID: uuid.New(), DocumentID: documentID, Ordinal: 0, Type: "text"}},
+	}
+	service := NewDocumentStructureService(config.Config{DocumentStructureCacheDir: cacheDir,
+		DocumentStructureCacheEntries: 2, DocumentStructureCacheMaxBytes: 1 << 20}, repository)
+
+	first, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil {
+		t.Fatalf("first structure read: %v", err)
+	}
+	cachePath := filepath.Join(cacheDir, documentID.String()+".json")
+	if _, err := os.Stat(cachePath); err != nil {
+		t.Fatalf("cache was not written: %v", err)
+	}
+	cached, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil || cached.Fingerprint != first.Fingerprint || cached.SchemaVersion != 6 {
+		t.Fatalf("cache hit = %#v, error=%v", cached, err)
+	}
+	if err := os.WriteFile(cachePath, []byte("broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rebuilt, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil || rebuilt.Fingerprint != first.Fingerprint || rebuilt.SchemaVersion != 6 {
+		t.Fatalf("corrupt cache rebuild = %#v, error=%v", rebuilt, err)
+	}
+	cacheData, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheData = bytes.Replace(cacheData, []byte(`"schemaVersion":6`), []byte(`"schemaVersion":5`), 1)
+	if err := os.WriteFile(cachePath, cacheData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upgraded, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil || upgraded.SchemaVersion != 6 {
+		t.Fatalf("schema cache rebuild = %#v, error=%v", upgraded, err)
+	}
+	repository.markdown.RecognitionGeneration = 4
+	staleRebuilt, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil {
+		t.Fatalf("stale cache rebuild: %v", err)
+	}
+	if staleRebuilt.Fingerprint == first.Fingerprint || staleRebuilt.RecognitionGeneration != 4 {
+		t.Fatalf("stale cache was reused: %#v", staleRebuilt)
+	}
+	if err := os.Remove(cachePath); err != nil {
+		t.Fatal(err)
+	}
+	cacheLossRebuilt, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil || cacheLossRebuilt.Fingerprint != staleRebuilt.Fingerprint {
+		t.Fatalf("cache loss rebuild = %#v, error=%v", cacheLossRebuilt, err)
+	}
+}
+
+type blockingStructureRepository struct {
+	*documentStatusRepoStub
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	calls   atomic.Int32
+}
+
+func (r *blockingStructureRepository) GetMarkdown(ctx context.Context, documentID uuid.UUID) (types.DocumentMarkdown, error) {
+	r.calls.Add(1)
+	r.once.Do(func() { close(r.started) })
+	select {
+	case <-ctx.Done():
+		return types.DocumentMarkdown{}, ctx.Err()
+	case <-r.release:
+		return r.documentStatusRepoStub.GetMarkdown(ctx, documentID)
+	}
+}
+
+// TestDocumentStructureOmitsRecognitionHintAfterSuccessfulMarkdown verifies that
+// the recognition hint is omitted once markdown succeeds but retained while the
+// markdown stage is still running.
+func TestDocumentStructureOmitsRecognitionHintAfterSuccessfulMarkdown(t *testing.T) {
+	documentID := uuid.New()
+	outlineJSON, err := types.LegacyDocumentOutline().JSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, FileSHA256: "abc", SourceState: types.DocumentSourceAvailable,
+			MarkdownStatus: types.DocumentStageSucceeded},
+		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/current.md",
+			DocumentOutline: outlineJSON, RecognitionGeneration: 1},
+	}
+	service := NewDocumentStructureService(config.Config{DocumentStructureCacheDir: t.TempDir(),
+		DocumentStructureCacheEntries: 2, DocumentStructureCacheMaxBytes: 1 << 20}, repository)
+
+	structure, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil {
+		t.Fatalf("structure read: %v", err)
+	}
+	for _, diagnostic := range structure.Diagnostics {
+		if diagnostic == "recognize_document_to_create_outline" {
+			t.Fatalf("successful markdown still produced a recognition hint: %#v", structure.Diagnostics)
+		}
+	}
+
+	repository.document.MarkdownStatus = types.DocumentStageRunning
+	repository.markdown.RecognitionGeneration = 2
+	running, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil {
+		t.Fatalf("running structure read: %v", err)
+	}
+	found := false
+	for _, diagnostic := range running.Diagnostics {
+		if diagnostic == "recognize_document_to_create_outline" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unfinished markdown should keep the recognition hint: %#v", running.Diagnostics)
+	}
+}
+
+// TestDocumentStructureSingleflightKeepsCompileAfterFirstCallerCancels verifies
+// that singleflight compilation continues after the first caller cancels so the
+// remaining caller receives the shared result from one compile.
+func TestDocumentStructureSingleflightKeepsCompileAfterFirstCallerCancels(t *testing.T) {
+	documentID := uuid.New()
+	outline, _ := (types.DocumentOutline{SchemaVersion: 1, Source: types.DocumentOutlineNone,
+		Sections: []types.DocumentOutlineSection{}}).JSON()
+	repository := &blockingStructureRepository{
+		documentStatusRepoStub: &documentStatusRepoStub{
+			document: types.Document{ID: documentID, FileSHA256: "abc", SourceState: types.DocumentSourceAvailable},
+			markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/current.md",
+				DocumentOutline: outline, RecognitionGeneration: 1},
+		},
+		started: make(chan struct{}), release: make(chan struct{}),
+	}
+	service := NewDocumentStructureService(config.Config{DocumentStructureCacheDir: t.TempDir(),
+		DocumentStructureCacheEntries: 2, DocumentStructureCacheMaxBytes: 1 << 20}, repository)
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstResult := make(chan error, 1)
+	go func() {
+		_, err := service.GetDocumentReadingStructure(firstCtx, documentID.String())
+		firstResult <- err
+	}()
+	<-repository.started
+
+	secondResult := make(chan error, 1)
+	secondInvoked := make(chan struct{})
+	go func() {
+		close(secondInvoked)
+		_, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+		secondResult <- err
+	}()
+	<-secondInvoked
+	select {
+	case err := <-secondResult:
+		t.Fatalf("second caller returned before shared compile was released: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	cancelFirst()
+	if err := <-firstResult; !errors.Is(err, context.Canceled) {
+		t.Fatalf("first caller error = %v, want context.Canceled", err)
+	}
+	close(repository.release)
+	if err := <-secondResult; err != nil {
+		t.Fatalf("second caller did not receive shared result: %v", err)
+	}
+	if calls := repository.calls.Load(); calls != 1 {
+		t.Fatalf("shared compile calls = %d, want 1", calls)
+	}
+}
+
+// TestDocumentStructureResponseIsBounded verifies that a structure response
+// exceeding the configured cache byte limit is rejected as too large.
+func TestDocumentStructureResponseIsBounded(t *testing.T) {
+	documentID := uuid.New()
+	outline, _ := (types.DocumentOutline{SchemaVersion: 1, Source: types.DocumentOutlineNone,
+		Sections: []types.DocumentOutlineSection{}}).JSON()
+	repository := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, SourceState: types.DocumentSourceAvailable},
+		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/current.md", DocumentOutline: outline},
+	}
+	service := NewDocumentStructureService(config.Config{DocumentStructureCacheDir: t.TempDir(),
+		DocumentStructureCacheEntries: 1, DocumentStructureCacheMaxBytes: 32}, repository)
+	_, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if !errors.Is(err, ErrDocumentStructureTooLarge) {
+		t.Fatalf("error = %v, want ErrDocumentStructureTooLarge", err)
+	}
+}
+
+// TestDocumentStructureCacheWriteFailureIsNonFatal verifies that an unwritable
+// structure cache does not fail the read and that a legacy outline is returned as
+// unavailable.
+func TestDocumentStructureCacheWriteFailureIsNonFatal(t *testing.T) {
+	documentID := uuid.New()
+	parent := t.TempDir()
+	cachePath := filepath.Join(parent, "not-a-directory")
+	if err := os.WriteFile(cachePath, []byte("occupied"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	legacy, _ := types.LegacyDocumentOutline().JSON()
+	repository := &documentStatusRepoStub{
+		document: types.Document{ID: documentID, FileSHA256: "abc", SourceState: types.DocumentSourceAvailable},
+		markdown: types.DocumentMarkdown{DocumentID: documentID, StorageKey: "markdown/legacy.md", DocumentOutline: legacy},
+	}
+	service := NewDocumentStructureService(config.Config{DocumentStructureCacheDir: cachePath,
+		DocumentStructureCacheEntries: 2, DocumentStructureCacheMaxBytes: 1 << 20}, repository)
+	structure, err := service.GetDocumentReadingStructure(context.Background(), documentID.String())
+	if err != nil {
+		t.Fatalf("structure read must survive cache failure: %v", err)
+	}
+	if structure.Outline.Source != types.DocumentOutlineUnavailable {
+		t.Fatalf("legacy outline source = %q", structure.Outline.Source)
+	}
+}
+
+// TestDocumentStructureStartupEvictsOldestCacheFiles verifies that structure
+// service startup trims the cache to the configured entry count by removing the
+// oldest files.
+func TestDocumentStructureStartupEvictsOldestCacheFiles(t *testing.T) {
+	cacheDir := t.TempDir()
+	for index, name := range []string{"a.json", "b.json", "c.json"} {
+		path := filepath.Join(cacheDir, name)
+		if err := os.WriteFile(path, []byte(`{}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Unix(int64(index+1), 0)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = NewDocumentStructureService(config.Config{DocumentStructureCacheDir: cacheDir,
+		DocumentStructureCacheEntries: 2, DocumentStructureCacheMaxBytes: 1024}, &documentStatusRepoStub{})
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 2 || entries[0].Name() != "b.json" || entries[1].Name() != "c.json" {
+		t.Fatalf("remaining cache files = %#v", entries)
 	}
 }

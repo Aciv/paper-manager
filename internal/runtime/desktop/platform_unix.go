@@ -30,6 +30,14 @@ func Acquire(root string) (*InstanceLock, error) {
 	return &InstanceLock{f}, nil
 }
 func (l *InstanceLock) Close() error { return l.file.Close() }
+
+func lockBundleFile(f *os.File) (*InstanceLock, error) {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		return nil, fmt.Errorf("runtime is in use: %w", err)
+	}
+	return &InstanceLock{f}, nil
+}
 func prepareProcess(cmd *exec.Cmd) (func(), func(), error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	return func() {}, func() {

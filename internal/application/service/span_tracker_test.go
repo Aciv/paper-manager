@@ -84,6 +84,8 @@ func (*spanRepositoryStub) AggregateParentDisplay(context.Context, uuid.UUID) (t
 
 var _ interfaces.DocumentProcessingSpanRepository = (*spanRepositoryStub)(nil)
 
+// TestSpanRecorderBeginChildPersistsParentAndHeartbeats verifies that a child
+// span persists its parent reference and can be refreshed by its returned ID.
 func TestSpanRecorderBeginChildPersistsParentAndHeartbeats(t *testing.T) {
 	repo := &spanRepositoryStub{}
 	tracker := NewSpanTracker(repo)
@@ -107,6 +109,8 @@ func TestSpanRecorderBeginChildPersistsParentAndHeartbeats(t *testing.T) {
 	}
 }
 
+// TestSpanTrackerExposesNarrowWriterAndReaderViewsOfSameInstance verifies that
+// the narrow writer and reader adapters share the original tracker instance.
 func TestSpanTrackerExposesNarrowWriterAndReaderViewsOfSameInstance(t *testing.T) {
 	tracker := NewSpanTracker(&spanRepositoryStub{})
 	if NewSpanRecorder(tracker) != tracker || NewProcessingViewQuery(tracker) != tracker {
@@ -114,6 +118,8 @@ func TestSpanTrackerExposesNarrowWriterAndReaderViewsOfSameInstance(t *testing.T
 	}
 }
 
+// TestProcessingQueryKeepsBoundedObservationRows verifies that the view retains
+// observation rows for each independently attempted stage kind.
 func TestProcessingQueryKeepsBoundedObservationRows(t *testing.T) {
 	documentID := uuid.New()
 	tracker := NewSpanTracker(&spanRepositoryStub{rows: []types.DocumentProcessingSpan{
@@ -129,6 +135,8 @@ func TestProcessingQueryKeepsBoundedObservationRows(t *testing.T) {
 	}
 }
 
+// TestProcessingQueryUsesCurrentStageControlState verifies that the view derives
+// all four stage states from the document columns and sanitizes raw error text.
 func TestProcessingQueryUsesCurrentStageControlState(t *testing.T) {
 	documentID, canonicalID := uuid.New(), uuid.New()
 	raw := "private provider response"
@@ -149,6 +157,8 @@ func TestProcessingQueryUsesCurrentStageControlState(t *testing.T) {
 
 func ptr(value string) *string { return &value }
 
+// TestSpanRecorderDoesNotReopenTerminalSpan verifies that beginning a span fails
+// when the repository reports that it is already in a terminal state.
 func TestSpanRecorderDoesNotReopenTerminalSpan(t *testing.T) {
 	repo := &spanRepositoryStub{upsertStatus: types.ProcessingSpanCancelled}
 	recorder := NewSpanTracker(repo)
@@ -160,6 +170,8 @@ func TestSpanRecorderDoesNotReopenTerminalSpan(t *testing.T) {
 	}
 }
 
+// TestSpanRecorderPersistsOnlyCanonicalFailure verifies that finished spans and
+// classified errors store only the canonical, redacted failure text.
 func TestSpanRecorderPersistsOnlyCanonicalFailure(t *testing.T) {
 	repo := &spanRepositoryStub{}
 	recorder := NewSpanTracker(repo)
@@ -177,6 +189,8 @@ func TestSpanRecorderPersistsOnlyCanonicalFailure(t *testing.T) {
 	}
 }
 
+// TestProcessingQueryRedactsPersistedErrors verifies that serialized processing
+// views omit raw provider error text, hosts, tokens, and attributes.
 func TestProcessingQueryRedactsPersistedErrors(t *testing.T) {
 	documentID := uuid.New()
 	raw := "https://token@example.internal/api response body private"

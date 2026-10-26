@@ -6,6 +6,8 @@ import (
 	"time"
 )
 
+// TestParentShutdownPipe verifies that a standalone server ignores stdin while a child
+// server watches the parent pipe and requests shutdown only after parent EOF.
 func TestParentShutdownPipe(t *testing.T) {
 	if parentShutdown(false, nil) != nil {
 		t.Fatal("standalone server unexpectedly watches stdin")

@@ -1,0 +1,136 @@
+# CI-only: run the entire D2 stack as an ordinary Windows account.
+param(
+    [string]$RedisServer,
+    [string]$Bundle,
+    [string]$Harness,
+    [string]$OutputDirectory,
+    [switch]$Upgrade,
+    [switch]$UserUninstall
+)
+$ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true') {
+    throw 'Run only in an ephemeral GitHub Actions Windows runner'
+}
+$account = 'pm_desktop_' + ([guid]::NewGuid().ToString('N').Substring(0, 8))
+$password = ConvertTo-SecureString ('Pm!' + [guid]::NewGuid().ToString('N')) -AsPlainText -Force
+$credential = [pscredential]::new("$env:COMPUTERNAME\$account", $password)
+$root = Join-Path $env:PUBLIC $account
+$repo = $env:GITHUB_WORKSPACE
+$output = if ($OutputDirectory) { $OutputDirectory } else { Join-Path $repo 'tmp/desktop-d0/launcher' }
+$python = (Get-Command python).Source
+if (-not $Bundle) { $bin = Split-Path (Get-Command pg_ctl).Source }
+$savedChildEnvironment = @{}
+foreach ($name in @('TEMP', 'TMP', 'USERPROFILE', 'HOME', 'APPDATA', 'LOCALAPPDATA')) {
+    $savedChildEnvironment[$name] = [Environment]::GetEnvironmentVariable($name)
+}
+try {
+    New-LocalUser -Name $account -Password $password -AccountNeverExpires | Out-Null
+    $members = Get-LocalGroupMember -SID 'S-1-5-32-545'
+    if (-not ($members | Where-Object { $_.Name -eq "$env:COMPUTERNAME\$account" })) {
+        Add-LocalGroupMember -SID 'S-1-5-32-545' -Member $account
+    }
+    New-Item -ItemType Directory -Path $root | Out-Null
+    $acl = Get-Acl $root
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($sid in @('S-1-5-18', 'S-1-5-32-544')) {
+        $identity = [System.Security.Principal.SecurityIdentifier]::new($sid)
+        $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $identity, 'FullControl', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+        $acl.AddAccessRule($rule)
+    }
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+        "$env:COMPUTERNAME\$account", 'Modify', 'ContainerInherit,ObjectInherit', 'None', 'Allow')
+    $acl.AddAccessRule($rule)
+    Set-Acl $root $acl
+    # Credential startup loads a registry profile but inherits the caller's
+    # environment. The ordinary account must not use the admin runner's paths.
+    $profileRoot = Join-Path $root 'profile'
+    $childEnvironment = @{
+        TEMP = (Join-Path $root 'temp'); TMP = (Join-Path $root 'temp')
+        USERPROFILE = $profileRoot; HOME = $profileRoot
+        APPDATA = (Join-Path $profileRoot 'AppData/Roaming')
+        LOCALAPPDATA = (Join-Path $profileRoot 'AppData/Local')
+    }
+    foreach ($name in $childEnvironment.Keys) {
+        New-Item -ItemType Directory -Path $childEnvironment[$name] -Force | Out-Null
+        [Environment]::SetEnvironmentVariable($name, $childEnvironment[$name])
+    }
+    if ($Bundle) {
+        $arguments = @(
+            ('"' + (Join-Path $Harness 'check_desktop_launcher.py') + '"'),
+            '--bundle', ('"' + $Bundle + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'result') + '"'),
+            '--temp-root', ('"' + $root + '"'), '--ascii-paths'
+        )
+    } else {
+        $arguments = @(
+            ('"' + (Join-Path $repo 'scripts/desktop/check_desktop_launcher.py') + '"'),
+            '--repository', ('"' + $repo + '"'),
+            '--launcher', ('"' + (Join-Path $repo 'tmp/desktop-d0/bin/launcher.exe') + '"'),
+            '--server', ('"' + (Join-Path $repo 'tmp/desktop-d0/bin/server.exe') + '"'),
+            '--postgres-bin', ('"' + $bin + '"'),
+            '--redis-server', ('"' + $RedisServer + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'result') + '"'),
+            '--temp-root', ('"' + $root + '"'), '--ascii-paths'
+        )
+    }
+    $process = Start-Process -FilePath $python -ArgumentList $arguments -Credential $credential `
+        -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
+        -RedirectStandardOutput (Join-Path $root 'stdout.log') `
+        -RedirectStandardError (Join-Path $root 'stderr.log')
+    New-Item -ItemType Directory -Path $output -Force | Out-Null
+    Copy-Item (Join-Path $root 'result/*') $output -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $root '*.log') $output -ErrorAction SilentlyContinue
+    $report = Get-Content (Join-Path $output 'launcher.json') -Raw | ConvertFrom-Json
+    if ($process.ExitCode -ne 0 -or $report.status -ne 'passed' -or $report.is_admin -ne $false) {
+        throw 'Ordinary-account Launcher probe failed; see launcher.json and service logs'
+    }
+    if ($Upgrade) {
+        if (-not $Bundle -or -not $Harness) { throw 'Upgrade probe requires Bundle and Harness' }
+        $upgradeArguments = @(
+            ('"' + (Join-Path $Harness 'check_desktop_upgrade.py') + '"'),
+            '--bundle', ('"' + $Bundle + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'upgrade-result') + '"'),
+            '--temp-root', ('"' + $root + '"'), '--ascii-paths'
+        )
+        $upgradeProcess = Start-Process -FilePath $python -ArgumentList $upgradeArguments -Credential $credential `
+            -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
+            -RedirectStandardOutput (Join-Path $root 'upgrade-stdout.log') `
+            -RedirectStandardError (Join-Path $root 'upgrade-stderr.log')
+        $upgradeOutput = Join-Path $output 'upgrade'
+        New-Item -ItemType Directory -Path $upgradeOutput -Force | Out-Null
+        Copy-Item (Join-Path $root 'upgrade-result/*') $upgradeOutput -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $root 'upgrade-*.log') $upgradeOutput -ErrorAction SilentlyContinue
+        $upgradeReport = Get-Content (Join-Path $upgradeOutput 'upgrade.json') -Raw | ConvertFrom-Json
+        if ($upgradeProcess.ExitCode -ne 0 -or $upgradeReport.status -ne 'passed' -or
+            $upgradeReport.is_admin -ne $false) {
+            throw 'Ordinary-account upgrade probe failed; see upgrade/upgrade.json'
+        }
+    }
+    if ($UserUninstall) {
+        if (-not $Bundle -or -not $Harness) { throw 'User probe requires Bundle and Harness' }
+        $userArguments = @(
+            ('"' + (Join-Path $Harness 'check_user_uninstall.py') + '"'),
+            '--delivery', ('"' + (Split-Path $Bundle) + '"'),
+            '--output-dir', ('"' + (Join-Path $root 'user-result') + '"'),
+            '--temp-root', ('"' + $root + '"')
+        )
+        $userProcess = Start-Process -FilePath $python -ArgumentList $userArguments -Credential $credential `
+            -LoadUserProfile -WorkingDirectory $root -Wait -PassThru `
+            -RedirectStandardOutput (Join-Path $root 'user-stdout.log') `
+            -RedirectStandardError (Join-Path $root 'user-stderr.log')
+        $userOutput = Join-Path $output 'user-uninstall'
+        New-Item -ItemType Directory -Path $userOutput -Force | Out-Null
+        Copy-Item (Join-Path $root 'user-result/*') $userOutput -ErrorAction SilentlyContinue
+        Copy-Item (Join-Path $root 'user-*.log') $userOutput -ErrorAction SilentlyContinue
+        $userReport = Get-Content (Join-Path $userOutput 'uninstall.json') -Raw | ConvertFrom-Json
+        if ($userProcess.ExitCode -ne 0 -or $userReport.status -ne 'passed') {
+            throw 'Ordinary-account configuration/uninstall probe failed; see user-uninstall/uninstall.json'
+        }
+    }
+} finally {
+    foreach ($name in $savedChildEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $savedChildEnvironment[$name])
+    }
+    Remove-LocalUser -Name $account -ErrorAction SilentlyContinue
+}

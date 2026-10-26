@@ -15,31 +15,31 @@ help:
 	@echo "  make dev-stop           Stop development infrastructure; keep volumes"
 
 dev:
-	./scripts/dev.sh all
+	./scripts/dev/dev.sh all
 
 dev-start:
-	./scripts/dev.sh start
+	./scripts/dev/dev.sh start
 
 dev-stop:
-	./scripts/dev.sh stop
+	./scripts/dev/dev.sh stop
 
 dev-restart:
-	./scripts/dev.sh restart
+	./scripts/dev/dev.sh restart
 
 dev-status:
-	./scripts/dev.sh status
+	./scripts/dev/dev.sh status
 
 dev-logs:
-	./scripts/dev.sh source-logs "$(SERVICE)"
+	./scripts/dev/dev.sh source-logs "$(SERVICE)"
 
 dev-infra-logs:
-	./scripts/dev.sh logs
+	./scripts/dev/dev.sh logs
 
 dev-app:
-	./scripts/dev.sh app
+	./scripts/dev/dev.sh app
 
 dev-parser:
-	./scripts/dev.sh parser
+	./scripts/dev/dev.sh parser
 
 dev-frontend:
-	./scripts/dev.sh frontend
+	./scripts/dev/dev.sh frontend

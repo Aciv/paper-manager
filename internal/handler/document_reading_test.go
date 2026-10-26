@@ -55,6 +55,8 @@ func readingHandlerTestEngine(stub *documentReadingServiceStub) *gin.Engine {
 	return engine
 }
 
+// TestDocumentReadingHandlerRendersPageImage verifies that a page image request
+// with dpi and bbox query parameters returns the rendered PNG and content type.
 func TestDocumentReadingHandlerRendersPageImage(t *testing.T) {
 	id := uuid.New()
 	stub := &documentReadingServiceStub{}
@@ -77,6 +79,8 @@ func TestDocumentReadingHandlerRendersPageImage(t *testing.T) {
 	}
 }
 
+// TestDocumentReadingHandlerRejectsInvalidPageBBox verifies that a malformed
+// bbox query value is rejected with 400.
 func TestDocumentReadingHandlerRejectsInvalidPageBBox(t *testing.T) {
 	id := uuid.New()
 	engine := readingHandlerTestEngine(&documentReadingServiceStub{})
@@ -92,6 +96,8 @@ func TestDocumentReadingHandlerRejectsInvalidPageBBox(t *testing.T) {
 	}
 }
 
+// TestDocumentReadingHandlerReturnsMarkdown verifies that the Markdown endpoint
+// returns the parsed bytes with a filename-bearing Content-Disposition.
 func TestDocumentReadingHandlerReturnsMarkdown(t *testing.T) {
 	id := uuid.New()
 	stub := &documentReadingServiceStub{markdown: types.DocumentMarkdownContent{
@@ -107,6 +113,9 @@ func TestDocumentReadingHandlerReturnsMarkdown(t *testing.T) {
 	}
 }
 
+// TestDocumentReadingHandlerReturnsStructureAndMapsMissing verifies that the
+// structure endpoint returns the outline without blocks and maps a missing
+// document to 404.
 func TestDocumentReadingHandlerReturnsStructureAndMapsMissing(t *testing.T) {
 	id := uuid.New()
 	stub := &documentReadingServiceStub{structure: types.DocumentReadingStructure{

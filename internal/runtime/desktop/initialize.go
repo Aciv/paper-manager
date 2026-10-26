@@ -71,23 +71,22 @@ func (r *Runtime) validateFiles() error {
 }
 
 func (r *Runtime) initialize(ctx context.Context, done chan struct{}) {
-	defer close(done)
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.StartupTimeout)
 	defer cancel()
 	if err := r.initializeData(ctx); err != nil {
 		if ctx.Err() != nil {
-			r.setState("stopped", "")
+			r.finishCycle(done, "stopped", "")
 		} else {
-			r.setState("failed", err.Error())
 			logger.Error(ctx, "desktop initialization failed", "error", r.cfg.redact(err.Error()))
+			r.finishCycle(done, "failed", err.Error())
 		}
 		return
 	}
 	r.mu.Lock()
 	r.state.Initialized = true
 	r.mu.Unlock()
-	r.setState("stopped", "")
 	logger.Info(ctx, "desktop initialization completed")
+	r.finishCycle(done, "stopped", "")
 }
 
 func (r *Runtime) initializeData(ctx context.Context) error {

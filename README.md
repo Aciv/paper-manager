@@ -39,14 +39,15 @@ Agent 阅读和总结需要自行配置支持 MCP 的客户端及模型，应用
 3. 浏览器打开管理页。首次点击“首次初始化 / 重试”，完成后点击“启动”。
 4. 以后从同一入口启动即可；退出时使用管理页的“退出 Launcher”。关闭浏览器不会停止服务。
 
-程序和用户数据分开保存；Windows 请使用完整 ASCII 路径。需要指定数据位置时：
+数据默认保存在解压目录的 `data/`，启动配置 `.launcher_env` 位于根目录。建议使用纯英文路径。
+Launcher 运行、其他服务停止时，可在管理页“配置”修改端口和并发。需要指定其他数据位置时：
 
 ```powershell
 .\paper_manager.exe --data-dir C:/paper_manager_data
 ```
 
-默认数据位置、可选安装脚本、更新限制和卸载见
-[解压运行与维护](packaging/desktop/INSTALL.md)。自行制作包见[构建说明](packaging/desktop/BUILD.md)。
+默认数据位置、更新限制和卸载见
+[解压运行与维护](packaging/desktop/USER.md)。自行制作包见[构建说明](packaging/desktop/BUILD.md)。
 
 ### Docker Compose
 

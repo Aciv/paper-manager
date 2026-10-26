@@ -60,6 +60,20 @@ func Acquire(root string) (*InstanceLock, error) {
 }
 func (l *InstanceLock) Close() error { return l.file.Close() }
 
+func lockBundleFile(f *os.File) (*InstanceLock, error) {
+	overlap := windows.Overlapped{Offset: 0xfffffffe, OffsetHigh: 0x7fffffff}
+	lock := &InstanceLock{file: f, overlap: overlap}
+	err := windows.LockFileEx(
+		windows.Handle(f.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK|windows.LOCKFILE_FAIL_IMMEDIATELY,
+		0, 1, 0, &lock.overlap,
+	)
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("runtime is in use: %w", err)
+	}
+	return lock, nil
+}
+
 var jobs sync.Map // cmd pointer -> private kill-on-close job
 func prepareProcess(cmd *exec.Cmd) (func(), func(), error) {
 	job, err := windows.CreateJobObject(nil, nil)
