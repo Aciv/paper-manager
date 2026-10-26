@@ -260,7 +260,10 @@ async function targetTextByLink(page: PDFPageProxy, links: PDFLinkPreview[]): Pr
 
 // Link annotations become geometric hotspots; hovering one previews the
 // target region as original PDF pixels (no citation matching involved).
-export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Promise<PDFLinkPreview[]> {
+export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy, signal?: AbortSignal): Promise<PDFLinkPreview[]> {
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw new DOMException('PDF link scan aborted', 'AbortError');
+  };
   const pagePromises = new Map<number, Promise<PDFPageProxy>>();
   const getPage = (pageNumber: number) => {
     let page = pagePromises.get(pageNumber);
@@ -273,9 +276,12 @@ export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Pro
 
   const links: PDFLinkPreview[] = [];
   for (let sourcePageNumber = 1; sourcePageNumber <= pdfDocument.numPages; sourcePageNumber += 1) {
+    throwIfAborted();
     const sourcePage = await getPage(sourcePageNumber);
+    throwIfAborted();
     const sourceViewport = sourcePage.getViewport({ scale: 1 });
     const annotations = await sourcePage.getAnnotations();
+    throwIfAborted();
     for (let annotationIndex = 0; annotationIndex < annotations.length; annotationIndex += 1) {
       const annotation = annotations[annotationIndex] as { id?: string; subtype?: string; rect?: unknown; dest?: unknown };
       if (annotation.subtype !== 'Link' || !annotation.dest) continue;
@@ -291,15 +297,18 @@ export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Pro
         const destination = namedDestination
           ? await pdfDocument.getDestination(annotation.dest as string)
           : annotation.dest;
+        throwIfAborted();
         if (!Array.isArray(destination) || destination.length === 0) continue;
 
         const pageReference = destination[0];
         const targetPageIndex = typeof pageReference === 'number'
           ? pageReference
           : await pdfDocument.getPageIndex(pageReference);
+        throwIfAborted();
         const targetPageNumber = targetPageIndex + 1;
         if (targetPageNumber < 1 || targetPageNumber > pdfDocument.numPages) continue;
         const targetPage = await getPage(targetPageNumber);
+        throwIfAborted();
         const targetViewport = targetPage.getViewport({ scale: 1 });
         const pdfPoint = destinationPDFPoint(destination);
         if (!pdfPoint) continue;
@@ -318,7 +327,9 @@ export async function collectPDFLinkPreviews(pdfDocument: PDFDocumentProxy): Pro
             y: Math.min(targetViewport.height, Math.max(0, targetY)),
           },
         });
-      } catch {
+      } catch (error) {
+        // Abort is not a malformed annotation: stop the whole scan at once.
+        if (signal?.aborted) throw error;
         // A malformed destination disables only that link. Other native links
         // in the document can still provide trustworthy geometric previews.
       }
@@ -359,15 +370,40 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
   const rootRef = useRef<HTMLDivElement>(null);
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [loadError, setLoadError] = useState('');
+  const [inView, setInView] = useState(false);
   const [areaDraft, setAreaDraft] = useState<NormalizedPDFRegion>();
   const dragStart = useRef<{ pointerId: number; x: number; y: number } | undefined>(undefined);
   const drawStart = useRef<{ pointerId: number; points: Array<{ x: number; y: number }> } | undefined>(undefined);
   const [previewState, setPreviewState] = useState<{ linkID: string; url?: string; error?: string }>();
   const previewRequest = useRef(0);
+  // Parsed blocks are only needed for block picking or for drawing evidence.
+  // Never fetch them for every page of the document up front: a long PDF would
+  // issue one request (and keep one React state tree) per page even though the
+  // reader renders only a few pages at a time.
+  const needsBlocks = Boolean(documentId) && (mode === 'block' || evidence.length > 0);
 
   useEffect(() => {
-    // A local file has no parsed blocks; its overlay stays empty.
-    if (!documentId) {
+    const node = rootRef.current;
+    if (!node) return;
+    if (typeof IntersectionObserver === 'undefined') {
+      setInView(true);
+      return;
+    }
+    const root = node.closest('.pdf-viewer-scroll');
+    const observer = new IntersectionObserver(([entry]) => {
+      setInView(Boolean(entry?.isIntersecting));
+    }, {
+      root: root instanceof Element ? root : null,
+      rootMargin: '150% 0px',
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    // A local file has no parsed blocks; hidden pages and text-only reading do
+    // not need them either.
+    if (!documentId || !needsBlocks || !inView) {
       setBlocks([]);
       setLoadError('');
       return;
@@ -378,7 +414,7 @@ const PageOverlay = memo(function PageOverlay({ documentId, selectionTarget, pag
       .then(result => { if (active) setBlocks(result.items); })
       .catch(error => { if (active) setLoadError(error instanceof Error ? error.message : '无法读取解析块。'); });
     return () => { active = false; };
-  }, [documentId, pageNumber]);
+  }, [documentId, pageNumber, needsBlocks, inView]);
 
   // The page element is pdf.js's; text selection is reported from it because
   // this overlay stays pointer-events:none in text mode.
@@ -1022,7 +1058,10 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
 
     const onPagesInit = () => {
       // Continuous reading fills the width; a single page or a spread fits the
-      // whole page into the viewport.
+      // whole page into the viewport. `setDocument` resets both modes, so a
+      // switch must re-apply the device-local presentation choice here.
+      viewer.scrollMode = viewModeRef.current === 'continuous' ? ScrollMode.VERTICAL : ScrollMode.PAGE;
+      viewer.spreadMode = viewModeRef.current === 'double' ? SpreadMode.ODD : SpreadMode.NONE;
       viewer.currentScaleValue = viewModeRef.current === 'continuous' ? 'page-width' : 'page-fit';
       setZoom(viewer.currentScale);
       syncSlots();
@@ -1115,6 +1154,9 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       }, 120);
     };
     bus?.on('pagesinit', onRestorePages);
+    // A page-by-page link scan can outlive its document when the user switches
+    // papers; let the cleanup stop it instead of retaining old page proxies.
+    const linksAbort = new AbortController();
     // A stored document streams from the content endpoint; a local file is read
     // straight off disk.
     const loading = localFile
@@ -1124,7 +1166,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
     void loading.then(task => {
       opened.task = task;
       if (disposed) {
-        void task.destroy();
+        void task.destroy().catch(() => {});
         return undefined;
       }
       return task.promise.then(pdfDocument => {
@@ -1147,7 +1189,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
           });
           if (!disposed && pdfLoadGeneration.current === generation) setNativeOutline(entries);
         }).catch(() => { if (!disposed) setNativeOutline([]); });
-        void collectPDFLinkPreviews(pdfDocument).then(links => {
+        void collectPDFLinkPreviews(pdfDocument, linksAbort.signal).then(links => {
           if (disposed || pdfLoadGeneration.current !== generation) return;
           setLinks(links);
           setLinksByPage(groupLinks(links));
@@ -1161,12 +1203,22 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
 
     return () => {
       disposed = true;
+      linksAbort.abort();
       bus?.off('pagesinit', onRestorePages);
       window.clearTimeout(positionSaveTimer.current);
       // Flush the latest page of the source being left.
       if (!restoreGuard.current) saveReadingPage(readingKey, latestPageRef.current);
       restoreGuard.current = false;
       pdfDocumentRef.current = undefined;
+      // Detach the old document before destroying its loading task. Otherwise
+      // pdf.js keeps its page views and in-flight render tasks attached to a
+      // transport whose worker is already gone: renderView can then throw
+      // "sendWithStream of null", and the old canvases stay alive while the
+      // next PDF is downloading. setDocument(null) cancels rendering and clears
+      // the page DOM immediately.
+      // pdf.js accepts null at runtime but its typings only declare the
+      // document argument; the null value is what resets the viewer.
+      if (viewerRef.current === viewer) viewer.setDocument(null as unknown as PDFDocumentProxy);
       linkServiceRef.current?.setDocument(null);
       setSlots([]);
       setPageCount(0);
@@ -1181,7 +1233,7 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
       setFindMatches(null);
       setFindState(null);
       eventBusRef.current?.dispatch('findbarclose', { source: null });
-      if (opened.task) void opened.task.destroy();
+      if (opened.task) void opened.task.destroy().catch(() => {});
     };
   }, [sourceKey, localFile, documentId, readingKey, onMessage]);
 
@@ -1222,7 +1274,9 @@ export function PdfReader({ document, file, citations = [], onCitationLinks, onT
         if (cancelled) return;
         try {
           const page = await pdfDocument.getPage(pageNumber);
+          if (cancelled) return;
           const targetTexts = await targetTextByLink(page, pageLinks);
+          if (cancelled) return;
           for (const link of pageLinks) {
             const matched = matchCitationTargets(targetTexts.get(link.id) ?? '', citations)
               .map(match => citationsByID.get(match.referenceId))

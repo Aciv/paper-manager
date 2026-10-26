@@ -441,12 +441,15 @@ export function ReadingNotePanel({
 
   // Load only the active section body. Draft state always mirrors the saved
   // body after a section switch; unsaved changes are saved before switching.
+  // In read mode the chapter reader owns this fetch (it loads the whole
+  // chapter); asking here too duplicated every active-section request.
   useEffect(() => {
     if (!activeEntry) {
       setDraft('');
       setSavedMarkdown('');
       return;
     }
+    if (viewMode === 'read' && readingChapter.length > 0) return;
     const cached = sections[activeEntry.id];
     if (cached) {
       setSavedMarkdown(cached.markdown);
@@ -473,7 +476,7 @@ export function ReadingNotePanel({
       })
       .finally(() => { if (active) setSectionLoading(''); });
     return () => { active = false; };
-  }, [activeEntry, documentId, sections]);
+  }, [activeEntry, documentId, sections, viewMode, readingChapter.length]);
 
   // Only the selected section contributes PDF overlays. Cached bodies for
   // other sections stay available for fast switching but never mark the PDF
