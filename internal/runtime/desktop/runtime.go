@@ -323,7 +323,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		fail(err)
 		return
 	}
-	if err = r.ready(startup, postgres, func(check context.Context) error {
+	if err = r.ready(startup, "等待数据库启动或崩溃恢复完成", postgres, func(check context.Context) error {
 		db, e := pgx.Connect(check, r.dsn())
 		if e != nil {
 			return e
@@ -355,7 +355,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		return
 	}
 	redisReady := func(check context.Context) error { return rc.Ping(check).Err() }
-	if err = r.ready(startup, redisProcess, redisReady); err != nil {
+	if err = r.ready(startup, "等待任务队列加载已有任务", redisProcess, redisReady); err != nil {
 		fail(fmt.Errorf("Redis readiness failed; see redis.log: %w", err))
 		return
 	}
@@ -377,7 +377,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 	}
 	defer connection.Close()
 	connection.Connect()
-	if err = r.ready(startup, parser, func(check context.Context) error {
+	if err = r.ready(startup, "等待论文解析服务就绪", parser, func(check context.Context) error {
 		if connection.GetState() == connectivity.Ready {
 			return nil
 		}
@@ -395,7 +395,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		return
 	}
 	client := &http.Client{Timeout: time.Second}
-	if err = r.ready(startup, api, func(check context.Context) error {
+	if err = r.ready(startup, "等待论文库就绪（含数据库结构检查及必要升级）", api, func(check context.Context) error {
 		req, _ := http.NewRequestWithContext(check, "GET", r.Snapshot().AppURL+"/health", nil)
 		resp, e := client.Do(req)
 		if e != nil {
@@ -436,7 +436,13 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 	}
 }
 
-func (r *Runtime) ready(ctx context.Context, c *child, check func(context.Context) error) error {
+func (r *Runtime) ready(ctx context.Context, stage string, c *child, check func(context.Context) error) error {
+	return RunWithProgress(ctx, stage, func() error {
+		return r.waitReady(ctx, c, check)
+	})
+}
+
+func (r *Runtime) waitReady(ctx context.Context, c *child, check func(context.Context) error) error {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {

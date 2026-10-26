@@ -74,7 +74,9 @@ func (r *Runtime) initialize(ctx context.Context, done chan struct{}) {
 	logger.Info(ctx, "开始初始化应用数据，初始化完成后请启动服务")
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.StartupTimeout)
 	defer cancel()
-	if err := r.initializeData(ctx); err != nil {
+	if err := RunWithProgress(ctx, "初始化或检查应用数据", func() error {
+		return r.initializeData(ctx)
+	}); err != nil {
 		if ctx.Err() != nil {
 			r.finishCycle(done, "stopped", "")
 		} else {

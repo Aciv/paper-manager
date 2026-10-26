@@ -1,17 +1,57 @@
 package desktop
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"paperMaster/internal/logger"
 
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var consoleMu sync.Mutex
+
+// RunWithProgress describes Launcher-owned work without forwarding service logs.
+// Completion means the operation succeeded; a heartbeat only means it is pending.
+func RunWithProgress(ctx context.Context, stage string, operation func() error) error {
+	return runWithProgress(ctx, stage, 5*time.Second, operation)
+}
+
+func runWithProgress(ctx context.Context, stage string, interval time.Duration, operation func() error) error {
+	started := time.Now()
+	logger.Info(ctx, "正在处理，请稍候", "stage", stage)
+	stop, done := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				logger.Info(ctx, "仍在处理，请稍候", "stage", stage, "elapsed", time.Since(started).Round(time.Second))
+			}
+		}
+	}()
+	err := operation()
+	close(stop)
+	<-done
+	if err == nil {
+		logger.Info(ctx, "处理完成", "stage", stage, "elapsed", time.Since(started).Round(time.Millisecond))
+	} else {
+		logger.Warn(ctx, "处理未完成，请查看后续提示", "stage", stage)
+	}
+	return err
+}
 
 // ConfigureLogging is owned by the Launcher entry point, not business servers.
 // File and console output share the same line-based credential redaction.

@@ -128,7 +128,12 @@ func run() (runErr error) {
 			break
 		}
 	}
-	cfg, err := openConfig(*root, *install)
+	var cfg desktop.Config
+	err = desktop.RunWithProgress(ctx, "校验程序文件、检查数据兼容性并适配已有配置", func() error {
+		var configErr error
+		cfg, configErr = openConfig(*root, *install)
+		return configErr
+	})
 	if err != nil {
 		return err
 	}
@@ -158,6 +163,7 @@ func run() (runErr error) {
 	logger.Info(ctx, "Launcher 已启动", "data_dir", cfg.DataDir,
 		"config_file", filepath.Join(cfg.DataDir, "runtime.json"),
 		"log_dir", filepath.Join(cfg.DataDir, "logs"))
+	logger.Info(ctx, "配置已就绪；已有论文和笔记将继续使用，数据库结构检查或升级在服务启动时执行")
 	app := desktop.New(cfg)
 	app.EnableConfigReload()
 	if *initialize {
