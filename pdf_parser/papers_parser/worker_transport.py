@@ -14,6 +14,9 @@ import signal
 import socket
 import subprocess
 import threading
+import time
+
+from papers_parser.worker_protocol import WorkerProtocolError, recv_exact
 
 TOKEN_ENV = "PAPERS_PARSER_WORKER_TOKEN"
 PARENT_ENV = "PAPERS_PARSER_OWNED_WORKER"
@@ -130,7 +133,8 @@ def listen(path: Path, backlog: int) -> socket.socket:
         raise
 
 
-def connect(path: Path, token: str, timeout: float = 0.5) -> socket.socket:
+def connect(path: Path, token: str, timeout: float = 0.5, *,
+            deadline: float | None = None, cancel_check=None) -> socket.socket:
     tcp = _uses_tcp(path)
     connection = socket.socket(socket.AF_INET if tcp else socket.AF_UNIX,
                                socket.SOCK_STREAM)
@@ -144,7 +148,17 @@ def connect(path: Path, token: str, timeout: float = 0.5) -> socket.socket:
             connection.connect(("127.0.0.1", port))
             connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             connection.sendall(token.encode("ascii"))
-            if connection.recv(1) != b"\x01":
+            try:
+                if deadline is None:
+                    ack = connection.recv(1)
+                else:
+                    ack = recv_exact(
+                        connection, 1, deadline=deadline, clock=time.monotonic,
+                        cancel_check=cancel_check,
+                    )
+            except WorkerProtocolError as exc:
+                raise OSError("worker authentication failed") from exc
+            if ack != b"\x01":
                 raise OSError("worker authentication failed")
         else:
             connection.connect(str(path))

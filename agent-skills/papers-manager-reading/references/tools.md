@@ -6,6 +6,10 @@ capabilities to the reading workflow.
 | Tool | Use |
 | --- | --- |
 | `papers_manager_library_search` / `papers_manager_library_get` | Resolve a paper and read L0 metadata. |
+| `papers_manager_library_get_many` | Read metadata for 1–200 document IDs in one call. |
+| `papers_manager_processing_status_many` | Check markdown readiness for 1–200 documents before batch note generation. |
+| `papers_manager_base_list` / `papers_manager_base_get` | Resolve Base identity and member count. |
+| `papers_manager_base_list_documents` | Read actual Base membership before a Base summary/comparison or batch note run. |
 | `papers_manager_document_structure` | Read the persisted source outline and diagnostics. |
 | `papers_manager_document_read_section` | Read one source outline section by ordinal, using its Markdown/page/Block mapping. |
 | `papers_manager_document_read_markdown` | Read bounded full source Markdown when a section cannot be addressed through the outline. |
@@ -24,6 +28,7 @@ capabilities to the reading workflow.
 
 Do not use library-management tools such as `papers_manager_library_delete` from this skill.
 Do not claim that `base_summary` exists until it is registered in the MCP
-manifest.
+manifest. Batch note generation uses the same reading tools; its orchestration
+rules are in [batch-notes.md](batch-notes.md).
 
 MCP arguments use snake_case (`document_id`, `section_id`, `expected_revision`). The HTTP API's camelCase field names do not apply to tool arguments.

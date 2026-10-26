@@ -1,4 +1,4 @@
-# Base summary HTML templates
+# Base summary/comparison HTML templates
 
 These files are standalone report shells for the `papers-manager-reading` Base
 summary workflow. They share one placeholder contract and one content policy,
@@ -44,10 +44,12 @@ templates rather than duplicating the entire content contract into another file.
 
 The section headings in the templates (`核心结论`, `对比`, `分论文`,
 `证据缺口`, `成员状态`) are a display scaffold, not a required information
-architecture. Rename, merge, split, reorder, or omit them as the comparison
-requires. Keep the content requirements, link policy, persistence path and HTML
-safety rules from [../base-summary.md](../base-summary.md); this README only
-covers style.
+architecture. Rename, merge, split, reorder, or omit them as the task requires:
+in summary mode, `对比` can become `主题` or `方法版图`, the `比较维度` header
+can become `主题`/`论文`/`证据`, and the comparison table can become a
+theme/coverage matrix. Keep the content requirements, link policy, persistence
+path and HTML safety rules from [../base-summary.md](../base-summary.md); this
+README only covers style.
 
 ## Shared placeholder contract
 
@@ -58,17 +60,17 @@ between styles without rewriting its content:
 | --- | --- |
 | `{{REPORT_TITLE}}` | Plain text for `<title>`; escape it |
 | `{{BASE_NAME}}` | Base display name |
-| `{{SCOPE_SUMMARY}}` | One-paragraph scope and comparison question |
+| `{{SCOPE_SUMMARY}}` | One-paragraph scope and the comparison question or summary scope |
 | `{{BASE_URL}}` | `http://localhost:5173/#/library?base=<base_id>` |
 | `{{BASE_ID}}` | Base UUID |
 | `{{GENERATED_AT}}` | Generation timestamp with timezone |
 | `{{MEMBER_COUNT}}` | Total Base members |
-| `{{SELECTED_COUNT}}` | Members included in the comparison |
-| `{{SKIPPED_COUNT}}` | Members excluded from the comparison |
+| `{{SELECTED_COUNT}}` | Members included in the report |
+| `{{SKIPPED_COUNT}}` | Members excluded from the report |
 | `{{TAKEAWAYS}}` | HTML fragment: short answer and key conclusions |
-| `{{COMPARISON_CAPTION}}` | Table caption text |
+| `{{COMPARISON_CAPTION}}` | Table caption text; rename for a theme/coverage matrix |
 | `{{COMPARISON_HEADER_CELLS}}` | Repeated `<th scope="col">...</th>` cells |
-| `{{COMPARISON_ROWS}}` | Repeated `<tr>...</tr>` comparison rows |
+| `{{COMPARISON_ROWS}}` | Repeated `<tr>...</tr>` rows; comparison or theme coverage |
 | `{{PAPER_CARDS}}` | Repeated `<article class="paper-card">...</article>` blocks |
 | `{{EVIDENCE_GAPS}}` | Repeated `<li>...</li>` gap items |
 | `{{MEMBER_STATUS_ROWS}}` | Repeated `<li>...</li>` member status items |
@@ -144,8 +146,8 @@ a single template. The recurring signals across the references were:
 - digital-first report design: KPI/big-number modules, editorial storytelling,
   responsive tables, accessibility and print adaptivity.
 
-For a Base summary, these are presentation choices only. They do not change the
-comparison method, reading budgets, or evidence requirements.
+For a Base summary or comparison, these are presentation choices only. They do
+not change the analysis method, reading budgets, or evidence requirements.
 
 ### Sources consulted
 

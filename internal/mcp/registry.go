@@ -25,6 +25,7 @@ func (s *ToolServer) toolHandlers() map[string]toolHandler {
 		"papers_manager_library_get_many":             jsonTool(s.libraryGetMany),
 		"papers_manager_library_import_url":           jsonTool(s.libraryImportURL),
 		"papers_manager_library_import_urls":          jsonTool(s.libraryImportURLs),
+		"papers_manager_library_import_status":        jsonTool(s.libraryImportStatus),
 		"papers_manager_library_import_file":          jsonTool(s.libraryImportFile),
 		"papers_manager_library_import_files":         jsonTool(s.libraryImportFiles),
 		"papers_manager_library_update_metadata":      jsonTool(s.libraryUpdateMetadata),

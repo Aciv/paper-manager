@@ -73,7 +73,7 @@ curl -sS http://127.0.0.1:8090/mcp \
 | OpenCode | `opencode.json` 中的 `mcp` | `.opencode/skills/`、`.agents/skills/`、`.claude/skills/` |
 | DeepSeek Harness | MCP Center 或 MCP 客户端插件 | `.dsh/skills/`、`~/.dsh/skills/`、`.agents/skills/` |
 
-服务端清单有 47 个工具。宿主可能加命名空间前缀，不必逐个手动注册工具。
+服务端清单有 48 个工具。宿主可能加命名空间前缀，不必逐个手动注册工具。
 配置后重启或重新加载客户端，再检查工具是否可见。
 
 ## 3. Claude Code
@@ -331,5 +331,6 @@ ssh -L 8090:127.0.0.1:8090 user@server
 Agent 可执行修改和删除，与网页操作使用同一资源权限。按宿主能力设置确认策略；
 本地导入只开放明确目录，不向客户端返回私有存储路径。
 
-更多格式约束见[阅读笔记契约](../reading-note-agent-contract.md)和
-[笔记标准](../../agent-skills/papers-manager-reading/references/notes-standard.md)。
+更多格式约束见[阅读笔记契约](../reading-note-agent-contract.md)、
+[笔记标准](../../agent-skills/papers-manager-reading/references/notes-standard.md)和
+[批量阅读与笔记生成](../../agent-skills/papers-manager-reading/references/batch-notes.md)。

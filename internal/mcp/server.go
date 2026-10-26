@@ -69,9 +69,25 @@ type ToolServer struct {
 	processing   interfaces.ProcessingViewQuery
 	server       *sdk.Server
 	registry     map[string]registeredTool
-	// importSlots bounds concurrent import tool calls. URL imports download
-	// synchronously inside the request, so this mirrors the HTTP upload gate.
+	urlImports   interfaces.URLImportService
+	// importSlots bounds synchronous local-file acceptance calls. Remote
+	// downloads are handled by the shared background queue.
 	importSlots chan struct{}
+}
+
+// NewToolServerWithURLImports wires durable URL acceptance for the application
+// while keeping the lightweight constructor usable by independent adapters.
+func NewToolServerWithURLImports(
+	cfg config.Config, documents interfaces.DocumentService, reading interfaces.DocumentReadingService,
+	notes interfaces.NoteReadingService, papers interfaces.PaperService, bases interfaces.DocumentBaseService,
+	bibliography interfaces.BibliographyService, paperInfo interfaces.PaperInfoService,
+	processing interfaces.ProcessingViewQuery, imports interfaces.URLImportService,
+) (*ToolServer, error) {
+	server, err := NewToolServer(cfg, documents, reading, notes, papers, bases, bibliography, paperInfo, processing)
+	if err == nil {
+		server.urlImports = imports
+	}
+	return server, err
 }
 
 // NewToolServer is the production DI constructor. It deliberately accepts the

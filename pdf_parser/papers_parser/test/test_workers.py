@@ -628,6 +628,91 @@ class FrameBoundaryTest(unittest.TestCase):
         self.assertEqual(connection.calls, 0)
 
 
+class BusyTCPHandshakeTest(unittest.TestCase):
+    def _run_handshake(self, delay, budget, cancel=None):
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(transport, "_TCP", True), \
+                mock.patch.dict(os.environ, {transport.TOKEN_ENV: "a" * 64}):
+            path = Path(directory) / "worker.sock"
+            listener = transport.listen(path, 4)
+            errors = []
+
+            def acknowledge():
+                try:
+                    connection, _ = listener.accept()
+                    with connection:
+                        connection.recv(64)
+                        time.sleep(delay)
+                        try:
+                            connection.sendall(b"\x01")
+                        except OSError:
+                            pass
+                except Exception as exc:
+                    errors.append(exc)
+
+            server = threading.Thread(target=acknowledge)
+            server.start()
+            try:
+                return transport.connect(path, "a" * 64, timeout=.02,
+                                         deadline=time.monotonic() + budget, cancel_check=cancel)
+            finally:
+                server.join(timeout=2)
+                listener.close()
+                self.assertFalse(server.is_alive())
+                self.assertFalse(errors)
+
+    def test_busy_worker_ack_outlives_socket_poll_timeout(self):
+        connection = self._run_handshake(delay=.12, budget=1)
+        connection.close()
+
+    def test_shared_call_survives_ack_delayed_beyond_500ms(self):
+        from papers_parser.worker_pool import SharedWorkerHandle
+        from papers_parser.worker_protocol import STATUS_OK, recv_exact
+        with tempfile.TemporaryDirectory() as directory, \
+                mock.patch.object(transport, "_TCP", True):
+            path = Path(directory) / "worker.sock"
+            listener = transport.listen(path, 4)
+            errors = []
+
+            def respond():
+                try:
+                    connection, _ = listener.accept()
+                    with connection:
+                        connection.settimeout(2)
+                        recv_exact(connection, 64)
+                        time.sleep(.7)
+                        connection.sendall(b"\x01")
+                        method, payload = read_frame(connection, max_payload_bytes=128)
+                        self.assertEqual(payload, b"request")
+                        write_frame(connection, STATUS_OK, b"response")
+                except Exception as exc:
+                    errors.append(exc)
+
+            server = threading.Thread(target=respond)
+            server.start()
+            worker = SharedWorkerHandle(kind="extract", process=mock.Mock(), socket_path=path,
+                                        temp_dir=Path(directory), max_jobs=20, max_payload_bytes=128)
+            worker.token = "a" * 64
+            try:
+                response = worker.call(METHOD_EXTRACT, b"request", cancel_check=lambda: False, timeout=2)
+                self.assertEqual(response, b"response")
+                self.assertEqual(worker.jobs, 1)
+            finally:
+                server.join(timeout=3)
+                listener.close()
+                self.assertFalse(server.is_alive())
+                self.assertFalse(errors)
+
+    def test_handshake_still_obeys_request_deadline(self):
+        with self.assertRaises(TimeoutError):
+            self._run_handshake(delay=.2, budget=.06)
+
+    def test_handshake_obeys_request_cancellation(self):
+        from papers_parser.worker_protocol import WorkerCancelled
+        with self.assertRaises(WorkerCancelled):
+            self._run_handshake(delay=.12, budget=1, cancel=lambda: True)
+
+
 if __name__ == "__main__":
     if "--kind" in sys.argv:
         child()

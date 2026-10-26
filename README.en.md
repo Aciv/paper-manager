@@ -56,7 +56,7 @@ To select a data directory:
 ```
 
 See [usage and maintenance](packaging/desktop/USER.md) for default data locations,
-update limitations and removal; see [building packages](packaging/desktop/BUILD.md)
+manual updates preserving data and removal; see [building packages](packaging/desktop/BUILD.md)
 for producing your own bundle. Supporting documentation is maintained in Chinese, except existing
 packaging reference materials.
 
@@ -130,7 +130,7 @@ Source runs require `MCP_ENABLED=true`; for Launcher runs, copy the actual conne
 from the management page.
 
 - `papers-manager-library`: import, metadata, collections, and references.
-- `papers-manager-reading`: layered reading, section notes, evidence, and Base comparison reports.
+- `papers-manager-reading`: layered reading, single/batch notes, evidence, and Base summary/comparison reports.
 
 ## Documentation and license
 

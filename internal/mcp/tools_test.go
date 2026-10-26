@@ -47,6 +47,7 @@ func resultText(t *testing.T, result *sdk.CallToolResult) string {
 }
 
 type behaviorDocumentService struct {
+	beforeLocalBatch func()
 	interfaces.DocumentService
 	importedPath       string
 	lastDocumentID     uuid.UUID
@@ -143,8 +144,11 @@ func (s *behaviorDocumentService) CreateDocumentsFromURLs(
 func (s *behaviorDocumentService) CreateDocumentsFromLocalFiles(
 	_ context.Context, paths []string, dois []string,
 ) (types.DocumentBatchResult, error) {
-	s.batchPaths = append([]string(nil), paths...)
-	s.batchDOIs = append([]string(nil), dois...)
+	if s.beforeLocalBatch != nil {
+		s.beforeLocalBatch()
+	}
+	s.batchPaths = append(s.batchPaths, paths...)
+	s.batchDOIs = append(s.batchDOIs, dois...)
 	return s.batchResult(
 		len(paths),
 		func(index int) string { return filepath.Base(paths[index]) },
@@ -604,46 +608,53 @@ func TestNoteAndBlockImageToolsDispatch(t *testing.T) {
 	}
 }
 
-// TestBatchURLImportToolReturnsPerItemResultsAndAttachesBase verifies that URL
-// batch import forwards DOIs, attaches every imported item to the base, and
-// returns per-item results.
-func TestBatchURLImportToolReturnsPerItemResultsAndAttachesBase(t *testing.T) {
+type behaviorURLImports struct {
+	interfaces.URLImportService
+	commands  []types.DocumentURLImportCommand
+	baseID    string
+	requestID string
+	snapshot  types.URLImportTask
+}
+
+func (s *behaviorURLImports) EnqueueURLs(_ context.Context, commands []types.DocumentURLImportCommand,
+	baseID, requestID string) (types.URLImportTask, error) {
+	s.commands, s.baseID, s.requestID = commands, baseID, requestID
+	return types.URLImportTask{ID: "url-import-" + uuid.NewString(), State: "queued", Total: len(commands), BaseID: baseID}, nil
+}
+func (s *behaviorURLImports) GetURLImportTask(context.Context, string) (types.URLImportTask, error) {
+	return s.snapshot, nil
+}
+
+func TestBatchURLImportReturnsQueuedTaskWithoutDownloading(t *testing.T) {
 	documents := &behaviorDocumentService{}
 	bases := &behaviorBaseService{}
-	server, err := NewToolServer(config.Config{
-		MCPAddress: "127.0.0.1:8090", MCPMaxRequestBytes: 8 << 20,
-		MCPImportConcurrency: 2, BatchImportTimeout: time.Minute,
-	}, documents, nil, nil, nil, bases, nil, nil, nil)
+	imports := &behaviorURLImports{}
+	server, err := NewToolServerWithURLImports(config.Config{MCPAddress: "127.0.0.1:8090", MCPMaxRequestBytes: 8 << 20},
+		documents, nil, nil, nil, bases, nil, nil, nil, imports)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := connectTestClient(t, server)
-	baseID := uuid.NewString()
+	baseID, requestID := uuid.NewString(), uuid.NewString()
 	result := callTool(t, client, "papers_manager_library_import_urls", map[string]any{
-		"urls": []string{
-			"https://example.org/a.pdf",
-			"https://example.org/b.pdf",
-		},
-		"dois":    []string{"10.1000/a", ""},
-		"base_id": baseID,
+		"urls": []string{"https://example.org/a.pdf", "https://example.org/b.pdf"},
+		"dois": []string{"10.1000/a", ""}, "base_id": baseID, "request_id": requestID,
 	})
 	if result.IsError {
-		t.Fatalf("batch import failed: %s", resultText(t, result))
+		t.Fatalf("queue failed: %s", resultText(t, result))
 	}
-	if len(documents.batchURLs) != 2 {
-		t.Fatalf("batch URLs = %#v", documents.batchURLs)
+	if len(imports.commands) != 2 || imports.commands[0].DOI != "10.1000/a" || imports.baseID != baseID || imports.requestID != requestID {
+		t.Fatal("queue lost URL, DOI, Base or idempotency arguments")
 	}
-	if documents.batchURLs[0].DOI != "10.1000/a" || documents.batchURLs[1].DOI != "" {
-		t.Fatalf("batch DOIs = %#v", documents.batchURLs)
+	if len(documents.batchURLs) != 0 || len(bases.addedDocuments) != 0 {
+		t.Fatal("MCP call downloaded or attached before the background worker")
 	}
-	if len(bases.addedDocuments) != 2 {
-		t.Fatalf("base memberships = %#v, want 2", bases.addedDocuments)
+	if !strings.Contains(resultText(t, result), `"state":"queued"`) {
+		t.Fatalf("task handle missing: %s", resultText(t, result))
 	}
-	text := resultText(t, result)
-	for _, want := range []string{`"items"`, `"baseId"`, "https://example.org/a.pdf", "https://example.org/b.pdf"} {
-		if !strings.Contains(text, want) {
-			t.Fatalf("result missing %q: %s", want, text)
-		}
+	result = callTool(t, client, "papers_manager_library_import_url", map[string]any{"url": "https://example.org/single.pdf"})
+	if result.IsError || len(imports.commands) != 1 {
+		t.Fatal("single URL did not share the queue path")
 	}
 }
 
@@ -659,6 +670,14 @@ func TestBatchFileImportToolReturnsPerItemResultsAndAttachesBase(t *testing.T) {
 	}
 	documents := &behaviorDocumentService{}
 	bases := &behaviorBaseService{}
+	localCalls := 0
+	documents.beforeLocalBatch = func() {
+		if len(bases.addedDocuments) != localCalls {
+			t.Fatal("previous local import was not attached before next file")
+		}
+		localCalls++
+	}
+
 	server, err := NewToolServer(config.Config{
 		MCPAddress: "127.0.0.1:8090", MCPMaxRequestBytes: 8 << 20,
 		MCPLocalImportRoot: root, MaxUploadSize: 1 << 20, MCPImportConcurrency: 2,
@@ -676,6 +695,10 @@ func TestBatchFileImportToolReturnsPerItemResultsAndAttachesBase(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("batch import failed: %s", resultText(t, result))
 	}
+	if localCalls != 2 {
+		t.Fatalf("local files were not accepted independently: %d calls", localCalls)
+	}
+
 	if len(documents.batchPaths) != 2 {
 		t.Fatalf("batch paths = %#v", documents.batchPaths)
 	}
@@ -909,33 +932,24 @@ func TestBatchReadToolsEnforceIDLimits(t *testing.T) {
 	}
 }
 
-// TestBatchImportAttachesExistingDuplicateToBase verifies that duplicate batch
-// items, which resolve to already-available documents, are still attached to the
-// requested base and reported with duplicate status.
-func TestBatchImportAttachesExistingDuplicateToBase(t *testing.T) {
-	documents := &behaviorDocumentService{batchStatus: types.DocumentImportItemDuplicate}
-	bases := &behaviorBaseService{}
-	server, err := NewToolServer(config.Config{
-		MCPAddress: "127.0.0.1:8090", MCPMaxRequestBytes: 8 << 20,
-		MCPImportConcurrency: 2,
-	}, documents, nil, nil, nil, bases, nil, nil, nil)
+func TestURLImportStatusReturnsPartialResultsAndDocumentIDs(t *testing.T) {
+	id, documentID := "url-import-"+uuid.NewString(), uuid.New()
+	imports := &behaviorURLImports{snapshot: types.URLImportTask{ID: id, State: "running", Total: 2, Completed: 1,
+		Result: &types.DocumentBatchResult{Items: []types.DocumentBatchItemResult{{Index: 0,
+			Status: types.DocumentImportItemDuplicate, Document: &types.Document{ID: documentID}}}}}}
+	server, err := NewToolServerWithURLImports(config.Config{MCPAddress: "127.0.0.1:8090", MCPMaxRequestBytes: 8 << 20},
+		nil, nil, nil, nil, nil, nil, nil, nil, imports)
 	if err != nil {
 		t.Fatal(err)
 	}
-	client := connectTestClient(t, server)
-	baseID := uuid.NewString()
-	result := callTool(t, client, "papers_manager_library_import_urls", map[string]any{
-		"urls":    []string{"https://example.org/existing-a.pdf", "https://example.org/existing-b.pdf"},
-		"base_id": baseID,
-	})
+	result := callTool(t, connectTestClient(t, server), "papers_manager_library_import_status", map[string]any{"task_id": id})
 	if result.IsError {
-		t.Fatalf("duplicate batch import failed: %s", resultText(t, result))
+		t.Fatal(resultText(t, result))
 	}
-	if len(bases.addedDocuments) != 2 {
-		t.Fatalf("base memberships = %#v, want existing duplicates attached", bases.addedDocuments)
-	}
-	if !strings.Contains(resultText(t, result), `"status":"duplicate"`) {
-		t.Fatalf("result = %s", resultText(t, result))
+	for _, want := range []string{`"state":"running"`, `"completed":1`, `"status":"duplicate"`, documentID.String()} {
+		if !strings.Contains(resultText(t, result), want) {
+			t.Fatalf("progress missing %s: %s", want, resultText(t, result))
+		}
 	}
 }
 
@@ -1093,5 +1107,20 @@ func TestManifestUsesIndependentBaseAndCitationCollections(t *testing.T) {
 	}
 	if groups["base"] != 10 || groups["citation"] != 9 {
 		t.Fatalf("group counts = %#v", groups)
+	}
+}
+
+type disconnectAwareBase struct{ interfaces.DocumentBaseService }
+
+func (disconnectAwareBase) AddDocumentToBase(ctx context.Context, _, _ string) error {
+	return ctx.Err()
+}
+
+func TestCommittedLocalImportAttachesBaseAfterClientDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	server := &ToolServer{bases: disconnectAwareBase{}}
+	if err := server.attachImportedDocumentToBase(ctx, uuid.NewString(), &types.Document{ID: uuid.New()}); err != nil {
+		t.Fatalf("committed upload was stranded outside its Base: %v", err)
 	}
 }

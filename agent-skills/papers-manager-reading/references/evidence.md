@@ -81,9 +81,9 @@ When a claim is useful but cannot be tied to the source, mark it explicitly:
 Do not invent a page/rect/Block to satisfy the format. It is better to keep an
 honest gap than a false precision.
 
-## Base comparison
+## Base summary and comparison
 
-In a Base summary, every material comparison should have:
+In a Base report, every material comparison or synthesis claim should have:
 
 - one document-level library link per paper claim, optionally naming the relevant
   note section in the link text, or

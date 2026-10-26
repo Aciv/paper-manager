@@ -103,7 +103,8 @@ func classifyToolError(err error) toolFailureDetails {
 		return toolFailureDetails{Code: "FORBIDDEN", Message: "local file path is outside the allowed import root"}
 	case errors.Is(err, errImportBusy):
 		return toolFailureDetails{Code: "RESOURCE_EXHAUSTED", Message: "too many concurrent import calls; retry shortly", Retryable: true}
-	case errors.Is(err, appservice.ErrInvalidDocumentFilename),
+	case errors.Is(err, appservice.ErrInvalidURLImport),
+		errors.Is(err, appservice.ErrInvalidDocumentFilename),
 		errors.Is(err, appservice.ErrInvalidDocumentDOI),
 		errors.Is(err, appservice.ErrInvalidDocumentBaseName),
 		errors.Is(err, appservice.ErrInvalidPaperMetadata),
@@ -121,7 +122,8 @@ func classifyToolError(err error) toolFailureDetails {
 		errors.Is(err, types.ErrBibliographyOutputTooLarge),
 		errors.Is(err, appservice.ErrDocumentStructureTooLarge):
 		return toolFailureDetails{Code: "PAYLOAD_TOO_LARGE", Message: "request or response exceeds the MCP limit"}
-	case errors.Is(err, appservice.ErrDocumentParseActive),
+	case errors.Is(err, appservice.ErrURLImportRequestConflict),
+		errors.Is(err, appservice.ErrDocumentParseActive),
 		errors.Is(err, appservice.ErrPaperInfoAttemptActive),
 		errors.Is(err, appservice.ErrReferenceAlreadyResolved),
 		errors.Is(err, types.ErrReferenceDownloadInProgress),
@@ -138,6 +140,10 @@ func classifyToolError(err error) toolFailureDetails {
 		return toolFailureDetails{Code: "UNAVAILABLE", Message: "processing service is temporarily unavailable", Retryable: true}
 	case errors.Is(err, types.ErrBibliographyTaskNotFound):
 		return toolFailureDetails{Code: "NOT_FOUND", Message: "bibliography task was not found"}
+	case errors.Is(err, types.ErrTaskNotFound):
+		return toolFailureDetails{Code: "NOT_FOUND", Message: "import task was not found or has expired"}
+	case errors.Is(err, types.ErrTaskInspectorUnavailable):
+		return toolFailureDetails{Code: "UNAVAILABLE", Message: "import task queue or status is unavailable", Retryable: true}
 	case errors.Is(err, types.ErrBibliographyTaskUnavailable):
 		return toolFailureDetails{Code: "UNAVAILABLE", Message: "bibliography task status is unavailable", Retryable: true}
 	case errors.Is(err, types.ErrRemotePDFUnavailable):

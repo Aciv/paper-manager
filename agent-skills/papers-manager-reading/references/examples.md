@@ -42,6 +42,24 @@ User request: “给这篇论文建一份分析方法部分的笔记，并带原
    reload the section, and re-plan. Never retry the stale payload.
 5. After success, report the new revision and changed section.
 
+## Batch note generation
+
+Read [batch-notes.md](batch-notes.md) before starting. The short version:
+
+1. Resolve the Base or document list, then batch metadata with
+   `papers_manager_library_get_many` and readiness with
+   `papers_manager_processing_status_many` (1–200 IDs per call).
+2. Build a manifest with one action per paper: `create`, `update`, `skip`,
+   `blocked`, or `exclude`. Do not silently overwrite an existing note.
+3. Process at most three papers per wave. Assign one paper to one writer; if the
+   host has subagents that can access the same MCP tools, use one subagent per
+   paper, otherwise process sequentially.
+4. Each worker reads its own note/source outline, then targeted sections; it
+   creates or incrementally updates only that paper's note and returns status,
+   revision, coverage, evidence gaps, and unread scope.
+5. Aggregate per-paper results. Retry only the failed paper, at most once, and
+   report existing notes, blocked papers, and failures separately from success.
+
 ## Section-level mapping
 
 A note section can carry:
@@ -57,14 +75,20 @@ A note section can carry:
 This is metadata for the directory and Agent navigation. It is not a substitute
 for claim-level evidence links.
 
-## Base summary
+## Base summary or comparison
 
 1. `papers_manager_base_list` and `papers_manager_base_get`; record the Base
-   UUID, name, and member count.
-2. Read metadata and note outlines/descriptions for a bounded member set.
-3. Select candidates; read their notes before source sections.
-4. Compare methods/results and verify key claims with page/Blocks. Keep the
-   verification state and a page/section hint for the report.
+   UUID, name, and member count. Decide whether the request is a **comparison**
+   (user gives a question/dimensions), a **summary/synthesis** (themes, method
+   map, consensus, gaps), or a mixed request.
+2. Batch metadata with `papers_manager_library_get_many`; read note outlines and
+   descriptions for a bounded member set. Do not preload every note body.
+3. For comparison, select candidates and read their notes before source sections.
+   For summary, cover all members at metadata/outline level before deepening
+   selected themes.
+4. Compare or synthesize methods/results and verify material claims with
+   page/Blocks. Keep the verification state, source hint, and missing-note
+   status for the report.
 5. Before writing, ask which style to use unless the user already specified one:
    `neutral` (default), `editorial`, `swiss`, `brutalist`, `cyberpunk`, or a
    custom style in one sentence. If the user has no preference, use `neutral`.

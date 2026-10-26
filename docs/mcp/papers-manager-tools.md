@@ -2,7 +2,7 @@
 
 [文档导航](../README.md) · [客户端与技能接入](agent-installation.md)
 
-当前 `internal/mcp` 已实现 47 个工具，分为 `library`、`reading`、`base`、`citation`
+当前 `internal/mcp` 已实现 48 个工具，分为 `library`、`reading`、`base`、`citation`
 四组。精确的工具名称、必填项、枚举和输入模式见[机器清单](papers-manager-tools.json)；
 本文解释行为、边界和消费者应遵守的规则。JSON 字段与工具标识符不翻译。
 
@@ -94,8 +94,9 @@ MCP 是应用服务的适配层，与 HTTP 共用数据库、文件存储、服�
 
 | 工具 | 输入 | 行为 |
 | --- | --- | --- |
-| `papers_manager_library_import_url` | `url`；可选 `doi`、`base_id` | 导入单个 HTTP(S) URL 并启动正常处理 |
-| `papers_manager_library_import_urls` | `urls`；可选 `dois`、`base_id` | 顺序导入 1–20 个 URL；`dois` 省略或与输入等长 |
+| `papers_manager_library_import_url` | `url`；可选 `doi`、`base_id`、`request_id` | 立即返回后台 URL 导入任务 ID |
+| `papers_manager_library_import_urls` | `urls`；可选 `dois`、`base_id`、`request_id` | 后台顺序导入 1–20 个 URL；立即返回任务 ID |
+| `papers_manager_library_import_status` | `task_id` | 读取任务状态、进度和逐项文档 ID，完成结果保留 24 小时 |
 | `papers_manager_library_import_file` | `path`；可选 `doi`、`base_id` | 导入受控目录中的单个普通文件；服务保存副本，不长期引用输入路径 |
 | `papers_manager_library_import_files` | `paths`；可选 `dois`、`base_id` | 导入受控目录中的 1–20 个普通文件 |
 
@@ -104,10 +105,14 @@ URL 只接受 HTTP(S)，下载还受远程 PDF 大小、地址、并发和重定
 本地路径可为绝对路径或相对受控根目录路径，不能越界或通过符号链接逃逸。
 本地批量导入先验证全部路径、类型和大小，一项不合法则整批拒绝，不创建文档。
 
-单项导入返回文档与初始队列状态，不等待全部识别结束；通过处理状态工具适度轮询。
-批量返回 `items`、`stopped`、`error` 和可选 `baseId`，逐项状态为
-`accepted`、`duplicate`、`rejected` 或 `failed`。单项失败不丢弃其他已完成结果。
-URL 批次受 `BATCH_IMPORT_TIMEOUT`（默认 2 分钟）限制，超时保留完成项并标记未处理项。
+URL 工具返回 `id/state/total`，提交后用 `papers_manager_library_import_status(task_id=id)` 有界轮询。
+客户端断开不会取消已接收的 Asynq 下载任务。可选 `request_id` 为 UUID，原输入连同相同 ID 重发会返回原任务；
+同一 ID 不允许换输入。后台结果逐项持久化，并立即把 accepted/duplicate 文档加入 Base。
+查询返回 `queued/running/succeeded/failed`、`completed/total` 和 `result`；`succeeded` 不代表每项成功。
+`result.items` 的逐项状态为 `accepted/duplicate/rejected/failed`；后台 `BATCH_IMPORT_TIMEOUT` 默认 2 分钟，
+到期返回部分结果、`stopped=true` 及未处理项。完成结果在队列保留 24 小时，之后查询返回 NOT_FOUND。
+文档 ID 出现后，使用 processing_status 查询解析状态，不把下载任务完成当作论文解析就绪。
+本地文件工具仍同步保存副本并立即投递解析任务；批量文件每项完成后加入 Base，不等待整批结束。
 
 ### 更新、删除与重试
 
@@ -263,8 +268,11 @@ MCP 直接复用应用服务，不应复制数据库写入逻辑或绕过 revisi
 | 引用 | `/api/paper/{documentID}/citations`、`/api/references/{referenceID}` 及子路径 |
 
 入库技能使用库、状态、Base 与引用工具；阅读技能使用原文、笔记、图片和证据工具。
-Base 比较目前由阅读技能组合已有读取能力，在宿主端生成独立 HTML 报告，
-默认输出 `reports/base-summary/`，模板位于
+批量笔记由阅读技能在宿主端分批加载、按“一篇论文一个写入者”编排，MCP 不提供单独的
+批量生成执行器；具体流程见
+[批量阅读与笔记生成](../../agent-skills/papers-manager-reading/references/batch-notes.md)。
+Base 比较和主题总结目前由阅读技能组合已有读取能力，在宿主端生成独立
+HTML 报告，默认输出 `reports/base-summary/`，模板位于
 `agent-skills/papers-manager-reading/references/html_template/`。
 尚无独立 `base_summary` / `base_compare` 或服务端 LLM 生成工具。
 不提供自动目录扫描；本地批次仅导入明确列出的文件，不提供整篇高清图片批量预渲染。

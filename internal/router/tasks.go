@@ -31,6 +31,7 @@ type AsynqTaskParams struct {
 	DocumentService     interfaces.DocumentService          `optional:"true"`
 	PaperInfoService    interfaces.PaperInfoService         `optional:"true"`
 	BibliographyService interfaces.BibliographyService      `optional:"true"`
+	URLImports          interfaces.URLImportService         `optional:"true"`
 	TaskEnqueuer        interfaces.TaskEnqueuer             `optional:"true"`
 	DeadLetterRepo      interfaces.TaskDeadLetterRepository `optional:"true"`
 }
@@ -142,7 +143,7 @@ func NewAsynqServer(cfg config.Config) *asynq.Server {
 				types.QueueCritical: 6, // Highest priority queue
 				types.QueueDefault:  3, // Default priority queue
 				types.QueueLow:      1, // Lowest priority queue
-				types.QueueDownload: 1, // Explicit user-requested reference downloads
+				types.QueueDownload: 1, // Explicit user-requested downloads/imports
 				//types.QueueMultimodal: 1, // Isolated lane for high-volume slow VLM image tasks
 				//types.QueueGraph:      1, // Isolated lane for high-volume slow graph-extraction tasks
 				//types.QueueQuestion:   1, // Isolated lane for high-volume slow question-generation tasks
@@ -227,6 +228,15 @@ func RunAsynqServer(params AsynqTaskParams) (*asynq.ServeMux, error) {
 		mux.HandleFunc(types.TypeBibliographyGenerate, limitTaskConcurrency(
 			params.Config.BibliographyTaskConcurrency,
 			params.BibliographyService.ProcessBaseBibliography,
+		))
+	}
+	if params.URLImports != nil {
+		importConcurrency := params.Config.RemotePDFDownloadConcurrency
+		if importConcurrency <= 0 {
+			importConcurrency = 2
+		}
+		mux.HandleFunc(types.TypeLibraryImportURLs, limitTaskConcurrency(
+			importConcurrency, params.URLImports.ProcessURLImport,
 		))
 	}
 

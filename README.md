@@ -47,7 +47,7 @@ Launcher 运行、其他服务停止时，可在管理页“配置”修改端�
 .\paper_manager.exe --data-dir C:/paper_manager_data
 ```
 
-默认数据位置、更新限制和卸载见
+默认数据位置、保留数据的手动更新和卸载见
 [解压运行与维护](packaging/desktop/USER.md)。自行制作包见[构建说明](packaging/desktop/BUILD.md)。
 
 ### Docker Compose
@@ -118,7 +118,7 @@ Docker 运行 PostgreSQL 和 Redis；本机运行 API、解析器与前端。
 源码模式需设置 `MCP_ENABLED=true`；Launcher 模式从管理页获取实际连接地址与配置。
 
 - `papers-manager-library`：入库、信息整理、Base 与引用管理。
-- `papers-manager-reading`：分层阅读、章节笔记、证据定位和 Base 比较报告。
+- `papers-manager-reading`：分层阅读、单篇/批量笔记、证据定位，以及 Base 比较/总结报告。
 
 ## 文档与许可
 

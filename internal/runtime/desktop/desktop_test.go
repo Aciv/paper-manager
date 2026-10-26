@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -80,44 +81,162 @@ func TestUnpackedBundleConfigRetainsIdentityAndAllowsIdenticalCopy(t *testing.T)
 	}
 }
 
-// TestUnpackedBundleRefusesSilentVersionChangeAndMissingOldBundle verifies that an
-// unpacked runtime rejects a different build version or a copy whose original bundle
-// disappeared, leaving the persisted identity unchanged.
-func TestUnpackedBundleRefusesSilentVersionChangeAndMissingOldBundle(t *testing.T) {
+func TestIncompletePortableLayoutIsNotTreatedAsSourceLauncher(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "bundle"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BundleDirectory(filepath.Join(root, "paper_manager")); err == nil {
+		t.Fatal("incomplete portable package fell back to old source component paths")
+	}
+}
+
+// A complete data directory can be copied to another compatible release even
+// when the previous runtime is still installed or no longer exists.
+func TestCopiedDataUsesCurrentBundleAndRetainsIdentity(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		for _, removeOld := range []bool{false, true} {
+			t.Run(fmt.Sprintf("legacy=%v/removeOld=%v", legacy, removeOld), func(t *testing.T) {
+				original := testBundle(t, "1.0.0")
+				data := t.TempDir()
+				cfg, err := OpenBundleConfig(data, original)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if legacy {
+					cfg.BundleHash = ""
+				}
+				cfg.Concurrency.Tasks = 12
+				if err := SaveConfig(cfg); err != nil {
+					t.Fatal(err)
+				}
+				if err := writeRecord(filepath.Join(data, "initialized.json"), New(cfg).initializationRecord()); err != nil {
+					t.Fatal(err)
+				}
+				for _, name := range []string{"uploads/paper.pdf", "notes/document/section.md", "postgres/keep-data"} {
+					path := filepath.Join(data, filepath.FromSlash(name))
+					if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.WriteFile(path, []byte("preserve "+name), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				before, err := fileInventory(data, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				copied := filepath.Join(t.TempDir(), "copied data")
+				if err := copyTree(data, copied, false); err != nil {
+					t.Fatal(err)
+				}
+				if removeOld {
+					if err := os.RemoveAll(original); err != nil {
+						t.Fatal(err)
+					}
+				}
+				selected := testBundle(t, "1.0.1")
+				reopened, err := OpenBundleConfig(copied, selected)
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := configForBundle(cfg, selected, cfg.ExtractionEngine)
+				want.DataDir = copied
+				if reopened != want {
+					t.Fatal("copy changed credentials, ports or user settings, or selected old components")
+				}
+				if err := SaveConfig(reopened); err != nil {
+					t.Fatal(err)
+				}
+				if err := New(reopened).checkInitialization(); err != nil {
+					t.Fatalf("copy no longer recognizes initialized data: %v", err)
+				}
+				after, err := fileInventory(copied, false)
+				if err != nil {
+					t.Fatal(err)
+				}
+				delete(before, "runtime.json")
+				delete(after, "runtime.json")
+				if !reflect.DeepEqual(before, after) {
+					t.Fatal("rebinding modified copied database, notes, papers or initialization marker")
+				}
+			})
+		}
+	}
+}
+
+func TestBundleReplacementInPlaceRetainsConfiguration(t *testing.T) {
 	data := t.TempDir()
-	original := testBundle(t, "1.0.0")
-	cfg, err := OpenBundleConfig(data, original)
+	bundle := testBundle(t, "1.0.0")
+	cfg, err := OpenBundleConfig(data, bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := SaveConfig(cfg); err != nil {
 		t.Fatal(err)
 	}
-	// Legacy external configurations have no portable runtime fingerprint.
-	cfg.BundleHash = ""
-	if err := SaveConfig(cfg); err != nil {
+	if err := os.RemoveAll(bundle); err != nil {
 		t.Fatal(err)
 	}
-	before, err := os.ReadFile(filepath.Join(data, "runtime.json"))
+	if err := copyTree(testBundle(t, "1.0.1"), bundle, true); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenBundleConfig(data, bundle)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenBundleConfig(data, testBundle(t, "1.0.1")); err == nil {
-		t.Fatal("another build silently reused the existing database")
+	want := cfg
+	want.BundleHash = reopened.BundleHash
+	if reopened != want || reopened.BundleHash == cfg.BundleHash {
+		t.Fatal("replacement did not refresh only the runtime fingerprint")
 	}
-	copyPath := filepath.Join(t.TempDir(), "copy")
-	if err := copyTree(original, copyPath, true); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(original, original+"-moved"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := OpenBundleConfig(data, copyPath); err == nil {
-		t.Fatal("missing original runtime was guessed instead of checked")
-	}
-	after, err := os.ReadFile(filepath.Join(data, "runtime.json"))
-	if err != nil || string(after) != string(before) {
-		t.Fatal("rejected runtime switch modified existing identity")
+}
+
+func TestInvalidCurrentBundlePreservesExistingConfiguration(t *testing.T) {
+	for _, invalid := range []string{"modified", "incompatible", "malformed", "wrong-platform", "missing-manifest"} {
+		t.Run(invalid, func(t *testing.T) {
+			data := t.TempDir()
+			cfg, err := OpenBundleConfig(data, testBundle(t, "1.0.0"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := SaveConfig(cfg); err != nil {
+				t.Fatal(err)
+			}
+			before, err := os.ReadFile(filepath.Join(data, "runtime.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			selected := testBundle(t, "1.0.1")
+			var manifest bundleManifest
+			if err := readRecord(filepath.Join(selected, "bundle.json"), &manifest); err != nil {
+				t.Fatal(err)
+			}
+			switch invalid {
+			case "modified":
+				err = os.WriteFile(filepath.Join(selected, "web", "index.html"), []byte("partial update"), 0600)
+			case "incompatible":
+				manifest.Compatibility.DataFormat = 2
+				err = writeRecord(filepath.Join(selected, "bundle.json"), manifest)
+			case "malformed":
+				err = os.WriteFile(filepath.Join(selected, "bundle.json"), []byte("{"), 0600)
+			case "wrong-platform":
+				manifest.Target = "unsupported-target"
+				err = writeRecord(filepath.Join(selected, "bundle.json"), manifest)
+			case "missing-manifest":
+				err = os.Remove(filepath.Join(selected, "bundle.json"))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := OpenBundleConfig(data, selected); err == nil {
+				t.Fatal("invalid current package was accepted")
+			}
+			after, err := os.ReadFile(filepath.Join(data, "runtime.json"))
+			if err != nil || !bytes.Equal(before, after) {
+				t.Fatal("invalid replacement changed persisted configuration")
+			}
+		})
 	}
 }
 
@@ -163,8 +282,8 @@ func TestPortableBundleRenameRetainsDataAndSettings(t *testing.T) {
 				t.Fatal(err)
 			}
 			other := testBundle(t, "1.0.1")
-			if _, err := OpenBundleConfig(reopened.DataDir, other); err == nil {
-				t.Fatal("another build silently replaced the portable runtime")
+			if _, err := OpenBundleConfig(reopened.DataDir, other); err != nil {
+				t.Fatalf("compatible replacement after rename was rejected: %v", err)
 			}
 		})
 	}

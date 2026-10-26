@@ -1,6 +1,6 @@
 package types
 
-// MaxDocumentBatchItems bounds one synchronous batch request. Processing is
+// MaxDocumentBatchItems bounds a request or queued URL import. Processing is
 // still asynchronous per document, but bounded acceptance protects the API,
 // storage, and queue from an unbounded browser submission.
 const MaxDocumentBatchItems = 20
@@ -12,9 +12,9 @@ type DocumentURLImportBatchRequest struct {
 	URLs []DocumentURLImportCommand `json:"urls"`
 }
 
-// DocumentImportItemStatus describes the outcome of accepting one input. A
-// batch itself is intentionally not persisted: documents and their lifecycle
-// status remain the durable source of processing progress.
+// DocumentImportItemStatus describes the outcome of accepting one input.
+// HTTP batches do not create database rows. Queued URL imports retain partial
+// results in Asynq; document stages remain the source of PDF processing state.
 type DocumentImportItemStatus string
 
 const (

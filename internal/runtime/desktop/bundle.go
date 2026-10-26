@@ -42,31 +42,42 @@ func BundleDirectory(executable string) (string, error) {
 			return "", err
 		}
 	}
+	if _, err := os.Stat(filepath.Join(directory, "bundle")); err == nil {
+		return "", fmt.Errorf("bundle/ 缺少 bundle.json，请完整解压新版程序")
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
 	// Source development and standalone maintenance helpers have no manifest.
 	return directory, nil
 }
 
-// OpenBundleConfig binds sealed deliveries to the chosen runtime. Persisted
-// credentials and ports are retained; unpacking another runtime directory does
-// not silently select its components for an existing database.
+// OpenBundleConfig uses the selected sealed runtime with existing portable data.
+// Credentials, ports and user settings survive replacement of program files;
+// persisted component paths and fingerprints never select an older runtime.
 func OpenBundleConfig(root, bundle string) (Config, error) {
-	info, err := os.Stat(filepath.Join(bundle, "bundle.json"))
-	if os.IsNotExist(err) {
-		return OpenConfig(root, bundle)
+	if _, err := os.Stat(filepath.Join(bundle, "bundle.json")); os.IsNotExist(err) {
+		cfg, configErr := OpenConfig(root, bundle)
+		if configErr == nil && cfg.BundleHash != "" {
+			return cfg, fmt.Errorf("当前运行包缺少 bundle.json，请完整解压新版；原有数据已保留")
+		}
+		return cfg, configErr
+	} else if err != nil {
+		return Config{}, err
 	}
+	selected, err := filepath.Abs(bundle)
 	if err != nil {
 		return Config{}, err
 	}
-	if info.IsDir() {
-		return Config{}, fmt.Errorf("bundle.json must be a file")
-	}
-	var manifest bundleManifest
-	if err := readRecord(filepath.Join(bundle, "bundle.json"), &manifest); err != nil {
-		return Config{}, err
+	// Validate the current package and its platform/data/queue compatibility
+	// before creating or replacing any configuration. The old package need not
+	// exist: users can copy all of data/ or replace the stopped program files.
+	manifest, digest, err := verifyBundle(selected)
+	if err != nil {
+		return Config{}, fmt.Errorf("当前运行包不完整或不兼容，原有数据已保留: %w", err)
 	}
 	_, configErr := os.Stat(filepath.Join(root, "runtime.json"))
 	fresh := os.IsNotExist(configErr)
-	cfg, err := OpenConfig(root, bundle)
+	cfg, err := OpenConfig(root, selected)
 	if err != nil {
 		return cfg, err
 	}
@@ -74,49 +85,15 @@ func OpenBundleConfig(root, bundle string) (Config, error) {
 	if fresh && manifest.Profile == "rules" {
 		engine = "rules"
 	}
-	selected, err := filepath.Abs(bundle)
-	if err != nil {
-		return cfg, err
-	}
 	expected := configForBundle(cfg, selected, engine)
-	currentPaths := configForBundle(cfg, selected, cfg.ExtractionEngine)
-	if sameRuntimeFiles(cfg, currentPaths) {
-		if cfg.BundleHash != "" && cfg.BundleHash != expected.BundleHash {
-			return cfg, fmt.Errorf("运行包已被其他版本替换，请使用原版本或显式升级；原有数据已保留")
-		}
-		// macOS may spell the same directory through /var and /private/var.
-		// Keep persisted paths rather than treating this alias as a new build.
+	expected.BundleHash = digest
+	if sameRuntimeFiles(cfg, expected) {
+		// Preserve equivalent spellings such as macOS /var and /private/var.
 		expected.Server, expected.Python = cfg.Server, cfg.Python
 		expected.ParserDir, expected.PostgresBin = cfg.ParserDir, cfg.PostgresBin
 		expected.Redis, expected.WebDir = cfg.Redis, cfg.WebDir
-		return expected, nil
 	}
-	old := filepath.Dir(cfg.Server)
-	// Identical, intact copies may be switched without migrating user data.
-	// A recorded fingerprint also works after a directory rename, when the old
-	// absolute path no longer exists. Verify the complete selected inventory.
-	_, previousHash, previousErr := verifyBundle(old)
-	_, selectedHash, selectedErr := verifyBundle(selected)
-	if selectedErr == nil && cfg.BundleHash != "" && cfg.BundleHash == selectedHash &&
-		usesBundlePaths(cfg, old) {
-		return expected, nil
-	}
-	// Older portable configurations have no fingerprint. Only bootstrap one
-	// when data travelled with the bundle and the old runtime is absent. An
-	// external data directory still requires evidence of the original build.
-	_, oldErr := os.Stat(old)
-	portableData := filepath.Join(DeliveryDirectory(selected), "data")
-	if selectedErr == nil && cfg.BundleHash == "" && os.IsNotExist(oldErr) &&
-		filepath.Clean(cfg.DataDir) == filepath.Clean(portableData) &&
-		usesBundlePaths(cfg, old) {
-		return expected, nil
-	}
-	if usesBundlePaths(cfg, old) &&
-		previousErr == nil && selectedErr == nil && previousHash == selectedHash {
-		return expected, nil
-	}
-	return cfg, fmt.Errorf("existing data uses another runtime directory; " +
-		"open the original launcher or perform an explicit maintenance upgrade; data preserved")
+	return expected, nil
 }
 
 func sameRuntimeFiles(a, b Config) bool {
@@ -132,10 +109,4 @@ func sameRuntimeFiles(a, b Config) bool {
 		}
 	}
 	return a == b
-}
-
-func usesBundlePaths(cfg Config, bundle string) bool {
-	expected := configForBundle(cfg, bundle, cfg.ExtractionEngine)
-	expected.BundleHash = cfg.BundleHash
-	return cfg == expected
 }

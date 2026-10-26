@@ -162,14 +162,14 @@ func (s *ToolServer) libraryGet(ctx context.Context, raw json.RawMessage) (any, 
 }
 
 type importURLInput struct {
-	URL    string `json:"url"`
-	DOI    string `json:"doi"`
-	BaseID string `json:"base_id"`
+	URL       string `json:"url"`
+	DOI       string `json:"doi"`
+	BaseID    string `json:"base_id"`
+	RequestID string `json:"request_id"`
 }
 
-// acquireImportSlot bounds concurrent import calls. URL imports download
-// synchronously inside the tool call, so an unbounded agent loop could open
-// many publisher downloads and parser jobs at once.
+// acquireImportSlot bounds synchronous local-file acceptance calls. Remote
+// downloads are bounded by the shared queue worker and download limiter.
 func (s *ToolServer) acquireImportSlot() (func(), error) {
 	select {
 	case s.importSlots <- struct{}{}:
@@ -206,7 +206,11 @@ func (s *ToolServer) attachImportedDocumentToBase(
 	if s.bases == nil {
 		return fmt.Errorf("%w: base service is unavailable", errInvalidToolInput)
 	}
-	return s.bases.AddDocumentToBase(ctx, baseID, document.ID.String())
+	// A committed upload must not be stranded outside its requested Base just
+	// because the client disconnected after the file was saved.
+	attachCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return s.bases.AddDocumentToBase(attachCtx, baseID, document.ID.String())
 }
 
 func (s *ToolServer) libraryImportURL(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -214,28 +218,11 @@ func (s *ToolServer) libraryImportURL(ctx context.Context, raw json.RawMessage) 
 	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
 	}
-	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
-		return nil, err
+	if s.urlImports == nil {
+		return nil, types.ErrTaskInspectorUnavailable
 	}
-	release, err := s.acquireImportSlot()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-	document, err := s.documents.CreateDocumentFromURL(ctx, types.DocumentURLImportCommand{
-		URL: input.URL, DOI: input.DOI,
-	})
-	if err != nil {
-		return nil, err
-	}
-	if err := s.attachImportedDocumentToBase(ctx, input.BaseID, document); err != nil {
-		return nil, err
-	}
-	result := map[string]any{"document": document}
-	if baseID := strings.TrimSpace(input.BaseID); baseID != "" {
-		result["baseId"] = baseID
-	}
-	return result, nil
+	return s.urlImports.EnqueueURLs(ctx, []types.DocumentURLImportCommand{{URL: input.URL, DOI: input.DOI}},
+		input.BaseID, input.RequestID)
 }
 
 type importFileInput struct {
@@ -338,9 +325,10 @@ func (s *ToolServer) attachImportBatchToBase(
 }
 
 type importURLsInput struct {
-	URLs   []string `json:"urls"`
-	DOIs   []string `json:"dois"`
-	BaseID string   `json:"base_id"`
+	URLs      []string `json:"urls"`
+	DOIs      []string `json:"dois"`
+	BaseID    string   `json:"base_id"`
+	RequestID string   `json:"request_id"`
 }
 
 func (s *ToolServer) libraryImportURLs(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -351,32 +339,27 @@ func (s *ToolServer) libraryImportURLs(ctx context.Context, raw json.RawMessage)
 	if err := validateImportBatch(len(input.URLs), len(input.DOIs), "urls"); err != nil {
 		return nil, err
 	}
-	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
-		return nil, err
+	if s.urlImports == nil {
+		return nil, types.ErrTaskInspectorUnavailable
 	}
-	release, err := s.acquireImportSlot()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
-
 	commands := make([]types.DocumentURLImportCommand, len(input.URLs))
 	for index, url := range input.URLs {
-		commands[index] = types.DocumentURLImportCommand{
-			URL: strings.TrimSpace(url), DOI: batchDOI(input.DOIs, index),
-		}
+		commands[index] = types.DocumentURLImportCommand{URL: strings.TrimSpace(url), DOI: batchDOI(input.DOIs, index)}
 	}
-	timeout := s.cfg.BatchImportTimeout
-	if timeout <= 0 {
-		timeout = 2 * time.Minute
+	return s.urlImports.EnqueueURLs(ctx, commands, input.BaseID, input.RequestID)
+}
+
+func (s *ToolServer) libraryImportStatus(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input struct {
+		TaskID string `json:"task_id"`
 	}
-	batchCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	result, err := s.documents.CreateDocumentsFromURLs(batchCtx, commands)
-	if err != nil {
+	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
 	}
-	return s.attachImportBatchToBase(ctx, input.BaseID, result), nil
+	if s.urlImports == nil {
+		return nil, types.ErrTaskInspectorUnavailable
+	}
+	return s.urlImports.GetURLImportTask(ctx, strings.TrimSpace(input.TaskID))
 }
 
 type importFilesInput struct {
@@ -409,11 +392,47 @@ func (s *ToolServer) libraryImportFiles(ctx context.Context, raw json.RawMessage
 		return nil, err
 	}
 	defer release()
-	result, err := s.documents.CreateDocumentsFromLocalFiles(ctx, paths, input.DOIs)
-	if err != nil {
-		return nil, err
+	output := libraryImportBatchResult{BaseID: strings.TrimSpace(input.BaseID),
+		DocumentBatchResult: types.DocumentBatchResult{Items: []types.DocumentBatchItemResult{}}}
+	for index, path := range paths {
+		if ctx.Err() != nil {
+			output.Stopped = true
+			for next := index; next < len(paths); next++ {
+				output.Items = append(output.Items, types.DocumentBatchItemResult{
+					Index: next, Filename: filepath.Base(paths[next]),
+					Status: types.DocumentImportItemFailed, Error: "batch stopped before this file was imported",
+				})
+			}
+			break
+		}
+		var dois []string
+		if len(input.DOIs) > 0 {
+			dois = []string{input.DOIs[index]}
+		}
+		result, err := s.documents.CreateDocumentsFromLocalFiles(ctx, []string{path}, dois)
+		if err != nil {
+			return nil, err
+		}
+		attached := s.attachImportBatchToBase(ctx, input.BaseID, result)
+		for _, item := range attached.Items {
+			item.Index = index
+			output.Items = append(output.Items, item)
+		}
+		if attached.Error != "" {
+			output.Error = attached.Error
+		}
+		if attached.Stopped {
+			output.Stopped = true
+			for next := index + 1; next < len(paths); next++ {
+				output.Items = append(output.Items, types.DocumentBatchItemResult{
+					Index: next, Filename: filepath.Base(paths[next]),
+					Status: types.DocumentImportItemFailed, Error: "batch stopped before this file was imported",
+				})
+			}
+			break
+		}
 	}
-	return s.attachImportBatchToBase(ctx, input.BaseID, result), nil
+	return output, nil
 }
 
 // validateLocalImportFile confines one path to the configured root and applies

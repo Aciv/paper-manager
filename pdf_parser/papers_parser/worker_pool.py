@@ -419,8 +419,12 @@ class SharedWorkerHandle:
         connection = None
         try:
             try:
-                connection = connect(self.socket_path, getattr(self, "token", ""))
                 deadline = time.monotonic() + timeout
+                # TCP ACK is a control-plane response, not a 500ms availability
+                # probe. A busy native worker may briefly hold the GIL; poll
+                # cancellation until the caller's actual budget expires.
+                connection = connect(self.socket_path, getattr(self, "token", ""),
+                                     deadline=deadline, cancel_check=cancel_check)
                 write_frame(connection, method, payload, deadline=deadline, cancel_check=cancel_check)
                 status, response = read_frame(
                     connection,
@@ -434,7 +438,8 @@ class SharedWorkerHandle:
                 # shared worker survives and other calls continue.
                 raise WorkerRPCError("CANCELLED", "parser request was cancelled") from exc
             except TimeoutError as exc:
-                raise WorkerUnavailable("worker response timed out") from exc
+                phase = "handshake" if connection is None else "response"
+                raise WorkerUnavailable(f"worker {phase} timed out") from exc
             except (OSError, WorkerProtocolError) as exc:
                 raise WorkerUnavailable("worker connection failed") from exc
         finally:

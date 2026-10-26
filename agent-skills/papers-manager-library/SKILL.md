@@ -1,6 +1,6 @@
 ---
 name: papers-manager-library
-description: 管理本地 papersManager 论文库：搜索、通过 URL 或受控本地文件导入、检查、修改或删除论文，维护元数据、标签、Base 生命周期与成员、引用与书目以及处理状态。用于入库、整理或书目级操作，不用于阅读注释或 Base 总结；删除和覆盖操作必须先获得用户明确确认。需要 papersManager MCP server；若当前 host 没有这些工具，不要使用本 skill。
+description: 管理本地 papersManager 论文库：搜索、通过 URL 或受控本地文件导入、检查、修改或删除论文，维护元数据、标签、Base 生命周期与成员、引用与书目以及处理状态。用于入库、整理或书目级操作，不用于阅读注释或 Base 总结/比较；删除和覆盖操作必须先获得用户明确确认。需要 papersManager MCP server；若当前 host 没有这些工具，不要使用本 skill。
 ---
 
 # PapersManager Library
@@ -21,7 +21,7 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 不用于：
 
 - 阅读、总结或注释论文；
-- 生成或修改阅读笔记；
+- 生成或修改阅读笔记，或做 Base 总结/比较；
 - 解析证据链接；
 - LaTeX 编辑、OCR 或通用 PDF 转换。
 
@@ -36,7 +36,7 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
   `papers_manager_processing_status_many`、`papers_manager_base_list`、
   `papers_manager_base_get`、`papers_manager_base_list_documents`、
   `papers_manager_citation_list`、`papers_manager_citation_list_cited_by`、
-  `papers_manager_base_bibliography_status`。
+  `papers_manager_base_bibliography_status`、`papers_manager_library_import_status`。
 - 写入工具：`papers_manager_library_import_url`、
   `papers_manager_library_import_urls`、`papers_manager_library_import_file`、
   `papers_manager_library_import_files`、`papers_manager_library_update_metadata`、
@@ -92,12 +92,14 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 不接受服务器本地路径或任意文件系统访问；
 - 如果用户要求导入到某个 Base，传入可选的 `base_id`，不要先导入再单独调用成员工具；批次导入时 `base_id` 会应用到每个 accepted/duplicate 项；
 - 用户一次给出多个 URL 时，优先使用 `papers_manager_library_import_urls`：每次 1–20 个 URL，可选 `dois` 必须与 URL 一一对齐或整体省略；超过 20 个拆成多次调用；
-- 批次调用内按顺序处理，受 `BATCH_IMPORT_TIMEOUT`（默认 2 分钟）约束；超时会返回已完成项、`stopped=true` 和未处理项的失败状态；
+- 单项/批量 URL 导入立即返回任务 `id/state/total`，下载由后台执行；记录任务 ID，用 `papers_manager_library_import_status(task_id=id)` 每隔 2–5 秒有界轮询，不等待同一次 MCP 调用下载完成；
+- 可选 `request_id` 使用稳定 UUID；若提交响应丢失，原参数连同同一个 request_id 重发即可取得原任务，不能用同一 request_id 提交不同输入；
+- 后台按顺序导入，受 `BATCH_IMPORT_TIMEOUT`（默认 2 分钟）约束；通过状态工具读取 `result.items`、`result.stopped` 和 `result.error`；后台截止后保留已完成项及未处理项的失败状态；完成结果保留 24 小时；
 - 批次结果必须逐项检查 `status`（accepted/duplicate/rejected/failed）和 `error`，不能只看整体成功；
-- 导入成功返回 document ID 和初始处理状态；
-- 导入工具（单项与批次）共享并发限制（默认最多同时 20 个调用）；遇到 `RESOURCE_EXHAUSTED` 时等待后重试，不要并发堆积；
+- 状态工具返回 `queued/running/succeeded/failed`、`completed/total`；`succeeded` 仅表示任务执行完成，仍要逐项检查结果。每个 accepted/duplicate 项带 document ID，并在该项结束时加入请求的 Base；
+- URL 下载复用现有队列及下载并发限制；不要为催促任务重复提交整批。仅对结果中失败/未处理的项按用户要求新建重试任务；
 - 不要无限等待解析完成；使用 `papers_manager_processing_status` 做有界轮询，或把轮询留给用户界面；
-- 失败时报告阶段和可重试入口，不要重复盲目提交。
+- 若结果已包含 document ID 但 Base 附加失败，优先补 Base 成员关系，不重新下载；失败时报告阶段和可重试入口，不要重复盲目提交。
 
 ### 导入本地文件
 
@@ -107,8 +109,8 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 不要猜测路径、扫描目录或尝试导入目录；
 - 用户一次给出多个本地路径时使用 `papers_manager_library_import_files`（每次 1–20 个）；工具会先整体校验所有路径，任一越界/不支持/超限会整批拒绝且不导入任何文件；
 - `FORBIDDEN` 表示本地导入被禁用或路径越界；让用户改网页上传，不要用 shell 读取文件；
-- 与 URL 导入共用并发上限（默认 20）；遇到 `RESOURCE_EXHAUSTED` 时等待后重试；
-- 如果用户要求导入到某个 Base，传入可选的 `base_id`，批次中会应用到每个 accepted/duplicate 项；
+- 本地文件工具同步保存副本，解析在后台执行；本地导入共享调用并发上限（默认 20），遇到 `RESOURCE_EXHAUSTED` 时等待后重试；
+- 如果用户要求导入到某个 Base，传入可选的 `base_id`，每个 accepted/duplicate 项保存完成后立即加入 Base，不等待整批结束；
 - 导入成功后同样用 `papers_manager_processing_status` 做有界轮询。
 
 ### 修改元数据

@@ -11,8 +11,9 @@ collections, not `papers_manager_library_*` operations.
 | `papers_manager_library_search` | Search by title, DOI, tags, or ID; paginated. | Read-only |
 | `papers_manager_library_get` | Read one document and its paper metadata. | Read-only |
 | `papers_manager_library_get_many` | Read 1–200 documents and their paper metadata in one call; optional processing. | Read-only; >200 IDs rejected; missing IDs reported |
-| `papers_manager_library_import_url` | Import an HTTP(S) URL and start processing. Optional `base_id` adds the document to a Base. | Requires a user-supplied URL; shares the 20-call import concurrency gate |
-| `papers_manager_library_import_urls` | Import 1–20 HTTP(S) URLs in one call, sequentially; per-item results. Optional `dois` align by index; optional `base_id` applies to every accepted/duplicate item. | Requires user-supplied URLs; >20 items, misaligned `dois`, and the 2-minute batch deadline are enforced |
+| `papers_manager_library_import_url` | Queue one HTTP(S) URL; returns task id immediately. Optional `base_id` and stable UUID `request_id`. | Poll import_status; request_id may only replay identical input |
+| `papers_manager_library_import_urls` | Queue 1–20 URLs; optional aligned `dois`, `base_id`, UUID `request_id`. Base membership updates per completed item. | Returns immediately; background deadline defaults to 2 minutes; poll import_status and inspect every result |
+| `papers_manager_library_import_status` | Read import task state, completed/total and partial per-item document IDs. | Read-only; completed results retained 24 hours; PDF processing is queried separately |
 | `papers_manager_library_import_file` | Import one local file under `MCP_LOCAL_IMPORT_ROOT`. Optional `base_id` adds the document to a Base. | Disabled unless configured; path is confined to the root; shares the 20-call import concurrency gate |
 | `papers_manager_library_import_files` | Import 1–20 local files under `MCP_LOCAL_IMPORT_ROOT`, sequentially; all paths validated before any import. Optional `base_id` applies to every accepted/duplicate item. | Disabled unless configured; one invalid path rejects the whole call; shares the 20-call import concurrency gate |
 | `papers_manager_library_update_metadata` | Correct filename, DOI, title, authors, abstract, venue, tags, and publication fields. | Only explicit field changes |

@@ -123,7 +123,7 @@
     {
       "name": "papers_manager_library_import_url",
       "title": "Import a paper URL",
-      "description": "Import one HTTP(S) paper URL and start normal processing. Import calls are bounded by MCP_IMPORT_CONCURRENCY (default 20, matching the web batch limit); excess calls fail with RESOURCE_EXHAUSTED. Returns quickly with a document ID and initial processing state; use processing_status for bounded polling. Optionally adds the document to a Base via base_id.",
+      "description": "Queue explicit HTTP(S) paper URL downloads and return immediately with id/state/total. Poll papers_manager_library_import_status using the returned id. Accepted documents are added to base_id per item; PDF processing continues independently. Optional request_id is a UUID idempotency key: reuse it only with the identical request. Completed results are retained for 24 hours; BATCH_IMPORT_TIMEOUT bounds background acceptance, not this MCP call.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -138,6 +138,11 @@
           "base_id": {
             "type": "string",
             "description": "Optional Base ID. When set, the imported document is added to this Base (idempotent)."
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional stable UUID for safely resubmitting the identical request after a lost response."
           }
         },
         "required": [
@@ -188,14 +193,14 @@
     {
       "name": "papers_manager_library_import_urls",
       "title": "Import paper URLs in a batch",
-      "description": "Import 1-20 HTTP(S) paper URLs in one call and start normal processing. Items are accepted sequentially and each returns its own accepted/duplicate/rejected/failed result; the batch is bounded by BATCH_IMPORT_TIMEOUT. Import calls share the MCP_IMPORT_CONCURRENCY gate (default 20); excess calls fail with RESOURCE_EXHAUSTED. Optionally adds each resulting document to a Base via base_id.",
+      "description": "Queue explicit HTTP(S) paper URL downloads and return immediately with id/state/total. Poll papers_manager_library_import_status using the returned id. Accepted documents are added to base_id per item; PDF processing continues independently. Optional request_id is a UUID idempotency key: reuse it only with the identical request. Completed results are retained for 24 hours; BATCH_IMPORT_TIMEOUT bounds background acceptance, not this MCP call.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "urls": {
             "type": "array",
-            "description": "1-20 HTTP(S) paper URLs, processed sequentially in order.",
+            "description": "1-20 explicit HTTP(S) paper URLs downloaded sequentially in the background.",
             "minItems": 1,
             "maxItems": 20,
             "items": {
@@ -214,6 +219,11 @@
           "base_id": {
             "type": "string",
             "description": "Optional Base ID. Each accepted or duplicate document is added to this Base (idempotent)."
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Optional stable UUID for safely resubmitting the identical request after a lost response."
           }
         },
         "required": [
@@ -225,6 +235,31 @@
         "destructiveHint": false,
         "idempotentHint": false,
         "openWorldHint": true
+      },
+      "group": "library"
+    },
+    {
+      "name": "papers_manager_library_import_status",
+      "title": "Get URL import progress",
+      "description": "Read queued/running/succeeded/failed URL import state, per-item results and document IDs. Poll after submitting import_url/import_urls. Import completion is separate from PDF parsing; query processing_status for created documents. A succeeded batch may contain failed/rejected items or stopped=true; inspect every item. Results expire 24 hours after completion.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "task_id": {
+            "type": "string",
+            "description": "The id returned by import_url or import_urls."
+          }
+        },
+        "required": [
+          "task_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
       },
       "group": "library"
     },
