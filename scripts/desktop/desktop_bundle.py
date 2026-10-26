@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import ssl
 import tarfile
+import time
+import urllib.error
 import urllib.request
 import zipfile
 
@@ -32,18 +36,44 @@ def download(item: dict, cache: Path) -> Path:
     if path.exists():
         if sha256(path) != expected:
             raise ValueError(f"cached dependency hash mismatch: {path.name}")
+        print(f"Using verified dependency cache: {path.name}", flush=True)
         return path
     temporary = path.with_suffix(path.suffix + ".part")
-    try:
-        request = urllib.request.Request(item["url"], headers={"User-Agent": "papersManager-desktop-build/1.0"})
-        with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as out:
-            shutil.copyfileobj(response, out, length=1 << 20)
-        if sha256(temporary) != expected:
-            raise ValueError(f"download hash mismatch: {path.name}")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
-    return path
+    for attempt in range(1, 4):
+        print(f"Downloading dependency ({attempt}/3): {path.name}", flush=True)
+        try:
+            request = urllib.request.Request(item["url"], headers={"User-Agent": "papersManager-desktop-build/1.0"})
+            with urllib.request.urlopen(request, timeout=120) as response, temporary.open("wb") as out:
+                shutil.copyfileobj(response, out, length=1 << 20)
+                length = response.headers.get("Content-Length")
+            if length is not None and length.isdecimal() and temporary.stat().st_size < int(length):
+                raise http.client.IncompleteRead(b"", int(length) - temporary.stat().st_size)
+            if sha256(temporary) != expected:
+                raise ValueError(f"download hash mismatch: {path.name}")
+            temporary.replace(path)
+            print(f"Dependency download verified: {path.name}", flush=True)
+            return path
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.IncompleteRead) as exc:
+            if isinstance(exc, urllib.error.HTTPError):
+                exc.close()
+            if not retryable_download_error(exc):
+                raise
+            if attempt == 3:
+                raise RuntimeError(f"dependency download failed after 3 attempts: {path.name}") from exc
+            delay = 2 ** attempt
+            print(f"Dependency transfer interrupted ({type(exc).__name__}); retrying in {delay}s", flush=True)
+        finally:
+            temporary.unlink(missing_ok=True)
+        time.sleep(delay)
+
+
+def retryable_download_error(error: Exception) -> bool:
+    """Retry transient transport failures; never bypass trust or hash checks."""
+    if isinstance(error, urllib.error.HTTPError):
+        return error.code in {408, 429, 500, 502, 503, 504}
+    if isinstance(error, urllib.error.URLError):
+        return isinstance(error.reason, OSError) and not isinstance(error.reason, ssl.SSLCertVerificationError)
+    return isinstance(error, (TimeoutError, ConnectionError, http.client.IncompleteRead))
 
 
 def extract(archive: Path, destination: Path, *, prefixes: tuple[str, ...] | None = None) -> None:
