@@ -1,4 +1,4 @@
-# Internal D3 validation lock. Exact versions and PyPI wheel SHA-256 values.
+# Shared desktop/Docker runtime lock. Exact versions and PyPI wheel SHA-256 values.
 # Generated from versioned PyPI JSON metadata; source builds are forbidden.
 grpcio==1.82.1 \
     --hash=sha256:011c8badee95734dee8bf05ce3464756a0ac3ebb8d443afd20c0e2b5e4640ad9 \

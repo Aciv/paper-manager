@@ -254,3 +254,8 @@ RPC 总预算 `PARSER_MAX_CONCURRENT_RPCS=8`。
 
 不必为了改文档触发平台构建。功能开发时，常规检查为 `go test ./...`、
 `go build ./...`、`npm --prefix web run build`；专项集成测试应按实际改动选择。
+
+## Docker 发行准备
+
+预构建镜像部署与维护者本机构建、独立验收见 [Docker 配置说明](../packaging/docker/README.md)。
+当前只完成本机准备，不代表已有 GHCR 镜像、ARM 支持或公开发行。

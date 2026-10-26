@@ -2,6 +2,7 @@
 .*
 !.air.toml
 !.launcher_env.example
+!packaging/docker/.env.example
 # Cross-platform release validation must be tracked despite the dotfile rule.
 !.github/
 !.github/workflows/

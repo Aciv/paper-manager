@@ -62,6 +62,10 @@ packaging reference materials.
 
 ### Docker Compose
 
+The root configuration builds from source. An image-only deployment configuration and
+local validation are documented in [Docker preparation](packaging/docker/README.md);
+container images have not been published yet.
+
 From the repository root:
 
 ```bash

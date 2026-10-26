@@ -52,6 +52,9 @@ Launcher 运行、其他服务停止时，可在管理页“配置”修改端�
 
 ### Docker Compose
 
+仓库配置用于源码构建。预构建镜像的发行 Compose 与本机验收见
+[Docker 发行准备](packaging/docker/README.md)；目前尚未发布容器镜像。
+
 在仓库根目录执行：
 
 ```bash

@@ -18,6 +18,8 @@ RUN_API_TESTS=1 ./scripts/run_tests.sh all   # include API smoke tests
 `all` deliberately excludes the API smoke suite because it needs a live API,
 PostgreSQL, Redis, and the parser. Run it explicitly with `api`.
 
+`all` also excludes Docker image builds/runtime validation; run that category explicitly.
+
 The category scripts are thin wrappers:
 
 | Category | Runner | Contents |
@@ -26,6 +28,7 @@ The category scripts are thin wrappers:
 | Python parser | `scripts/tests/python.sh` | `unittest` discovery in `pdf_parser/papers_parser/test` |
 | Web | `scripts/tests/web.sh` | `test:selection`, `test:doi`, `test:bibliography`, `test:translation`, `test:reading-note` |
 | API smoke | `scripts/tests/api.sh` → `scripts/api-tests/run_all.sh` | Health, upload, CRUD, selection, metadata, citations, imports, bases, cancel, processing |
+| Docker | `scripts/tests/docker.sh` → `scripts/docker/validate.py` | Separate images/project/ports; PDF, notes, MCP and persistence |
 | Desktop | `scripts/tests/desktop.sh` → `scripts/desktop/run_tests.sh` | Desktop Python packaging tests plus Go launcher/runtime tests |
 
 The desktop runner also accepts `--python-only` and `--go-only`; CI uses the
@@ -40,6 +43,7 @@ scripts/
   api-tests/            # API smoke scripts, shared lib, and run_all.sh
   desktop/              # desktop build/package/validation tools
   desktop/tests/        # desktop Python tests
+  docker/               # isolated image-only Compose build/runtime validation
   parser/               # parser benchmarks and recognition checks
   dev/                  # dev.sh, task_map.sh, taskmap
 ```
@@ -143,3 +147,8 @@ Desktop build, validation, and packaging details are in
 ./scripts/dev/dev.sh all       # Makefile `make dev` delegates here
 ./scripts/dev/task_map.sh      # Asynq topology; -check fails on an unhandled task
 ```
+
+## Docker 验收
+
+`python scripts/docker/validate.py --output-dir tmp/docker-validation` 构建并验证独立 Docker 栈；
+不发布镜像、不接触当前运行的项目。详见 [Docker 说明](../packaging/docker/README.md)。

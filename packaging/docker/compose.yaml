@@ -1,0 +1,145 @@
+# Prebuilt-image deployment. This file needs no source checkout or build tools.
+services:
+  storage-init:
+    image: alpine:3.20
+    user: "0:0"
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p /data/uploads /data/recognition-output /data/runtime /data/tmp
+        chown -R 10001:10001 /data/uploads /data/recognition-output /data/runtime /data/tmp
+        chmod 0750 /data/uploads /data/recognition-output /data/runtime
+        chmod 0700 /data/tmp
+    volumes:
+      - ${PAPER_MANAGER_DATA_DIR:-./data}:/data
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: papers
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: papers
+    volumes:
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U papers -d papers"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    mem_limit: ${POSTGRES_MEM_LIMIT:-768m}
+    stop_grace_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --appendonly, "yes"]
+    volumes:
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/redis:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+    mem_limit: ${REDIS_MEM_LIMIT:-256m}
+    stop_grace_period: 30s
+
+  parser:
+    image: ${PAPER_MANAGER_IMAGE_PREFIX:-ghcr.io/aciv/paper-manager}-parser:${PAPER_MANAGER_VERSION:-1.0.0}
+    environment:
+      UPLOAD_DIR: /data/uploads
+      RECOGNITION_OUTPUT_DIR: /data/recognition-output
+      PARSER_GRPC_ADDR: 0.0.0.0:50051
+      PARSER_EXECUTION_MODE: shared
+      PARSER_RECOGNIZE_CONCURRENCY: ${PARSER_RECOGNIZE_CONCURRENCY:-4}
+      PARSER_EXTRACT_CONCURRENCY: ${PARSER_EXTRACT_CONCURRENCY:-4}
+      PARSER_RENDER_CONCURRENCY: ${PARSER_RENDER_CONCURRENCY:-4}
+      PARSER_MAX_CONCURRENT_RPCS: ${PARSER_MAX_CONCURRENT_RPCS:-8}
+      PARSER_RECOGNIZE_WORKER_MAX: "1"
+      PARSER_EXTRACT_WORKER_MAX: "1"
+      PARSER_RENDER_WORKER_MAX: "1"
+      PARSER_LAYOUT_THREADS: ${PARSER_LAYOUT_THREADS:-2}
+      PARSER_IMAGE_DPI: ${PARSER_IMAGE_DPI:-144}
+      PAPER_EXTRACTION_ENGINE: hybrid
+      PAPER_REFERENCE_CRF_ENABLED: "false"
+      PARSER_SHUTDOWN_GRACE_SECONDS: "30"
+      MALLOC_ARENA_MAX: "2"
+    volumes:
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/uploads:/data/uploads:ro
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/recognition-output:/data/recognition-output
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    mem_limit: ${PARSER_MEM_LIMIT:-4g}
+    cpus: ${PARSER_CPUS:-4}
+    stop_grace_period: 40s
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -c, "import socket; socket.create_connection(('127.0.0.1', 50051), 2).close()"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  api:
+    image: ${PAPER_MANAGER_IMAGE_PREFIX:-ghcr.io/aciv/paper-manager}-api:${PAPER_MANAGER_VERSION:-1.0.0}
+    user: "10001:10001"
+    environment:
+      PAPERS_SKIP_DOTENV: "1"
+      DATABASE_URL: postgres://papers:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}@postgres:5432/papers?sslmode=disable
+      REDIS_ADDR: redis:6379
+      HTTP_ADDR: :8080
+      UPLOAD_DIR: /data/uploads
+      RECOGNITION_OUTPUT_DIR: /data/recognition-output
+      DOCUMENT_STRUCTURE_CACHE_DIR: /data/runtime/document-structures
+      LOG_PATH: /data/runtime/logs/api.log
+      GIN_MODE: release
+      AUTO_MIGRATE: "true"
+      PARSER_GRPC_ADDR: parser:50051
+      DOCUMENT_RECOGNITION_DRIVER: builtin
+      ASYNQ_CONCURRENCY: ${ASYNQ_CONCURRENCY:-32}
+      DOCUMENT_RECOGNITION_CONCURRENCY: ${PARSER_RECOGNIZE_CONCURRENCY:-4}
+      DOCUMENT_EXTRACTION_CONCURRENCY: ${PARSER_EXTRACT_CONCURRENCY:-4}
+      DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-48}
+      MCP_ENABLED: "true"
+      MCP_ADDR: 0.0.0.0:8090
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      SEMANTIC_SCHOLAR_API_KEY: ${SEMANTIC_SCHOLAR_API_KEY:-}
+      OPENALEX_API_KEY: ${OPENALEX_API_KEY:-}
+      CROSSREF_MAILTO: ${CROSSREF_MAILTO:-}
+      CORS_ORIGIN: http://127.0.0.1:${WEB_PORT:-5173},http://localhost:${WEB_PORT:-5173}
+      NO_PROXY: localhost,127.0.0.1,parser,postgres,redis
+      no_proxy: localhost,127.0.0.1,parser,postgres,redis
+    volumes:
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/uploads:/data/uploads
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/recognition-output:/data/recognition-output
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/runtime:/data/runtime
+      - ${PAPER_MANAGER_DATA_DIR:-./data}/tmp:/tmp
+    ports:
+      - "127.0.0.1:${MCP_PORT:-8090}:8090"
+    mem_limit: ${API_MEM_LIMIT:-1g}
+    stop_grace_period: 70s
+    depends_on:
+      storage-init:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      parser:
+        condition: service_healthy
+
+  web:
+    image: ${PAPER_MANAGER_IMAGE_PREFIX:-ghcr.io/aciv/paper-manager}-web:${PAPER_MANAGER_VERSION:-1.0.0}
+    ports:
+      - "127.0.0.1:${WEB_PORT:-5173}:80"
+    mem_limit: ${WEB_MEM_LIMIT:-256m}
+    depends_on: [api]
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1/health]
+      interval: 5s
+      timeout: 3s
+      retries: 30
