@@ -12,7 +12,7 @@ import (
 	"paperMaster/internal/logger"
 )
 
-var errSetupRequired = errors.New("first-time setup required; initialize from the management page or use --initialize")
+var errSetupRequired = errors.New("首次使用需要初始化数据。请在管理页点击「初始化数据」，完成后点击「启动服务」。")
 
 type initialization struct {
 	Version  int    `json:"version"`

@@ -19,6 +19,7 @@
         <div class="masthead-right">
           <strong id="state" class="masthead-state" data-state="loading" role="status" aria-live="polite">正在读取状态</strong>
           <button id="refresh-status" class="masthead-link" type="button">刷新状态</button>
+          <button id="open-tutorial" class="help-button" type="button" title="使用说明" aria-label="查看使用说明" aria-haspopup="dialog" aria-controls="tutorial">?</button>
         </div>
       </div>
     </header>
@@ -61,7 +62,7 @@
               <pre id="activity-log" class="code-block log-preview">正在读取最近日志…</pre>
               <p><button id="open-logs" class="text-link" type="button">查看完整日志</button></p>
 
-              <p class="note">数据独立保存在用户目录；关闭页面不会停止应用，退出 Launcher 才会停止服务。</p>
+              <p class="note">数据默认保存在程序旁的 data 文件夹；关闭页面不会停止应用，退出 Launcher 才会停止服务。</p>
             </section>
 
             <section id="panel-mcp" class="panel-view" role="tabpanel" aria-labelledby="tab-mcp" hidden>
@@ -190,5 +191,24 @@
         </div>
       </div>
     </div>
+    <dialog id="tutorial" class="tutorial" aria-labelledby="tutorial-title" aria-describedby="tutorial-intro">
+      <div class="tutorial-heading">
+        <h2 id="tutorial-title">欢迎使用 paper_manager</h2>
+        <button id="close-tutorial" class="tutorial-close" type="button" aria-label="关闭使用说明">×</button>
+      </div>
+      <p id="tutorial-intro">这个页面负责启动和停止本地服务。首次使用按下面的步骤操作即可。</p>
+      <p class="note">请以普通用户运行程序，不要使用 root、sudo 或“以管理员身份运行”。</p>
+      <ol class="tutorial-steps">
+        <li><strong>初始化数据</strong><p>点击「初始化数据」，等待完成。只在首次使用时需要；如需调整端口或并行度，可以先到「配置」页面修改。</p></li>
+        <li><strong>启动并打开论文库</strong><p>点击「启动服务」，状态变为「服务已就绪」后，再点击「打开论文库」，即可上传和阅读论文。</p></li>
+        <li><strong>需要 Agent 时再接入</strong><p>从程序旁的 skills 文件夹复制技能到 Agent 客户端；在本页「MCP」中复制连接配置。</p></li>
+        <li><strong>结束使用时退出 Launcher</strong><p>关闭浏览器不会停止后台服务。点击「退出 Launcher」才会关闭服务；论文和笔记会保留在数据目录中。</p></li>
+      </ol>
+      <p class="note">以后可通过顶部的问号重新查看。初始化失败时，可以查看「日志」中的「初始化日志」，无需删除数据目录。</p>
+      <div class="tutorial-actions">
+        <button id="tutorial-configuration" class="button secondary" type="button">先看配置</button>
+        <button id="tutorial-done" class="button primary" type="button" autofocus>我知道了</button>
+      </div>
+    </dialog>
   </body>
 </html>

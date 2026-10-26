@@ -7,7 +7,7 @@ const panels = {
   configuration: element('panel-configuration'),
 };
 const states = {
-  setup_required: '需要首次配置',
+  setup_required: '需要首次初始化',
   initializing: '正在初始化',
   starting: '正在启动',
   ready: '服务已就绪',
@@ -16,7 +16,7 @@ const states = {
   failed: '启动或运行失败',
 };
 const stateCopy = {
-  setup_required: '数据目录尚未初始化。首次使用请先初始化数据。',
+  setup_required: '首次使用，请点击右侧「初始化数据」。完成后点击「启动服务」，再打开论文库。',
   initializing: '正在初始化本地数据，请稍候。',
   starting: '正在启动本地服务，请稍候。',
   ready: '服务已就绪，可以打开论文库。',
@@ -43,10 +43,50 @@ const serviceStates = {
 };
 const serviceOrder = ['postgres', 'redis', 'parser', 'api'];
 const tabStorageKey = 'paper_manager.management.tab';
+const tutorialStorageKey = 'paper_manager.management.tutorial.v1';
 
 let noticeTimer;
 let currentSettings;
 let settingsDirty = false;
+let tutorialOpenedAutomatically = false;
+let tutorialReturnFocus;
+
+function openTutorial(automatic = false) {
+  const tutorial = element('tutorial');
+  if (tutorial.open) return;
+  tutorialReturnFocus = automatic ? element('primary-action') : element('open-tutorial');
+  tutorial.showModal();
+}
+
+function maybeShowTutorial(status) {
+  const canExplainSetup = ['setup_required', 'stopped', 'failed'].includes(status.state);
+  if (status.initialized || !canExplainSetup || tutorialOpenedAutomatically) return;
+  try {
+    if (localStorage.getItem(tutorialStorageKey) === 'seen') return;
+  } catch {
+    // The per-page guard still prevents polling from reopening the tutorial.
+  }
+  tutorialOpenedAutomatically = true;
+  openTutorial(true);
+}
+
+element('open-tutorial').addEventListener('click', () => openTutorial());
+element('close-tutorial').addEventListener('click', () => element('tutorial').close());
+element('tutorial-done').addEventListener('click', () => element('tutorial').close());
+element('tutorial-configuration').addEventListener('click', () => {
+  tutorialReturnFocus = element('tab-configuration');
+  element('tutorial').close();
+  activateTab('configuration');
+  element('tab-configuration').focus();
+});
+element('tutorial').addEventListener('close', () => {
+  try {
+    localStorage.setItem(tutorialStorageKey, 'seen');
+  } catch {
+    // Help remains available even when browser storage is disabled.
+  }
+  tutorialReturnFocus?.focus();
+});
 
 function setNotice(message) {
   clearTimeout(noticeTimer);
@@ -206,7 +246,7 @@ async function refresh() {
     state.dataset.state = status.state;
     element('state-copy').textContent = stateCopy[status.state] || '';
 
-    if (status.error) {
+    if (status.error && status.state !== 'setup_required') {
       showError(status.error);
     } else {
       clearError();
@@ -232,6 +272,7 @@ async function refresh() {
     syncMcpPreview(status.mcp_url);
     syncActions(status);
     setConfigurationEditable(status.can_configure);
+    maybeShowTutorial(status);
   } catch (error) {
     const state = element('state');
     state.textContent = '无法读取状态';

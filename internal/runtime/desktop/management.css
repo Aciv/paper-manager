@@ -222,3 +222,43 @@ tr[data-state="failed"] .status-dot,
 #configuration-fields:disabled { opacity: .6; }
 .configuration-engine { max-width: 240px; margin-bottom: 20px; }
 .configuration-file { overflow-wrap: anywhere; }
+
+.help-button {
+  display: grid;
+  place-items: center;
+  flex: 0 0 30px;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid #fff;
+  border-radius: 50%;
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.help-button:hover { background: rgb(255 255 255 / 16%); }
+.tutorial {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  padding: 28px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--card);
+  color: var(--text);
+  box-shadow: 0 12px 48px rgb(0 0 0 / 25%);
+}
+.tutorial::backdrop { background: rgb(0 0 0 / 48%); }
+.tutorial-heading { display: flex; align-items: start; gap: 16px; margin-bottom: 16px; }
+.tutorial-heading h2 { flex: 1; margin: 0; font-size: 24px; }
+.tutorial-close { padding: 0 4px; border: 0; background: none; font-size: 26px; cursor: pointer; }
+.tutorial-steps { margin: 20px 0; padding-left: 24px; }
+.tutorial-steps li { padding-left: 6px; }
+.tutorial-steps p { margin: 6px 0 18px; color: var(--body-muted); font-size: 14px; }
+.tutorial-actions { display: flex; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 20px; }
+@media (max-width: 620px) {
+  .tutorial { padding: 20px; }
+  .tutorial-heading h2 { font-size: 21px; }
+  .masthead-right { gap: 12px; }
+}
