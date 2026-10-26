@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"paperMaster/internal/config"
+	"paperMaster/internal/logger"
 	"paperMaster/internal/runtime/desktop"
 )
 
@@ -28,7 +29,7 @@ func main() {
 	}
 }
 
-func run() error {
+func run() (runErr error) {
 	// Install before opening the browser or starting services: a console close
 	// during startup must follow the same shutdown path as a later interruption.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -142,6 +143,21 @@ func run() error {
 		fmt.Println(filepath.Join(cfg.DataDir, "runtime.json"))
 		return nil
 	}
+	closeLogging, err := desktop.ConfigureLogging(cfg)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if runErr != nil {
+			// Runtime errors can contain paths, but private credentials never
+			// belong in either console output or the persisted Launcher log.
+			logger.Error(ctx, "Launcher 运行失败", "error", runErr)
+		}
+		closeLogging()
+	}()
+	logger.Info(ctx, "Launcher 已启动", "data_dir", cfg.DataDir,
+		"config_file", filepath.Join(cfg.DataDir, "runtime.json"),
+		"log_dir", filepath.Join(cfg.DataDir, "logs"))
 	app := desktop.New(cfg)
 	app.EnableConfigReload()
 	if *initialize {
@@ -173,19 +189,23 @@ func run() error {
 	go func() { serveErr <- server.Serve(listener) }()
 	fmt.Printf("Management: %s\nConfig: %s\n",
 		app.ManagementURL(), filepath.Join(cfg.DataDir, "runtime.json"))
+	logger.Info(ctx, "管理页已就绪", "url", app.ManagementURL())
+	logger.Info(ctx, "关闭浏览器不会停止服务；结束使用请在管理页退出 Launcher，或在此按 Ctrl+C")
 	if *browser {
 		go func() {
 			if err := openBrowser(app.ManagementURL()); err != nil {
-				fmt.Fprintln(os.Stderr, "请在浏览器打开管理地址：", app.ManagementURL(), err)
+				logger.Warn(ctx, "自动打开浏览器失败，请手动打开管理地址", "url", app.ManagementURL(), "error", err)
 			}
 		}()
 	}
 	app.Start()
 	select {
 	case <-ctx.Done():
+		logger.Info(context.Background(), "收到系统退出信号，正在关闭所有服务")
 	case <-app.QuitRequested():
+		logger.Info(ctx, "收到管理页退出请求，正在关闭所有服务")
 	case err := <-serveErr:
-		fmt.Fprintln(os.Stderr, "management server stopped:", err)
+		logger.Error(ctx, "管理页服务已退出", "error", err)
 	}
 	app.Quit()
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 4*cfg.StopTimeout+time.Second)
@@ -193,7 +213,11 @@ func run() error {
 	if err := app.Wait(stopCtx); err != nil {
 		return err
 	}
-	return server.Shutdown(stopCtx)
+	if err := server.Shutdown(stopCtx); err != nil {
+		return err
+	}
+	logger.Info(context.Background(), "Launcher 已退出，数据和日志已保留", "data_dir", cfg.DataDir)
+	return nil
 }
 
 func openBrowser(url string) error {

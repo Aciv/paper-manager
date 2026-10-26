@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
+
+	"paperMaster/internal/logger"
 )
 
 type child struct {
@@ -69,6 +71,8 @@ func (c *child) close(ctx context.Context, graceful func()) {
 		select {
 		case <-c.done:
 		case <-ctx.Done():
+			logger.Warn(ctx, "服务未在停机期限内退出，正在强制回收所属进程树",
+				"process", filepath.Base(c.cmd.Path), "pid", c.cmd.Process.Pid)
 			c.killTree()
 			_ = c.cmd.Process.Kill()
 			<-c.done

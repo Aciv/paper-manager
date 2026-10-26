@@ -71,13 +71,14 @@ func (r *Runtime) validateFiles() error {
 }
 
 func (r *Runtime) initialize(ctx context.Context, done chan struct{}) {
+	logger.Info(ctx, "开始初始化应用数据，初始化完成后请启动服务")
 	ctx, cancel := context.WithTimeout(ctx, r.cfg.StartupTimeout)
 	defer cancel()
 	if err := r.initializeData(ctx); err != nil {
 		if ctx.Err() != nil {
 			r.finishCycle(done, "stopped", "")
 		} else {
-			logger.Error(ctx, "desktop initialization failed", "error", r.cfg.redact(err.Error()))
+			logger.Error(ctx, "应用数据初始化失败，请查看 initdb 日志后重试", "error", r.cfg.redact(err.Error()))
 			r.finishCycle(done, "failed", err.Error())
 		}
 		return
@@ -85,7 +86,7 @@ func (r *Runtime) initialize(ctx context.Context, done chan struct{}) {
 	r.mu.Lock()
 	r.state.Initialized = true
 	r.mu.Unlock()
-	logger.Info(ctx, "desktop initialization completed")
+	logger.Info(ctx, "应用数据初始化完成，现在可以启动服务")
 	r.finishCycle(done, "stopped", "")
 }
 

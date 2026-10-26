@@ -88,10 +88,14 @@ func (r *Runtime) setState(state, message string) {
 	r.state.Error = r.cfg.redact(message)
 	r.mu.Unlock()
 }
-func (r *Runtime) setService(name, state string) {
+func (r *Runtime) setService(ctx context.Context, name, state string) {
 	r.mu.Lock()
 	r.state.Services[name] = state
 	r.mu.Unlock()
+	message := map[string]string{
+		"starting": "服务进程已启动，正在等待就绪", "ready": "服务已就绪", "stopped": "服务已停止",
+	}[state]
+	logger.Info(ctx, message, "service", name)
 }
 
 // Start never attaches to an existing service. Failed cycles need an explicit
@@ -170,6 +174,9 @@ func (r *Runtime) Quit()                          { r.quitOnce.Do(func() { close
 func (r *Runtime) QuitRequested() <-chan struct{} { return r.quit }
 
 func (r *Runtime) run(ctx context.Context, done chan struct{}) {
+	logger.Info(ctx, "开始启动应用服务", "startup_timeout", r.cfg.StartupTimeout,
+		"tasks", r.cfg.Concurrency.Tasks, "recognition", r.cfg.Concurrency.Recognition,
+		"extraction", r.cfg.Concurrency.Extraction, "rpcs", r.cfg.Concurrency.RPCs)
 	var owned []managed
 	var release []func()
 	var failure error
@@ -179,21 +186,24 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		// needed for a durable Redis/PostgreSQL shutdown.
 		for i := len(owned) - 1; i >= 0; i-- {
 			entry := owned[i]
+			logger.Info(context.Background(), "正在停止服务", "service", entry.name, "pid", entry.process.cmd.Process.Pid)
 			stopCtx, cancel := context.WithTimeout(context.Background(), r.cfg.StopTimeout)
 			entry.process.close(stopCtx, func() { entry.stop(stopCtx) })
 			cancel()
 			entry.log.Close()
-			r.setService(entry.name, "stopped")
+			r.setService(context.Background(), entry.name, "stopped")
 		}
 		for _, closeResource := range release {
 			closeResource()
 		}
 		if errors.Is(failure, errSetupRequired) {
+			logger.Info(context.Background(), errSetupRequired.Error())
 			r.finishCycle(done, "setup_required", failure.Error())
 		} else if failure != nil {
-			logger.Error(context.Background(), "local runtime failed", "error", r.cfg.redact(failure.Error()))
+			logger.Error(context.Background(), "应用服务运行失败，请查看对应服务日志后重试", "error", r.cfg.redact(failure.Error()))
 			r.finishCycle(done, "failed", failure.Error())
 		} else {
+			logger.Info(context.Background(), "应用服务已全部停止，管理页仍可用于配置和重新启动")
 			r.finishCycle(done, "stopped", "")
 		}
 	}()
@@ -278,13 +288,14 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 			reservations["mcp"].Close()
 			delete(reservations, "mcp")
 		}
+		logger.Info(ctx, "正在启动服务", "service", name, "log_file", log.Filename)
 		c, err := startChild(binary, args, env, dir, &redactedWriter{cfg: r.cfg, out: log})
 		if err != nil {
 			log.Close()
 			return nil, fmt.Errorf("start %s: %w", name, err)
 		}
 		owned = append(owned, managed{name, c, func(stopCtx context.Context) { stop(c, stopCtx) }, log})
-		r.setService(name, "starting")
+		r.setService(ctx, name, "starting")
 		return c, nil
 	}
 	env := r.serviceEnv(nil)
@@ -323,7 +334,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		fail(fmt.Errorf("PostgreSQL readiness failed; see postgres.log: %w", err))
 		return
 	}
-	r.setService("postgres", "ready")
+	r.setService(ctx, "postgres", "ready")
 	rc := redis.NewClient(&redis.Options{
 		Addr: address(r.cfg.Ports.Redis), Password: r.cfg.RedisPassword,
 		MaxRetries: -1, DialTimeout: time.Second,
@@ -348,7 +359,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		fail(fmt.Errorf("Redis readiness failed; see redis.log: %w", err))
 		return
 	}
-	r.setService("redis", "ready")
+	r.setService(ctx, "redis", "ready")
 	parser, err := start(
 		"parser", r.cfg.Python, r.parserArgs(), r.parserEnv(),
 		filepath.Join(r.cfg.DataDir, "work"), closeInput,
@@ -375,7 +386,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 		fail(fmt.Errorf("parser readiness failed; see parser.log: %w", err))
 		return
 	}
-	r.setService("parser", "ready")
+	r.setService(ctx, "parser", "ready")
 	api, err := start(
 		"api", r.cfg.Server, nil, r.apiEnv(), filepath.Join(r.cfg.DataDir, "work"), closeInput,
 	)
@@ -405,9 +416,9 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 			return
 		}
 	}
-	r.setService("api", "ready")
+	r.setService(ctx, "api", "ready")
 	r.setState("ready", "")
-	logger.Info(ctx, "local runtime ready", "api_address", address(r.cfg.Ports.API))
+	logger.Info(ctx, "所有服务已就绪，可以打开论文库", "app_url", r.Snapshot().AppURL)
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	for {

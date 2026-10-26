@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"paperMaster/internal/logger"
 )
 
 func (r *Runtime) pgBinary(name string) (string, error) {
@@ -69,6 +71,7 @@ func (r *Runtime) postgresData(ctx context.Context, initialize bool) (string, er
 			return "", e
 		}
 		defer log.Close()
+		logger.Info(ctx, "正在初始化私有 PostgreSQL 数据目录", "data_dir", data)
 		stage := filepath.Join(temp, "cluster")
 		args := []string{
 			"-D", stage, "-U", "papers_local", "--pwfile", password,
@@ -109,6 +112,9 @@ func (r *Runtime) postgresData(ctx context.Context, initialize bool) (string, er
 	// the live-process/lock checks and WAL recovery; let it distinguish a stale
 	// lock from an active instance. Never unlink the PID file in the Launcher.
 	// Identity checks above and port reservations still precede process startup.
+	if _, err := os.Stat(filepath.Join(data, "postmaster.pid")); err == nil {
+		logger.Info(ctx, "检测到数据库 PID 文件，将由 PostgreSQL 检查活跃实例并尝试崩溃恢复")
+	}
 	return data, nil
 }
 
