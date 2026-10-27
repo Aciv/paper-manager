@@ -12,6 +12,15 @@ from check_desktop_package import verify_checksum
 TARGETS = {"linux-x86_64", "windows-x86_64", "macos-arm64"}
 
 
+def release_notes(notes_dir: Path, version: str) -> str:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("invalid application version")
+    content = (notes_dir / f"{version}.md").read_text(encoding="utf-8").strip()
+    if not content.startswith(f"# paper_manager {version}\n"):
+        raise ValueError("release notes are missing the matching version heading")
+    return content + "\n"
+
+
 def select_test_run(runs: list[dict], revision: str) -> int:
     candidates = [run for run in runs if run.get("head_sha") == revision
                   and run.get("path") == ".github/workflows/test.yml"
@@ -49,8 +58,12 @@ def main():
     parser.add_argument("--runs", type=Path)
     parser.add_argument("--artifacts", type=Path)
     parser.add_argument("--version")
+    parser.add_argument("--notes", action="store_true")
     args = parser.parse_args()
-    if args.runs:
+    if args.notes and args.version:
+        root = Path(__file__).resolve().parents[2]
+        print(release_notes(root / "packaging/desktop/releases", args.version), end="")
+    elif args.runs:
         payload = json.loads(args.runs.read_text())
         print(select_test_run(payload["workflow_runs"], args.revision))
     elif args.artifacts and args.version:

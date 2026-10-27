@@ -5,10 +5,35 @@ import tempfile
 import unittest
 
 from desktop_bundle import sha256
-from prepare_release import release_archives, select_test_run, TARGETS
+from prepare_release import release_archives, release_notes, select_test_run, TARGETS
+from check_desktop_upgrade import upgrade_versions
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_release_notes_require_the_requested_version(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "1.0.1.md").write_text("# paper_manager 1.0.1\n\n更新内容。\n", encoding="utf-8")
+            self.assertIn("更新内容", release_notes(root, "1.0.1"))
+            with self.assertRaises(FileNotFoundError):
+                release_notes(root, "1.0.0")
+            with self.assertRaises(ValueError):
+                release_notes(root, "../1.0.1")
+            (root / "1.0.1.md").write_text("# Wrong version\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                release_notes(root, "1.0.1")
+
+    def test_current_product_has_matching_release_notes(self):
+        root = Path(__file__).resolve().parents[3]
+        product = json.loads((root / "packaging/desktop/product.json").read_text())
+        self.assertTrue(release_notes(root / "packaging/desktop/releases", product["version"]))
+
+    def test_upgrade_fixture_accepts_future_patch_versions(self):
+        self.assertEqual(upgrade_versions("1.0.0"), ("1.0.1", "1.0.2"))
+        self.assertEqual(upgrade_versions("1.0.1"), ("1.0.2", "1.0.3"))
+        with self.assertRaises(ValueError):
+            upgrade_versions("invalid")
+
     def test_selection_rejects_old_failed_and_unfinished_runs(self):
         def run(identifier, **changes):
             return {"id": identifier, "head_sha": "new", "status": "completed",

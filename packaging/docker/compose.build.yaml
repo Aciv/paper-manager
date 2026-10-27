@@ -4,7 +4,7 @@ x-build: &build
   network: ${PAPER_MANAGER_BUILD_NETWORK:-default}
   args:
     VCS_REF: ${PAPER_MANAGER_REVISION:-unknown}
-    VERSION: ${PAPER_MANAGER_VERSION:-1.0.0}
+    VERSION: ${PAPER_MANAGER_VERSION:-1.0.1}
     HTTP_PROXY: ${HTTP_PROXY:-${ALL_PROXY:-}}
     HTTPS_PROXY: ${HTTPS_PROXY:-${ALL_PROXY:-}}
     NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1}

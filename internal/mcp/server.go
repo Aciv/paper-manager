@@ -23,7 +23,7 @@ import (
 
 const (
 	serverName    = "papers-manager"
-	serverVersion = "1.0.0"
+	serverVersion = "1.0.1"
 )
 
 //go:embed manifest.json

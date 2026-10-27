@@ -31,7 +31,7 @@ cp .env.example .env
 
 ```dotenv
 PAPER_MANAGER_IMAGE_PREFIX=paper-manager-local
-PAPER_MANAGER_VERSION=1.0.0
+PAPER_MANAGER_VERSION=1.0.1
 POSTGRES_PASSWORD=your_local_password
 WEB_PORT=5173
 MCP_PORT=8090

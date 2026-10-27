@@ -84,12 +84,13 @@ def main() -> int:
     report["working_tree_changes"] = bool(subprocess.check_output(
         ["git", "status", "--porcelain"], cwd=ROOT, text=True,
     ).strip())
+    version = json.loads((ROOT / "packaging/desktop/product.json").read_text())["version"]
     token = secrets.token_hex(32)
     env_file = output / (project + ".env")
     data = output / (project + "-data")
     environment = {**os.environ, "POSTGRES_PASSWORD": secrets.token_hex(24), "MCP_TOKEN": token,
                    "WEB_PORT": str(web_port), "MCP_PORT": str(mcp_port),
-                   "PAPER_MANAGER_IMAGE_PREFIX": prefix, "PAPER_MANAGER_VERSION": "1.0.0",
+                   "PAPER_MANAGER_IMAGE_PREFIX": prefix, "PAPER_MANAGER_VERSION": version,
                    "PAPER_MANAGER_REVISION": revision, "PAPER_MANAGER_DATA_DIR": str(data),
                    "PARSER_LAYOUT_THREADS": "2", "SEMANTIC_SCHOLAR_API_KEY": "",
                    "OPENALEX_API_KEY": "", "CROSSREF_MAILTO": ""}
@@ -125,7 +126,7 @@ def main() -> int:
                 command(compose + ["-f", str(BUILD), "build", "api", "parser", "web"])
             report["images"] = {}
             for name in ("api", "parser", "web"):
-                image = f"{prefix}-{name}:1.0.0"
+                image = f"{prefix}-{name}:{version}"
                 metadata = json.loads(command(["docker", "image", "inspect", image], capture=True))[0]
                 actual = metadata["Os"] + "/" + metadata["Architecture"]
                 require(actual == "linux/amd64", f"not a validated amd64 image: {image}: {actual}")

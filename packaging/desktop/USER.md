@@ -1,4 +1,4 @@
-# paper_manager 1.0.0
+# paper_manager 1.0.1
 
 1. 完整解压，保留程序旁的 bundle 文件夹。
 2. Windows 打开 paper_manager.exe；Linux/macOS 运行 ./paper_manager。

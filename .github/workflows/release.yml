@@ -56,15 +56,13 @@ jobs:
             echo "Release $tag already exists; refusing to replace its assets."
             exit 1
           fi
-          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          paper_manager $VERSION
+          python scripts/desktop/prepare_release.py --revision "$GITHUB_SHA" \
+            --version "$VERSION" --notes > "$RUNNER_TEMP/release-notes.md"
+          cat >> "$RUNNER_TEMP/release-notes.md" <<EOF
 
+          ---
           Source commit: $GITHUB_SHA
           Tested run: https://github.com/$GH_REPO/actions/runs/${{ steps.source.outputs.run_id }}
-
-          Download the archive for your platform and extract the entire folder.
-          Run paper_manager.exe (Windows) or ./paper_manager (Linux/macOS).
-          Use ASCII program/data paths. Linux/macOS must run as an ordinary user.
           EOF
           gh release create "$tag" --draft --target "$GITHUB_SHA" \
             --title "paper_manager $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" "${archives[@]}"

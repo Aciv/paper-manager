@@ -27,7 +27,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 FROM alpine:3.20 AS runtime-assets
 
 FROM scratch
-ARG VERSION=1.0.0
+ARG VERSION=1.0.1
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="paper_manager API" \
       org.opencontainers.image.version=$VERSION \

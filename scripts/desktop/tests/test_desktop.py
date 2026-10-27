@@ -177,7 +177,7 @@ class DeliveryTests(unittest.TestCase):
                 self.assertTrue(os.access(destination / "paper_manager", os.X_OK))
             guide = destination / "README.md"
             original_guide = guide.read_bytes()
-            self.assertIn(b"1.0.0", original_guide)
+            self.assertEqual(original_guide, (Path(__file__).resolve().parents[3] / "packaging/desktop/USER.md").read_bytes())
             self.assertTrue((destination / "LICENSE").is_file())
             guide.write_bytes(b"modified installation instructions")
             with self.assertRaises(ValueError):

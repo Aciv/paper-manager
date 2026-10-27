@@ -6,6 +6,7 @@ import argparse
 from contextlib import ExitStack
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,6 +20,13 @@ os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 
 from desktop_bundle import inventory, sha256, verify, write_json
 from check_desktop_launcher import fixture_pdf, http, kill_owned, require, upload_pdf, wait_state
+
+
+def upgrade_versions(version: str) -> tuple[str, str]:
+    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("invalid baseline application version")
+    major, minor, patch = map(int, version.split("."))
+    return f"{major}.{minor}.{patch + 1}", f"{major}.{minor}.{patch + 2}"
 
 
 def reseal(root: Path, version: str):
@@ -58,7 +66,7 @@ def main() -> int:
         else:
             require(os.geteuid() != 0, "run the upgrade probe as an ordinary user")
         require(failure.is_file(), "validation-only native failure probe missing")
-        require(manifest["application"]["version"] == "1.0.0", "fixture currently expects the 1.0.0 baseline")
+        next_version, failed_version = upgrade_versions(manifest["application"]["version"])
         report["path_mode"] = "ascii"
         prefix = "pm d4 "
         temporary = tempfile.TemporaryDirectory(prefix=prefix, dir=args.temp_root)
@@ -194,9 +202,9 @@ def main() -> int:
                 path.write_bytes(b"preserve before upgrade")
             stop(base)
             report["steps"].append("real PDF/queue/parser and durable resources before upgrade")
-            newer = root / "synthetic 1.0.1"
+            newer = root / f"synthetic {next_version}"
             shutil.copytree(bundle, newer, symlinks=True)
-            reseal(newer, "1.0.1")
+            reseal(newer, next_version)
             maintain(newer)
             current = config()
             for field in ("ports", "database_password", "redis_password", "mcp_token"):
@@ -208,12 +216,12 @@ def main() -> int:
             require(b"Methods" in http(ready["app_url"] + note_url)[1], "upgrade lost the reading note directory")
             stop(base)
             report["steps"].append("synthetic next-version switch preserves parsed document, credentials, ports and DB")
-            bad = root / "synthetic 1.0.2 failed"
+            bad = root / f"synthetic {failed_version} failed"
             shutil.copytree(bundle, bad, symlinks=True)
             server = bad / ("server" + suffix)
             server.unlink()
             shutil.copy2(failure, server)
-            reseal(bad, "1.0.2")
+            reseal(bad, failed_version)
             maintain(bad, success=False)
             journal = json.loads((data / "maintenance/journal.json").read_text(encoding="utf-8"))
             recovery = data / "maintenance/recovery" / journal["checkpoint"] / "notes/d4-canary.md"

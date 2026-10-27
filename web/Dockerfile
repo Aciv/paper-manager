@@ -16,7 +16,7 @@ ENV VITE_API_URL=$VITE_API_URL
 RUN npm run build
 
 FROM nginx:1.27-alpine
-ARG VERSION=1.0.0
+ARG VERSION=1.0.1
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="paper_manager web" \
       org.opencontainers.image.version=$VERSION \
