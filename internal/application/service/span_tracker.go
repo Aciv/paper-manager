@@ -163,7 +163,8 @@ func (s *spanTracker) GetViews(
 
 func newDocumentProcessingView(document types.Document) types.DocumentProcessingView {
 	return types.DocumentProcessingView{
-		DocumentID: document.ID, SourceState: document.SourceState,
+		DocumentWorkflowSummary: document.WorkflowSummary(),
+		DocumentID:              document.ID, SourceState: document.SourceState,
 		CanonicalDocumentID: document.CanonicalDocumentID,
 		StageStates:         documentStageStates(document), Stages: []types.DocumentProcessingSpan{},
 	}
@@ -266,6 +267,8 @@ func spanFailure(err error) (string, string) {
 
 func safeSpanOutcome(code, _ string) (string, string) {
 	switch code {
+	case "SKIPPED_BY_IMPORT":
+		return code, "导入时选择跳过自动源信息查询"
 	case "":
 		return "", ""
 	case types.ProcessingErrorCancelled, types.ProcessingErrorUserCancelled:

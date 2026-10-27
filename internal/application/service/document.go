@@ -153,7 +153,7 @@ type documentUploadSource struct {
 	Open        func() (io.ReadCloser, error)
 }
 
-func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error) {
+func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string, options ...types.DocumentImportOptions) (*types.Document, error) {
 	if file == nil {
 		return nil, errors.New("file is required")
 	}
@@ -163,13 +163,13 @@ func (s *documentService) CreateDocumentFromFile(ctx context.Context, file *mult
 		Open: func() (io.ReadCloser, error) {
 			return file.Open()
 		},
-	}, doi)
+	}, doi, options...)
 }
 
 // CreateDocumentFromLocalFile imports a regular file selected by a trusted
 // caller. Path containment and symlink checks belong to that caller; the
 // service only rejects non-regular files and applies the normal upload rules.
-func (s *documentService) CreateDocumentFromLocalFile(ctx context.Context, path, doi string) (*types.Document, error) {
+func (s *documentService) CreateDocumentFromLocalFile(ctx context.Context, path, doi string, options ...types.DocumentImportOptions) (*types.Document, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, errors.New("local file path is required")
@@ -186,14 +186,25 @@ func (s *documentService) CreateDocumentFromLocalFile(ctx context.Context, path,
 		Open: func() (io.ReadCloser, error) {
 			return os.Open(path)
 		},
-	}, doi)
+	}, doi, options...)
 }
 
 func (s *documentService) createDocumentFromSource(
 	ctx context.Context,
 	source documentUploadSource,
 	doi string,
+	options ...types.DocumentImportOptions,
 ) (*types.Document, error) {
+	importOptions, err := documentImportOptions(options)
+	if err != nil {
+		return nil, err
+	}
+	if len(options) > 0 {
+		doi, importOptions, err = normalizeDocumentImport(doi, importOptions)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if source.Open == nil {
 		return nil, errors.New("file source is required")
 	}
@@ -214,7 +225,7 @@ func (s *documentService) createDocumentFromSource(
 		}
 		if page.Total > 0 {
 			logger.Warn(ctx, "duplicate document DOI rejected", "doi", doi)
-			return &page.Items[0], ErrDuplicateDOI
+			return s.finishImportedDocument(ctx, &page.Items[0], importOptions, ErrDuplicateDOI)
 		}
 	}
 	input, err := source.Open()
@@ -262,11 +273,11 @@ func (s *documentService) createDocumentFromSource(
 	}
 	if page.Total > 0 {
 		discardStored()
-		return &page.Items[0], types.ErrDuplicateFileHash
+		return s.finishImportedDocument(ctx, &page.Items[0], importOptions, types.ErrDuplicateFileHash)
 	}
 	doc := types.Document{ID: uuid.New(), OriginalFilename: stored.Filename, ContentType: stored.ContentType,
 		SizeBytes: stored.Size, DOI: doi, FileSHA256: fileHash, StorageKey: stored.Key,
-		SourceState: types.DocumentSourceAvailable}
+		SourceState: types.DocumentSourceAvailable, SourceLookupMode: importOptions.Processing.SourceLookup}
 	created, err := s.repo.Create(ctx, doc)
 	if err != nil {
 		logger.Error(ctx, "create document record failed", "document_id", doc.ID, "error", err)
@@ -275,18 +286,18 @@ func (s *documentService) createDocumentFromSource(
 		}
 		if errors.Is(err, types.ErrDuplicateFileHash) {
 			if duplicate, lookupErr := s.existingDocument(ctx, "", fileHash); lookupErr == nil && duplicate != nil {
-				return duplicate, err
+				return s.finishImportedDocument(ctx, duplicate, importOptions, err)
 			}
 		}
 		if errors.Is(err, types.ErrDuplicateDOI) {
 			if duplicate, lookupErr := s.existingDocument(ctx, doi, ""); lookupErr == nil && duplicate != nil {
-				return duplicate, err
+				return s.finishImportedDocument(ctx, duplicate, importOptions, err)
 			}
 		}
 		return nil, err
 	}
 	logger.Info(ctx, "document created", "document_id", created.ID)
-	return s.startCreatedDocumentProcessing(ctx, created)
+	return s.finishImportedDocument(ctx, &created, importOptions, nil)
 }
 
 // startCreatedDocumentProcessing starts the initial parse after the file and
@@ -593,7 +604,8 @@ func (s *documentService) GetDocumentProjections(
 
 func basicProcessingView(document types.Document) types.DocumentProcessingView {
 	view := types.DocumentProcessingView{
-		DocumentID: document.ID, SourceState: document.SourceState,
+		DocumentWorkflowSummary: document.WorkflowSummary(),
+		DocumentID:              document.ID, SourceState: document.SourceState,
 		CanonicalDocumentID: document.CanonicalDocumentID,
 		StageStates:         []types.DocumentStageState{},
 		Stages:              []types.DocumentProcessingSpan{},

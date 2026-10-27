@@ -181,6 +181,7 @@ func (DocumentProcessingSpan) TableName() string { return "document_processing_s
 
 // DocumentProcessingView is the compact API representation used by the UI.
 type DocumentProcessingView struct {
+	DocumentWorkflowSummary
 	DocumentID          uuid.UUID                `json:"documentId"`
 	SourceState         DocumentSourceState      `json:"sourceState"`
 	CanonicalDocumentID *uuid.UUID               `json:"canonicalDocumentId,omitempty"`

@@ -43,6 +43,7 @@ type Document struct {
 	FileSHA256                     string              `gorm:"column:file_sha256;type:char(64);not null;default:''" json:"-"`
 	StorageKey                     string              `gorm:"column:storage_key;type:text;not null;uniqueIndex" json:"-"`
 	SourceState                    DocumentSourceState `gorm:"column:source_state;type:text;not null;default:available" json:"sourceState"`
+	SourceLookupMode               SourceLookupMode    `gorm:"column:source_lookup_mode;type:text;not null;default:auto" json:"sourceLookupMode"`
 	CanonicalDocumentID            *uuid.UUID          `gorm:"column:canonical_document_id;type:uuid" json:"canonicalDocumentId,omitempty"`
 	MarkdownStatus                 DocumentStageStatus `gorm:"column:markdown_status;type:text;not null;default:not_started" json:"markdownStatus"`
 	MarkdownGeneration             int64               `gorm:"column:markdown_generation;not null;default:0" json:"markdownGeneration"`
@@ -66,6 +67,8 @@ type Document struct {
 	ReferenceLookupErrorMessage    *string             `gorm:"column:reference_lookup_error_message;type:text" json:"referenceLookupErrorMessage,omitempty"`
 	CreatedAt                      time.Time           `gorm:"column:created_at;autoCreateTime" json:"createdAt"`
 	UpdatedAt                      time.Time           `gorm:"column:updated_at;autoUpdateTime" json:"updatedAt"`
+
+	ImportMetadata *DocumentImportMetadataResult `gorm:"-" json:"importMetadata,omitempty"`
 }
 
 func (Document) TableName() string { return "documents" }

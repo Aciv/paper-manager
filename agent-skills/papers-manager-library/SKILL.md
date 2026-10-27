@@ -84,6 +84,19 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 超过 200 个 ID 时按页拆分（例如每页 100 个），不要无界并发批次；
 - 元数据缺失是允许的，不要从正文推断或用 `update_metadata` 补猜。
 
+### 导入源信息与阅读就绪
+
+- 已有源信息时随导入传 metadata，避免创建后逐篇补写；字段为 camelCase，日期支持
+  YYYY-MM-DD/RFC3339。批量用 options 与 paths/urls 对齐，空对象保留默认行为。
+- 默认保持自动源信息查询；只有用户明确要求跳过才传 processing.source_lookup=skip，
+  不从 DOI、标题完整度或来源自行推断。skip 不影响解析、参考文献提取和手动 catalog retry。
+- 重复导入默认 fill_missing，保留已有设置与手动清空；用户明确要求覆盖才使用
+  duplicate_metadata=replace。不要为刷新阶段而重传文件。
+- 检查逐项 importMetadata.status（applied/skipped/failed）；失败的文件可能已入库，
+  用返回的 document ID 修复 metadata，不重复上传。批量 status 与导入状态不等于解析就绪。
+- 批量状态以 readingReady 判断 notes 调度；workflowStatus=waiting 可能只是引用查询未手动
+  启动，source skipped 不阻塞阅读。保留 partial/failed/missing 的区别，不把部分完成称为全部成功。
+
 ### 导入 URL
 
 使用 `papers_manager_library_import_url`：

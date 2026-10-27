@@ -30,6 +30,10 @@ description: 通过 papersManager MCP 阅读库内论文、回答原文问题、
 - 创建链接前阅读 [证据规则](references/evidence.md)；公式遵循 [公式来源](references/formula-source.md)。链接可定位不等于主张被证明。
 - 描述缺失或预算耗尽不等于章节没有相关内容；检查工具的完整性标记和诊断。
 
+批量导入后使用 processing_status_many 的 readingReady 分发已就绪论文，不等整批下载或
+source/reference 查询完成。导入任务 succeeded 不等于解析成功；workflowStatus=waiting
+可能只是引用查询等待手动启动。source_lookup=skipped 不妨碍已解析论文的 notes 写入。
+
 ## MCP 与写入边界
 
 - 使用当前 host 的 papers_manager_ MCP 工具，外层命名空间可能不同。参数及工具能力以 tools/list 为准，[工具索引](references/tools.md) 仅用于导航。

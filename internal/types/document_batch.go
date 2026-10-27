@@ -37,13 +37,48 @@ type DocumentBatchItemResult struct {
 	ProcessingQueued *bool                    `json:"processingQueued,omitempty"`
 	Retryable        *bool                    `json:"retryable,omitempty"`
 	Error            string                   `json:"error,omitempty"`
+
+	ImportMetadata *DocumentImportMetadataResult `json:"importMetadata,omitempty"`
 }
 
 // DocumentBatchResult aggregates independently accepted items. Callers must
 // inspect every item: a successful HTTP response deliberately permits partial
 // success.
 type DocumentBatchResult struct {
+	Status  string                    `json:"status"`
+	Summary DocumentBatchSummary      `json:"summary"`
 	Items   []DocumentBatchItemResult `json:"items"`
 	Stopped bool                      `json:"stopped,omitempty"`
 	Error   string                    `json:"error,omitempty"`
+}
+
+type DocumentBatchSummary struct {
+	Total     int `json:"total"`
+	Succeeded int `json:"succeeded"`
+	Partial   int `json:"partial"`
+	Failed    int `json:"failed"`
+}
+
+// UpdateSummary distinguishes source acceptance from metadata or queue failure.
+// It never claims that accepted documents have finished their PDF processing.
+func (result *DocumentBatchResult) UpdateSummary() {
+	summary := DocumentBatchSummary{Total: len(result.Items)}
+	for _, item := range result.Items {
+		accepted := item.Status == DocumentImportItemAccepted || item.Status == DocumentImportItemDuplicate
+		if !accepted {
+			summary.Failed++
+		} else if (item.ImportMetadata != nil && item.ImportMetadata.Status == "failed") ||
+			(item.ProcessingQueued != nil && !*item.ProcessingQueued) {
+			summary.Partial++
+		} else {
+			summary.Succeeded++
+		}
+	}
+	result.Summary = summary
+	result.Status = "succeeded"
+	if summary.Failed == summary.Total && summary.Total > 0 {
+		result.Status = "failed"
+	} else if summary.Failed > 0 || summary.Partial > 0 || result.Stopped {
+		result.Status = "partial"
+	}
 }

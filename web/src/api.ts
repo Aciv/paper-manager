@@ -8,6 +8,8 @@ export type Document = {
   sizeBytes: number;
   doi?: string;
   sourceState: DocumentSourceState;
+  sourceLookupMode?: 'auto' | 'skip';
+  importMetadata?: ImportMetadataResult;
   // Present on search/list responses; optional so older payloads remain valid.
   markdownStatus?: DocumentStageStatus;
   createdAt: string;
@@ -101,6 +103,10 @@ export type ProcessingSpan = {
   finishedAt?: string;
 };
 export type DocumentProcessingView = {
+  readingReady?: boolean;
+  workflowStatus?: 'processing' | 'waiting' | 'succeeded' | 'partial' | 'failed';
+  sourceLookupMode?: 'auto' | 'skip';
+  retryTargets?: string[];
   documentId: string;
   sourceState: DocumentSourceState;
   canonicalDocumentId?: string;
@@ -190,7 +196,14 @@ export type DocumentSearch = {
   page?: number;
 };
 
-export type DocumentURLImport = {
+export type ImportMetadataResult = { status: 'applied' | 'skipped' | 'failed'; error?: string };
+export type DocumentImportOptions = {
+  metadata?: PaperMetadataUpdate & { doi?: string };
+  processing?: { source_lookup: 'auto' | 'skip' };
+  duplicate_metadata?: 'none' | 'fill_missing' | 'replace';
+};
+
+export type DocumentURLImport = DocumentImportOptions & {
   url: string;
   doi?: string;
   filename?: string;
@@ -198,6 +211,7 @@ export type DocumentURLImport = {
 
 export type DocumentBatchItemStatus = 'accepted' | 'duplicate' | 'rejected' | 'failed';
 export type DocumentBatchItemResult = {
+  importMetadata?: ImportMetadataResult;
   index: number;
   filename?: string;
   url?: string;
@@ -208,6 +222,8 @@ export type DocumentBatchItemResult = {
   error?: string;
 };
 export type DocumentBatchResult = {
+  status?: 'succeeded' | 'partial' | 'failed';
+  summary?: { total: number; succeeded: number; partial: number; failed: number };
   items: DocumentBatchItemResult[];
   stopped?: boolean;
   error?: string;
@@ -225,7 +241,7 @@ export type URLImportTask = {
   baseIds?: string[];
   total: number;
   completed: number;
-  summary: { accepted: number; duplicate: number; rejected: number; failed: number };
+  summary: { accepted: number; duplicate: number; rejected: number; failed: number; metadataFailed?: number };
   result?: DocumentBatchResult;
   retryUrls?: DocumentURLImport[];
   error?: string;
@@ -450,15 +466,24 @@ export const api = {
     query.set('page', String(search.page ?? 1));
     return request<DocumentPage>(`/search?${query.toString()}`);
   },
-  upload: (file: File, doi: string): Promise<{ document: Document }> => {
+  upload: (file: File, doi: string, options?: DocumentImportOptions): Promise<{ document: Document }> => {
     const body = new FormData();
     body.append('file', file);
     body.append('doi', doi);
+    if (options?.metadata) body.append('metadata', JSON.stringify(options.metadata));
+    if (options?.processing) body.append('processing', JSON.stringify(options.processing));
+    if (options?.duplicate_metadata) body.append('duplicate_metadata', options.duplicate_metadata);
     return request<{ document: Document }>('/upload', { method: 'POST', body });
   },
-  uploadBatch: (files: File[]): Promise<DocumentBatchResult> => {
+  uploadBatch: (files: File[], options?: DocumentImportOptions[]): Promise<DocumentBatchResult> => {
     const body = new FormData();
     files.forEach((file) => body.append('files', file));
+    if (options) {
+      if (options.length !== files.length) throw new Error('每个文件必须对应一项导入选项。');
+      body.append('metadata', JSON.stringify(options.map((item) => item.metadata ?? null)));
+      body.append('processing', JSON.stringify(options.map((item) => item.processing ?? {})));
+      body.append('duplicate_metadata', JSON.stringify(options.map((item) => item.duplicate_metadata ?? 'fill_missing')));
+    }
     return request<DocumentBatchResult>('/batch-upload', { method: 'POST', body });
   },
   importFromURL: (payload: DocumentURLImport): Promise<{ document: Document }> => request<{ document: Document }>(

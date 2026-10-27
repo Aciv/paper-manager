@@ -92,7 +92,7 @@ func classifyToolError(err error) toolFailureDetails {
 	switch {
 	case errors.Is(err, errNoteNotFound):
 		return toolFailureDetails{Code: "NOTE_NOT_FOUND", Message: "reading note does not exist"}
-	case errors.Is(err, errInvalidToolInput):
+	case errors.Is(err, errInvalidToolInput), errors.Is(err, types.ErrInvalidDocumentImport):
 		return toolFailureDetails{Code: "INVALID_ARGUMENT", Message: "invalid tool input"}
 	case errors.Is(err, errInvalidEvidence):
 		return toolFailureDetails{Code: "INVALID_EVIDENCE", Message: "evidence link is invalid or cannot be resolved"}

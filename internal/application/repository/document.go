@@ -40,9 +40,20 @@ func Migrate(ctx context.Context, db *gorm.DB) error {
 }
 
 func (r *documentRepository) Create(ctx context.Context, document types.Document) (types.Document, error) {
+	mode, err := document.SourceLookupMode.Normalized()
+	if err != nil {
+		return document, err
+	}
+	document.SourceLookupMode = mode
+	if mode == types.SourceLookupSkip &&
+		(document.SourceLookupStatus == "" || document.SourceLookupStatus == types.DocumentStageNotStarted) {
+		document.SourceLookupStatus = types.DocumentStageSkipped
+		code, reason := "SKIPPED_BY_IMPORT", "导入时选择跳过自动源信息查询"
+		document.SourceLookupErrorCode, document.SourceLookupErrorMessage = &code, &reason
+	}
 	document.DOI = strings.ToLower(strings.TrimSpace(document.DOI))
 	document.FileSHA256 = strings.ToLower(strings.TrimSpace(document.FileSHA256))
-	err := r.db.WithContext(ctx).Create(&document).Error
+	err = r.db.WithContext(ctx).Create(&document).Error
 	if isDuplicateDOIError(err) {
 		err = fmt.Errorf("%w: %s", types.ErrDuplicateDOI, document.DOI)
 	}

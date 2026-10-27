@@ -34,6 +34,7 @@ export function URLImportJobs({ jobs, onOpen }: {
           <span>{item.filename || item.url || `第 ${item.index + 1} 项`}</span>
           <strong>{({ accepted: '已入库', duplicate: '已存在', rejected: '已拒绝', failed: '失败' })[item.status]}</strong>
           {item.error && <small>{item.error}</small>}
+          {item.importMetadata && <small>源信息：{({ applied: '已应用', skipped: '保持原值', failed: '写入失败（文件已保存）' })[item.importMetadata.status]}</small>}
           {item.document && <button type="button" onClick={() => onOpen(item.document!)}>查看文档</button>}
           {item.processingQueued === false && <span>解析尚未入队，请打开文档后重试解析。</span>}
         </li>)}</ul>

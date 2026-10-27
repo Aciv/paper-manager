@@ -46,7 +46,7 @@ jobs:
       - name: Packaging, URL import helpers and Go tests
         run: |
           ./scripts/desktop/run_tests.sh --python-only
-          node --experimental-strip-types --test web/tests/urlImports.test.ts
+          node --experimental-strip-types --test web/tests/urlImports.test.ts web/tests/importOptions.test.ts
           go test ./...
       - name: Windows ordinary-account wrapper regression
         if: runner.os == 'Windows'

@@ -45,3 +45,7 @@ selection without text, then pass that range or selected IDs plus
 expected_generation to document_read_blocks. On CONFLICT, reload the outline and
 reselect; do not reuse old IDs with a refreshed generation. Unmapped section
 boundaries return UNAVAILABLE; use page reads instead.
+
+批量导入后的调度以 processing_status_many.items[].readingReady 为准；四阶段状态含 generation
+与失败/跳过原因。workflowStatus=waiting 可能为手动引用查询，不能因此阻止 ready 论文写 notes。
+批量 missingDocumentIds 和 partial/failed 必须分别报告，不能把导入 accepted 当作解析完成。

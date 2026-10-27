@@ -8,6 +8,7 @@ SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 tests=(
   test_health_api.sh
   test_upload_api.sh
+  test_import_options_api.sh
   test_document_crud_api.sh
   test_document_selection_api.sh
   test_paper_metadata_api.sh

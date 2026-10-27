@@ -92,9 +92,16 @@ func (s *paperInfoService) RetryCatalogResolution(
 }
 
 func (s *paperInfoService) enqueueSourceLookupIfNeeded(ctx context.Context, documentID uuid.UUID, requestID string) error {
-	state, err := s.documents.GetStage(ctx, documentID, types.DocumentStageSourceLookup)
+	document, err := s.documents.Get(ctx, documentID)
+	if err != nil || document.SourceLookupMode == types.SourceLookupSkip {
+		return err
+	}
+	state, err := document.StageState(types.DocumentStageSourceLookup)
 	if err != nil {
 		return err
+	}
+	if state.Status == "" {
+		state.Status = types.DocumentStageNotStarted
 	}
 	if state.Status == types.DocumentStageNotStarted {
 		state, _, err = s.documents.QueueStageNewGeneration(ctx, documentID, types.DocumentStageSourceLookup)
@@ -109,6 +116,10 @@ func (s *paperInfoService) enqueueSourceLookupIfNeeded(ctx context.Context, docu
 }
 
 func (s *paperInfoService) restartSourceLookup(ctx context.Context, documentID uuid.UUID, requestID string) error {
+	document, err := s.documents.Get(ctx, documentID)
+	if err != nil || document.SourceLookupMode == types.SourceLookupSkip {
+		return err
+	}
 	state, applied, err := s.documents.QueueStageNewGeneration(ctx, documentID, types.DocumentStageSourceLookup)
 	if err != nil {
 		return err

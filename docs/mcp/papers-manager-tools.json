@@ -140,7 +140,7 @@
     {
       "name": "papers_manager_library_import_url",
       "title": "Import a paper URL",
-      "description": "Queue explicit HTTP(S) paper URL downloads and return immediately with id/state/total. Poll papers_manager_library_import_status using the returned id. Accepted documents are added to base_id per item; PDF processing continues independently. Optional request_id is a UUID idempotency key: reuse it only with the identical request. Completed results are retained for 24 hours; BATCH_IMPORT_TIMEOUT bounds background acceptance, not this MCP call.",
+      "description": "Queue explicit HTTP(S) paper URL downloads and return immediately with id/state/total. Poll papers_manager_library_import_status using the returned id. Accepted documents are added to base_id per item; PDF processing continues independently. Optional request_id is a UUID idempotency key: reuse it only with the identical request. Completed results are retained for 24 hours; BATCH_IMPORT_TIMEOUT bounds background acceptance, not this MCP call. Optional metadata is applied before parsing; importMetadata reports applied/skipped/failed independently of source acceptance. Only explicit processing.source_lookup=skip disables automatic catalog lookup.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -160,6 +160,111 @@
             "type": "string",
             "format": "uuid",
             "description": "Optional stable UUID for safely resubmitting the identical request after a lost response."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "title": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "abstract": {
+                "type": "string",
+                "maxLength": 32768
+              },
+              "doi": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "authors": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "maxLength": 512
+                    },
+                    "affiliation": {
+                      "type": "string",
+                      "maxLength": 2048
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ]
+                }
+              },
+              "tags": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "sourceName": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "sourceUrl": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "venue": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "publishedAt": {
+                "type": "string",
+                "description": "YYYY-MM-DD or RFC3339."
+              },
+              "volume": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "issue": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "pages": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "language": {
+                "type": "string",
+                "maxLength": 16
+              }
+            },
+            "description": "Optional imported bibliographic fields (camelCase). At most 64 KiB; provided fields are protected from automatic overwrites."
+          },
+          "processing": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source_lookup": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "skip"
+                ],
+                "default": "auto"
+              }
+            },
+            "description": "Only explicit skip disables automatic source lookup. Parsing and reference extraction continue; manual catalog retry remains available."
+          },
+          "duplicate_metadata": {
+            "type": "string",
+            "enum": [
+              "none",
+              "fill_missing",
+              "replace"
+            ],
+            "default": "fill_missing",
+            "description": "Existing-document metadata policy. Never changes saved processing options or restarts tasks. replace overwrites only supplied fields."
           }
         },
         "required": [
@@ -177,7 +282,7 @@
     {
       "name": "papers_manager_library_import_file",
       "title": "Import a local paper file",
-      "description": "Import one regular file from MCP_LOCAL_IMPORT_ROOT and start the normal processing pipeline. Local file import calls are bounded by MCP_IMPORT_CONCURRENCY (default 2 simultaneous calls, independent of the 20-item batch size); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds the document to a Base via base_id.",
+      "description": "Import one regular file from MCP_LOCAL_IMPORT_ROOT and start the normal processing pipeline. Local file import calls are bounded by MCP_IMPORT_CONCURRENCY (default 2 simultaneous calls, independent of the 20-item batch size); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds the document to a Base via base_id. Optional metadata is applied before parsing; importMetadata reports applied/skipped/failed independently of source acceptance. Only explicit processing.source_lookup=skip disables automatic catalog lookup.",
       "group": "library",
       "inputSchema": {
         "type": "object",
@@ -194,6 +299,111 @@
           "base_id": {
             "type": "string",
             "description": "Optional Base ID. When set, the imported document is added to this Base (idempotent)."
+          },
+          "metadata": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "title": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "abstract": {
+                "type": "string",
+                "maxLength": 32768
+              },
+              "doi": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "authors": {
+                "type": "array",
+                "maxItems": 100,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "name": {
+                      "type": "string",
+                      "maxLength": 512
+                    },
+                    "affiliation": {
+                      "type": "string",
+                      "maxLength": 2048
+                    }
+                  },
+                  "required": [
+                    "name"
+                  ]
+                }
+              },
+              "tags": {
+                "type": "array",
+                "maxItems": 32,
+                "items": {
+                  "type": "string",
+                  "maxLength": 64
+                }
+              },
+              "sourceName": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "sourceUrl": {
+                "type": "string",
+                "maxLength": 2048
+              },
+              "venue": {
+                "type": "string",
+                "maxLength": 1024
+              },
+              "publishedAt": {
+                "type": "string",
+                "description": "YYYY-MM-DD or RFC3339."
+              },
+              "volume": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "issue": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "pages": {
+                "type": "string",
+                "maxLength": 128
+              },
+              "language": {
+                "type": "string",
+                "maxLength": 16
+              }
+            },
+            "description": "Optional imported bibliographic fields (camelCase). At most 64 KiB; provided fields are protected from automatic overwrites."
+          },
+          "processing": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source_lookup": {
+                "type": "string",
+                "enum": [
+                  "auto",
+                  "skip"
+                ],
+                "default": "auto"
+              }
+            },
+            "description": "Only explicit skip disables automatic source lookup. Parsing and reference extraction continue; manual catalog retry remains available."
+          },
+          "duplicate_metadata": {
+            "type": "string",
+            "enum": [
+              "none",
+              "fill_missing",
+              "replace"
+            ],
+            "default": "fill_missing",
+            "description": "Existing-document metadata policy. Never changes saved processing options or restarts tasks. replace overwrites only supplied fields."
           }
         },
         "required": [
@@ -210,7 +420,7 @@
     {
       "name": "papers_manager_library_import_urls",
       "title": "Import paper URLs in a batch",
-      "description": "Queue explicit HTTP(S) paper URL downloads and return immediately with id/state/total. Poll papers_manager_library_import_status using the returned id. Accepted documents are added to base_id per item; PDF processing continues independently. Optional request_id is a UUID idempotency key: reuse it only with the identical request. Completed results are retained for 24 hours; BATCH_IMPORT_TIMEOUT bounds background acceptance, not this MCP call.",
+      "description": "Queue explicit HTTP(S) paper URL downloads and return immediately with id/state/total. Poll papers_manager_library_import_status using the returned id. Accepted documents are added to base_id per item; PDF processing continues independently. Optional request_id is a UUID idempotency key: reuse it only with the identical request. Completed results are retained for 24 hours; BATCH_IMPORT_TIMEOUT bounds background acceptance, not this MCP call. Optional options must align with paths/urls before any filtering. Each item may include metadata, processing.source_lookup, duplicate_metadata. Import results distinguish source acceptance and metadata application; parsing readiness is separate.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -241,6 +451,123 @@
             "type": "string",
             "format": "uuid",
             "description": "Optional stable UUID for safely resubmitting the identical request after a lost response."
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "metadata": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "abstract": {
+                      "type": "string",
+                      "maxLength": 32768
+                    },
+                    "doi": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "authors": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "maxLength": 512
+                          },
+                          "affiliation": {
+                            "type": "string",
+                            "maxLength": 2048
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ]
+                      }
+                    },
+                    "tags": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 64
+                      }
+                    },
+                    "sourceName": {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    "sourceUrl": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "venue": {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    "publishedAt": {
+                      "type": "string",
+                      "description": "YYYY-MM-DD or RFC3339."
+                    },
+                    "volume": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "issue": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "pages": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "language": {
+                      "type": "string",
+                      "maxLength": 16
+                    }
+                  },
+                  "description": "Optional imported bibliographic fields (camelCase). At most 64 KiB; provided fields are protected from automatic overwrites."
+                },
+                "processing": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_lookup": {
+                      "type": "string",
+                      "enum": [
+                        "auto",
+                        "skip"
+                      ],
+                      "default": "auto"
+                    }
+                  },
+                  "description": "Only explicit skip disables automatic source lookup. Parsing and reference extraction continue; manual catalog retry remains available."
+                },
+                "duplicate_metadata": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "fill_missing",
+                    "replace"
+                  ],
+                  "default": "fill_missing",
+                  "description": "Existing-document metadata policy. Never changes saved processing options or restarts tasks. replace overwrites only supplied fields."
+                }
+              }
+            },
+            "description": "Optional one options object per path/URL, in exactly the same order; use {} for defaults. At most 1 MiB for the request."
           }
         },
         "required": [
@@ -283,7 +610,7 @@
     {
       "name": "papers_manager_library_import_files",
       "title": "Import local paper files in a batch",
-      "description": "Import 1-20 regular files from MCP_LOCAL_IMPORT_ROOT in one call and start the normal processing pipeline. All paths are validated before any import; items are then accepted sequentially with per-item results. Import calls share the MCP_IMPORT_CONCURRENCY gate (default 2 simultaneous calls); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds each resulting document to a Base via base_id.",
+      "description": "Import 1-20 regular files from MCP_LOCAL_IMPORT_ROOT in one call and start the normal processing pipeline. All paths are validated before any import; items are then accepted sequentially with per-item results. Import calls share the MCP_IMPORT_CONCURRENCY gate (default 2 simultaneous calls); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds each resulting document to a Base via base_id. Optional options must align with paths/urls before any filtering. Each item may include metadata, processing.source_lookup, duplicate_metadata. Import results distinguish source acceptance and metadata application; parsing readiness is separate.",
       "group": "library",
       "inputSchema": {
         "type": "object",
@@ -309,6 +636,123 @@
           "base_id": {
             "type": "string",
             "description": "Optional Base ID. Each accepted or duplicate document is added to this Base (idempotent)."
+          },
+          "options": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 20,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "metadata": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "title": {
+                      "type": "string",
+                      "maxLength": 4096
+                    },
+                    "abstract": {
+                      "type": "string",
+                      "maxLength": 32768
+                    },
+                    "doi": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "authors": {
+                      "type": "array",
+                      "maxItems": 100,
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                          "name": {
+                            "type": "string",
+                            "maxLength": 512
+                          },
+                          "affiliation": {
+                            "type": "string",
+                            "maxLength": 2048
+                          }
+                        },
+                        "required": [
+                          "name"
+                        ]
+                      }
+                    },
+                    "tags": {
+                      "type": "array",
+                      "maxItems": 32,
+                      "items": {
+                        "type": "string",
+                        "maxLength": 64
+                      }
+                    },
+                    "sourceName": {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    "sourceUrl": {
+                      "type": "string",
+                      "maxLength": 2048
+                    },
+                    "venue": {
+                      "type": "string",
+                      "maxLength": 1024
+                    },
+                    "publishedAt": {
+                      "type": "string",
+                      "description": "YYYY-MM-DD or RFC3339."
+                    },
+                    "volume": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "issue": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "pages": {
+                      "type": "string",
+                      "maxLength": 128
+                    },
+                    "language": {
+                      "type": "string",
+                      "maxLength": 16
+                    }
+                  },
+                  "description": "Optional imported bibliographic fields (camelCase). At most 64 KiB; provided fields are protected from automatic overwrites."
+                },
+                "processing": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "source_lookup": {
+                      "type": "string",
+                      "enum": [
+                        "auto",
+                        "skip"
+                      ],
+                      "default": "auto"
+                    }
+                  },
+                  "description": "Only explicit skip disables automatic source lookup. Parsing and reference extraction continue; manual catalog retry remains available."
+                },
+                "duplicate_metadata": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "fill_missing",
+                    "replace"
+                  ],
+                  "default": "fill_missing",
+                  "description": "Existing-document metadata policy. Never changes saved processing options or restarts tasks. replace overwrites only supplied fields."
+                }
+              }
+            },
+            "description": "Optional one options object per path/URL, in exactly the same order; use {} for defaults. At most 1 MiB for the request."
           }
         },
         "required": [
@@ -444,7 +888,7 @@
     {
       "name": "papers_manager_processing_status",
       "title": "Read document processing status",
-      "description": "Read the single processing projection for one document: stage states, active or terminal spans, safe errors, and reference progress.",
+      "description": "Read the single processing projection for one document: stage states, active or terminal spans, safe errors, and reference progress. Includes readingReady (source available + markdown succeeded), workflowStatus, sourceLookupMode and retryTargets. Waiting includes not-started/manual stages; skipped is explicit, not failure. Generation and stage reasons remain authoritative.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -469,7 +913,7 @@
     {
       "name": "papers_manager_processing_status_many",
       "title": "Read multiple document processing statuses",
-      "description": "Read processing projections for 1-200 documents in one call: stage states, active or terminal spans, safe errors, and reference progress. Results preserve the requested order; IDs that do not resolve are reported in missingDocumentIds. Duplicate IDs are deduplicated. Read-only.",
+      "description": "Read processing projections for 1-200 documents in one call: stage states, active or terminal spans, safe errors, and reference progress. Results preserve the requested order; IDs that do not resolve are reported in missingDocumentIds. Duplicate IDs are deduplicated. Read-only. Includes readingReady (source available + markdown succeeded), workflowStatus, sourceLookupMode and retryTargets. Waiting includes not-started/manual stages; skipped is explicit, not failure. Generation and stage reasons remain authoritative. Aggregate status is processing/waiting/succeeded/partial/failed; summary includes missing IDs and readingReady count. This is document processing, not import acceptance.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,

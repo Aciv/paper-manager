@@ -28,6 +28,11 @@ func (s *documentService) CreateDocumentFromURL(
 	if err := command.Validate(); err != nil {
 		return nil, err
 	}
+	doi, importOptions, err := normalizeDocumentImport(command.DOI, command.ImportOptions())
+	if err != nil {
+		return nil, err
+	}
+	command.DOI = doi
 	if s.urlResolver == nil {
 		return nil, errors.New("paper URL resolver is not configured")
 	}
@@ -51,7 +56,7 @@ func (s *documentService) CreateDocumentFromURL(
 		if getErr != nil {
 			return nil, getErr
 		}
-		return &existing, ErrDuplicateDOI
+		return s.finishImportedDocument(ctx, &existing, importOptions, ErrDuplicateDOI)
 	}
 	stored, err := s.downloadResolvedPDF(ctx, resolved.DownloadURL, filename)
 	if err != nil {
@@ -66,26 +71,26 @@ func (s *documentService) CreateDocumentFromURL(
 		if getErr != nil {
 			return nil, getErr
 		}
-		return &existing, ErrDuplicateFileHash
+		return s.finishImportedDocument(ctx, &existing, importOptions, ErrDuplicateFileHash)
 	}
 	document := types.Document{
 		ID: uuid.New(), OriginalFilename: stored.File.Filename,
 		ContentType: stored.File.ContentType, SizeBytes: stored.File.Size,
 		DOI: resolved.DOI, FileSHA256: stored.File.SHA256,
 		StorageKey:  stored.File.Key,
-		SourceState: types.DocumentSourceAvailable,
+		SourceState: types.DocumentSourceAvailable, SourceLookupMode: importOptions.Processing.SourceLookup,
 	}
 	created, err := s.repo.Create(ctx, document)
 	if err != nil {
 		_ = s.storage.Delete(context.WithoutCancel(ctx), stored.File.Key)
 		if errors.Is(err, types.ErrDuplicateFileHash) {
 			if existing, lookupErr := s.existingDocument(ctx, "", stored.File.SHA256); lookupErr == nil && existing != nil {
-				return existing, err
+				return s.finishImportedDocument(ctx, existing, importOptions, err)
 			}
 		}
 		if errors.Is(err, types.ErrDuplicateDOI) {
 			if existing, lookupErr := s.existingDocument(ctx, resolved.DOI, ""); lookupErr == nil && existing != nil {
-				return existing, err
+				return s.finishImportedDocument(ctx, existing, importOptions, err)
 			}
 		}
 		return nil, err
@@ -99,7 +104,7 @@ func (s *documentService) CreateDocumentFromURL(
 			logger.Warn(ctx, "persist imported paper source URL failed", "document_id", created.ID, "error", metadataErr)
 		}
 	}
-	processed, processErr := s.startCreatedDocumentProcessing(ctx, created)
+	processed, processErr := s.finishImportedDocument(ctx, &created, importOptions, nil)
 	if processErr != nil {
 		return processed, processErr
 	}

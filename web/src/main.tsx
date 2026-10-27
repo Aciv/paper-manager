@@ -3,6 +3,8 @@ import { ChangeEvent, DragEvent as ReactDragEvent, FormEvent, lazy, Suspense, us
 import { createRoot } from 'react-dom/client';
 import { ErrorBoundary } from './ErrorBoundary';
 import { URLImportJobs } from './URLImportJobs';
+import { ImportOptionsEditor } from './ImportOptionsEditor';
+import { buildImportOptions, type ImportDrafts } from './importOptions';
 import { useURLImportJobs } from './useURLImportJobs';
 import { api, Document, DocumentBase, DocumentBatchItemResult, DocumentBatchResult, DocumentPage, DocumentProcessingView, DocumentSearch, DocumentStageStatus, DocumentURLImport, PaperCitation, PaperMetadata, PaperReference, ProcessingSpan, ProcessingSpanStatus } from './api';
 import {
@@ -91,9 +93,10 @@ function documentListStatus(
       return { className: 'status-failed', label: '解析失败', title: '解析失败，可在详情中重新解析' };
     case 'cancelled':
       return { className: 'status-cancelled', label: '已取消', title: '解析已取消' };
-    case 'succeeded':
     case 'skipped':
-      return { className: 'status-ready', label: '可用', title: '解析完成，可在阅读库中打开' };
+      return { className: 'status-uploaded', label: '未解析', title: '解析已跳过，只有原始文件' };
+    case 'succeeded':
+      return { className: 'status-ready', label: '已解析', title: 'Markdown 已就绪，可阅读和写 notes；后台查询可能仍在运行' };
     case 'not_started':
       return { className: 'status-uploaded', label: '待解析', title: '等待解析' };
     default:
@@ -172,6 +175,8 @@ function processingKindLabel(kind: string) {
     pipeline: '处理流程',
     recognition: '文档识别',
     metadata_extraction: '元数据提取',
+    source_lookup: '源信息查询',
+    reference_lookup: '引用查询',
     catalog_source: '源论文查询',
     catalog_reference: '引用论文查询',
     catalog_provider: '论文库提供方查询',
@@ -205,6 +210,11 @@ function App() {
   const [remoteURL, setRemoteURL] = useState('');
   const [remoteDOI, setRemoteDOI] = useState('');
   const [remoteFilename, setRemoteFilename] = useState('');
+  const [importDrafts, setImportDrafts] = useState<ImportDrafts>({});
+  const [skipSourceLookup, setSkipSourceLookup] = useState(false);
+  const uploadOptionItems = files.map((file) => ({
+    key: `file:${file.name}:${file.size}:${file.lastModified}`, label: file.name,
+  }));
   const [editOriginalFilename, setEditOriginalFilename] = useState('');
   const [editDoi, setEditDoi] = useState('');
   const [editTitle, setEditTitle] = useState('');
@@ -271,7 +281,7 @@ function App() {
   const sourceCatalogActive = ['queued', 'running'].includes(stageState('source_lookup')?.status ?? 'not_started');
   const referenceCatalogActive = ['queued', 'running'].includes(stageState('reference_lookup')?.status ?? 'not_started');
   const markdownState = stageState('markdown');
-	const documentStatus = processing?.sourceState === 'deleting' ? 'deleting' : processing?.sourceState === 'merged' ? 'merged' : pipelineActive ? 'processing' : markdownState?.status === 'failed' ? 'failed' : markdownState?.status === 'cancelled' ? 'cancelled' : markdownState?.status === 'succeeded' ? 'ready' : selected?.sourceState ?? 'available';
+	const documentStatus = processing?.sourceState === 'deleting' ? 'deleting' : processing?.sourceState === 'merged' ? 'merged' : markdownState?.status === 'succeeded' ? 'ready' : pipelineActive ? 'processing' : markdownState?.status === 'failed' ? 'failed' : markdownState?.status === 'cancelled' ? 'cancelled' : selected?.sourceState ?? 'available';
   // Refresh the visible page quietly while any row is still parsing, so its
   // dot changes without the user pressing 刷新. Non-selected rows are not
   // covered by the selected document's processing poll.
@@ -511,6 +521,13 @@ function App() {
     }
   }
 
+  function discardImportDrafts(keys: string[]) {
+    const removed = new Set(keys);
+    setImportDrafts((current) => Object.fromEntries(
+      Object.entries(current).filter(([key]) => !removed.has(key)),
+    ));
+  }
+
   // The toolbar search box routes to the exact lookup when the input is an ID or
   // a DOI, and to paper-metadata search otherwise.
   async function runToolbarSearch() {
@@ -553,10 +570,14 @@ function App() {
     if (files.length > 1) {
       setMessage(`正在批量上传 ${files.length} 个文件…`);
       try {
-        const result = await api.uploadBatch(files);
+        const options = buildImportOptions(uploadOptionItems.map((item) => item.key), importDrafts, skipSourceLookup);
+        const result = await api.uploadBatch(files, options);
         const selectedUploadBases = bases.filter((base) => formBaseIDs.includes(base.id));
         const baseNote = await attachBatchDocumentsToBases(result, selectedUploadBases);
         await presentBatchResult(result, '文件批量上传', baseNote);
+        discardImportDrafts(result.items.filter((item) =>
+          ['accepted', 'duplicate'].includes(item.status) && item.importMetadata?.status !== 'failed',
+        ).map((item) => uploadOptionItems[item.index].key));
         setFiles([]);
         setFormBaseIDs([]);
         const input = window.document.getElementById('document-file') as HTMLInputElement | null;
@@ -571,11 +592,18 @@ function App() {
     const file = files[0];
     setMessage(`正在上传 ${file.name}…`);
     try {
-      const { document: uploadedDocument } = await api.upload(file, doi.trim());
+      const [options] = buildImportOptions(uploadOptionItems.map((item) => item.key), importDrafts, skipSourceLookup);
+      options.metadata = {
+        ...(title.trim() ? { title: title.trim() } : {}),
+        ...(parseTags(tags).length ? { tags: parseTags(tags) } : {}),
+        ...options.metadata,
+      };
+      const { document: uploadedDocument } = await api.upload(file, doi.trim(), options);
       watchQueuedProcessing(uploadedDocument.id);
+      if (uploadedDocument.importMetadata?.status !== 'failed') discardImportDrafts(uploadOptionItems.map((item) => item.key));
       let uploadedPaper: PaperMetadata | undefined;
-      if (title.trim() || parseTags(tags).length > 0) {
-        ({ paperMetadata: uploadedPaper } = await api.updatePaperMetadata(uploadedDocument.id, { title: title.trim(), tags: parseTags(tags) }));
+      if (uploadedDocument.importMetadata?.status === 'applied') {
+        try { ({ paperMetadata: uploadedPaper } = await api.getPaperMetadata(uploadedDocument.id)); } catch { /* Refresh later. */ }
       }
       const selectedUploadBases = bases.filter((base) => formBaseIDs.includes(base.id));
       const baseAttachmentFailures = await attachDocumentToBases(uploadedDocument, selectedUploadBases);
@@ -590,9 +618,11 @@ function App() {
       if (input) input.value = '';
       await load({ page: 1 });
       const baseSummary = baseAttachmentSummary(selectedUploadBases, baseAttachmentFailures);
-      setMessage(baseSummary
+      const metadataNote = uploadedDocument.importMetadata?.status === 'failed'
+        ? ' 源信息写入失败，文件已保存；可在详情中补充。' : '';
+      setMessage((baseSummary
         ? `上传成功：${documentLabel(uploadedDocument, uploadedPaper)}${baseSummary}。`
-        : `上传成功：${documentLabel(uploadedDocument, uploadedPaper)}（${uploadedDocument.id}）。`);
+        : `上传成功：${documentLabel(uploadedDocument, uploadedPaper)}（${uploadedDocument.id}）。`) + metadataNote);
     } catch (error) {
       setMessage(error instanceof Error ? `上传失败：${error.message}` : '上传失败。');
     } finally {
@@ -613,13 +643,16 @@ function App() {
     setBusy(true);
     setMessage('正在提交后台导入任务…');
     try {
-      const commands: DocumentURLImport[] = remoteURLs.map((url) => ({
+      const options = buildImportOptions(remoteURLs.map((url) => `url:${url}`), importDrafts, skipSourceLookup);
+      const commands: DocumentURLImport[] = remoteURLs.map((url, index) => ({
+        ...options[index],
         url,
         doi: remoteURLs.length === 1 ? remoteDOI.trim() || undefined : undefined,
         filename: remoteURLs.length === 1 ? remoteFilename.trim() || undefined : undefined,
       }));
       const task = await urlImportJobs.enqueue(commands, formBaseIDs);
       if (task) {
+        discardImportDrafts(remoteURLs.map((url) => `url:${url}`));
         setRemoteURL('');
         setRemoteDOI('');
         setRemoteFilename('');
@@ -996,8 +1029,10 @@ function App() {
       (current, item) => ({ ...current, [item.status]: current[item.status] + 1 }),
       { accepted: 0, duplicate: 0, rejected: 0, failed: 0 },
     );
+    const metadataFailures = result.items.filter((item) => item.importMetadata?.status === 'failed').length;
+    const metadataNote = metadataFailures ? `；源信息写入失败 ${metadataFailures} 项（文件已保存）` : '';
     const stopped = result.stopped ? `；已安全停止：${result.error ?? '重复检测暂不可用'}` : '';
-    setMessage(`${operation}完成：受理 ${counts.accepted}，已存在 ${counts.duplicate}，拒绝 ${counts.rejected}，失败 ${counts.failed}${stopped}${suffix}。`);
+    setMessage(`${operation}完成：受理 ${counts.accepted}，已存在 ${counts.duplicate}，拒绝 ${counts.rejected}，失败 ${counts.failed}${metadataNote}${stopped}${suffix}。`);
   }
 
   function toggleFormBase(baseID: string) {
@@ -1081,6 +1116,8 @@ function App() {
         <input id="document-title" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="未填写时使用原始文件名" disabled={busy || files.length > 1} />
         <label htmlFor="document-tags">学科标签（可选）</label>
         <input id="document-tags" value={tags} onChange={(event) => setTags(event.target.value)} placeholder="computer science, graphics" disabled={busy || files.length > 1} />
+        <ImportOptionsEditor items={uploadOptionItems} drafts={importDrafts} onChange={setImportDrafts}
+          skip={skipSourceLookup} onSkip={setSkipSourceLookup} disabled={busy} />
         {renderBasePicker()}
         <button className="primary" type="submit" disabled={busy || files.length === 0}>{files.length > 1 ? `批量上传 ${files.length} 个文件` : '上传并创建记录'}</button>
         <p className="hint" title="支持 TXT、JSON、Markdown、CSV、PDF、Word、Excel 与 PowerPoint；单文件可设置 DOI、标题和标签，所选 Base 会应用到本次上传的全部文档。">支持 PDF / Office / Markdown / TXT 等；所选 Base 会应用到全部上传文件。</p>
@@ -1097,6 +1134,9 @@ function App() {
         <input id="remote-doi" value={remoteDOI} maxLength={255} onChange={(event) => setRemoteDOI(event.target.value)} placeholder="10.1000/example" disabled={busy || remoteURLs.length > 1} />
         <label htmlFor="remote-filename">保存文件名（可选）</label>
         <input id="remote-filename" value={remoteFilename} onChange={(event) => setRemoteFilename(event.target.value)} placeholder="paper.pdf" disabled={busy || remoteURLs.length > 1} />
+        <ImportOptionsEditor items={remoteURLs.map((url) => ({ key: `url:${url}`, label: url }))}
+          drafts={importDrafts} onChange={setImportDrafts} skip={skipSourceLookup}
+          onSkip={setSkipSourceLookup} disabled={busy || urlImportJobs.submitting} />
         {renderBasePicker()}
         <button className="primary" type="submit" disabled={busy || urlImportJobs.submitting || remoteURLs.length === 0}>{remoteURLs.length > 1 ? `批量导入 ${remoteURLs.length} 个 URL` : '提交后台导入'}</button>
         <p className="hint" title="普通出版社落地页不会被猜测为 PDF；当前支持显式 PDF URL、arXiv 页面及对应 DOI URL。多行 URL 会逐项受理，单项 DOI 和文件名仅适用于单行导入；所选 Base 会应用到本次导入的全部文档。">支持显式 PDF URL、arXiv 页面与 DOI URL（每行一个）；所选 Base 会应用到全部导入文档。</p>
@@ -1113,6 +1153,7 @@ function App() {
           <span>{batchItemLabel(item)}</span>
           <strong className={`batch-status batch-status-${item.status}`}>{batchStatusLabel(item.status)}</strong>
           {item.error && <small>{item.error}</small>}
+          {item.importMetadata && <small>源信息：{({ applied: '已应用', skipped: '保持原值', failed: '写入失败（文件已保存）' })[item.importMetadata.status]}</small>}
         </li>)}</ul>
       </section>}
 
@@ -1251,7 +1292,12 @@ function App() {
             </form>}
             {detailMenu === 'pipeline' && <>
 			<section className="paper-info-panel">
-			  <div className="panel-heading"><h4>文档处理流程</h4><span>{processing?.sourceState ?? '尚未加载'}</span></div>
+			  <div className="panel-heading"><h4>文档处理流程</h4><span>{processing?.readingReady ? '已解析，可阅读 / 写 notes' : '尚未解析完成'}</span></div>
+              <p className="hint">{processing?.workflowStatus === 'processing' ? '后台任务仍在运行。' :
+                processing?.workflowStatus === 'partial' ? '部分阶段失败，可分别重试。' :
+                processing?.workflowStatus === 'failed' ? '处理失败，请查看下方原因。' :
+                processing?.workflowStatus === 'waiting' ? '有阶段尚未开始；引用查询可能需要手动启动。' : '所有阶段已完成或已明确跳过。'}
+                自动源信息查询：{processing?.sourceLookupMode === 'skip' ? '已关闭（仍可手动查询）' : '开启'}。</p>
 			  <div className="paper-info-stages">
 				{stageStates.length ? stageStates.map((stage) => <div key={stage.stage}><strong>{processingKindLabel(stage.stage)}</strong><span className={`paper-stage paper-stage-${stageOutcomeClass(stage)}`}>{stageOutcomeLabel(stage, paperMetadata?.metadataSource)}</span><small>{stageOutcomeDetail(stage, paperMetadata?.metadataSource)}</small></div>) : <p className="hint">尚未产生阶段状态。</p>}
 			  </div>
@@ -1259,14 +1305,14 @@ function App() {
 				<section className="paper-info-panel">
 				  <div className="panel-heading"><h4>论文信息任务</h4><span>由四阶段状态控制</span></div>
 				  <div className="paper-info-stages">
-					<div><strong>元数据提取</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperExtraction, '已提交元数据提取重试。')} disabled={busy || extractionActive || pipelineActive}>重试</button></div>
-					<div><strong>源论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperCatalog, '已提交源论文查询重试。')} disabled={busy || sourceCatalogActive || pipelineActive}>重试</button></div>
+					<div><strong>元数据提取</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperExtraction, '已提交元数据提取重试。')} disabled={busy || extractionActive || !processing?.readingReady}>重试</button></div>
+					<div><strong>源论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperCatalog, '已提交源论文查询重试。')} disabled={busy || sourceCatalogActive || (!selected.doi && !paperMetadata?.title)}>查询 / 重试</button></div>
 					<div><strong>引用论文查询</strong><button type="button" onClick={() => void runPaperControl(api.retryPaperReferences, '已提交引用论文查询重试。')} disabled={busy || referenceCatalogActive}>重试</button></div>
 					<div><strong>引用 PDF 获取</strong><span className="paper-stage">仅在引用条目中手动触发</span></div>
 				  </div>
 			  {processing?.referenceProgress && <p className="hint">引用目标源查询：排队 {processing.referenceProgress.queued} · 运行 {processing.referenceProgress.running} · 完成 {processing.referenceProgress.completed} · 失败 {processing.referenceProgress.failed} · 已取消 {processing.referenceProgress.cancelled}</p>}
 			  {referenceCatalogActive && <button type="button" className="warning" onClick={() => void cancelPaperInfo()} disabled={busy}>取消引用论文查询</button>}
-			  <p className="hint">状态来自持久化处理 span；元数据来源来自已落库的论文信息。历史失败请查看 Asynq 死信记录。</p>
+			  <p className="hint">四阶段状态来自文档记录；处理 span 提供执行详情，元数据来源来自已落库的论文信息。历史失败请查看 Asynq 死信记录。</p>
 			</section>
             </>}
 			{detailMenu === 'citations' && <section className="citation-panel">

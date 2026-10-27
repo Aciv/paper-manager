@@ -67,7 +67,7 @@ func (r *paperMetadataRepository) Upsert(
 				return err
 			}
 			preparePaperMetadata(&metadata, documentID)
-			if err := tx.Create(&metadata).Error; err != nil {
+			if err := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&metadata).Error; err != nil {
 				return err
 			}
 			// Lock the newly created row as well so every merge below uses the
@@ -80,6 +80,9 @@ func (r *paperMetadataRepository) Upsert(
 		changes, nextSources, applied, err := mergePaperMetadataChanges(metadata.FieldSources, &update)
 		if err != nil {
 			return err
+		}
+		if update.FillMissingOnly {
+			applied = filterImportMissingFields(metadata, changes, nextSources, applied)
 		}
 		if len(changes) > 0 {
 			if update.MetadataSource != nil {
@@ -110,6 +113,38 @@ func (r *paperMetadataRepository) Upsert(
 	}
 	logger.Info(ctx, "paper metadata update completed", "document_id", documentID, "metadata_source", incomingSource)
 	return updated, nil
+}
+
+// filterImportMissingFields runs while the metadata row is locked. A manual
+// empty value is an intentional clear and must remain protected as well.
+func filterImportMissingFields(
+	current types.PaperMetadata, changes map[string]interface{},
+	sources types.PaperMetadataFieldSources, applied []string,
+) []string {
+	empty := map[string]bool{
+		"title":    strings.TrimSpace(current.Title) == "",
+		"abstract": strings.TrimSpace(current.Abstract) == "",
+		"authors":  len(current.Authors) == 0, "tags": len(current.Tags) == 0,
+		"source_name": strings.TrimSpace(current.SourceName) == "",
+		"source_url":  strings.TrimSpace(current.SourceURL) == "",
+		"venue":       strings.TrimSpace(current.Venue) == "", "published_at": current.PublishedAt == nil,
+		"volume": strings.TrimSpace(current.Volume) == "", "issue": strings.TrimSpace(current.Issue) == "",
+		"pages": strings.TrimSpace(current.Pages) == "", "language": strings.TrimSpace(current.Language) == "",
+	}
+	kept := make([]string, 0, len(applied))
+	for _, field := range applied {
+		if empty[field] && current.FieldSources[field] != types.PaperMetadataSourceManual {
+			kept = append(kept, field)
+			continue
+		}
+		delete(changes, field)
+		if previous, exists := current.FieldSources[field]; exists {
+			sources[field] = previous
+		} else {
+			delete(sources, field)
+		}
+	}
+	return kept
 }
 
 func (r *paperMetadataRepository) Search(ctx context.Context, search types.PaperSearch) (types.PaperMetadataPage, error) {

@@ -19,10 +19,11 @@ type URLImportTask struct {
 }
 
 type URLImportSummary struct {
-	Accepted  int `json:"accepted"`
-	Duplicate int `json:"duplicate"`
-	Rejected  int `json:"rejected"`
-	Failed    int `json:"failed"`
+	MetadataFailed int `json:"metadataFailed"`
+	Accepted       int `json:"accepted"`
+	Duplicate      int `json:"duplicate"`
+	Rejected       int `json:"rejected"`
+	Failed         int `json:"failed"`
 }
 
 type URLImportPayload struct {

@@ -8,7 +8,7 @@ read individual papers and compare papers in a Base collection.
 
 ## Features
 
-- **Paper library**: upload PDFs, import supported paper URLs, search titles/authors/tags, and edit metadata.
+- **Paper library**: batch-import files or supported paper URLs with metadata, optionally skip automatic source lookup, and search titles/authors/tags.
 - **PDF reading**: navigate outlines, select text or parsed blocks, and follow evidence links.
   Hover over a citation index to filter reference candidates; click to navigate within the PDF.
   Selected-text translation is available.

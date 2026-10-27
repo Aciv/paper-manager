@@ -105,18 +105,20 @@ type PaperMetadataPage struct {
 // leave persisted data unchanged, while an empty slice explicitly clears tags
 // or authors.
 type PaperMetadataUpdate struct {
-	Title       *string        `json:"title,omitempty"`
-	Abstract    *string        `json:"abstract,omitempty"`
-	Authors     *[]PaperAuthor `json:"authors,omitempty"`
-	Tags        *[]string      `json:"tags,omitempty"`
-	SourceName  *string        `json:"sourceName,omitempty"`
-	SourceURL   *string        `json:"sourceUrl,omitempty"`
-	Venue       *string        `json:"venue,omitempty"`
-	PublishedAt *time.Time     `json:"publishedAt,omitempty"`
-	Volume      *string        `json:"volume,omitempty"`
-	Issue       *string        `json:"issue,omitempty"`
-	Pages       *string        `json:"pages,omitempty"`
-	Language    *string        `json:"language,omitempty"`
+	// FillMissingOnly is an internal import policy evaluated under a database row lock.
+	FillMissingOnly bool           `json:"-"`
+	Title           *string        `json:"title,omitempty"`
+	Abstract        *string        `json:"abstract,omitempty"`
+	Authors         *[]PaperAuthor `json:"authors,omitempty"`
+	Tags            *[]string      `json:"tags,omitempty"`
+	SourceName      *string        `json:"sourceName,omitempty"`
+	SourceURL       *string        `json:"sourceUrl,omitempty"`
+	Venue           *string        `json:"venue,omitempty"`
+	PublishedAt     *time.Time     `json:"publishedAt,omitempty"`
+	Volume          *string        `json:"volume,omitempty"`
+	Issue           *string        `json:"issue,omitempty"`
+	Pages           *string        `json:"pages,omitempty"`
+	Language        *string        `json:"language,omitempty"`
 	// MetadataSource is internal write provenance. HTTP clients cannot set it;
 	// PaperService assigns manual while automated pipelines assign their source.
 	MetadataSource *PaperMetadataSource `json:"-"`

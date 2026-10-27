@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 
+	appservice "paperMaster/internal/application/service"
 	fileservice "paperMaster/internal/application/service/file"
 	"paperMaster/internal/types"
 )
@@ -162,6 +164,7 @@ func (s *ToolServer) libraryGet(ctx context.Context, raw json.RawMessage) (any, 
 }
 
 type importURLInput struct {
+	importOptionsInput
 	URL       string `json:"url"`
 	DOI       string `json:"doi"`
 	BaseID    string `json:"base_id"`
@@ -203,6 +206,9 @@ func (s *ToolServer) attachImportedDocumentToBase(
 }
 
 func (s *ToolServer) libraryImportURL(ctx context.Context, raw json.RawMessage) (any, error) {
+	if err := validateMCPImportOptions(raw, 0, nil); err != nil {
+		return nil, err
+	}
 	var input importURLInput
 	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
@@ -210,17 +216,22 @@ func (s *ToolServer) libraryImportURL(ctx context.Context, raw json.RawMessage) 
 	if s.urlImports == nil {
 		return nil, types.ErrTaskInspectorUnavailable
 	}
-	return s.urlImports.EnqueueURLs(ctx, []types.DocumentURLImportCommand{{URL: input.URL, DOI: input.DOI}},
+	return s.urlImports.EnqueueURLs(ctx, []types.DocumentURLImportCommand{{URL: input.URL, DOI: input.DOI,
+		Metadata: input.Metadata, Processing: input.Processing, DuplicateMetadata: input.DuplicateMetadata}},
 		input.BaseID, input.RequestID)
 }
 
 type importFileInput struct {
+	importOptionsInput
 	Path   string `json:"path"`
 	DOI    string `json:"doi"`
 	BaseID string `json:"base_id"`
 }
 
 func (s *ToolServer) libraryImportFile(ctx context.Context, raw json.RawMessage) (any, error) {
+	if err := validateMCPImportOptions(raw, 0, nil); err != nil {
+		return nil, err
+	}
 	var input importFileInput
 	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
@@ -232,14 +243,22 @@ func (s *ToolServer) libraryImportFile(ctx context.Context, raw json.RawMessage)
 	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
 		return nil, err
 	}
-	document, err := s.documents.CreateDocumentFromLocalFile(ctx, path, input.DOI)
-	if err != nil {
+	document, err := s.documents.CreateDocumentFromLocalFile(ctx, path, input.DOI, input.options()...)
+	duplicate := errors.Is(err, types.ErrDuplicateDOI) || errors.Is(err, types.ErrDuplicateFileHash)
+	queueFailed := errors.Is(err, appservice.ErrDocumentProcessQueue)
+	if err != nil && !((duplicate || queueFailed) && document != nil) {
 		return nil, err
 	}
 	if err := s.attachImportedDocumentToBase(ctx, input.BaseID, document); err != nil {
 		return nil, err
 	}
 	result := map[string]any{"document": document}
+	if duplicate {
+		result["status"] = "duplicate"
+	}
+	if queueFailed {
+		result["processingQueued"], result["retryable"] = false, true
+	}
 	if baseID := strings.TrimSpace(input.BaseID); baseID != "" {
 		result["baseId"] = baseID
 	}
@@ -305,14 +324,16 @@ func (s *ToolServer) attachImportBatchToBase(
 			output.Error += "; " + message
 		}
 	}
+	output.DocumentBatchResult.UpdateSummary()
 	return output
 }
 
 type importURLsInput struct {
-	URLs      []string `json:"urls"`
-	DOIs      []string `json:"dois"`
-	BaseID    string   `json:"base_id"`
-	RequestID string   `json:"request_id"`
+	Options   []types.DocumentImportOptions `json:"options"`
+	URLs      []string                      `json:"urls"`
+	DOIs      []string                      `json:"dois"`
+	BaseID    string                        `json:"base_id"`
+	RequestID string                        `json:"request_id"`
 }
 
 func (s *ToolServer) libraryImportURLs(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -323,12 +344,21 @@ func (s *ToolServer) libraryImportURLs(ctx context.Context, raw json.RawMessage)
 	if err := validateImportBatch(len(input.URLs), len(input.DOIs), "urls"); err != nil {
 		return nil, err
 	}
+	if err := validateMCPImportOptions(raw, len(input.URLs), input.Options); err != nil {
+		return nil, err
+	}
 	if s.urlImports == nil {
 		return nil, types.ErrTaskInspectorUnavailable
 	}
 	commands := make([]types.DocumentURLImportCommand, len(input.URLs))
 	for index, url := range input.URLs {
 		commands[index] = types.DocumentURLImportCommand{URL: strings.TrimSpace(url), DOI: batchDOI(input.DOIs, index)}
+		if len(input.Options) > 0 {
+			option := input.Options[index]
+			commands[index].Metadata = option.Metadata
+			commands[index].Processing = option.Processing
+			commands[index].DuplicateMetadata = option.DuplicateMetadata
+		}
 	}
 	return s.urlImports.EnqueueURLs(ctx, commands, input.BaseID, input.RequestID)
 }
@@ -347,9 +377,10 @@ func (s *ToolServer) libraryImportStatus(ctx context.Context, raw json.RawMessag
 }
 
 type importFilesInput struct {
-	Paths  []string `json:"paths"`
-	DOIs   []string `json:"dois"`
-	BaseID string   `json:"base_id"`
+	Options []types.DocumentImportOptions `json:"options"`
+	Paths   []string                      `json:"paths"`
+	DOIs    []string                      `json:"dois"`
+	BaseID  string                        `json:"base_id"`
 }
 
 func (s *ToolServer) libraryImportFiles(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -358,6 +389,9 @@ func (s *ToolServer) libraryImportFiles(ctx context.Context, raw json.RawMessage
 		return nil, err
 	}
 	if err := validateImportBatch(len(input.Paths), len(input.DOIs), "paths"); err != nil {
+		return nil, err
+	}
+	if err := validateMCPImportOptions(raw, len(input.Paths), input.Options); err != nil {
 		return nil, err
 	}
 	paths := make([]string, len(input.Paths))
@@ -388,7 +422,11 @@ func (s *ToolServer) libraryImportFiles(ctx context.Context, raw json.RawMessage
 		if len(input.DOIs) > 0 {
 			dois = []string{input.DOIs[index]}
 		}
-		result, err := s.documents.CreateDocumentsFromLocalFiles(ctx, []string{path}, dois)
+		var options [][]types.DocumentImportOptions
+		if len(input.Options) > 0 {
+			options = [][]types.DocumentImportOptions{{input.Options[index]}}
+		}
+		result, err := s.documents.CreateDocumentsFromLocalFiles(ctx, []string{path}, dois, options...)
 		if err != nil {
 			return nil, err
 		}
@@ -411,6 +449,7 @@ func (s *ToolServer) libraryImportFiles(ctx context.Context, raw json.RawMessage
 			break
 		}
 	}
+	output.DocumentBatchResult.UpdateSummary()
 	return output, nil
 }
 
@@ -622,7 +661,8 @@ func (s *ToolServer) processingStatus(ctx context.Context, raw json.RawMessage) 
 			}
 		}
 		return map[string]any{"processing": types.DocumentProcessingView{
-			DocumentID: document.ID, SourceState: document.SourceState,
+			DocumentWorkflowSummary: document.WorkflowSummary(),
+			DocumentID:              document.ID, SourceState: document.SourceState,
 			CanonicalDocumentID: document.CanonicalDocumentID, StageStates: states,
 		}}, nil
 	}
@@ -630,6 +670,7 @@ func (s *ToolServer) processingStatus(ctx context.Context, raw json.RawMessage) 
 	if err != nil {
 		return nil, err
 	}
+	view.DocumentWorkflowSummary = document.WorkflowSummary()
 	if progress, progressErr := s.documents.GetReferenceProgress(ctx, document.ID.String()); progressErr == nil {
 		view.ReferenceProgress = &progress
 	}
@@ -740,6 +781,8 @@ type processingStatusManyInput struct {
 }
 
 type processingStatusManyResult struct {
+	Status             string                         `json:"status"`
+	Summary            map[string]int                 `json:"summary"`
 	Items              []types.DocumentProcessingView `json:"items"`
 	MissingDocumentIDs []string                       `json:"missingDocumentIds,omitempty"`
 }
@@ -766,8 +809,39 @@ func (s *ToolServer) processingStatusMany(ctx context.Context, raw json.RawMessa
 		view := types.DocumentProcessingView{DocumentID: projection.Document.ID}
 		if projection.Processing != nil {
 			view = *projection.Processing
+		} else {
+			view.Stages = []types.DocumentProcessingSpan{}
+			for _, stage := range []types.DocumentStage{
+				types.DocumentStageMarkdown, types.DocumentStageMetadataExtraction,
+				types.DocumentStageSourceLookup, types.DocumentStageReferenceLookup,
+			} {
+				state, _ := projection.Document.StageState(stage)
+				view.StageStates = append(view.StageStates, state)
+			}
 		}
+		view.DocumentWorkflowSummary = projection.Document.WorkflowSummary()
 		items = append(items, view)
 	}
-	return processingStatusManyResult{Items: items, MissingDocumentIDs: missing}, nil
+	summary := map[string]int{"total": len(ids), "readingReady": 0, "processing": 0,
+		"waiting": 0, "succeeded": 0, "partial": 0, "failed": len(missing), "missing": len(missing)}
+	for _, item := range items {
+		summary[item.WorkflowStatus]++
+		if item.ReadingReady {
+			summary["readingReady"]++
+		}
+	}
+	status := "succeeded"
+	switch {
+	case summary["processing"] > 0:
+		status = "processing"
+	case summary["failed"] == len(ids):
+		status = "failed"
+	case summary["failed"] > 0 || summary["partial"] > 0:
+		status = "partial"
+	case summary["waiting"] > 0:
+		status = "waiting"
+	}
+	return processingStatusManyResult{
+		Items: items, MissingDocumentIDs: missing, Status: status, Summary: summary,
+	}, nil
 }

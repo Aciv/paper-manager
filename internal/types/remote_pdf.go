@@ -86,9 +86,12 @@ type ResolvedPaperURL struct {
 // DocumentURLImportCommand is the HTTP/application command for importing one
 // PDF from an explicit source URL.
 type DocumentURLImportCommand struct {
-	URL      string `json:"url"`
-	DOI      string `json:"doi,omitempty"`
-	Filename string `json:"filename,omitempty"`
+	Metadata          *PaperMetadataImport     `json:"metadata,omitempty"`
+	Processing        DocumentImportProcessing `json:"processing,omitempty"`
+	DuplicateMetadata DuplicateMetadataPolicy  `json:"duplicate_metadata,omitempty"`
+	URL               string                   `json:"url"`
+	DOI               string                   `json:"doi,omitempty"`
+	Filename          string                   `json:"filename,omitempty"`
 }
 
 // Validate rejects incomplete or malformed URL import commands before any

@@ -238,3 +238,21 @@ concurrency 保存任务和解析预算；旧文件缺少该字段时补充原�
 Launcher 根目录 launcher.json 是端口配置入口，交付默认 28450–28455；私有 runtime.json 保留有效端口快照和凭据。启动先汇总绑定检查，保留管理监听器，子服务交接前仍再次检查；不自动重新分配。管理页停止态更新同步根配置，显式启动重新读取根配置。旧目录根文件缺失时沿用已有端口生成；Windows 独立双击的失败终端等待回车，已有终端和重定向自动化不等待。
 
 MCP 注册表在启动时按 read-only 注解归入普通读/写，并显式标记整篇/图片与本地导入；共用invoke路径分别申请read128/write32/heavy4/import2非阻塞名额，SDK和本地Invoke一致，没有外层总限制。超限返回可重试RESOURCE_EXHAUSTED及group/limit，其他组可继续。本地导入不重复申请名额，URL后台工作仍由队列和原下载预算管理。技能以默认8、最多16活跃论文worker滚动补位，每篇解析就绪后直接保存notes并回传精简结果，不设置整批屏障。该工具名额不是Agent身份或空闲会话数量限制。
+
+## 导入源信息与自动查询策略
+
+文件与 URL 的创建流程统一为：校验（包括 DOI 提升/冲突）→ 保存原文件 → 创建 document
+及 source_lookup_mode → 应用 manual 来源元数据 → 发布解析任务。元数据写入失败保留文档，
+以 importMetadata 独立返回；查询选项不依赖“可信度”判断。
+
+migration 000033 为 documents 增加 source_lookup_mode，旧数据默认 auto。只有显式 skip
+才初始化 source lookup 为 skipped；automatic enqueue 与 extraction restart 都检查保存的
+选项。手动 catalog retry 复用原 stage/generation 转换，不修改导入策略。
+
+重复 DOI/文件哈希复用旧 document，不改选项或阶段。元数据 none/fill_missing/replace
+复用 PaperService 与 PaperMetadataRepository；fill_missing 在持有行锁时判断当前字段值，
+手动清空同样受保护，避免读取后再写的并发覆盖。批量状态和元数据投影继续使用原批量查询，
+新增 readingReady/workflowStatus/retryTargets 都在内存按阶段列计算，不新增逐篇查询。
+
+HTTP/MCP 参数与结果见 [导入及工作流契约](mcp/papers-manager-tools.md)。不新增 Python RPC、
+解析阶段、Markdown 直接导入或通用 processing 配置框架。

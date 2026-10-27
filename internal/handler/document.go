@@ -56,6 +56,7 @@ type updateDocumentRequest struct {
 // ImportURL accepts a trusted provider landing page or an explicit PDF URL.
 // The service owns URL resolution, SSRF checks, streaming, and persistence.
 func (h *DocumentHandler) ImportURL(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, types.MaxDocumentImportPayloadBytes)
 	var command types.DocumentURLImportCommand
 	if err := c.ShouldBindJSON(&command); err != nil {
 		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
@@ -63,12 +64,17 @@ func (h *DocumentHandler) ImportURL(c *gin.Context) {
 	}
 	created, err := h.documents.CreateDocumentFromURL(c.Request.Context(), command)
 	if err != nil {
+		if created != nil && created.ImportMetadata != nil &&
+			(errors.Is(err, types.ErrDuplicateDOI) || errors.Is(err, types.ErrDuplicateFileHash)) {
+			c.JSON(http.StatusOK, gin.H{"document": created, "status": "duplicate"})
+			return
+		}
 		if created != nil && errors.Is(err, appservice.ErrDocumentProcessQueue) {
 			h.writeCreatedButNotQueued(c, *created)
 			return
 		}
 		switch {
-		case errors.Is(err, types.ErrInvalidRemotePDFRequest):
+		case errors.Is(err, types.ErrInvalidRemotePDFRequest), errors.Is(err, types.ErrInvalidDocumentImport):
 			h.writeError(c, apperrors.NewBadRequestError("URL and DOI must be valid"), err)
 		case errors.Is(err, types.ErrRemotePDFUnavailable):
 			h.writeError(c, apperrors.NewBadRequestError("URL does not resolve to a supported PDF"), err)
@@ -93,6 +99,7 @@ func (h *DocumentHandler) ImportURL(c *gin.Context) {
 // deliberately returns one outcome per URL so a bad provider response does
 // not discard the rest of the user's batch.
 func (h *DocumentHandler) ImportURLBatch(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, types.MaxDocumentImportPayloadBytes)
 	var request types.DocumentURLImportBatchRequest
 	if err := c.ShouldBindJSON(&request); err != nil {
 		h.writeError(c, apperrors.NewBadRequestError("request body must be valid JSON"), err)
@@ -106,6 +113,10 @@ func (h *DocumentHandler) ImportURLBatch(c *gin.Context) {
 	defer cancel()
 	result, err := h.documents.CreateDocumentsFromURLs(ctx, request.URLs)
 	if err != nil {
+		if errors.Is(err, types.ErrInvalidDocumentImport) {
+			h.writeError(c, apperrors.NewBadRequestError("invalid import options"), err)
+			return
+		}
 		h.writeError(c, apperrors.NewInternalServerError("import remote document batch"), err)
 		return
 	}
@@ -194,8 +205,22 @@ func (h *DocumentHandler) Upload(c *gin.Context) {
 		h.writeError(c, apperrors.NewBadRequestError("doi must be at most 255 characters and contain no control characters"), nil)
 		return
 	}
-	created, err := h.documents.CreateDocumentFromFile(c.Request.Context(), fileHeader, doi)
+	options, err := multipartImportOptions(c, 1, false)
 	if err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid metadata or processing options"), err)
+		return
+	}
+	var singleOptions []types.DocumentImportOptions
+	if len(options) > 0 {
+		singleOptions = options[0]
+	}
+	created, err := h.documents.CreateDocumentFromFile(c.Request.Context(), fileHeader, doi, singleOptions...)
+	if err != nil {
+		if created != nil && created.ImportMetadata != nil &&
+			(errors.Is(err, types.ErrDuplicateDOI) || errors.Is(err, types.ErrDuplicateFileHash)) {
+			c.JSON(http.StatusOK, gin.H{"document": created, "status": "duplicate"})
+			return
+		}
 		if created != nil && errors.Is(err, appservice.ErrDocumentProcessQueue) {
 			h.writeCreatedButNotQueued(c, *created)
 			return
@@ -267,8 +292,17 @@ func (h *DocumentHandler) UploadBatch(c *gin.Context) {
 			return
 		}
 	}
-	result, err := h.documents.CreateDocumentsFromFiles(c.Request.Context(), files, dois)
+	options, err := multipartImportOptions(c, len(files), true)
 	if err != nil {
+		h.writeError(c, apperrors.NewBadRequestError("invalid aligned metadata or processing options"), err)
+		return
+	}
+	result, err := h.documents.CreateDocumentsFromFiles(c.Request.Context(), files, dois, options...)
+	if err != nil {
+		if errors.Is(err, types.ErrInvalidDocumentImport) {
+			h.writeError(c, apperrors.NewBadRequestError("invalid import options"), err)
+			return
+		}
 		h.writeError(c, apperrors.NewInternalServerError("create document batch"), err)
 		return
 	}
@@ -432,6 +466,8 @@ func (h *DocumentHandler) writeUploadError(c *gin.Context, err error) {
 		h.writeError(c, apperrors.NewPayloadTooLargeError("file exceeds the configured upload limit"), err)
 	case errors.Is(err, fileservice.ErrUnsupportedFileType):
 		h.writeError(c, apperrors.NewUnsupportedMediaTypeError("unsupported file type"), err)
+	case errors.Is(err, types.ErrInvalidDocumentImport):
+		h.writeError(c, apperrors.NewBadRequestError("invalid metadata, DOI or processing options"), err)
 	case errors.Is(err, fileservice.ErrEmptyFile), errors.Is(err, fileservice.ErrInvalidPDF), errors.Is(err, fileservice.ErrInvalidOfficeFile):
 		h.writeError(c, apperrors.NewBadRequestError(err.Error()), err)
 	default:

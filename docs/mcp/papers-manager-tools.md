@@ -144,6 +144,72 @@ URL 工具返回 `id/state/total`，提交后用 `papers_manager_library_import_
 `papers_manager_processing_cancel` 输入 `document_id`，`target` 为
 `markdown`（默认）或 `paper_info`。两条处理链分别取消，不互相替代。
 
+### 导入时携带源信息与查询选项
+
+单条文件/URL 工具可传 `metadata`、`processing`、`duplicate_metadata`；批量工具使用
+`options` 对象数组，与原始 `paths`/`urls` 严格对齐，`{}` 表示该项使用默认值。
+不能先过滤文件再套用原 options。请求最多 20 项，整体导入参数/URL task payload 最多 1 MiB，
+单篇序列化 metadata 最多 64 KiB。
+
+```json
+{
+  "paths": ["paper-a.pdf", "paper-b.pdf"],
+  "options": [
+    {
+      "metadata": {"title": "Paper A", "authors": [{"name": "A"}], "doi": "10.1234/a"},
+      "processing": {"source_lookup": "skip"}
+    },
+    {}
+  ]
+}
+```
+
+metadata 复用现有元数据字段，**使用 camelCase**：`title/authors/abstract/tags/doi/sourceName/
+sourceUrl/venue/publishedAt/volume/issue/pages/language`。作者可带 affiliation；日期接受
+YYYY-MM-DD 或 RFC3339；标签按现有规则转小写并去重。未知字段与任意 provenance/trusted 声明拒绝。
+DOI 在去重前规范化并提升到 document；顶层 DOI 与 metadata DOI 冲突时拒绝该项。
+
+`processing.source_lookup` 只有 `auto`（默认）和 `skip`。不按源信息完整度自动跳过，
+不影响 Markdown、信息/参考文献提取及现有引用查询配置。skip 持久化到新文档，阶段为
+skipped、generation=0；`processing_retry(target="catalog")` 可手动查询一次，保存的模式不变。
+重新提取及自动恢复不会绕过保存的 skip。
+
+重复导入不改已有处理设置、不重新排队解析。`duplicate_metadata`：
+`none` 保持源信息；默认 `fill_missing` 在数据库事务内补空字段，保留手动清空；
+`replace` 仅覆盖本次提供的字段。只有用户要求覆盖时才使用 replace。
+
+源信息在解析任务发布前应用。逐项 `importMetadata.status=applied|skipped|failed`，
+失败附稳定 `error=METADATA_APPLY_FAILED`，文件与文档 ID 保留。修复源信息用 update_metadata，
+不要因为 metadata 失败重复上传文件。批量 `status=succeeded|partial|failed` 和 summary
+只描述导入/元数据应用/解析入队，**不描述 PDF 是否已解析**。
+
+### 阶段与阅读就绪
+
+processing_status 和 processing_status_many 新增：
+
+- `readingReady`：源文件 available 且当前 markdown 阶段 succeeded；可以立刻开始 notes。
+- `workflowStatus`：processing、waiting、succeeded、partial、failed；四阶段无活动任务且全部
+  succeeded/skipped 才为 succeeded。waiting 可包括等待手动启动的 reference lookup。
+- `sourceLookupMode`：保存的自动查询策略。
+- `retryTargets`：基于阶段状态提供的重试入口提示（markdown/extraction/catalog/reference）；
+  实际执行仍校验源信息身份、引用条目和当前 generation，状态变化可能导致冲突。
+
+stageStates 继续返回四阶段状态、generation、安全原因；span 是执行观测，不是状态真值。
+批量汇总提供 status/summary（含 readingReady、waiting、missing），缺失 ID 单列。
+有运行项时汇总为 processing，其余看失败/部分失败/等待/全部完成；不要把 missing 隐藏掉。
+导入任务 succeeded、目录 available、旧 Markdown 可读都不能代替当前 readingReady 判定。
+
+### HTTP 对应入口
+
+- `POST /api/document/upload`：multipart 单对象 metadata/processing，duplicate_metadata 为字符串。
+- `POST /api/document/batch-upload`：metadata/processing/duplicate_metadata 分别为按文件对齐的
+  JSON 数组；metadata 的 null 项表示不提供，processing 用 `{}` 表示默认值。
+- `POST /api/document/import-url` 与 `/batch-import-url`：兼容原同步入口，每个 URL command
+  可附同名字段；推荐异步 `POST /api/document/url-imports`，以 urls 数组提交各项配置。
+- `GET /api/document/{id}/processing` 和现有批量 projections 共享同一阶段投影。
+- 带 metadata 的同步单条重复导入返回 200、原 document 和 status=duplicate；未使用新字段的
+  旧重复上传保留原冲突响应。批量逐项结果不变，只增加源信息结果和导入汇总。
+
 ## 2. 论文原文读取
 
 这些工具均为只读，不在适配器中重新推断目录或创建持久化信息。

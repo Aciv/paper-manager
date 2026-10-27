@@ -420,7 +420,7 @@ func TestDocumentProcessingSpanParentsMigrationAddsCascadeLink(t *testing.T) {
 // TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility verifies
 // that the latest migration set adds idempotent processing runs, run-scoped
 // spans, search indexes, reference download fields, and the citation-row table.
-// It also checks that rollback keeps the widened attempt type and that version 32
+// It also checks that rollback keeps the widened attempt type and that version 33
 // is the newest migration.
 func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testing.T) {
 	for _, fragment := range []string{
@@ -445,8 +445,8 @@ func TestProcessingRunsMigrationAddsControlPlaneAndLegacyCompatibility(t *testin
 			t.Fatalf("processing runs rollback does not include %q", fragment)
 		}
 	}
-	if got := migrations[len(migrations)-1].version; got != 32 {
-		t.Fatalf("latest migration version = %d, want 32", got)
+	if got := migrations[len(migrations)-1].version; got != 33 {
+		t.Fatalf("latest migration version = %d, want 33", got)
 	}
 	for _, fragment := range []string{
 		"CREATE EXTENSION IF NOT EXISTS pg_trgm SCHEMA public",

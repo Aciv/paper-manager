@@ -47,6 +47,8 @@ func resultText(t *testing.T, result *sdk.CallToolResult) string {
 }
 
 type behaviorDocumentService struct {
+	importError      error
+	importOptions    []types.DocumentImportOptions
 	beforeLocalBatch func()
 	interfaces.DocumentService
 	importedPath       string
@@ -93,11 +95,12 @@ func (s *behaviorDocumentService) GetDocumentProjections(
 }
 
 func (s *behaviorDocumentService) CreateDocumentFromLocalFile(
-	_ context.Context, path, doi string,
+	_ context.Context, path, doi string, options ...types.DocumentImportOptions,
 ) (*types.Document, error) {
+	s.importOptions = append(s.importOptions, options...)
 	s.importedPath = path
 	s.lastDocumentID = uuid.New()
-	return &types.Document{ID: s.lastDocumentID, OriginalFilename: filepath.Base(path), DOI: doi}, nil
+	return &types.Document{ID: s.lastDocumentID, OriginalFilename: filepath.Base(path), DOI: doi}, s.importError
 }
 
 func (s *behaviorDocumentService) batchResult(
@@ -142,10 +145,13 @@ func (s *behaviorDocumentService) CreateDocumentsFromURLs(
 }
 
 func (s *behaviorDocumentService) CreateDocumentsFromLocalFiles(
-	_ context.Context, paths []string, dois []string,
+	_ context.Context, paths []string, dois []string, options ...[]types.DocumentImportOptions,
 ) (types.DocumentBatchResult, error) {
 	if s.beforeLocalBatch != nil {
 		s.beforeLocalBatch()
+	}
+	if len(options) > 0 {
+		s.importOptions = append(s.importOptions, options[0]...)
 	}
 	s.batchPaths = append(s.batchPaths, paths...)
 	s.batchDOIs = append(s.batchDOIs, dois...)

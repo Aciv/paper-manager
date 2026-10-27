@@ -14,7 +14,7 @@ export function importSummary(task: URLImportTask): string {
   }[task.state];
   const count = task.summary;
   const unconfirmed = importFinished(task) && task.completed < task.total ? `，未确认 ${task.total - task.completed}` : '';
-  return `${label} · ${task.completed}/${task.total} · 新增 ${count.accepted}，已存在 ${count.duplicate}，拒绝 ${count.rejected}，失败 ${count.failed}${unconfirmed}`;
+  return `${label} · ${task.completed}/${task.total} · 新增 ${count.accepted}，已存在 ${count.duplicate}，拒绝 ${count.rejected}，失败 ${count.failed}${count.metadataFailed ? `，源信息写入失败 ${count.metadataFailed}` : ''}${unconfirmed}`;
 }
 
 // Only handles and unconfirmed submissions are cached. Redis owns progress;

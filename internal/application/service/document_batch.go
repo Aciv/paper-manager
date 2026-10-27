@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"mime/multipart"
@@ -18,8 +19,9 @@ import (
 // Sequential acceptance keeps one request from creating an unbounded burst of
 // storage writes and queue jobs; document recognition remains asynchronous.
 func (s *documentService) CreateDocumentsFromFiles(
-	ctx context.Context, files []*multipart.FileHeader, dois []string,
-) (types.DocumentBatchResult, error) {
+	ctx context.Context, files []*multipart.FileHeader, dois []string, options ...[]types.DocumentImportOptions,
+) (result types.DocumentBatchResult, outputErr error) {
+	defer func() { result.UpdateSummary() }()
 	if err := validateBatchLength(len(files)); err != nil {
 		return types.DocumentBatchResult{}, err
 	}
@@ -27,7 +29,10 @@ func (s *documentService) CreateDocumentsFromFiles(
 		return types.DocumentBatchResult{}, errors.New("each batch file requires at most one matching doi")
 	}
 
-	result := types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(files))}
+	if err := validateImportOptionsBatch(len(files), options); err != nil {
+		return types.DocumentBatchResult{}, err
+	}
+	result = types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(files))}
 	for index, file := range files {
 		doi := ""
 		if len(dois) != 0 {
@@ -49,7 +54,7 @@ func (s *documentService) CreateDocumentsFromFiles(
 			result.Items = append(result.Items, item)
 			continue
 		}
-		created, err := s.CreateDocumentFromFile(ctx, file, doi)
+		created, err := s.CreateDocumentFromFile(ctx, file, doi, batchImportOptions(options, index)...)
 		if errors.Is(err, errDocumentDuplicateLookup) {
 			return stopBatchForDeduplicationFailure(ctx, result, item, err), nil
 		}
@@ -62,11 +67,24 @@ func (s *documentService) CreateDocumentsFromFiles(
 // validation, download limits, hash deduplication, persistence, and queueing.
 func (s *documentService) CreateDocumentsFromURLs(
 	ctx context.Context, commands []types.DocumentURLImportCommand,
-) (types.DocumentBatchResult, error) {
+) (result types.DocumentBatchResult, outputErr error) {
+	defer func() { result.UpdateSummary() }()
 	if err := validateBatchLength(len(commands)); err != nil {
 		return types.DocumentBatchResult{}, err
 	}
-	result := types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(commands))}
+	encoded, err := json.Marshal(commands)
+	if err != nil || len(encoded) > types.MaxDocumentImportPayloadBytes {
+		return types.DocumentBatchResult{}, invalidImport("URL import payload exceeds 1 MiB")
+	}
+	for _, command := range commands {
+		if _, err := command.Processing.SourceLookup.Normalized(); err != nil {
+			return types.DocumentBatchResult{}, err
+		}
+		if _, err := command.DuplicateMetadata.Normalized(); err != nil {
+			return types.DocumentBatchResult{}, err
+		}
+	}
+	result = types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(commands))}
 	for index, command := range commands {
 		if ctx.Err() != nil {
 			return stopBatchForContext(ctx, result, index, commands), nil
@@ -88,8 +106,9 @@ func (s *documentService) CreateDocumentsFromURLs(
 // files whose paths the caller has already contained and validated. It applies
 // the same file, size, DOI, and duplicate rules as a single local import.
 func (s *documentService) CreateDocumentsFromLocalFiles(
-	ctx context.Context, paths []string, dois []string,
-) (types.DocumentBatchResult, error) {
+	ctx context.Context, paths []string, dois []string, options ...[]types.DocumentImportOptions,
+) (result types.DocumentBatchResult, outputErr error) {
+	defer func() { result.UpdateSummary() }()
 	if err := validateBatchLength(len(paths)); err != nil {
 		return types.DocumentBatchResult{}, err
 	}
@@ -97,7 +116,10 @@ func (s *documentService) CreateDocumentsFromLocalFiles(
 		return types.DocumentBatchResult{}, errors.New("each batch file requires at most one matching doi")
 	}
 
-	result := types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(paths))}
+	if err := validateImportOptionsBatch(len(paths), options); err != nil {
+		return types.DocumentBatchResult{}, err
+	}
+	result = types.DocumentBatchResult{Items: make([]types.DocumentBatchItemResult, 0, len(paths))}
 	for index, path := range paths {
 		if ctx.Err() != nil {
 			return stopLocalBatchForContext(ctx, result, index, paths), nil
@@ -123,7 +145,7 @@ func (s *documentService) CreateDocumentsFromLocalFiles(
 			result.Items = append(result.Items, item)
 			continue
 		}
-		created, err := s.CreateDocumentFromLocalFile(ctx, path, doi)
+		created, err := s.CreateDocumentFromLocalFile(ctx, path, doi, batchImportOptions(options, index)...)
 		if errors.Is(err, errDocumentDuplicateLookup) {
 			return stopBatchForDeduplicationFailure(ctx, result, item, err), nil
 		}
@@ -201,6 +223,9 @@ func validBatchDOI(doi string) bool {
 func batchResultForDocument(
 	item types.DocumentBatchItemResult, document *types.Document, err error,
 ) types.DocumentBatchItemResult {
+	if document != nil {
+		item.ImportMetadata = document.ImportMetadata
+	}
 	if err == nil && document != nil {
 		queued := true
 		item.Status, item.Document, item.ProcessingQueued = types.DocumentImportItemAccepted, document, &queued
@@ -222,7 +247,8 @@ func batchResultForDocument(
 
 func batchFailure(err error) (types.DocumentImportItemStatus, string) {
 	switch {
-	case errors.Is(err, types.ErrInvalidRemotePDFRequest),
+	case errors.Is(err, types.ErrInvalidDocumentImport),
+		errors.Is(err, types.ErrInvalidRemotePDFRequest),
 		errors.Is(err, types.ErrRemotePDFUnavailable),
 		errors.Is(err, ErrInvalidDocumentFilename),
 		errors.Is(err, fileservice.ErrFileTooLarge),

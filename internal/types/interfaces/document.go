@@ -101,24 +101,24 @@ type DocumentRepository interface {
 // DocumentService contains document lifecycle and storage orchestration.
 type DocumentService interface {
 	// CreateDocumentFromFile stores an upload and creates its source record.
-	CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string) (*types.Document, error)
+	CreateDocumentFromFile(ctx context.Context, file *multipart.FileHeader, doi string, options ...types.DocumentImportOptions) (*types.Document, error)
 	// CreateDocumentFromLocalFile stores one regular local file and creates its
 	// source record. The caller is responsible for constraining which paths may
 	// be imported; this method only validates the file itself.
-	CreateDocumentFromLocalFile(ctx context.Context, path, doi string) (*types.Document, error)
+	CreateDocumentFromLocalFile(ctx context.Context, path, doi string, options ...types.DocumentImportOptions) (*types.Document, error)
 	// CreateDocumentFromURL resolves and safely downloads one explicit remote
 	// PDF, creates its source record, and starts the normal document pipeline.
 	CreateDocumentFromURL(ctx context.Context, command types.DocumentURLImportCommand) (*types.Document, error)
 	// CreateDocumentsFromFiles independently accepts a bounded multipart batch.
 	// Duplicate file hashes return the existing document instead of creating a
 	// second source record; a failed item does not stop later items.
-	CreateDocumentsFromFiles(ctx context.Context, files []*multipart.FileHeader, dois []string) (types.DocumentBatchResult, error)
+	CreateDocumentsFromFiles(ctx context.Context, files []*multipart.FileHeader, dois []string, options ...[]types.DocumentImportOptions) (types.DocumentBatchResult, error)
 	// CreateDocumentsFromURLs independently resolves and accepts a bounded URL
 	// batch through the same SSRF-protected single-item import path.
 	CreateDocumentsFromURLs(ctx context.Context, commands []types.DocumentURLImportCommand) (types.DocumentBatchResult, error)
 	// CreateDocumentsFromLocalFiles independently accepts a bounded batch of
 	// local files whose paths the caller has already contained and validated.
-	CreateDocumentsFromLocalFiles(ctx context.Context, paths []string, dois []string) (types.DocumentBatchResult, error)
+	CreateDocumentsFromLocalFiles(ctx context.Context, paths []string, dois []string, options ...[]types.DocumentImportOptions) (types.DocumentBatchResult, error)
 	// GetDocumentByID parses and retrieves a document by its textual UUID.
 	GetDocumentByID(ctx context.Context, id string) (*types.Document, error)
 	GetReferenceProgress(ctx context.Context, id string) (types.PaperReferenceProgress, error)

@@ -62,6 +62,15 @@ func validateURLImportPayload(payload types.URLImportPayload) error {
 			return fmt.Errorf("%w: invalid document base id", ErrInvalidURLImport)
 		}
 	}
+	encoded, err := json.Marshal(payload)
+	if err != nil || len(encoded) > types.MaxDocumentImportPayloadBytes {
+		return fmt.Errorf("%w: import payload exceeds 1 MiB", ErrInvalidURLImport)
+	}
+	for _, command := range payload.Commands {
+		if _, _, err := normalizeDocumentImport(command.DOI, command.ImportOptions()); err != nil {
+			return fmt.Errorf("%w: %w", ErrInvalidURLImport, err)
+		}
+	}
 	return nil
 }
 
@@ -176,8 +185,12 @@ func (s *urlImportService) GetURLImportTask(ctx context.Context, id string) (typ
 		if err := json.Unmarshal(record.Result, &progress); err != nil {
 			return types.URLImportTask{}, fmt.Errorf("decode URL import progress: %w", err)
 		}
+		progress.UpdateSummary()
 		result.Result, result.Completed = &progress, len(progress.Items)
 		for _, item := range progress.Items {
+			if item.ImportMetadata != nil && item.ImportMetadata.Status == "failed" {
+				result.Summary.MetadataFailed++
+			}
 			switch item.Status {
 			case types.DocumentImportItemAccepted:
 				result.Summary.Accepted++
@@ -200,14 +213,16 @@ func (s *urlImportService) GetURLImportTask(ctx context.Context, id string) (typ
 		if result.Result == nil {
 			return types.URLImportTask{}, errors.New("completed URL import has no result")
 		}
-		result.State = "succeeded"
+		result.State = result.Result.Status
 		if result.Result.Stopped {
 			result.State = "stopped"
-		} else if result.Summary.Failed+result.Summary.Rejected > 0 {
-			result.State = "failed"
-			if result.Summary.Accepted+result.Summary.Duplicate > 0 {
-				result.State = "partial"
+		} else if result.Completed < result.Total {
+			result.State = "partial"
+			if result.Completed == 0 {
+				result.State = "failed"
 			}
+			result.Error = "URL import did not confirm all items; inspect results before retrying"
+			result.RetryURLs = append(result.RetryURLs, payload.Commands[result.Completed:]...)
 		}
 	case "archived":
 		result.State, result.Error = "failed", "URL import task failed; inspect completed items before retrying"
@@ -279,6 +294,7 @@ func (s *urlImportService) processURLImport(
 		result.Items = []types.DocumentBatchItemResult{}
 	}
 	publish := func() error {
+		result.UpdateSummary()
 		encoded, err := json.Marshal(result)
 		if err != nil {
 			return err
