@@ -79,6 +79,9 @@ func (r *Runtime) UpdateSettings(settings Settings) error {
 	if err := r.checkLiveCompatibility(cfg); err != nil {
 		return err
 	}
+	if err := saveLauncherConfiguration(cfg); err != nil {
+		return err
+	}
 	if err := SaveConfig(cfg); err != nil {
 		return err
 	}
@@ -102,6 +105,13 @@ func (r *Runtime) readSavedConfigLocked() (Config, error) {
 	}
 	cfg.DataDir = r.cfg.DataDir
 	cfg = cfg.withDefaults()
+	if r.cfg.LauncherFile != "" {
+		var err error
+		cfg, err = ApplyLauncherConfiguration(cfg, r.cfg.LauncherFile)
+		if err != nil {
+			return cfg, err
+		}
+	}
 	if err := r.checkLiveCompatibility(cfg); err != nil {
 		return cfg, err
 	}

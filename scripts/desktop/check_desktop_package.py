@@ -84,7 +84,8 @@ def verify_user_delivery(root: Path, record: dict) -> dict:
     }[manifest["target"]]
     if record.get("entrypoint") != entry or record.get("uninstaller") != script:
         raise ValueError("wrong platform entry points")
-    if {path.name for path in root.iterdir()} != {"bundle", "skills", "README.md", ".launcher_env", entry, script}:
+    expected = {"bundle", "skills", "README.md", ".launcher_env", "launcher.json", entry, script}
+    if {path.name for path in root.iterdir()} != expected:
         raise ValueError("unexpected user delivery contents")
     native = "launcher.exe" if entry.endswith(".exe") else "launcher"
     if sha256(root / entry) != sha256(root / "bundle" / native):
@@ -97,7 +98,7 @@ def verify_user_delivery(root: Path, record: dict) -> dict:
         observed["skills/" + name] = item
     if skills != inventory(root / "bundle/skills", exclude=()):
         raise ValueError("root skills differ from sealed runtime")
-    for name in (entry, script, "README.md", ".launcher_env"):
+    for name in (entry, script, "README.md", ".launcher_env", "launcher.json"):
         path = root / name
         if not path.is_file() or path.is_symlink():
             raise ValueError("entry must be a regular file")

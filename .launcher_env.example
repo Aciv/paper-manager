@@ -17,14 +17,8 @@
 # LAUNCHER_DATA_DIR='C:/paper-manager-data'
 # LAUNCHER_PYTHON='C:/Program Files/papers-manager/python/python.exe'
 
-# Omit ports for automatic first selection; chosen ports remain stable on restart.
-# An occupied saved port causes a visible error, never an automatic takeover.
-# LAUNCHER_MANAGEMENT_PORT=18081
-# LAUNCHER_HTTP_PORT=18080
-# LAUNCHER_MCP_PORT=18090
-# LAUNCHER_POSTGRES_PORT=15432
-# LAUNCHER_REDIS_PORT=16379
-# LAUNCHER_PARSER_PORT=15051
+# Edit ports in launcher.json beside paper_manager; default ports: 28450–28455.
+# Occupied or forbidden ports fail startup; choose replacements manually.
 
 LAUNCHER_OPEN_BROWSER=true
 LAUNCHER_STARTUP_TIMEOUT=90s

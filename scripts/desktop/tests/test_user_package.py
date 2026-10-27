@@ -40,7 +40,12 @@ class UserPackageTests(unittest.TestCase):
                 verify_delivery(destination, external)
                 self.assertEqual(
                     {path.name for path in destination.iterdir()},
-                    {entry, script, "bundle", "skills", "README.md", ".launcher_env"},
+                    {entry, script, "bundle", "skills", "README.md", ".launcher_env", "launcher.json"},
+                )
+                self.assertEqual(
+                    json.loads((destination / "launcher.json").read_text())["ports"],
+                    {"manager": 28450, "api": 28451, "mcp": 28452,
+                     "postgres": 28453, "redis": 28454, "parser": 28455},
                 )
                 self.assertTrue((destination / "skills/papers-manager-reading/references/tools.md").is_file())
                 if os.name != "nt":

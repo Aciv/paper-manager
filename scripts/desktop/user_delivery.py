@@ -103,9 +103,15 @@ def package_user(bundle: Path, output: Path) -> Path:
         shutil.copytree(bundle / "skills", staging / "skills")
         (staging / ".launcher_env").write_text(
             "# Optional Launcher overrides. Restart Launcher after editing.\n"
-            "# Ports and concurrency: management page > Configuration.\n"
+            "# Ports: launcher.json. Concurrency: management page > Configuration.\n"
             "# Default data directory: data/ beside this file.\n"
             "# LAUNCHER_OPEN_BROWSER=false\n", encoding="utf-8",
+        )
+        (staging / "launcher.json").write_text(
+            json.dumps({"ports": {
+                "manager": 28450, "api": 28451, "mcp": 28452,
+                "postgres": 28453, "redis": 28454, "parser": 28455,
+            }}, indent=2) + "\n", encoding="utf-8",
         )
         record = {
             "schema_version": 1, "distribution": "user", "target": target,

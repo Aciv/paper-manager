@@ -16,6 +16,7 @@ import (
 )
 
 type Config struct {
+	LauncherFile     string        `json:"-"`
 	Version          int           `json:"version"`
 	BundleHash       string        `json:"bundle_hash,omitempty"`
 	DataDir          string        `json:"-"`
@@ -138,33 +139,8 @@ func OpenConfig(root, install string) (Config, error) {
 		StopTimeout:      75 * time.Second,
 		Concurrency:      Concurrency{Tasks: 32, Recognition: 4, Extraction: 4, Render: 4, RPCs: 8},
 	}
-	// Ports are selected once, then persisted. An occupied persisted port is an
-	// error, never permission to attach to another application's service.
-	used := map[int]bool{}
-	ports := []*int{
-		&cfg.Ports.Manager, &cfg.Ports.API, &cfg.Ports.MCP,
-		&cfg.Ports.Postgres, &cfg.Ports.Redis, &cfg.Ports.Parser,
-	}
-	for _, port := range ports {
-		found := false
-		for attempt := 0; attempt < 8; attempt++ {
-			listener, e := net.Listen("tcp", "127.0.0.1:0")
-			if e != nil {
-				return cfg, e
-			}
-			n := listener.Addr().(*net.TCPAddr).Port
-			listener.Close()
-			if !used[n] {
-				used[n] = true
-				*port = n
-				found = true
-				break
-			}
-		}
-		if !found {
-			return cfg, fmt.Errorf("could not select distinct private ports")
-		}
-	}
+	// New instances use fixed defaults. Conflicts require an explicit user edit.
+	cfg.Ports = DefaultLauncherPorts()
 	return cfg, SaveConfig(cfg)
 }
 

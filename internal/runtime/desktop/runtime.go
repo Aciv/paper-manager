@@ -248,7 +248,7 @@ func (r *Runtime) run(ctx context.Context, done chan struct{}) {
 	for name, port := range ports {
 		l, err := net.Listen("tcp", address(port))
 		if err != nil {
-			fail(fmt.Errorf("%s port %d is occupied; release it or change the stopped runtime's configuration", name, port))
+			fail(fmt.Errorf("%s；请修改端口配置后重试", portFailure(name, port, err)))
 			return
 		}
 		reservations[name] = l

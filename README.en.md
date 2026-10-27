@@ -46,7 +46,7 @@ Full Windows/macOS acceptance of the new root-entry layout remains pending.
 4. Reuse the same entry on subsequent launches. Select “退出 Launcher” to exit;
    closing the browser does not stop the services.
 
-Data defaults to `data/` inside the extracted directory; `.launcher_env` lives at its root.
+Data defaults to `data/` inside the extracted directory. Edit root `launcher.json` for ports (defaults `28450–28455`); unavailable ports require a manual change and restart. Other startup settings live in `.launcher_env`.
 Edit ports and concurrency in the management page while Launcher is running and application services are stopped. Use full ASCII paths on Windows.
 Copy the two directories under `skills/` into your Agent client and use MCP connection settings from the management page.
 To select a data directory:
@@ -105,7 +105,7 @@ See the [running guide](docs/running.md) for individual services, port overrides
 ## Key settings
 
 Source/container settings use the root `.env`. The unpacked Launcher uses an optional
-`bundle/.launcher_env` and does not read the service `.env`. Keep real credentials out of Git.
+`.launcher_env` and does not read the service `.env`. Keep real credentials out of Git.
 
 | Setting | Purpose |
 | --- | --- |

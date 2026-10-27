@@ -195,7 +195,8 @@ def main():
                     if os.name == "nt" else "/nonexistent"
                 )
             command = [str(args.launcher.resolve()), "--data-dir", str(root),
-                       "--env-file", str(env_file), "--open-browser=false"]
+                       "--env-file", str(env_file), "--open-browser=false",
+                       "--launcher-config", str(Path(temporary) / "launcher.json")]
             if args.bundle and args.launcher.parent == args.bundle:
                 command += ["--install-dir", str(args.bundle)]
             if args.bundle and manifest["profile"] == "hybrid":
@@ -452,14 +453,14 @@ def main():
                     occupied.bind(("127.0.0.1", 0))
                     occupied.listen()
                     config["ports"]["redis"] = occupied.getsockname()[1]
-                    config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
-                    process = start()
-                    wait_state(base, "failed", process)
+                    port_path = Path(temporary) / "launcher.json"
+                    original_ports = port_path.read_bytes()
+                    port_path.write_text(json.dumps({"ports": config["ports"]}), encoding="utf-8")
+                    result = subprocess.run(command, env=launcher_env, capture_output=True, timeout=20)
+                    require(result.returncode != 0 and b"Redis" in result.stderr,
+                            "port conflict did not fail before service startup")
                     require(occupied.fileno() >= 0, "port-conflict probe socket was closed")
-                    action("quit")
-                    process.wait(timeout=120)
-                    require(process.returncode == 0, "port-conflict Launcher did not exit cleanly")
-                    process = None
+                    port_path.write_bytes(original_ports)
                 report["steps"].append("occupied persisted port failed without adopting another service")
                 # Corrupted existing data is never treated as a fresh install.
                 version_file = root / "postgres/PG_VERSION"

@@ -59,8 +59,12 @@ def main():
             environment_path = program / ".launcher_env"
             initial_port = free_port([])
             environment_path.write_text(
-                f"LAUNCHER_OPEN_BROWSER=false\nLAUNCHER_HTTP_PORT={initial_port}\n", encoding="utf-8",
+                "LAUNCHER_OPEN_BROWSER=false\n", encoding="utf-8",
             )
+            launcher_path = program / "launcher.json"
+            launcher_settings = json.loads(launcher_path.read_text(encoding="utf-8"))
+            launcher_settings["ports"]["api"] = initial_port
+            launcher_path.write_text(json.dumps(launcher_settings), encoding="utf-8")
             environment_bytes = environment_path.read_bytes()
             command = [str(program / ("paper_manager" + suffix))]
             with (output / "configure-console.log").open("wb") as log:
@@ -69,7 +73,7 @@ def main():
             config_path = data / "runtime.json"
             require(config_path.is_file(), "portable Launcher did not use program/data")
             original = json.loads(config_path.read_text(encoding="utf-8"))
-            require(original["ports"]["api"] == initial_port, "root .launcher_env was not loaded")
+            require(original["ports"]["api"] == initial_port, "root launcher.json was not loaded")
             base = f"http://127.0.0.1:{original['ports']['manager']}"
             with (output / "launcher-console.log").open("wb") as log:
                 process = subprocess.Popen(command, env=env, stdout=log, stderr=log, cwd=root)
@@ -92,6 +96,8 @@ def main():
                 settings["concurrency"] = {"tasks": 16, "recognition": 2, "extraction": 2, "render": 2, "rpcs": 4}
                 payload = {key: settings[key] for key in ("ports", "concurrency", "extraction_engine")}
                 require(request("/configuration", "PUT", payload)[0] == 200, "stopped settings save failed")
+                saved_ports = json.loads(launcher_path.read_text(encoding="utf-8"))["ports"]
+                require(saved_ports == payload["ports"], "management edit did not update launcher.json")
                 require(request("/initialize", "POST")[0] == 202, "initialization refused after settings save")
                 wait_state(base, "stopped", process)
                 require(request("/start", "POST")[0] == 202, "stopped state published before start admission")

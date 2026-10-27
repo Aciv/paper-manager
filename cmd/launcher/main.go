@@ -6,7 +6,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,6 +24,7 @@ import (
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
+		pauseOnFailure()
 		os.Exit(1)
 	}
 }
@@ -53,6 +53,8 @@ func run() (runErr error) {
 	browser := flag.Bool("open-browser", true, "open the independent management page")
 	envFile := flag.String("env-file", filepath.Join(desktop.DeliveryDirectory(bundle), ".launcher_env"),
 		"optional Launcher-only environment file")
+	launcherFile := flag.String("launcher-config", filepath.Join(desktop.DeliveryDirectory(bundle), "launcher.json"),
+		"editable Launcher port configuration")
 	maintenance := flag.String("maintenance", "", "offline install, retry, restore, cleanup, status, delete-checkpoint or uninstall")
 	program := flag.String("program-dir", "", "managed program directory, separate from user data")
 	source := flag.String("source-bundle", bundle, "sealed directory to install or update")
@@ -141,6 +143,10 @@ func run() (runErr error) {
 	if err != nil {
 		return err
 	}
+	cfg, err = desktop.ApplyLauncherConfiguration(cfg, *launcherFile)
+	if err != nil {
+		return err
+	}
 	if err := desktop.SaveConfig(cfg); err != nil {
 		return err
 	}
@@ -164,6 +170,11 @@ func run() (runErr error) {
 		"config_file", filepath.Join(cfg.DataDir, "runtime.json"),
 		"log_dir", filepath.Join(cfg.DataDir, "logs"))
 	logger.Info(ctx, "配置已就绪；已有论文和笔记将继续使用，数据库结构检查或升级在服务启动时执行")
+	listener, err := desktop.ListenLauncher(cfg)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
 	app := desktop.New(cfg)
 	app.EnableConfigReload()
 	if *initialize {
@@ -181,10 +192,6 @@ func run() (runErr error) {
 		}
 		fmt.Println("Initialization completed; services have not been started.")
 		return nil
-	}
-	listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Ports.Manager))
-	if err != nil {
-		return fmt.Errorf("management port occupied; see runtime.json: %w", err)
 	}
 	server := &http.Server{
 		Handler: app.Handler(), ReadHeaderTimeout: 5 * time.Second,
