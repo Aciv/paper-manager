@@ -8,8 +8,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	"paperMaster/internal/types"
 )
 
 const DefaultMaxUploadSize int64 = 100 << 20 // 100 MiB
@@ -53,10 +51,12 @@ const (
 	defaultHTTPBatchConcurrency                              = 2
 	defaultMCPMaxRequestBytes                          int64 = 8 << 20
 	defaultMCPMaxImageBytes                            int64 = 12 << 20
-	// Match the web batch endpoints, which accept up to
-	// types.MaxDocumentBatchItems (20) items per request, so an Agent can keep
-	// the same number of imports in flight.
-	defaultMCPImportConcurrency                 = types.MaxDocumentBatchItems
+	// Separate cheap queries, writes and large-payload/rendering work.
+	// Items per batch and simultaneous import calls are independent budgets.
+	defaultMCPReadConcurrency                   = 128
+	defaultMCPWriteConcurrency                  = 32
+	defaultMCPHeavyConcurrency                  = 4
+	defaultMCPImportConcurrency                 = 2
 	defaultMCPAddress                           = "127.0.0.1:8090"
 	defaultBatchImportTimeout                   = 2 * time.Minute
 	defaultAsynqConcurrency                     = 32
@@ -108,9 +108,12 @@ type Config struct {
 	MCPToken           string
 	MCPMaxRequestBytes int64
 	MCPMaxImageBytes   int64
-	// MCPImportConcurrency bounds concurrent MCP import tool calls. URL
-	// imports download synchronously, so this is the MCP equivalent of the
-	// HTTP upload/batch concurrency gates.
+	// MCP budgets are independent groups shared across tools and sessions.
+	MCPReadConcurrency  int
+	MCPWriteConcurrency int
+	MCPHeavyConcurrency int
+	// MCPImportConcurrency bounds synchronous local-file calls.
+	// URL imports enqueue background jobs and retain the existing queue limits.
 	MCPImportConcurrency int
 	// MCPLocalImportRoot enables papers_manager_library_import_file. The MCP
 	// adapter rejects paths outside this directory (including symlink escapes).
@@ -396,6 +399,18 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	mcpReadConcurrency, err := positiveIntEnv("MCP_READ_CONCURRENCY", defaultMCPReadConcurrency, 1000)
+	if err != nil {
+		return Config{}, err
+	}
+	mcpWriteConcurrency, err := positiveIntEnv("MCP_WRITE_CONCURRENCY", defaultMCPWriteConcurrency, 128)
+	if err != nil {
+		return Config{}, err
+	}
+	mcpHeavyConcurrency, err := positiveIntEnv("MCP_HEAVY_CONCURRENCY", defaultMCPHeavyConcurrency, 32)
+	if err != nil {
+		return Config{}, err
+	}
 	batchImportTimeout, err := durationEnv("BATCH_IMPORT_TIMEOUT", defaultBatchImportTimeout)
 	if err != nil {
 		return Config{}, err
@@ -522,6 +537,9 @@ func Load() (Config, error) {
 		MCPToken:                                    env("MCP_TOKEN", ""),
 		MCPMaxRequestBytes:                          mcpMaxRequestBytes,
 		MCPMaxImageBytes:                            mcpMaxImageBytes,
+		MCPReadConcurrency:                          mcpReadConcurrency,
+		MCPWriteConcurrency:                         mcpWriteConcurrency,
+		MCPHeavyConcurrency:                         mcpHeavyConcurrency,
 		MCPImportConcurrency:                        mcpImportConcurrency,
 		MCPLocalImportRoot:                          env("MCP_LOCAL_IMPORT_ROOT", ""),
 		HTTPTrustedProxies:                          httpTrustedProxies,

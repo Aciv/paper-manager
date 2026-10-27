@@ -11,12 +11,14 @@ import (
 
 	"paperMaster/internal/middleware"
 	"paperMaster/internal/types"
+	"paperMaster/internal/types/interfaces"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
 type documentReadingServiceStub struct {
+	interfaces.DocumentReadingService
 	markdown  types.DocumentMarkdownContent
 	structure types.DocumentReadingStructure
 	blocks    []types.Block

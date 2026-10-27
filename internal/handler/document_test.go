@@ -809,3 +809,11 @@ func TestDocumentSelectionProcessorHonorsCancellation(t *testing.T) {
 		t.Fatalf("error=%v, want context.Canceled", err)
 	}
 }
+
+func (*documentCreatorStub) QueryBlocks(context.Context, uuid.UUID, types.DocumentBlockQuery) (types.DocumentBlockPage, error) {
+	panic("unexpected QueryBlocks call")
+}
+
+func (*documentCreatorStub) MarkdownPageCounts(context.Context, []uuid.UUID) (map[uuid.UUID]int, error) {
+	panic("unexpected MarkdownPageCounts call")
+}

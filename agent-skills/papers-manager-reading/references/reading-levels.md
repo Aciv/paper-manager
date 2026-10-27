@@ -37,7 +37,10 @@ the adapter's read budget, not missing content or lack of relevance.
 
 Read one of:
 
-- a source section's Markdown (selected by outline range);
+- a source section's Markdown (default or `mode=markdown`), or `mode=blocks`
+  for paginated blocks including its children (follow `has_more`);
+  use `mode=range` for selection without text, then read selected ranges/IDs
+  with the returned `recognition_generation` as `expected_generation`;
 - a note section's Markdown.
 
 Choose sections based on the user's task:

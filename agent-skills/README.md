@@ -56,7 +56,7 @@ needed.
 ## Current status
 
 The MCP server/tools are implemented in `internal/mcp` and started by the API
-process when `MCP_ENABLED=true`; the 48 prefixed tools are registered from the
+process when `MCP_ENABLED=true`; the 50 prefixed tools are registered from the
 manifest across the `library`, `reading`, `base`, and `citation` groups. Base
 and citation operations use independent tool collections. The skill source
 bundles in this directory are usable in a project that exposes that MCP

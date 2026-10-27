@@ -70,9 +70,6 @@ type ToolServer struct {
 	server       *sdk.Server
 	registry     map[string]registeredTool
 	urlImports   interfaces.URLImportService
-	// importSlots bounds synchronous local-file acceptance calls. Remote
-	// downloads are handled by the shared background queue.
-	importSlots chan struct{}
 }
 
 // NewToolServerWithURLImports wires durable URL acceptance for the application
@@ -113,25 +110,31 @@ func NewToolServer(
 	if spec.Server.ToolNamePrefix != "papers_manager_" {
 		return nil, fmt.Errorf("MCP tools must use the papers_manager_ prefix")
 	}
-	importConcurrency := cfg.MCPImportConcurrency
-	if importConcurrency <= 0 {
-		importConcurrency = 2
-	}
+
 	s := &ToolServer{
 		cfg: cfg, documents: documents, reading: reading, notes: notes,
 		papers: papers, bases: bases, bibliography: bibliography,
 		paperInfo: paperInfo, processing: processing,
-		importSlots: make(chan struct{}, importConcurrency),
 	}
 	registry, err := compileRegistry(spec.Tools, s.toolHandlers())
 	if err != nil {
 		return nil, err
 	}
 	s.registry = registry
+	budgets := newToolBudgets(cfg)
+	assignToolBudgets(spec.Tools, s.registry, budgets)
+
 	s.server = sdk.NewServer(&sdk.Implementation{
 		Name: serverName, Title: "paper_manager", Version: serverVersion,
 	}, &sdk.ServerOptions{
-		Instructions: "Use papers_manager_ tools for reading notes and library operations. All note writes require expected_revision. Evidence links and section-meta are consumer-owned Markdown.",
+		Instructions: fmt.Sprintf("Use papers_manager_ tools. Keep one writer per document; note workers write directly and return "+
+			"compact saved revisions, not Markdown drafts. Pipeline ready documents when markdown succeeds without "+
+			"waiting for the whole import batch or metadata lookup. Default 8 active workers, at most 16 across tasks "+
+			"and subject to host limits. Independent in-flight tool budgets: read=%d, write=%d, heavy=%d, import=%d. "+
+			"On RESOURCE_EXHAUSTED reduce the affected group concurrency "+
+			"and retry with bounded backoff. All note writes require expected_revision. "+
+			"Evidence links and section-meta are consumer-owned Markdown.",
+			cap(budgets[budgetRead]), cap(budgets[budgetWrite]), cap(budgets[budgetHeavy]), cap(budgets[budgetImport])),
 	})
 	for _, item := range spec.Tools {
 		if !strings.HasPrefix(item.Name, spec.Server.ToolNamePrefix) {

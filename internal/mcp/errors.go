@@ -24,7 +24,6 @@ var (
 	errInvalidEvidence      = errors.New("invalid evidence")
 	errLocalImportDisabled  = errors.New("local file import is disabled")
 	errLocalImportForbidden = errors.New("local file path is not allowed")
-	errImportBusy           = errors.New("too many concurrent imports")
 )
 
 type toolFailureDetails struct {
@@ -101,9 +100,8 @@ func classifyToolError(err error) toolFailureDetails {
 		return toolFailureDetails{Code: "FORBIDDEN", Message: "local file import is disabled; configure MCP_LOCAL_IMPORT_ROOT"}
 	case errors.Is(err, errLocalImportForbidden):
 		return toolFailureDetails{Code: "FORBIDDEN", Message: "local file path is outside the allowed import root"}
-	case errors.Is(err, errImportBusy):
-		return toolFailureDetails{Code: "RESOURCE_EXHAUSTED", Message: "too many concurrent import calls; retry shortly", Retryable: true}
-	case errors.Is(err, appservice.ErrInvalidURLImport),
+	case errors.Is(err, appservice.ErrInvalidBaseOutlineQuery),
+		errors.Is(err, appservice.ErrInvalidURLImport),
 		errors.Is(err, appservice.ErrInvalidDocumentFilename),
 		errors.Is(err, appservice.ErrInvalidDocumentDOI),
 		errors.Is(err, appservice.ErrInvalidDocumentBaseName),
@@ -114,7 +112,11 @@ func classifyToolError(err error) toolFailureDetails {
 		errors.Is(err, types.ErrInvalidDocumentSelection),
 		errors.Is(err, types.ErrInvalidPDFRegionRender):
 		return toolFailureDetails{Code: "INVALID_ARGUMENT", Message: "invalid request"}
-	case errors.Is(err, errSnapshotConflict):
+	case errors.Is(err, types.ErrSourceRangeUnavailable):
+		return toolFailureDetails{Code: "UNAVAILABLE", Message: "source section has no reliable block range; use page-based blocks"}
+	case errors.Is(err, types.ErrInvalidBlockQuery):
+		return toolFailureDetails{Code: "INVALID_ARGUMENT", Message: "invalid source block query"}
+	case errors.Is(err, errSnapshotConflict), errors.Is(err, types.ErrSourceSnapshotChanged):
 		return toolFailureDetails{Code: "CONFLICT", Message: "source or note snapshot changed; reload before retrying", Retryable: true}
 	case errors.Is(err, errPayloadTooLarge),
 		errors.Is(err, types.ErrDocumentMarkdownTooLarge),

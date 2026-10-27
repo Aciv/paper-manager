@@ -160,7 +160,7 @@
     {
       "name": "papers_manager_library_import_file",
       "title": "Import a local paper file",
-      "description": "Import one regular file from MCP_LOCAL_IMPORT_ROOT and start the normal processing pipeline. Import calls are bounded by MCP_IMPORT_CONCURRENCY (default 20, matching the web batch limit); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds the document to a Base via base_id.",
+      "description": "Import one regular file from MCP_LOCAL_IMPORT_ROOT and start the normal processing pipeline. Local file import calls are bounded by MCP_IMPORT_CONCURRENCY (default 2 simultaneous calls, independent of the 20-item batch size); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds the document to a Base via base_id.",
       "group": "library",
       "inputSchema": {
         "type": "object",
@@ -241,7 +241,7 @@
     {
       "name": "papers_manager_library_import_status",
       "title": "Get URL import progress",
-      "description": "Read queued/running/succeeded/partial/failed/stopped URL import state, per-item results and document IDs. Poll after submitting import_url/import_urls. Import completion is separate from PDF parsing; query processing_status for created documents. succeeded means every item was accepted or already existed; partial means mixed results; stopped means early termination. summary counts outcomes; retryUrls contains only failed/unprocessed inputs, preserving DOI/filename. Inspect every item. Results expire 24 hours after completion.",
+      "description": "Read queued/running/succeeded/partial/failed/stopped URL import state, per-item results and document IDs. Poll after submitting import_url/import_urls. Import completion is separate from PDF parsing; query processing_status for created documents. succeeded means every item was accepted or already existed; partial means mixed results; stopped means early termination. summary counts outcomes; retryUrls contains only failed/unprocessed inputs, preserving DOI/filename. Inspect result.items while running to discover accepted/duplicate document IDs incrementally; start notes once each document markdown succeeds, without waiting for the whole batch or metadata lookup. Results expire 24 hours after completion.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -266,7 +266,7 @@
     {
       "name": "papers_manager_library_import_files",
       "title": "Import local paper files in a batch",
-      "description": "Import 1-20 regular files from MCP_LOCAL_IMPORT_ROOT in one call and start the normal processing pipeline. All paths are validated before any import; items are then accepted sequentially with per-item results. Import calls share the MCP_IMPORT_CONCURRENCY gate (default 20); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds each resulting document to a Base via base_id.",
+      "description": "Import 1-20 regular files from MCP_LOCAL_IMPORT_ROOT in one call and start the normal processing pipeline. All paths are validated before any import; items are then accepted sequentially with per-item results. Import calls share the MCP_IMPORT_CONCURRENCY gate (default 2 simultaneous calls); excess calls fail with RESOURCE_EXHAUSTED. Paths outside the configured root, including symlink escapes, are rejected. Disabled when MCP_LOCAL_IMPORT_ROOT is empty. Optionally adds each resulting document to a Base via base_id.",
       "group": "library",
       "inputSchema": {
         "type": "object",
@@ -577,7 +577,7 @@
     {
       "name": "papers_manager_document_read_section",
       "title": "Read one source section",
-      "description": "Read one section from the persisted source outline by ordinal. The adapter uses the outline's Markdown range and page/Block hints; it never infers a new outline. If the section has only page/Block mapping, return those hints and a diagnostic.",
+      "description": "Read a source section by ordinal. Default mode=markdown preserves the original section/markdown/diagnostics response (up to 4 MiB). Explicit mode=blocks returns paginated blocks including child sections; mode=range returns a half-open block_range without text, with optional paginated IDs via include_ids=true. Blocks/range return recognition_generation; use expected_generation across calls. Missing block mappings return UNAVAILABLE in blocks/range mode; Markdown mapping remains independent.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -590,6 +590,35 @@
             "type": "integer",
             "minimum": 0,
             "description": "Source outline section ordinal."
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "markdown",
+              "blocks",
+              "range"
+            ],
+            "default": "markdown"
+          },
+          "include_ids": {
+            "type": "boolean",
+            "default": false
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          },
+          "expected_generation": {
+            "type": "integer",
+            "minimum": 0
           }
         },
         "required": [
@@ -633,7 +662,7 @@
     {
       "name": "papers_manager_document_read_blocks",
       "title": "Read page-scoped Blocks",
-      "description": "Read Blocks for exact evidence. Prefer one page; omit page_number only when a bounded all-page response is necessary.",
+      "description": "Read source blocks by page, block_range, or up to 200 unique block_ids (mutually exclusive). New selectors/pagination return ordered, paginated items, generation, missing_ids and succeeded/partial/failed status. Pass expected_generation from a prior section/range read to reject stale IDs. Legacy document/page-only calls retain the original items response.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -645,6 +674,62 @@
           "page_number": {
             "type": "integer",
             "minimum": 1
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "blocks",
+              "range"
+            ],
+            "default": "blocks"
+          },
+          "include_ids": {
+            "type": "boolean",
+            "default": false
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200,
+            "default": 50
+          },
+          "expected_generation": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "block_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 200,
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "block_range": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "start": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "end": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "start",
+              "end"
+            ]
           }
         },
         "required": [
@@ -820,7 +905,7 @@
     {
       "name": "papers_manager_reading_note_create",
       "title": "Create a reading note",
-      "description": "Create an absent reading note only. expected_revision must be 0; existing notes return REVISION_CONFLICT.",
+      "description": "Create an absent reading note only. expected_revision must be 0; existing notes return REVISION_CONFLICT. The assigned per-document worker should write directly and return the saved revision and a compact summary, not a draft for another agent to save.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1128,7 +1213,7 @@
     {
       "name": "papers_manager_evidence_validate",
       "title": "Validate an evidence link",
-      "description": "Parse and validate one papers-manager evidence link against the current document. The adapter is a consumer parser; the core note service remains evidence-agnostic.",
+      "description": "Validate link/version/UUID syntax, normalized rectangles and recorded page bounds only. Never checks block/section existence, ownership, page membership or semantic support. range_checked=false means page bounds are unknown even if valid=true. Reads metadata only, not Markdown/PDF.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -1145,6 +1230,49 @@
         "required": [
           "document_id",
           "href"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "group": "reading"
+    },
+    {
+      "name": "papers_manager_evidence_validate_many",
+      "title": "Validate evidence links in a batch",
+      "description": "Validate 1–100 evidence links with the same lightweight rules as evidence_validate. Fetches all distinct documents’ page counts in one metadata query. Returns input indexes, per-item validations/errors, summary and succeeded/partial/failed status. Unknown page bounds are partial; malformed/out-of-range links and lookup errors are failed. Does not resolve blocks.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 100,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "document_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "href": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "document_id",
+                "href"
+              ]
+            }
+          }
+        },
+        "required": [
+          "items"
         ]
       },
       "annotations": {
@@ -1237,6 +1365,58 @@
           "exclude_unknown": {
             "type": "boolean",
             "description": "Only include documents with an available source file."
+          }
+        },
+        "required": [
+          "base_id"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "papers_manager_base_reading_outlines",
+      "title": "Read source and notes outlines for a Base page",
+      "description": "Batch-read persisted source PDF/Markdown outlines and notes directories for Base members. outline_type selects source, notes or both. Uses batched database joins, never loads document bodies or section descriptions. Each item and the current page report succeeded/partial/failed; missing, not_ready, unavailable and error are separate part states. Valid empty outlines succeed, an empty Base succeeds, truncation is explicit via complete/total_sections. Page status covers only that page, not the entire Base; follow has_more. Notes revisions are metadata snapshots and do not prove section files are readable. Worker writes must still use a fresh revision.",
+      "group": "base",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "base_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "page": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10000,
+            "default": 1
+          },
+          "page_size": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 20
+          },
+          "outline_type": {
+            "type": "string",
+            "enum": [
+              "source",
+              "notes",
+              "both"
+            ],
+            "default": "both"
+          },
+          "section_limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 512,
+            "default": 64
           }
         },
         "required": [

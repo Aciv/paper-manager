@@ -32,10 +32,15 @@ comparison. A single-paper note normally uses `self`.
   - `y0 = bboxY0 / pageHeight`
   - `x1 = bboxX1 / pageWidth`
   - `y1 = bboxY1 / pageHeight`
-- Validate the final link with `papers_manager_evidence_validate` before writing it.
+- Validate final links before writing them; prefer `papers_manager_evidence_validate_many`
+  for 1–100 links (one batch metadata query), or `papers_manager_evidence_validate` for one link.
 - Reuse an identical validated target within the same reading run; do not
   revalidate it for each mention. Recheck stale targets after recognition changes.
-- Validation checks the target, not whether the source supports the claim.
+- Validation checks URL/UUID syntax, normalized rects and known page bounds only.
+  It does not look up block/section existence or ownership. `range_checked=false`
+  means page bounds are unknown, even when `valid=true`; batch items are then
+  partial. Obtain real block IDs from current source reads.
+- Validation does not check whether the source supports the claim.
   Read the source context; prioritize numbers, comparisons, figures and formulas.
 
 Do not guess page numbers from section numbers, and do not fabricate a Block

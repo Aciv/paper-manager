@@ -2,7 +2,7 @@
 
 [文档导航](../README.md) · [客户端与技能接入](agent-installation.md)
 
-当前 `internal/mcp` 已实现 48 个工具，分为 `library`、`reading`、`base`、`citation`
+当前 `internal/mcp` 已实现 50 个工具，分为 `library`、`reading`、`base`、`citation`
 四组。精确的工具名称、必填项、枚举和输入模式见[机器清单](papers-manager-tools.json)；
 本文解释行为、边界和消费者应遵守的规则。JSON 字段与工具标识符不翻译。
 
@@ -27,9 +27,21 @@ MCP 是应用服务的适配层，与 HTTP 共用数据库、文件存储、服�
 - 仅支持 stdio 的宿主可使用客户端桥接；桥接仍调用同一个 `/mcp`，不直接访问数据库。
 - 本地导入默认禁用；`MCP_LOCAL_IMPORT_ROOT` 非空才允许导入受控根目录中的普通文件，
   路径检查包含符号链接解析，越界返回 `FORBIDDEN`。
-- 单项与批量导入共用 `MCP_IMPORT_CONCURRENCY`，默认最多 20 个导入调用同时执行。
-  超限立即返回 `RESOURCE_EXHAUSTED`；每批最多 20 项，持有一个名额并顺序执行。
+- 没有统一的外层并发门槛。四组在途预算分别独立，同组跨工具/会话及本地 `Invoke` 共享：
+  普通读取 `MCP_READ_CONCURRENCY=128`、普通写入 `MCP_WRITE_CONCURRENCY=32`、
+  重型读取 `MCP_HEAVY_CONCURRENCY=4`、本地导入 `MCP_IMPORT_CONCURRENCY=2`。
+  整篇 Markdown、notes export、页面截图和块图片属于重型读取；本地单文件/批量导入只占导入名额。
+- 超限立即返回 `RESOURCE_EXHAUSTED`、`retryable=true`，`details.group/limit` 标识耗尽的预算，
+  不在服务端无界排队；其他组仍可执行。握手与 tools/list 不占处理名额，也没有每分钟调用配额。
+- 本地批量每调用最多 20 项且顺序执行，只占一个导入名额，不重复占普通写入或另一层导入名额。
+  URL 入队使用普通写入预算，进度查询使用读取预算；后台下载继续沿用原 Asynq/下载器限制。
+- `MCP_TOOL_CONCURRENCY` 已移除，不再限制任何组；旧配置请改用上述分组变量。
 - 图片响应使用 MCP 图片内容块，受 `MCP_MAX_IMAGE_BYTES`（默认 12 MiB）等上限约束。
+
+技能调度默认 8 个活跃论文 worker、最多 16 个，并遵守宿主更低上限；这不是服务端的 Agent 身份/数量管理。
+主 agent 与子任务合计控制，不给每批单独开满额度。每篇 markdown 成功即可直接派一个 worker 保存 notes，
+无需等待整批或其他检索阶段。worker 只回传实际 revision 和覆盖摘要；主 agent 不接收全文后重复写入。
+设置依据是[HTTP 业务压测](../performance-results.md)的保守选择，不能当作已测定所有 MCP 图片/批量调用的性能上限。
 
 ## 返回结构、错误与注解
 
@@ -139,9 +151,9 @@ URL 工具返回 `id/state/total`，提交后用 `papers_manager_library_import_
 | 工具 | 输入 | 输出与边界 |
 | --- | --- | --- |
 | `papers_manager_document_structure` | `document_id` | 持久化源目录、识别 generation、来源及页码/bbox/block ordinal/Markdown 范围提示 |
-| `papers_manager_document_read_section` | `document_id`、`ordinal` | 读取源目录节信息及可用的 Markdown 切片；最多 4 MiB |
+| `papers_manager_document_read_section` | `document_id`、`ordinal` | 默认兼容章节 Markdown；显式 mode=blocks/range 返回分页 blocks 或范围/IDs |
 | `papers_manager_document_read_markdown` | `document_id` | 有界的完整解析 Markdown、大小、页数和 generation；最多 16 MiB |
-| `papers_manager_document_read_blocks` | `document_id`；可选 `page_number` | Block ID、类型、文本、ordinal、页面尺寸和 bbox；优先按页，整篇可能超限 |
+| `papers_manager_document_read_blocks` | `document_id`；可选 `page_number` | 支持按页、半开序号范围或最多 200 个 IDs 读取；新参数入口分页并检查解析版本 |
 | `papers_manager_document_read_block_image` | `document_id`、`block_id` | 已保存的图片/表格 PNG，返回元数据及 MCP 图片；纯文本块返回 `NOT_FOUND` |
 | `papers_manager_document_read_page_image` | `document_id`、`page_number`；可选 `bbox`、`dpi` | 按需渲染整页/区域，默认 144 DPI、最高 300；同步执行，不经过 Asynq |
 
@@ -211,10 +223,78 @@ URL 工具返回 `id/state/total`，提交后用 `papers_manager_library_import_
 
 ## 4. 证据验证
 
-`papers_manager_evidence_validate` 是只读工具，输入 `document_id`、`href`。
-解析 `papers-manager://` 链接，返回页码、矩形、Block UUID、章节提示、诊断及规范化目标，
-检查页码范围和 Block 是否属于当前识别 generation。
-MCP 作为消费者解析证据，不改变核心笔记服务对证据内容不做解析的边界。
+`papers_manager_evidence_validate` 输入 `document_id`、`href`，只检查：
+
+- 链接、版本、UUID 格式是否合法；
+- rect 是否为有限数值、在 0–1 内且坐标顺序正确；
+- 页码是否在数据库已记录的页数内。
+
+只读取数据库清单，不加载 Markdown/PDF，不查询 block 是否存在、属于哪篇论文或在哪一页，
+也不校验章节存在性、论点是否有证据支持。`blockFound` 已移除。
+`valid=true` 表示参数通过已执行的检查；`range_checked=false` 表示页数未知，范围尚未验证，
+不能据此宣称定位目标存在。数据库查不到清单会返回相应工具错误。
+
+`papers_manager_evidence_validate_many` 输入 `items:[{document_id,href}, ...]`，每批 1–100 项。
+返回 `items`（保留输入 `index`，逐项 `validation` 或安全 `error`）、`summary` 和 `status`。
+所有不同论文的页数通过一条投影 SQL 批量读取，不逐链接查询。单项合法且范围已检查为 `succeeded`；
+合法但范围未检查为 `partial`；格式错误、页码超范围或查询失败为 `failed`。
+汇总全部成功为 `succeeded`，全部失败为 `failed`，其余为 `partial`。
+逐项失败保留在数据中（外层 `ok=true`）；整个调用参数非法/取消等返回工具错误。
+
+### 原文章节的 Markdown、blocks 和范围读取
+
+`papers_manager_document_read_section` 的 `document_id`、`ordinal` 必填，新增可选参数：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `mode` | `markdown` | `markdown` 兼容原返回；`blocks` 返回分页 blocks；`range` 仅返回序号范围 |
+| `include_ids` | `false` | 范围模式是否附带当前页 block IDs，不读取正文 |
+| `page` | `1` | 页号，1–10000 |
+| `page_size` | `50` | 每页 1–200 个 blocks/IDs |
+| `expected_generation` | 不检查跨调用版本 | 必须等于上次返回的 `recognition_generation` |
+
+blocks/range 模式的章节区间为 `[start,end)`，包含子节，到下一个同级或更高级章节起点之前。
+未映射的起点或后继边界返回 `UNAVAILABLE`，不要当成整篇剩余部分。
+最后一节沿用已持久化的终点。返回 `section`、`block_range`、`recognition_generation`、
+`total`、`page`、`page_size`、`has_more`、`status`，以及对应模式的 `items` 或 `block_ids`。
+范围不附 IDs 时返回完整区间元数据，不分页正文，`has_more=false`。
+兼容旧调用：只传 `document_id`、`ordinal` 或显式 `mode=markdown`，返回原有
+`section`、`markdown`、`diagnostics`，按 Unicode code point 范围截取 Markdown，最多 4 MiB。
+Markdown 映射与 block 映射独立：缺 block 范围仍可读取 Markdown；缺 Markdown 范围则保留
+section 并返回诊断，不读取正文文件。`expected_generation` 同样可用；目录与正文版本不一致
+返回 `CONFLICT`。分页和 `include_ids` 只适用于显式 blocks/range 模式，不能用于 Markdown。
+整篇 Markdown 仍可用 `document_read_markdown`。
+
+按 blocks 分页阅读：
+
+```json
+{"document_id":"<uuid>","ordinal":2,"mode":"blocks","page_size":50}
+```
+
+先定位再读（第二次请求使用第一次返回的范围和版本）：
+
+```json
+{"document_id":"<uuid>","ordinal":2,"mode":"range","include_ids":false}
+```
+
+```json
+{"document_id":"<uuid>","block_range":{"start":12,"end":80},"expected_generation":7,"page_size":50}
+```
+
+第二个请求调用 `papers_manager_document_read_blocks`；也可将范围换成
+`block_ids:["<uuid>", ...]`（最多 200 个不重复 UUID），用于筛选后批量读取。
+`block_ids`、`block_range`、`page_number` 互斥。ID 查询限制在目标论文，按 block ordinal 排序；
+返回 `missing_ids`（包括不属于本论文的 IDs），全部找到为 `succeeded`，部分找到为 `partial`，
+全部缺失为 `failed`。`total` 是实际匹配数，`missing_ids` 针对完整请求列表，不只是当前页。
+分页仍需按 `has_more` 继续，不能把当前页状态当成整批内容已读取。
+仅 document/page 的旧 `document_read_blocks` 调用保留原 `{items}` 输出；新增选择器、mode、
+版本或分页参数会启用新的分页输出。新分页正文回复最多 4 MiB，超限时减小 `page_size`。
+
+清单、目录、计数和 blocks 在同一 Repeatable Read 事务内读取；事务返回即结束，
+不跨 Agent 思考过程持锁。版本取已提交清单，不取刚排队的新 generation。
+跨请求带 `expected_generation`，重新解析后旧请求返回可重试 `CONFLICT`；
+应重读目录并重新选择，不能刷新版本后直接重用旧 IDs。
+
 
 ## 5. Base 集合
 
@@ -283,3 +363,44 @@ HTML 报告，默认输出 `reports/base-summary/`，模板位于
 章节元数据和证据链接当前均为 v1。
 验证重点包括输入模式、token 行为、响应边界、本地路径约束、revision 冲突、仅缺失时创建、
 章节描述解析、证据验证、错误映射，以及不泄露存储路径和凭据。
+
+## Base 批量原文 / notes 目录
+
+`papers_manager_base_reading_outlines` 一次读取某个 Base 的一页目录投影：
+
+```json
+{"base_id":"<UUID>","outline_type":"both","page":1,"page_size":20,"section_limit":64}
+```
+
+`outline_type` 可为 `source`、`notes`、`both`（默认）；`page_size` 默认 20、最大 50，
+`section_limit` 默认每篇每类 64 节、最大 512。返回文档 ID、标题、markdown 状态及所选目录，
+不返回 PDF/Markdown/notes 正文，不读取章节 description，也不返回 storage key。
+元数据读取使用普通读取预算；数据库通过固定三次 SELECT（Base 存在性、成员总数、关联查询）完成一页，
+不是在工具里循环单篇查询。成员顺序由 sort_order、加入时间、文档 ID 确定。
+
+| 批次/条目 status | 含义 |
+| --- | --- |
+| `succeeded` | 当前范围内请求的目录都可用且结构未截断；合法空目录、空 Base 也成功 |
+| `partial` | 至少取得部分目录，但有缺失、未就绪、错误或截断 |
+| `failed` | 当前范围内没有取得任何请求的可用目录 |
+
+顶层 `scope=page`，状态和 `summary.total/succeeded/partial/failed` 只统计本页，不代表整个 Base。
+`total` 是 Base 成员总数，必须结合 `page/page_size/has_more` 翻页；逐页汇总时按 ID 去重。
+正常执行得到全失败数据时外层仍为 `ok=true`，不能仅凭 ok 判断目录齐全。
+Base 不存在或数据库执行失败则返回工具错误，不伪造成功空页或逐项结果。
+
+每篇有独立的 `status`，`source_outline` 和 `notes_outline` 各自的 `state` 区分：
+
+- `available`：目录结构可用；`complete=false` 表示本次截断，原节数见 `total_sections`。
+- `missing`：原文清单或笔记记录不存在。
+- `not_ready`：原文 markdown 尚在等待/运行，不能据此推断解析失败。
+- `unavailable`：源文件不可用、解析失败/取消/跳过、代次不匹配或旧版没有可用目录 schema；看 error_code。
+- `error`：持久化目录无法解析或不符合可读取结构，返回安全 error_code，不返回内部错误/内容。
+
+无 PDF 原生目录但已持久化 Markdown 目录时仍返回可用 source；明确的 `source=none` 空目录也可用。
+旧版缺持久化目录时不会在批量查询中打开整篇 Markdown 重建，可按需用单篇结构工具处理。
+notes 合法空白目录与“没有 notes”不同；`revision` 为已提交元数据快照，`descriptions_loaded=false`。
+该入口不验证正文文件是否存在，也不锁住后续用户编辑；worker 真正修改前仍需读取所需最新内容并验证 revision。
+
+主 agent 验证多篇笔记是否存在或已形成章节时优先用此入口，避免逐篇 reading_note_outline/export。
+只有要读 description 或修订目标正文时才使用单篇工具；批量目录缺失与笔记质量不足也应分别报告。

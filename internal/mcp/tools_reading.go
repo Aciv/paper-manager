@@ -17,14 +17,13 @@ import (
 )
 
 type documentReadSectionInput struct {
-	DocumentID string `json:"document_id"`
-	Ordinal    int    `json:"ordinal"`
-}
-
-type sourceSectionResult struct {
-	Section     types.DocumentOutlineSection `json:"section"`
-	Markdown    string                       `json:"markdown,omitempty"`
-	Diagnostics []string                     `json:"diagnostics,omitempty"`
+	DocumentID         string `json:"document_id"`
+	Ordinal            int    `json:"ordinal"`
+	Mode               string `json:"mode"`
+	IncludeIDs         bool   `json:"include_ids"`
+	Page               int    `json:"page"`
+	PageSize           int    `json:"page_size"`
+	ExpectedGeneration *int64 `json:"expected_generation"`
 }
 
 func (s *ToolServer) documentStructure(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -40,9 +39,36 @@ func (s *ToolServer) documentReadSection(ctx context.Context, raw json.RawMessag
 	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
 	}
+	if input.Mode == "" || input.Mode == "markdown" {
+		return s.documentReadSectionMarkdown(ctx, input)
+	}
+	return s.readBlockPage(ctx, input.DocumentID, types.DocumentBlockQuery{
+		SectionOrdinal: &input.Ordinal, Mode: input.Mode, IncludeIDs: input.IncludeIDs,
+		Page: input.Page, PageSize: input.PageSize, ExpectedGeneration: input.ExpectedGeneration,
+	})
+}
+
+// sourceSectionResult preserves the original section Markdown response.
+type sourceSectionResult struct {
+	Section     types.DocumentOutlineSection `json:"section"`
+	Markdown    string                       `json:"markdown,omitempty"`
+	Diagnostics []string                     `json:"diagnostics,omitempty"`
+}
+
+func (s *ToolServer) documentReadSectionMarkdown(
+	ctx context.Context, input documentReadSectionInput,
+) (sourceSectionResult, error) {
+	if input.IncludeIDs || input.Page != 0 || input.PageSize != 0 {
+		return sourceSectionResult{}, fmt.Errorf(
+			"%w: pagination and IDs require mode=blocks or range", errInvalidToolInput,
+		)
+	}
 	structure, err := s.reading.GetDocumentReadingStructure(ctx, input.DocumentID)
 	if err != nil {
-		return nil, err
+		return sourceSectionResult{}, err
+	}
+	if input.ExpectedGeneration != nil && *input.ExpectedGeneration != structure.RecognitionGeneration {
+		return sourceSectionResult{}, errSnapshotConflict
 	}
 	var section *types.DocumentOutlineSection
 	for index := range structure.Outline.Sections {
@@ -52,27 +78,27 @@ func (s *ToolServer) documentReadSection(ctx context.Context, raw json.RawMessag
 		}
 	}
 	if section == nil {
-		return nil, fmt.Errorf("%w: source section %d", errInvalidToolInput, input.Ordinal)
+		return sourceSectionResult{}, errInvalidToolInput
 	}
 	result := sourceSectionResult{Section: *section}
 	if section.MarkdownCodepointStart < 0 || section.MarkdownCodepointEnd < section.MarkdownCodepointStart {
-		result.Diagnostics = append(result.Diagnostics, "source section has no Markdown range; use page or Block hints")
+		result.Diagnostics = []string{"source section has no Markdown range; use page or Block hints"}
 		return result, nil
 	}
 	markdown, err := s.reading.GetDocumentMarkdown(ctx, input.DocumentID)
 	if err != nil {
-		return nil, err
+		return result, err
 	}
 	if markdown.RecognitionGeneration != structure.RecognitionGeneration {
-		return nil, fmt.Errorf("%w: recognition generation changed while reading the section", errSnapshotConflict)
+		return result, errSnapshotConflict
 	}
 	runes := []rune(string(markdown.Markdown))
 	if section.MarkdownCodepointEnd > len(runes) {
-		return nil, fmt.Errorf("%w: outline Markdown range exceeds the stored Markdown", errSnapshotConflict)
+		return result, errSnapshotConflict
 	}
 	content := string(runes[section.MarkdownCodepointStart:section.MarkdownCodepointEnd])
 	if len(content) > 4<<20 {
-		return nil, fmt.Errorf("%w: source section exceeds the MCP response limit", errPayloadTooLarge)
+		return result, errPayloadTooLarge
 	}
 	result.Markdown = content
 	return result, nil
@@ -101,12 +127,18 @@ func (s *ToolServer) documentReadMarkdown(ctx context.Context, raw json.RawMessa
 type readBlocksInput struct {
 	DocumentID string `json:"document_id"`
 	PageNumber int    `json:"page_number"`
+	types.DocumentBlockQuery
 }
 
 func (s *ToolServer) documentReadBlocks(ctx context.Context, raw json.RawMessage) (any, error) {
 	var input readBlocksInput
 	if err := decodeToolArgs(raw, &input); err != nil {
 		return nil, err
+	}
+	if input.Range != nil || len(input.BlockIDs) > 0 || input.ExpectedGeneration != nil ||
+		input.Page > 0 || input.PageSize > 0 || input.Mode != "" {
+		input.DocumentBlockQuery.PageNumber = input.PageNumber
+		return s.readBlockPage(ctx, input.DocumentID, input.DocumentBlockQuery)
 	}
 	blocks, err := s.reading.GetDocumentBlocks(ctx, input.DocumentID, input.PageNumber)
 	if err != nil {
@@ -510,4 +542,21 @@ func (s *ToolServer) evidenceValidate(ctx context.Context, raw json.RawMessage) 
 		return nil, fmt.Errorf("%w: evidence link could not be parsed", errInvalidEvidence)
 	}
 	return validation, nil
+}
+
+func (s *ToolServer) readBlockPage(
+	ctx context.Context, documentID string, query types.DocumentBlockQuery,
+) (types.DocumentBlockPage, error) {
+	result, err := s.reading.QueryDocumentBlocks(ctx, documentID, query)
+	if err != nil {
+		return result, err
+	}
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		return result, err
+	}
+	if len(encoded) > 4<<20 {
+		return types.DocumentBlockPage{}, fmt.Errorf("%w: reduce page_size to read these blocks", errPayloadTooLarge)
+	}
+	return result, nil
 }

@@ -168,17 +168,6 @@ type importURLInput struct {
 	RequestID string `json:"request_id"`
 }
 
-// acquireImportSlot bounds synchronous local-file acceptance calls. Remote
-// downloads are bounded by the shared queue worker and download limiter.
-func (s *ToolServer) acquireImportSlot() (func(), error) {
-	select {
-	case s.importSlots <- struct{}{}:
-		return func() { <-s.importSlots }, nil
-	default:
-		return nil, errImportBusy
-	}
-}
-
 // validateImportBase checks a requested base before any document is created,
 // so an invalid base_id cannot leave a half-applied import behind.
 func (s *ToolServer) validateImportBase(ctx context.Context, baseID string) error {
@@ -243,11 +232,6 @@ func (s *ToolServer) libraryImportFile(ctx context.Context, raw json.RawMessage)
 	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
 		return nil, err
 	}
-	release, err := s.acquireImportSlot()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
 	document, err := s.documents.CreateDocumentFromLocalFile(ctx, path, input.DOI)
 	if err != nil {
 		return nil, err
@@ -387,11 +371,6 @@ func (s *ToolServer) libraryImportFiles(ctx context.Context, raw json.RawMessage
 	if err := s.validateImportBase(ctx, input.BaseID); err != nil {
 		return nil, err
 	}
-	release, err := s.acquireImportSlot()
-	if err != nil {
-		return nil, err
-	}
-	defer release()
 	output := libraryImportBatchResult{BaseID: strings.TrimSpace(input.BaseID),
 		DocumentBatchResult: types.DocumentBatchResult{Items: []types.DocumentBatchItemResult{}}}
 	for index, path := range paths {

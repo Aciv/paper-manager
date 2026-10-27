@@ -26,6 +26,7 @@ type DocumentBaseRepository interface {
 	AddDocument(ctx context.Context, membership types.DocumentBaseFile) error
 	// RemoveDocument removes one membership without deleting the source document.
 	RemoveDocument(ctx context.Context, baseID, documentID uuid.UUID) error
+	ListReadingOutlines(ctx context.Context, baseID uuid.UUID, page, pageSize int) ([]types.BaseReadingOutlineRow, int64, error)
 	// ListDocuments returns paginated source documents that belong to a base.
 	ListDocuments(ctx context.Context, baseID uuid.UUID, page, pageSize int, excludeUnknown bool) (types.DocumentPage, error)
 }
@@ -46,6 +47,7 @@ type DocumentBaseService interface {
 	AddDocumentToBase(ctx context.Context, baseID, documentID string) error
 	// RemoveDocumentFromBase removes one collection membership.
 	RemoveDocumentFromBase(ctx context.Context, baseID, documentID string) error
+	ListBaseReadingOutlines(ctx context.Context, baseID string, query types.BaseReadingOutlinesQuery) (types.BaseReadingOutlinesPage, error)
 	// ListBaseDocuments lists collection members with normal document metadata.
 	ListBaseDocuments(ctx context.Context, baseID string, page int, excludeUnknown bool) (types.DocumentPage, error)
 }

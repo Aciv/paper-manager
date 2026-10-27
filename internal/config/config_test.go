@@ -338,3 +338,39 @@ func unsetEnvForTest(t *testing.T, key string) {
 		_ = os.Unsetenv(key)
 	})
 }
+
+func TestMCPConcurrencyConfiguration(t *testing.T) {
+	for _, key := range []string{"MCP_READ_CONCURRENCY", "MCP_WRITE_CONCURRENCY", "MCP_HEAVY_CONCURRENCY", "MCP_IMPORT_CONCURRENCY"} {
+		t.Setenv(key, "")
+	}
+	// The removed global option must no longer throttle or override any group.
+	t.Setenv("MCP_TOOL_CONCURRENCY", "1")
+	cfg, err := Load()
+	if err != nil || cfg.MCPReadConcurrency != 128 || cfg.MCPWriteConcurrency != 32 ||
+		cfg.MCPHeavyConcurrency != 4 || cfg.MCPImportConcurrency != 2 {
+		t.Fatalf("unexpected defaults: read=%d write=%d heavy=%d import=%d err=%v",
+			cfg.MCPReadConcurrency, cfg.MCPWriteConcurrency, cfg.MCPHeavyConcurrency, cfg.MCPImportConcurrency, err)
+	}
+	t.Setenv("MCP_READ_CONCURRENCY", "256")
+	t.Setenv("MCP_WRITE_CONCURRENCY", "64")
+	t.Setenv("MCP_HEAVY_CONCURRENCY", "8")
+	t.Setenv("MCP_IMPORT_CONCURRENCY", "1")
+	cfg, err = Load()
+	if err != nil || cfg.MCPReadConcurrency != 256 || cfg.MCPWriteConcurrency != 64 ||
+		cfg.MCPHeavyConcurrency != 8 || cfg.MCPImportConcurrency != 1 {
+		t.Fatalf("group overrides not applied: %v", err)
+	}
+	for _, test := range []struct{ key, tooLarge string }{
+		{"MCP_READ_CONCURRENCY", "1001"}, {"MCP_WRITE_CONCURRENCY", "129"},
+		{"MCP_HEAVY_CONCURRENCY", "33"}, {"MCP_IMPORT_CONCURRENCY", "1001"},
+	} {
+		t.Run(test.key, func(t *testing.T) {
+			for _, value := range []string{"0", "-1", test.tooLarge, "invalid"} {
+				t.Setenv(test.key, value)
+				if _, err := Load(); err == nil {
+					t.Fatalf("invalid %s accepted: %s", test.key, value)
+				}
+			}
+		})
+	}
+}

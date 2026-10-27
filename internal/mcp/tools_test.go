@@ -444,8 +444,8 @@ func TestImportToolRejectsWhenSaturated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server.importSlots <- struct{}{}
-	defer func() { <-server.importSlots }()
+	server.registry["papers_manager_library_import_file"].slots <- struct{}{}
+	defer func() { <-server.registry["papers_manager_library_import_file"].slots }()
 	client := connectTestClient(t, server)
 	result := callTool(t, client, "papers_manager_library_import_file", map[string]any{"path": "paper.pdf"})
 	if !result.IsError || !strings.Contains(resultText(t, result), "RESOURCE_EXHAUSTED") {
@@ -1105,7 +1105,7 @@ func TestManifestUsesIndependentBaseAndCitationCollections(t *testing.T) {
 			}
 		}
 	}
-	if groups["base"] != 10 || groups["citation"] != 9 {
+	if groups["base"] != 11 || groups["citation"] != 9 {
 		t.Fatalf("group counts = %#v", groups)
 	}
 }

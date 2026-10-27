@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"paperMaster/internal/logger"
+
 	"github.com/google/jsonschema-go/jsonschema"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -14,6 +16,8 @@ type toolHandler func(context.Context, json.RawMessage) (*sdk.CallToolResult, er
 type registeredTool struct {
 	handler toolHandler
 	schema  *jsonschema.Resolved
+	slots   chan struct{}
+	budget  toolBudget
 }
 
 // toolHandlers is built once during construction, never mutated at runtime.
@@ -48,9 +52,11 @@ func (s *ToolServer) toolHandlers() map[string]toolHandler {
 		"papers_manager_reading_note_delete":          jsonTool(s.readingNoteDelete),
 		"papers_manager_reading_note_export":          jsonTool(s.readingNoteExport),
 		"papers_manager_reading_note_replace_section": jsonTool(s.readingNoteReplaceSection),
+		"papers_manager_evidence_validate_many":       jsonTool(s.evidenceValidateMany),
 		"papers_manager_evidence_validate":            jsonTool(s.evidenceValidate),
 		"papers_manager_base_list":                    jsonTool(s.baseList),
 		"papers_manager_base_get":                     jsonTool(s.baseGet),
+		"papers_manager_base_reading_outlines":        jsonTool(s.baseReadingOutlines),
 		"papers_manager_base_list_documents":          jsonTool(s.baseListDocuments),
 		"papers_manager_base_create":                  jsonTool(s.baseCreate),
 		"papers_manager_base_update":                  jsonTool(s.baseUpdate),
@@ -132,6 +138,21 @@ func (tool registeredTool) invoke(ctx context.Context, raw json.RawMessage) (*sd
 	}
 	if err := tool.schema.Validate(args); err != nil {
 		return failureResult(toolFailureDetails{Code: "INVALID_ARGUMENT", Message: "arguments do not match the tool schema"}), nil
+	}
+	if err := ctx.Err(); err != nil {
+		return errorResult(err), nil
+	}
+	if tool.slots != nil {
+		select {
+		case tool.slots <- struct{}{}:
+			defer func() { <-tool.slots }()
+		default:
+			logger.Warn(ctx, "MCP tool group concurrency limit reached", "group", tool.budget, "limit", cap(tool.slots))
+			return failureResult(toolFailureDetails{Code: "RESOURCE_EXHAUSTED", Retryable: true,
+				Message: "tool group is busy; reduce this group concurrency and retry shortly",
+				Details: map[string]any{"group": tool.budget, "limit": cap(tool.slots)},
+			}), nil
+		}
 	}
 	result, err := tool.handler(ctx, raw)
 	if err != nil {

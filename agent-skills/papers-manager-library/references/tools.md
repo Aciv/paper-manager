@@ -55,3 +55,7 @@ collections, not `papers_manager_library_*` operations.
 Do not use `reading_note_*` or `document_*` reading tools from this skill
 except to confirm that a document exists. Do not use this skill to generate
 notes or summaries.
+
+## Base 批量目录
+
+`papers_manager_base_reading_outlines(base_id, outline_type=both, page, page_size, section_limit)`：分页批量取原文/notes目录，不读正文或description。检查本页status/summary和逐项state、complete、has_more；外层ok不表示目录齐全。主agent批量验证优先使用，单篇worker修改时仍需新鲜revision。

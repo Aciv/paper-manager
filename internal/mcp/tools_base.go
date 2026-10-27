@@ -218,3 +218,19 @@ func (s *ToolServer) baseBibliographyStatus(ctx context.Context, raw json.RawMes
 	}
 	return map[string]any{"task": task}, nil
 }
+
+func (s *ToolServer) baseReadingOutlines(ctx context.Context, raw json.RawMessage) (any, error) {
+	var input struct {
+		BaseID       string `json:"base_id"`
+		Page         int    `json:"page"`
+		PageSize     int    `json:"page_size"`
+		OutlineType  string `json:"outline_type"`
+		SectionLimit int    `json:"section_limit"`
+	}
+	if err := decodeToolArgs(raw, &input); err != nil {
+		return nil, err
+	}
+	return s.bases.ListBaseReadingOutlines(ctx, input.BaseID, types.BaseReadingOutlinesQuery{
+		Page: input.Page, PageSize: input.PageSize, OutlineType: input.OutlineType, SectionLimit: input.SectionLimit,
+	})
+}

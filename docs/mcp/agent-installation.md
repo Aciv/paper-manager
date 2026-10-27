@@ -19,13 +19,20 @@ MCP_ADDR=127.0.0.1:8090
 MCP_TOKEN=
 MCP_MAX_REQUEST_BYTES=8388608
 MCP_MAX_IMAGE_BYTES=12582912
-MCP_IMPORT_CONCURRENCY=20
+MCP_READ_CONCURRENCY=128
+MCP_WRITE_CONCURRENCY=32
+MCP_HEAVY_CONCURRENCY=4
+MCP_IMPORT_CONCURRENCY=2
 # 按需启用本地文件导入，目录应尽量小；省略则禁用。
 # MCP_LOCAL_IMPORT_ROOT=/absolute/path/to/import-root
 ```
 
 运行 `make dev`，或在已有数据库、Redis、解析器的前提下运行 `make dev-app`。
-MCP 与 API 在同一 Go 进程中，但使用独立端口。源码默认地址为：
+MCP 与 API 在同一 Go 进程中，但使用独立端口。工具按普通读取 128、普通写入 32、重型读取 4、本地导入 2 分组限流，同组跨会话共享，组间互不占名额；
+本地每调用仍可包含最多 20 个文件。限额可用上述环境变量修改，
+超限返回可退避重试的 `RESOURCE_EXHAUSTED`，不会自动增加数据库连接或 Python 并发。
+旧 `.env` 中显式写入的值会覆盖新默认值，更新源码后需检查这些设置。`MCP_TOOL_CONCURRENCY` 已移除，不再施加总上限。Launcher 版本使用内置默认预算；
+其受控子进程环境不会直接继承任意 `MCP_*` 进程环境变量，不能仅修改宿主环境就假定已经生效。源码默认地址为：
 
 ```text
 http://127.0.0.1:8090/mcp
@@ -73,7 +80,7 @@ curl -sS http://127.0.0.1:8090/mcp \
 | OpenCode | `opencode.json` 中的 `mcp` | `.opencode/skills/`、`.agents/skills/`、`.claude/skills/` |
 | DeepSeek Harness | MCP Center 或 MCP 客户端插件 | `.dsh/skills/`、`~/.dsh/skills/`、`.agents/skills/` |
 
-服务端清单有 48 个工具。宿主可能加命名空间前缀，不必逐个手动注册工具。
+服务端清单有 50 个工具。宿主可能加命名空间前缀，不必逐个手动注册工具。
 配置后重启或重新加载客户端，再检查工具是否可见。
 
 ## 3. Claude Code

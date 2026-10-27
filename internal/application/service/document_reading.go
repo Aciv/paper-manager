@@ -248,3 +248,82 @@ func parseDocumentID(raw string) (uuid.UUID, error) {
 	}
 	return documentID, nil
 }
+
+// GetDocumentPageCount reads only the persisted manifest, never the Markdown file.
+func (s *documentReadingService) GetDocumentPageCount(ctx context.Context, id string) (int, error) {
+	documentID, err := parseDocumentID(id)
+	if err != nil {
+		return 0, err
+	}
+	manifest, err := s.repo.GetMarkdown(ctx, documentID)
+	return manifest.PageCount, err
+}
+
+func (s *documentReadingService) QueryDocumentBlocks(
+	ctx context.Context, id string, query types.DocumentBlockQuery,
+) (types.DocumentBlockPage, error) {
+	documentID, err := parseDocumentID(id)
+	if err != nil {
+		return types.DocumentBlockPage{}, err
+	}
+	if query.Page == 0 {
+		query.Page = 1
+	}
+	if query.PageSize == 0 {
+		query.PageSize = 50
+	}
+	if query.Mode == "" {
+		query.Mode = "blocks"
+	}
+	selectors := 0
+	for _, selected := range []bool{
+		query.SectionOrdinal != nil, query.Range != nil, len(query.BlockIDs) > 0, query.PageNumber > 0,
+	} {
+		if selected {
+			selectors++
+		}
+	}
+	if selectors > 1 || query.Page < 1 || query.Page > 10000 || query.PageSize < 1 || query.PageSize > 200 ||
+		(query.Mode != "blocks" && query.Mode != "range") || query.PageNumber < 0 || len(query.BlockIDs) > 200 ||
+		(query.SectionOrdinal != nil && *query.SectionOrdinal < 0) ||
+		(query.Range != nil && (query.Range.Start < 0 || query.Range.End < query.Range.Start)) ||
+		(query.ExpectedGeneration != nil && *query.ExpectedGeneration < 0) {
+		return types.DocumentBlockPage{}, types.ErrInvalidBlockQuery
+	}
+	seen := make(map[uuid.UUID]bool)
+	for index, id := range query.BlockIDs {
+		parsed, err := uuid.Parse(id)
+		if err != nil || seen[parsed] {
+			return types.DocumentBlockPage{}, types.ErrInvalidBlockQuery
+		}
+		seen[parsed] = true
+		query.BlockIDs[index] = parsed.String()
+	}
+	return s.repo.QueryBlocks(ctx, documentID, query)
+}
+
+// GetDocumentPageCounts supports evidence batches without per-link database reads.
+func (s *documentReadingService) GetDocumentPageCounts(
+	ctx context.Context, ids []string,
+) (map[string]int, error) {
+	if len(ids) > 100 {
+		return nil, types.ErrInvalidBlockQuery
+	}
+	parsed := make([]uuid.UUID, 0, len(ids))
+	for _, id := range ids {
+		value, err := parseDocumentID(id)
+		if err != nil {
+			return nil, err
+		}
+		parsed = append(parsed, value)
+	}
+	counts, err := s.repo.MarkdownPageCounts(ctx, parsed)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]int, len(counts))
+	for id, count := range counts {
+		result[id.String()] = count
+	}
+	return result, nil
+}

@@ -3155,3 +3155,11 @@ func TestDocumentStructureStartupEvictsOldestCacheFiles(t *testing.T) {
 		t.Fatalf("remaining cache files = %#v", entries)
 	}
 }
+
+func (*documentStatusRepoStub) QueryBlocks(context.Context, uuid.UUID, types.DocumentBlockQuery) (types.DocumentBlockPage, error) {
+	panic("unexpected QueryBlocks call")
+}
+
+func (*documentStatusRepoStub) MarkdownPageCounts(context.Context, []uuid.UUID) (map[uuid.UUID]int, error) {
+	panic("unexpected MarkdownPageCounts call")
+}

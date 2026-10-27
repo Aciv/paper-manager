@@ -219,11 +219,15 @@ case "$command_name" in
     follow_source_logs
     ;;
   app)
-    if command -v air >/dev/null 2>&1; then
+    if [[ "${DEV_AUTO_RELOAD:-true}" != "false" ]] && command -v air >/dev/null 2>&1; then
       exec air -c .air.toml
     fi
-    echo "Air is not installed; running without automatic reload." >&2
-    echo "Install it with: go install github.com/air-verse/air@latest" >&2
+    if [[ "${DEV_AUTO_RELOAD:-true}" == "false" ]]; then
+      echo "Automatic reload disabled by DEV_AUTO_RELOAD=false." >&2
+    else
+      echo "Air is not installed; running without automatic reload." >&2
+      echo "Install it with: go install github.com/air-verse/air@latest" >&2
+    fi
     exec go run ./cmd/server
     ;;
   parser)

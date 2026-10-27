@@ -34,7 +34,7 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 读取工具：`papers_manager_library_search`、`papers_manager_library_get`、
   `papers_manager_library_get_many`、`papers_manager_processing_status`、
   `papers_manager_processing_status_many`、`papers_manager_base_list`、
-  `papers_manager_base_get`、`papers_manager_base_list_documents`、
+  `papers_manager_base_get`、`papers_manager_base_list_documents`、`papers_manager_base_reading_outlines`、
   `papers_manager_citation_list`、`papers_manager_citation_list_cited_by`、
   `papers_manager_base_bibliography_status`、`papers_manager_library_import_status`。
 - 写入工具：`papers_manager_library_import_url`、
@@ -98,7 +98,7 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 批次结果必须逐项检查 `status`（accepted/duplicate/rejected/failed）和 `error`，不能只看整体成功；
 - 状态工具返回 `queued/running/succeeded/partial/failed/stopped`、`completed/total`；`succeeded` 表示所有项已入库或已存在，`partial` 为部分失败，`stopped` 为提前停止；读取 `summary` 和 `retryUrls`，仍要逐项检查结果。每个 accepted/duplicate 项带 document ID，并在该项结束时加入请求的 Base；
 - URL 下载复用现有队列及下载并发限制；不要为催促任务重复提交整批。仅对结果中失败/未处理的项按用户要求新建重试任务；
-- 不要无限等待解析完成；使用 `papers_manager_processing_status` 做有界轮询，或把轮询留给用户界面；
+- 不要无限等待解析完成；批量使用 `papers_manager_processing_status_many` 有界轮询。用户同时要求写 notes 时，把每个已入库 ID 随进度交给 reading 调度，`markdown` 成功即启动写作 worker，不等整个 URL 任务或其他元数据阶段；
 - 若结果已包含 document ID 但 Base 附加失败，优先补 Base 成员关系，不重新下载；失败时报告阶段和可重试入口，不要重复盲目提交。
 
 ### 导入本地文件
@@ -109,9 +109,10 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 - 不要猜测路径、扫描目录或尝试导入目录；
 - 用户一次给出多个本地路径时使用 `papers_manager_library_import_files`（每次 1–20 个）；工具会先整体校验所有路径，任一越界/不支持/超限会整批拒绝且不导入任何文件；
 - `FORBIDDEN` 表示本地导入被禁用或路径越界；让用户改网页上传，不要用 shell 读取文件；
-- 本地文件工具同步保存副本，解析在后台执行；本地导入共享调用并发上限（默认 20），遇到 `RESOURCE_EXHAUSTED` 时等待后重试；
+- 本地文件工具同步保存副本，解析在后台执行；本地单文件与批量导入共享调用并发上限（默认 2 个调用，每调用仍最多 20 项），遇到 `RESOURCE_EXHAUSTED` 时等待后重试；
 - 如果用户要求导入到某个 Base，传入可选的 `base_id`，每个 accepted/duplicate 项保存完成后立即加入 Base，不等待整批结束；
-- 导入成功后同样用 `papers_manager_processing_status` 做有界轮询。
+- 本地批量工具同步返回整批接收结果，没有 URL 任务式的逐项进度接口。若同时生成 notes，优先使用 1–5 项的小批次（最多仍为 20），每批返回就交接已就绪 ID，不等所有本地批次；宿主能异步调用时最多并行两批，不能假装同步工具已提供中间结果。
+- 导入成功后同样批量查询处理状态；解析就绪后由 reading worker 直接保存 notes，主 agent 只汇总状态和 revision。
 
 ### 修改元数据
 
@@ -176,13 +177,23 @@ description: 管理本地 papersManager 论文库：搜索、通过 URL 或受�
 轮询/自动反复重试，也不要声称已经自动修复。`auto` 交给文档服务选择，其余
 target 只影响一个阶段。
 
+## 并发与复合任务
+
+- 工具按普通读取 128、普通写入 32、重型读取 4、本地导入 2 分组独立限流；同组跨会话共享，没有总调用门槛。超限看 `details.group` 降低相应组并发，不是每分钟请求数或 Agent 数量。
+- 导入和写 notes 的复合任务由一个主 agent 维护 `待导入 → 待解析 → 可写 → 写作中 → 已保存/失败` 清单。
+  URL 查询结果里出现 accepted/duplicate 的 document ID 就可查询 markdown，不必等整个任务完成；按 ID 去重，只派一个 writer。
+- notes worker 默认同时 8 个、最多 16 个，受宿主更低限制；该预算在主任务和所有子任务间合计，完成一篇补一篇。
+- 读取、写作与核验由该篇 worker 自行完成并直接调用 reading 工具保存，主 agent 不接收正文再代写。
+  library skill 本身不写笔记，交由 `papers-manager-reading` 遵守内容标准和 revision 规则。
+
 ## 错误
 
 - `NOT_FOUND`：对象不存在或已被删除；重新搜索。
 - `CONFLICT`：重复 DOI/文件、正在处理或对象状态已变化；重新读取后再操作。重复对象要询问用户是打开已有论文还是取消。
 - `INVALID_ARGUMENT`：缺少或非法字段；不要自动猜测。
 - `FORBIDDEN`：本地导入被禁用或路径越界；改用网页上传，不要绕过限制。
-- `UNAVAILABLE`：处理或服务暂时不可用；稍后重试。
+- `UNAVAILABLE`：处理或服务暂时不可用；有限退避后报告。
+- `RESOURCE_EXHAUSTED`：调用预算已满；降低并发、按 1/2/4 秒量级有限退避，仍失败就报告并保留已完成项，不通过增加批次或新会话绕过。
 
 ## 工具
 

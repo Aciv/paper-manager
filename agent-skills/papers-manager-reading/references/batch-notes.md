@@ -1,162 +1,148 @@
-# 批量阅读与阅读笔记生成
+# 批量阅读与笔记流水线
 
-一次处理 2 篇以上论文时使用本流程。单篇内容标准见
-[notes-standard.md](notes-standard.md)，写入与 revision 规则见
-[note-generation.md](note-generation.md)，证据规则见 [evidence.md](evidence.md)，
-读取层级见 [reading-levels.md](reading-levels.md)。
+处理多篇论文，或“导入论文并生成 notes”时使用。单篇内容标准见
+[notes-standard.md](notes-standard.md)，写入见 [note-generation.md](note-generation.md)，
+证据见 [evidence.md](evidence.md)，按需读取见 [reading-levels.md](reading-levels.md)。
+本流程不降低单篇质量，也不授权替换或删除已有笔记。
 
-批量流程只解决三件事：**有界加载**、**一篇论文一个写入者**、**可核验的批次汇总**。
-它不改变单篇笔记的质量标准，也不授权整篇替换或删除已有笔记。
+## 1. 任务与并发预算
 
-## 1. 先判断任务类型
+- 批量建笔记默认 `standard`；用户明确要求速读才用 `brief`，明确要求深入分析才用 `deep`。
+- 已有笔记默认跳过；明确要求补充/更新才增量编辑，整篇替换或删除仍需明确授权。
+- 用户范围不明时澄清；已经要求全部处理时不要截断清单。大任务简短报告总量和并发，再持续执行。
+- 主任务及其所有子任务合计默认 **8 个活跃论文 worker**，最多 **16 个**，取 host 可用子 agent 数和
+  用户指定更低值；不要每批分别开满额度。一个 worker 当前只负责一篇，完成即补下一篇。
+- 服务端工具预算按 **普通读 128 / 普通写 32 / 重型读取 4 / 本地导入 2** 独立分组；没有统一外层上限。
+  同组在所有客户端间共享，整篇 Markdown/notes 导出和图片使用重型组，不挤占普通目录/状态查询。
+  worker 数与在途工具数不同，思考中的 worker 不占工具名额。
+- 本地文件导入默认最多 2 个并行调用，每调用可含 1–20 项；URL 下载用已有后台队列和下载预算。
+- `RESOURCE_EXHAUSTED` 时先查看 `details.group/limit`，降低对应组的调用并发并按约 1/2/4 秒有限退避；
+  若普通写入持续饱和，再减半活跃派发量并暂停补位，不能因重型组满额就停止其他组；持续失败则报告，
+  不开新会话绕过。连接失败或 `UNAVAILABLE` 时同样降载，不把正常 `queued/running` 当故障重试。
+- host 没有子 agent 或子 agent 不能访问同一 MCP 时，由主 agent 按相同流程顺序直接保存；
+  不用 shell 模拟 worker，也不让不可写的子 agent 回传大段草稿代替工具结果。
 
-- 用户要求为多篇论文或整个 Base **建/更新阅读笔记**：使用本流程。
-- 用户只是提问、比较或总结 Base：使用 [base-summary.md](base-summary.md)；
-  默认不创建笔记，除非用户明确要求保存。
-- 只有一篇论文：直接走单篇笔记流程，不需要批次和子 agent。
-- 用户说“给这些论文都建笔记”但没说深度：使用 `standard`。只有用户明确说
-  “快速看看”才用 `brief`，明确说“完整分析/复现/审阅”才用 `deep`。
-- 已有笔记默认**不改动**。用户明确要求“补充/更新/扩展”时才增量更新；整篇替换
-  和删除仍需要单独、明确的授权。
-- 如果用户没有说明范围（例如“整理一下这个 Base”），先确认是所有成员还是候选子集。
-  成员超过 20 篇或要求全部 `deep` 时，先报告成员数和预计波次再开始；用户已明确说
-  “全部”则按波次执行，不要静默截断。
+此预算是 HTTP 业务压测后选择的保守调度值，不保证图片解析或所有 MCP 批量操作也有相同延迟。
+同一篇 notes 始终只有一个写入者；主 agent 不与 worker 同时修改它，worker 不再派生子 agent。
 
-## 2. 建立批次清单
+## 2. 只维护进度清单，不预载正文
 
-主 agent 先建立清单，不要先读正文：
+已有 Base 优先用 `papers_manager_base_reading_outlines`，outline_type=both，分页取得 ID、标题、markdown 状态、原文和 notes 目录；按 has_more 继续。
+若 tools/list 尚无该批量入口，回退到 Base 分页及已有批量元数据/状态工具，只对确需验证的笔记用单篇工具，不能虚构批量结果。
+不用主 agent 逐篇 reading_note_outline 验证是否存在；worker 真正编辑时仍按需确认目标篇的最新 revision/内容。用户直接给出 ID 时以用户清单为准。
+Base 批量页已含标题、markdown 状态和目录，不在同一轮重复查询相同字段；只有需要作者/DOI/详细阶段时才补对应批量读取。
+直接给出的 ID、新导入 ID 或后续待解析集合使用 `papers_manager_library_get_many` / `papers_manager_processing_status_many`，
+每次 1–200 个 ID。处理 `missingDocumentIds`，不猜替代论文或重跑全批。
 
-1. 从 Base 取成员：`papers_manager_base_list_documents`；用户直接给出 document ID
-   时以用户清单为准。
-2. 批量读取元数据：`papers_manager_library_get_many`，每次 1–200 个 ID。
-3. 批量读取处理状态：`papers_manager_processing_status_many`，每次 1–200 个 ID。
-4. 检查 `missingDocumentIds`。缺失的 ID 单独报告，不要重试整批，也不要猜替代论文。
-5. 每篇论文记录一条清单：
+清单只保留：
 
 ```text
-document_id | 标题 | 作者/年份 | markdown 状态 | 笔记状态（未知可留空） | 计划动作
+输入URL/路径 | task_id | document_id | 标题 | markdown状态 | 动作 | worker | 结果revision/缺口
 ```
 
-`markdown` 尚未成功时，当前无法可靠读取章节。默认把该篇标记为
-`blocked:not_ready` 并继续其他论文，不要为等待它无限轮询；只有用户要求时才调用
-重试工具。
+按 document ID 去重：accepted、duplicate、多个 URL 或重复 Base 成员指向同一篇时，只派一次。
+动作 `create` 表示已存在笔记则跳过；`update` 表示按授权增量更新，不存在则创建，除非用户只允许更新已有笔记。
+主 agent 可用批量目录快照了解笔记存在性、revision 和章节数；正文由该篇 worker 按需读取，主 agent 不逐篇预读。
+批量结果 status=succeeded/partial/failed 只表示当前页所请求目录的完整性；summary 统计本页，逐项 state 区分缺失/未就绪/错误。
+合法空 notes 是已存在，不等于没有笔记；complete=false 是截断，不等于空白。不能把外层 ok=true 当作所有目录均可用。
 
-计划动作表示主 agent 的**写入意图**，最终结果以 worker 读取到的实际状态为准：
+任务状态：
 
-- `create`：用户要求生成；worker 若发现已有笔记且未获更新授权，返回
-  `skipped:note_exists`；
-- `update`：用户明确要求补充/更新；已有笔记则增量更新，不存在则创建（除非用户明确
-  只更新已有笔记）；
-- `skip`：主 agent 已明确排除（用户指定范围外、用户要求不动），不派 worker；
-- `blocked`：文档缺失、markdown 未就绪或缺少必要读取能力；
-- `exclude`：与本次任务范围无关。
+- `waiting_import`：还没有 document ID；
+- `waiting_parse`：有 ID，但 markdown 为 not_started/queued/running；
+- `ready`：markdown 成功，可以读取 source structure；
+- `writing`：已交给唯一 worker；
+- `created/updated/skipped`：worker 的实际结果；
+- `blocked/failed`：文档缺失、解析失败/取消、读取能力缺失或工具执行失败。
 
-主 agent 不需要预先读取每篇笔记正文。笔记是否存在、revision 和章节结构由该篇
-worker 在自己的一篇论文范围内读取；这样主上下文只保留清单和结果。worker 的最终
-`skipped:note_exists` 是正常结果，不是失败。
+metadata_extraction、source_lookup、reference_lookup 还在执行或失败，不构成写 notes 的等待条件。
+身份信息不足或与原文冲突时，worker 以实际阅读原文为准并说明差异；不能为补齐作者/DOI无限等候。
 
-## 3. 批次加载规则
+## 3. 导入、解析与写作滚动交接
 
-### 元数据和状态
+**不设置“所有导入完成”或“所有解析完成”屏障。** 主 agent 作为调度者维持待处理集合与活跃 worker，
+谁先具备可读原文、谁先进入写作；完成一篇立即补位，不等一波最慢的论文。
 
-- `library_get_many`、`processing_status_many` 是批量读取入口；不要对每个 ID
-  逐个调用单项工具。
-- 一次最多 200 个 ID；更多时按页拆分。清单可以一次读取 200 个，但实际阅读波次
-  仍按下面的 3 篇上限执行。
+### URL 导入
 
-### 每篇论文的读取
+1. 入库使用 library skill 的 `papers_manager_library_import_urls`，每批最多 20 项；保存稳定 request_id
+   和返回的 task_id。响应丢失时先按原任务查询，不能因为超时盲目重投。
+2. 调用 `papers_manager_library_import_status`；任务还在 running 时，检查 `result.items` 中已经完成的
+   accepted/duplicate 项，提取其 document ID，不必等 `completed == total`。若结果暂未出现就继续等待，
+   不猜 ID、不把 URL task 的 succeeded 当作 PDF 解析成功。
+3. 对新增 ID 与 `waiting_parse` ID 批量调用 `papers_manager_processing_status_many`。markdown 成功即移入
+   ready；立即在剩余 worker 预算内分派。主 agent 可继续收集下一项，不等已分派 worker 全部结束。
+4. worker 返回后更新结果并释放该篇占位；调度下一篇。Base 附加失败但已有 ID 时，先按授权补成员关系，
+   不重新下载；同一 document 不因再次出现而重复派发。
 
-- 先读 source outline 和 note outline（含 revision、章节树、description），再决定
-  要读哪些章节。
-- `brief` 通常从 2–4 个定向章节开始；`standard` 通常从 4–8 个开始；`deep` 通常
-  从 8–12 个开始。这些是**起始预算，不是配额**：论证覆盖不足就继续读，材料不够就
-  少读，不要为凑章节数或字数创建空壳。
-- 已有笔记覆盖了某节时，先读笔记；只有需要核验数字、图表、公式或笔记不足时再回原文。
-- 数字、表格、图、公式、跨论文比较结论和相互矛盾之处，使用
-  `papers_manager_document_read_blocks` 或
-  `papers_manager_document_read_page_image` 核验，并用
-  `papers_manager_evidence_validate` 检查证据目标。
-- 默认不要读取整篇 Markdown、整篇笔记 export 或整份 PDF。只有目录/章节无法定位、
-  用户明确要求通读，或定向读取失败后才升级。
-- `PAYLOAD_TOO_LARGE`：缩小到单节、页面或 Blocks；不要静默截断证据，也不要把截断
-  后的内容当作已覆盖。
-- `descriptions_complete=false` 只表示目录描述未完整加载，不代表章节无关或为空；
-  需要时按标题读取。
+### 本地文件导入
 
-### 并发
+`papers_manager_library_import_files` 同步返回整批接收结果，没有可轮询的本地导入 task_id，也不提供中间项流。
+复合任务优先每批 1–5 项，使已解析论文更早交接；最大仍是 20，用户明确偏好大批时遵守。
+host 支持异步工具调度时，可保留最多 2 个在途本地批次；一批返回就把 ID 加入上述解析/写作循环，
+不要等其他本地批次结束。host 只能同步调用时，在小批次之间查询并调度已就绪 ID，不假装工具能中途返回。
 
-- 默认每波最多 3 篇，每篇一个 worker；不要一次启动整个 Base。
-- 每个 worker 必须先确认自己能调用同一套 papersManager MCP 工具。不能访问 MCP 时
-  不要委派，改由主 agent 顺序执行。
-- 遇到 `RESOURCE_EXHAUSTED`、连接失败或 `UNAVAILABLE` 时，把并发降到 1–2 并做有限
-  退避；不要紧密循环重试，也不要为绕开限制另起更多 agent。
-- 一篇论文失败不应取消其他论文；记录失败并在该波结束后决定是否单独重试。
+### 等待与失败
 
-## 4. 子 agent 规则
+- 只有 waiting_import/waiting_parse 且暂时无可处理结果时，约每 2–5 秒批量检查一次；不让每个子 agent
+  各自高频轮询。合并重复查询，只查未终结的任务/论文。
+- 默认连续无进展最多等待 2 分钟；用户给定的等待预算优先。有实际进展时继续处理有限清单；
+  不能在没有进展时反复重置等待计时。
+- 到期仍未就绪，记录 `blocked:not_ready`、task_id/ID 和当前阶段；后台任务继续执行，不取消、不重投。
+  后续继续任务时从原 task_id 和 ID 恢复，已保存 notes 不重复生成。
+- markdown 失败或取消时记录原因并处理其他论文；只有用户要求或已明确授权自动重试时才重试解析。
+- 单篇写作失败不取消其他论文；允许纠正原因后只重试该篇一次，不能重跑整个清单。
 
-host 提供子 agent/任务工具时才使用并行；否则按相同顺序逐篇处理并如实说明是顺序执行。
-不要假装已经委派，也不要用 shell 启动外部进程来模拟子 agent。
+## 4. Worker 直接读、核验并保存
 
-每个 worker 的边界：
+每个 worker 自行按 source outline 和 note directory 按需读原文/笔记，不读取其他文档。
+brief/standard/deep 可从 2–4 / 4–8 / 8–12 个定向章节开始，覆盖不足继续读取，材料少则少读；
+这些是起始预算，不是配额，不为凑数量建空壳。方法、结果的细节深度遵守 notes-standard。
 
-- **只处理一篇论文、只写这一篇的笔记**。不要读取、创建、修改或删除其他文档的笔记。
-- **同一篇笔记只能有一个写入者**。主 agent 不得同时给同一 document 派两个 worker，
-  也不得在 worker 运行时自己改同一篇笔记。
-- worker 不再派生下级 agent；完成或失败后把结构化结果返回给主 agent。
-- 只能使用 papersManager MCP 工具。不得使用 `curl`、shell、脚本或其他 HTTP 客户端；
-  不得猜测工具名，不得绕过 MCP 写入边界。
-- 如果子 agent 看不到本 skill 的 `references/`，主 agent 必须把下面的 prompt 模板、
-  对应深度的要求以及 `notes-standard.md` 的关键约束直接放进任务描述；不能假设 worker
-  会自动加载技能文档。
-- 批量生成请求已经构成写入授权，但整篇替换、删除和“重建已有笔记”仍是单独的高风险
-  操作，没有明确授权时不要执行。
-- 创建笔记时使用 `expected_revision=0`；更新时先读目录和受影响章节，携带实际 revision。
-  `REVISION_CONFLICT` 后重新读取并重新规划，不重放旧操作。
-- 无法确认笔记是否存在（例如 note outline 读取失败）时，不要调用 create 或整篇替换；
-  返回 `blocked` 并报告原因，避免覆盖已有内容。
-- 返回结果必须是真实执行结果：没有写成功就不能返回 `created`/`updated`，没有核验的
-  内容不能写成已核验。
+数字、图表、公式和比较结论用 Blocks/页图回原文核验，并优先用 `papers_manager_evidence_validate_many` 批量检查链接参数和页码范围；
+它不检查 block 归属或论点支持，真实证据仍来自当前版本原文。
+`descriptions_complete=false` 不代表相关材料不存在；默认不读取全篇 Markdown、全笔记 export 或整份 PDF，
+定向读取不足或用户明确要求时再升级。超过载荷上限要缩小读取单元，不把截断内容当完整证据。
+
+**worker 必须直接调用真实 MCP 工具创建/增量编辑 notes，自行核对写入结果并必要时回读。**
+不要把“子 agent 生成 .md → 主 agent 读全文审核 → 主 agent 再调用写工具”作为默认流程；
+也不要同时交付本地 .md 和相同正文给主 agent 重复保存。写工具不可用时返回 blocked，不把草稿报成成功。
+用户明确另要文件导出或全文审核时才额外提供，不能替代真实 notes 写入。
+
+主 agent 正常情况下只检查返回的状态、实际 revision、覆盖和缺口；
+结果异常、证据可疑或用户明确要求审核时才定向抽查，并把具体缺口交回该篇 worker 修正，避免重载/重写整份正文。
 
 ## 5. Worker prompt 模板
 
-把下面的模板填好后再交给子 agent。方括号内容必须替换；不要只给一个论文标题就让
-worker 自己猜范围。
+替换方括号内容。若 worker 不能读取技能 references，主 agent 附上相应深度和证据约束，
+不附整篇原文/笔记。只分配已经 markdown 就绪的论文，不把 worker 名额用于排队等待解析。
 
 ```text
-你是 papersManager 阅读笔记 worker。只处理 document_id=<DOC_ID>。
-不要读取、创建、修改或删除其他文档的笔记；不要派生子 agent。
+你是 papersManager notes worker，只处理 document_id=<DOC_ID>，禁止再派生子 agent。
+任务：<create | update> 一篇 <brief | standard | deep> 笔记。
+用户要求：<原话>。已授权本篇写入，未授权整篇替换/删除已有笔记。
 
-任务：<create | update> 一篇 <brief | standard | deep> 阅读笔记。
-用户原始要求：<用户原话>
-写入授权：批量生成已授权；未授权整篇替换、删除或重建已有笔记。
-当前计划动作：<create | update>；若发现已有笔记但动作是 create，则返回 skipped。
+1. 确认可调用同一 MCP；读取 reading_note_outline 和 document_structure。
+   动作为 create 且已有笔记则 skipped:note_exists；无法确认存在性时 blocked，不能猜测后覆盖。
+2. 按 notes-standard.md、note-generation.md、evidence.md 定向阅读；方法和结果重点展开，
+   用 H2/H3 建可索引子节，需要时参考 worked-example.md，不能仅改写摘要。
+3. 关键主张回原文核验，验证证据链接；缺材料或读取受限如实记录，不编造位置与数值。
+4. 直接用 papers_manager_reading_note_create(expected_revision=0)，或用实际 revision 调用
+   reading_note_apply_edits / reading_note_replace_section 增量保存。结构变化使用 section 操作，
+   正文编辑不插入 H1–H3；每节写 description，不写 pipe table/raw HTML/LaTeX。
+5. 检查工具返回的实际 revision/章节，必要时回读；自己完成保存和核验，不回传正文让主 agent 代写，
+   不以本地 .md 作为交付。缺写工具则 blocked。
+6. REVISION_CONFLICT 后重读目录和目标节再规划，不重放旧范围；RESOURCE_EXHAUSTED/UNAVAILABLE
+   有限退避并通知主 agent 降载。写入响应不确定时先查目录/目标节确认结果，不盲目重建或重放。
 
-执行步骤：
-1. 读 papers_manager_reading_note_outline（revision、章节树、description）和
-   papers_manager_document_structure（source outline）。
-2. 若当前 skill 的 references/ 可读，读 notes-standard.md、note-generation.md、
-   evidence.md，按对应深度写作；需要方法与结果展开示例时读 worked-example.md。
-   若不可读，使用主 agent 在任务中附上的同等约束，不要自行降低深度或放宽证据要求。
-3. 先读目录和 description，再定向读取必要章节。brief/standard/deep 的起始阅读预算
-   分别是 2–4 / 4–8 / 8–12 个定向章节；覆盖不足时继续，材料不足时少读，
-   不要为凑数建空壳。
-4. 数字、图表、公式、比较结论必须回原文核验；用 Blocks/页图定位，并校验证据链接。
-   不能核验的内容明确写“未核验/读取受限/未发现报告”，不得猜页码、Block 或数值。
-5. 没有笔记时用 papers_manager_reading_note_create，expected_revision=0；已有笔记且
-   任务为 update 时先读受影响章节，再用实际 revision 增量编辑。正文不新增 H1–H3，
-   结构变化使用 section 操作。每节写 description；不写 pipe table、raw HTML 或 LaTeX。
-6. 失败处理：REVISION_CONFLICT 重读目录和章节后重新规划；UNAVAILABLE 有限重试；
-   PAYLOAD_TOO_LARGE 缩小读取单元。无法确认笔记是否存在时不要 create 或整篇替换，
-   返回 blocked。不要用 shell/curl，不要写其他论文，不要删除笔记。
-
-只返回以下字段（JSON 或等价的结构化文本）：
+只返回精简结构化结果，不返回全文：
 {
   "document_id": "...",
   "status": "created | updated | skipped | failed | blocked",
-  "reason": "note_exists | not_ready | missing_document | no_material | scope_excluded | ...",
+  "reason": "...",
   "revision": 0,
-  "sections_written": ["..."],
-  "coverage": "实际覆盖的问题/方法/结果",
+  "sections_written": ["实际章节ID或标题"],
+  "coverage": "实际覆盖的问题、方法与结果",
   "evidence_gaps": ["..."],
   "unread_scope": ["..."],
   "error_code": "...",
@@ -164,65 +150,19 @@ worker 自己猜范围。
 }
 ```
 
-`revision` 必须填写实际写入结果中的值（新建笔记也以工具返回为准），不能照抄示例的
-`0` 作为所有结果。如果 worker 的返回缺少 revision 或状态，主 agent 不能把它当作成功；
-应读取 note outline 确认，或把该篇标记为失败。
+revision 必须来自实际写入结果；没有 revision 的 created/updated 不能算成功，应查目录确认或报告失败。
+没有读到或没有核验的内容不能报成已覆盖。返回量通常控制为每篇几百字，不带正文副本。
 
-## 6. 主 agent 的汇总与重试
+## 6. 示例与汇总
 
-1. 收集每篇结果，逐条检查 `status`、`revision`、`sections_written`、`coverage` 和
-   `evidence_gaps`。`created`/`updated` 必须以实际写入结果为准。
-2. 抽查关键结论和证据，而不是把所有笔记重新读一遍。至少核对新建/更新笔记的章节数与
-   关键数字的来源；`deep` 或结果可疑时增加抽查。
-3. 单篇失败只重试该篇，一次为限，并缩小读取范围或修正任务描述；不要因为一篇失败就
-   重跑整个批次。
-4. 用户同时编辑导致 `REVISION_CONFLICT` 时，重新读取并合并；不要覆盖用户的新内容。
-5. 输出批次报告：
+用户要求导入 A/B/C/D 后生成 standard notes，URL 任务仍在运行：
 
-```text
-批次：<Base/清单>；总数：N
-created：a；updated：b；skipped：c；blocked：d；failed：e
+1. 已获得 A 的 ID，markdown 成功，立即派 A worker 直接读写；B 还在解析，C/D 尚未入库。
+2. A 写作期间主 agent 查询新结果，B 就绪便派 B，不等 C/D 下载。导入、解析和 notes 写作同时推进。
+3. A 完成后只返回实际 revision/覆盖/缺口；主 agent 记录，不再取回全文写一次。
+4. C 的 markdown 失败则记 blocked，继续 D；D 就绪即派发。没有整批或固定波次屏障。
+5. 最终报告每篇 created/updated/skipped/blocked/failed、实际 revision、覆盖及未完成原因。
 
-| document_id | 标题 | 动作 | 结果 | revision | 覆盖/缺口 | 原因或错误 |
-```
-
-报告必须区分“已有笔记未改动”“markdown 未就绪”“本轮失败”和“用户范围外”，不能把
-它们都写成“成功”。只对实际保存的笔记报告 revision。
-
-## 7. 标准示例
-
-用户请求：“给 Base B 里的 5 篇论文各建一份 standard 笔记。”
-
-1. `papers_manager_base_list_documents` 得到 A、B、C、D、E 五个 document ID。
-2. `papers_manager_library_get_many` 读取五个 ID 的元数据；
-   `papers_manager_processing_status_many` 读取处理状态。
-3. 建立清单：
-   - A、B、C、E：用户要求生成，markdown 已就绪 → `create`；
-   - D：markdown 失败 → `blocked:not_ready`，不重试。
-4. 第一波启动 A、B、C 三个 worker（host 无子 agent 时按 A→B→C 顺序执行）。
-   B 的 worker 读到已有笔记，但用户只说“建”而没有要求更新，返回
-   `skipped:note_exists`；A、C 正常创建。D 不进入本波。
-5. 第二波启动 E。每个 worker 返回自己的 revision、覆盖和缺口。若 A 因
-   `PAYLOAD_TOO_LARGE` 失败，只对 A 缩小章节后重试一次；其他论文结果不受影响。
-6. 汇总为一张批次表：A/C/E 的实际 revision，B 的“已有笔记未改动”，D 的“未就绪”，
-   以及 A 的重试结果。最后明确说明尚未覆盖的论文。
-
-## 8. Base 总结和比较中的批量加载
-
-Base 总结/比较也可以使用同样的清单和波次，但**不写笔记**：
-
-- 每个 worker 只负责一篇论文的证据行或指定章节摘要，返回 compact 结果；
-- 主 agent 负责选择维度、判断可比性、汇总主题/分歧并撰写最终 HTML 报告；
-- worker 不得写 report，不得替主 agent 下跨论文结论；
-- 具体的报告结构、风格和链接规则见 [base-summary.md](base-summary.md)。
-
-## 9. 常见错误
-
-- 一次启动整个 Base 的 worker，或为每个 worker 再开下级 worker；
-- 两个 worker 同时修改同一篇笔记；
-- 主上下文预载所有笔记正文或整篇 PDF；
-- 用摘要/标题猜方法、结果或证据；
-- 已有笔记被“生成”任务静默覆盖；
-- 一篇失败后重跑整个批次；
-- 把 worker 的 `status=failed` 或缺少 revision 的结果写成成功；
-- 用 shell、curl 或脚本绕过 MCP，或向没有 MCP 能力的子 agent 委派。
+已有 Base 的多篇任务使用同一滚动调度。只创建时，已有笔记返回 skipped，主 agent 不因其快速结束而重复派发。
+Base 总结/比较也可用相同并发和按需加载，但不创建 notes：worker 返回单篇证据行/摘要，主 agent
+负责跨论文可比性判断和最终报告，见 [base-summary.md](base-summary.md)。

@@ -40,6 +40,10 @@ type DocumentRepository interface {
 	CitationTargetProgressBatch(
 		ctx context.Context, citingDocumentIDs []uuid.UUID,
 	) (map[uuid.UUID]types.PaperReferenceProgress, error)
+	// MarkdownPageCounts reads only IDs and recorded page counts in one query;
+	// documents without a committed manifest are omitted.
+	MarkdownPageCounts(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]int, error)
+	QueryBlocks(ctx context.Context, documentID uuid.UUID, query types.DocumentBlockQuery) (types.DocumentBlockPage, error)
 	// GetMarkdown returns the current parsed Markdown source for a document.
 	// It returns sql.ErrNoRows when the document has not been parsed yet.
 	GetMarkdown(ctx context.Context, documentID uuid.UUID) (types.DocumentMarkdown, error)
