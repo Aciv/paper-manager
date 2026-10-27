@@ -1,342 +1,113 @@
-# Base summary and comparison workflow (Base 总结 / 比较)
+# Base 总结与比较
 
-Status: host-side workflow. No dedicated `base_summary` MCP tool exists yet;
-use the existing read tools and assemble the result in the host. The result is
-a standalone HTML report, not a new Base entity and not a reading note.
+通过现有 MCP 读取工具完成分析，直接生成一份 Markdown 报告（`.md`）。
+当前没有独立的 `base_summary` 工具，也不把报告保存为某篇论文的 notes 或 Base 数据库记录。
 
-This workflow covers two tasks that share the same retrieval and evidence rules
-but produce different reports:
+## 选择分析目标
 
-- **comparison** — answer a cross-paper question along explicit dimensions
-  (methods, assumptions, datasets, results, costs, limitations);
-- **summary / synthesis** — explain what the Base covers as a body of work:
-  themes, method families, shared findings, disagreements, evidence maturity,
-  and open gaps. A paper-by-paper comparison matrix is optional here.
+- **比较**：围绕用户的问题对照方法、假设、数据、结果、成本与适用边界。
+- **总结 / 综述**：归纳 Base 的主题、方法路线、共识、分歧、证据强弱与研究空白。
+- **混合**：先概括整体，再比较指定成员；说明比较子集。
 
-Do not force a matrix onto a broad “总结这个 Base” request, and do not return an
-unstructured paper list when the user asked a comparison question.
+从用户请求推断目标，明确的问题直接执行。宽泛的“总结这个 Base”优先按综述组织，
+不强制比较矩阵，不先询问视觉风格。正文按分析需要安排标题，不套固定展示布局。
 
-## Inputs
+## 取数与分析
 
-- Base ID and, if needed, a bounded member subset.
-- The user's requested mode: comparison, summary, or a mix of both.
-- For comparison: the comparison question and dimensions.
-- For summary: the theme scope, audience, and desired granularity.
-- The requested output format and a budget for member count, section reads, and
-  exact evidence checks.
+1. 确认 Base UUID、名称、成员范围。优先分页调用 `papers_manager_base_reading_outlines`，
+   获得成员信息与原文/notes 目录；检查 `status`、`summary`、逐项状态、截断和 `has_more`。
+   不把当前页成功当成整个 Base 已检查。旧服务没有该工具时，使用成员分页及既有目录工具，
+   不假定存在其他批量入口。
+2. 按需用 `papers_manager_library_get_many` 补齐元数据，每批最多 200 个 ID；
+   已取得的字段不重复查询。保留精简成员清单，记录缺笔记、未解析、仅元数据等状态。
+3. 先读相关 notes 章节，再回原文补足或验证。原文章节可读 Markdown，或使用
+   `mode=blocks` 分页读取；定位和筛选用 `mode=range`，后续读取传 `expected_generation`。
+   缺少笔记不意味着不能分析，缺少目录也不意味着论文没有相关内容。
+4. 综述在加深阅读前覆盖范围内每个成员的元数据和可用目录；比较优先筛选与问题相关的成员，
+   说明排除原因。不要为了形式完整把每份 notes 全文装入主上下文。
+5. 对影响结论的数字、对照、图表和公式回查原文上下文、blocks 或页图。
+   批量 evidence 校验只验证链接参数及已知页码范围，不证明 block 归属或论点有依据。
+6. 汇总得到直接回答，区分论文报告、已有笔记的解读和本次跨论文推断。
 
-## Choose the mode before reading bodies
+如 host 支持可访问同一 MCP 的子 agent，可让每个 worker 读取一篇论文并返回精简的
+发现、条件、证据位置和缺口；主 agent 负责跨论文可比性、矛盾处理和最终 Markdown。
+此任务不修改单篇 notes。并发和失败处理沿用 [批量流程](batch-notes.md)，
+默认最多 8 个活跃论文 worker、最多 16 个，服从 host 更低限制；没有子 agent 时顺序执行。
 
-Infer the mode from the request and state it in the report when it matters:
+## 报告内容
 
-- “比较 / 区别 / 哪个更好 / 在什么条件下更强” → **comparison**;
-- “总结 / 综述 / 这些论文在研究什么 / 方法版图 / 共识与空白” → **summary**;
-- “先概括整体，再比较其中几篇” → **mixed**: short synthesis first, then a
-  comparison of the selected members. State which members enter the comparison.
+先给出能回答用户问题的结论，再展开支持依据，不以逐篇摘要堆叠代替综合分析。
+方法与结果要写清具体机制、实验条件和证据，避免只列名词或笼统评价。
 
-If the request is broad and the answer shape would otherwise be unclear, prefer
-**summary** and say why. Ask the user only when the mode would materially change
-the report; do not ask repeatedly.
+**比较时**：先检查任务、输入输出、数据集与划分、协议、指标单位/方向、训练数据、
+模型规模、外部工具及算力是否可比。区分直接对照与跨论文间接观察；条件不同就解释
+取舍，不能把不同协议下的数字排成优劣榜。维度确实平行时使用简洁 Markdown 表格。
 
-## Retrieval ladder
+**综述时**：按实际支持的主题、方法路线或争议组织。每条路线展开其核心机制、支持论文、
+主要实验结论、适用边界和未回答的问题；区分多篇共享的结论与单篇发现。
+不要预设论文不支持的分类，也不强行把每篇塞进唯一类别。
 
-First define the mode and, for comparison, the dimensions. A broad comparison
-may use task, mechanism, evidence and deployment conditions as defaults; state
-the scope. For summary, define provisional theme buckets from titles, abstracts,
-tags, and note descriptions, then refine them after reading; do not invent a
-taxonomy that the papers do not support.
+报告应让读者找到：
 
-Use `papers_manager_base_list_documents` for actual membership and
-`papers_manager_library_get_many` for bounded metadata batches rather than
-calling library_get once per member. Build a compact manifest before reading
-note bodies; process large Bases in waves rather than loading every note or
-section into one context.
+- 范围：Base 名称与 UUID、生成时间、总成员数、实际覆盖/深入阅读/跳过数量；
+- 结论：主要发现及成立条件，证据不足时说明限制；
+- 支持：相关论文、notes 章节名、原文节/页位置、核验情况；
+- 缺口：未读内容、缺 notes/目录、解析失败、预算不足及其对结论的影响；
+- 成员覆盖：每个成员的实际阅读层级与状态，可用紧凑列表或表格。
 
-1. **L0 — membership and metadata**
-   - list Base members;
-   - read title, authors, year, venue, DOI, tags, abstract;
-   - record missing notes and missing source outlines.
+“未核验”“读取受限”和“检查后未发现报告”含义不同，不能统称为未报告。
+范围较大或记录不足时输出诚实的部分结果，不补写泛泛的结论。
 
-2. **L1 — compact structure**
-   - read note outline/description and source-outline label for each member;
-   - select candidate papers and candidate sections;
-   - do not read every note body.
+## 链接与可变端口
 
-3. **L2 — selected notes/sections**
-   - read notes first; they already contain analysis and evidence;
-   - read source sections only where the note is missing or insufficient;
-   - for comparison, read the sections aligned across the selected papers;
-   - for summary, read the sections that establish each theme, method family,
-     and evidence claim; cover every member at least at L0/L1 before deepening.
+报告是独立 Markdown 文件，应用内 `papers-manager://` 证据链接没有系统级打开保证。
+对外报告使用普通 HTTP(S) 文档级跳转，原文节/页和 notes 章节保留为可见定位提示。
+不要声称链接会直接选择某个 notes 章节。
 
-4. **L3 — verification**
-   - for each material claim used by the report, read the exact page/Block;
-   - record the verification state and a source hint for the report;
-   - do not use raw PDFs unless the structured path cannot answer.
+分析开始时调用一次 `papers_manager_application_info`，使用其 `web_base_url` 或
+`library_url` 构造报告链接，不需要用户提供地址或端口。此方法只返回公开的应用地址，
+不读取数据库或文件。开发、桌面和 Docker 入口会自动传入各自的 Web 地址。
+不得从 MCP 连接地址、CORS 或默认端口推算 Web 地址。
 
-For large Bases, keep a compact manifest and process members in waves. Batch
-metadata with `papers_manager_library_get_many` (1–200 IDs per call), and do not
-preload every note body. If the host provides subagents that can access the same MCP tools,
-one worker may collect one paper's compact evidence row; the main agent keeps
-the manifest, resolves contradictions, and writes the final report. Workers must
-not write notes or the report for this task. Otherwise process members
-sequentially. Use the wave limits and failure rules in
-[批量阅读与笔记生成](batch-notes.md); they apply here with writes disabled.
+`web_available=false` 表示该服务未发布 Web 地址（例如独立 API-only 部署），
+不是论文缺失，也不证明前端宕机；此字段只表达配置可用性，不是健康检查。
+旧版服务不提供此工具时也不虚构结果：保留 UUID 和来源位置继续报告，不追问用户端口。
 
-## Output: one self-contained HTML report
-
-Both modes must state scope, answer the request directly, show per-paper coverage
-and evidence gaps, and list every member's status. Do not copy whole notes or
-source sections into the report.
-
-For **comparison**, before ranking results, check task/input/output alignment,
-dataset and split, evaluation protocol, metric unit/direction, training data,
-model size, external tools and compute budget. Distinguish direct controlled
-comparisons from indirect cross-paper observations. If conditions differ,
-explain trade-offs instead of ranking raw numbers. Preserve these conditions as
-normal prose or table cells, not a new schema.
-
-For **summary**, organize the report by themes, method families, or debates that
-the papers actually support. For each theme, state which papers belong to it,
-what they do, what the evidence shows, where they agree or disagree, and what is
-still unknown. A compact coverage table (paper → theme/method → evidence →
-note status) is useful; a side-by-side metric matrix is optional and should be
-used only where the papers are genuinely comparable. Do not invent a taxonomy,
-force every paper into one theme, or rank papers without a comparison question.
-If the Base is small or its notes are sparse, say that the synthesis is limited
-instead of padding it with generic observations.
-
-## Style selection
-
-Before writing the report, ask which visual style to use unless the user already
-specified one:
-
-- `neutral` — default, balanced;
-- `editorial` — magazine / long-form;
-- `swiss` — Swiss grid / formal comparison or structured summary;
-- `brutalist` — neo-brutalist / high-energy;
-- `cyberpunk` — neon HUD / deliberately flashy;
-- or a **custom style**: one sentence from the user is enough. Do not ask for a
-  template, placeholder contract, or additional style specification.
-
-If the user has no preference or says “默认 / 随便 / you choose”, use `neutral`.
-Do not ask style questions repeatedly or per section.
-
-For a built-in style, choose exactly one template from
-[html_template/](html_template/README.md); the default is
-[neutral.html](html_template/neutral.html). For a custom style, build the
-one-off report directly from the user's sentence. Do not mix a custom style
-with a built-in template. Keep the result a single HTML file. The report is a
-navigation and synthesis layer; do not copy whole notes or source sections into
-it.
-
-The template's sections (`核心结论`, `对比`, `分论文`, `证据缺口`, `成员状态`) are
-only a presentation example, not a required information architecture. Rename,
-merge, split, reorder, or omit them as the task demands; do not mechanically
-reproduce the sample headings. In summary mode, rename `对比` to `主题` or
-`方法版图`, rename the first table header `比较维度` accordingly, and use the
-table slot for theme/coverage rows; do not leave an empty comparison table. The
-report should still expose the following information somewhere useful:
-
-- scope: Base name and UUID, generation time, member count, selected/skipped
-  counts, Base link, and the snapshot warning;
-- a direct answer to the user's request, not a list of every paper;
-- for comparison: a condition-aware comparison of methods/results/assumptions,
-  in a matrix or another layout that fits the question;
-- for summary: themes or method families, which members support each one, shared
-  findings, disagreements, and evidence maturity;
-- per-paper coverage: note availability, related note sections, main findings,
-  and evidence gaps;
-- explicit gaps: skipped members, missing notes/outlines, unread material, and
-  budget exhaustion;
-- member status: one entry per Base member with note/outline availability.
-
-Do not hide a skipped member in a footnote. State why it was skipped.
-
-## Report path and persistence
-
-Write the report under the current workspace by default:
+地址已知时，保留其 scheme、host、port 和部署路径，去掉旧 query/fragment，再追加：
 
 ```text
-reports/base-summary/<base_id>-<YYYYMMDD-HHMMSS>.html
+Base:  <web_base_url>#/library?base=<base_uuid>
+Paper: <web_base_url>#/library?doc=<document_uuid>
 ```
 
-- Create `reports/base-summary/` if needed. `reports/` is ignored by the project
-  repository.
-- Never overwrite an existing report. If the generated name collides, append
-  `-2`, `-3`, and so on after checking the directory.
-- Use the Base UUID in the filename; do not use the Base title as a path
-  component.
-- Tell the user the absolute path (or workspace-relative path plus the workspace
-  root) in the final answer. Do not auto-open the browser unless the user asks.
-- If the user requests a different filename or location, use that location.
-- Do not persist the summary as a reading note, Base description, or database
-  record. A future explicit Base-note design is still out of scope.
-- If the host has no file-write capability, say so. Provide the HTML only when
-  the user asks for it; do not use shell HTTP clients or scripts to work around
-  the MCP boundary.
+例如地址是 `http://127.0.0.1:28453/`，论文链接为
+`http://127.0.0.1:28453/#/library?doc=<document_uuid>`。
+这只是示例，不能把该端口用作默认值。使用真实工具结果中的 UUID，不能用标题或数组序号替代。
 
-## Link policy: document level only
+- 在关键结论附近写 `[论文短标题·方法](实际文档URL)`，不要只在末尾集中堆链接。
+- 未知 Web 地址时照常生成报告：写论文标题、`document_id` 和节/页提示，标注
+  “本地跳转地址未配置”，不要留下占位符链接或把 `#/library` 作为本地 `.md` 文件的相对链接。
+- 不要求用户输入端口。缺地址是部署配置状态，在交付时说明本地导航不可用，
+  不影响已核验内容的结论，也不因此标记证据缺失。
+- 已有 DOI/原文 URL 可按需附作外部来源，并明确它与本地阅读器链接不同。
+- 用户之后修改应用端口，已导出的绝对链接不会自动更新；保留 UUID 便于重新生成链接。
 
-The report links to the reading library, not to an in-app note section. The
-current reader opens the selected document with the right panel on 论文信息 and
-does not select a note section from a URL. Do not invent a section URL or claim
-that a link opens a specific note section.
+## 保存与交付
 
-Use these fixed destinations:
+默认保存到当前 workspace：
 
 ```text
-Base:  http://localhost:5173/#/library?base=<base_id>
-Paper: http://localhost:5173/#/library?doc=<document_id>
+reports/base-summary/<base_uuid>-<YYYYMMDD-HHMMSS>.md
 ```
 
-Rules:
+创建所需目录；文件名冲突时追加 `-2` 等后缀，不覆盖已有报告。用户指定路径时优先遵从。
+采用 Markdown 标题、段落、列表、引用及必要的比较表，不生成 HTML、CSS 或 JavaScript，
+不读取展示模板，也不生成另一套渲染脚本。独立报告可使用标准 Markdown 表格，
+单篇 notes 阅读器的内容限制不应机械套到这个文件。
 
-- Use the document UUID returned by the API; never use a title, filename, DOI,
-  or array index as the `doc` value.
-- Link text should be human-readable and identify the relevant note section,
-  for example `《Attention Is All You Need》· 方法`. Do not use “点击这里” or a bare
-  URL as link text.
-- The section name in the link text is a locator hint only. The link opens the
-  paper; the user may still need to switch to 阅读注释 and choose the section.
-- Put a link next to each material claim, or group tightly related claims under
-  one link. Do not collect all links in a separate table at the end.
-- If a paper has no reading note, link the paper and mark `无阅读笔记`; do not
-  name a section that does not exist.
-- If a document ID is missing, mark the item as missing and do not emit a broken
-  `href`.
-- Open links with `target="_blank"` and `rel="noopener noreferrer"` so the
-  report remains open.
+交付时给出文件路径、核心结论、实际覆盖情况及重要缺口，不自动打开浏览器。
+没有文件写入能力时直接在对话中交付 Markdown，并说明未落盘；
+不宣称已经保存，不绕过 MCP 边界读取数据库或通过其他 HTTP 客户端取数。
 
-The `papers-manager://.../evidence?...` link format is for reading-note Markdown
-and the in-app preview. Do not put it in this standalone HTML report and expect
-it to navigate. Keep the source page/section hint as visible text, for example
-`原文 §3，p.5`, and record whether the claim was verified.
-
-### Template fragments
-
-The template's placeholders expect HTML fragments, not escaped JSON. Replace
-`DOC_ID` and `BASE_ID` with real UUIDs and escape every API-derived label.
-
-Comparison header cell:
-
-```html
-<th scope="col"><a href="http://localhost:5173/#/library?doc=DOC_ID" target="_blank" rel="noopener noreferrer">《论文短标题》</a></th>
-```
-
-Comparison row:
-
-```html
-<tr>
-  <th scope="row">方法</th>
-  <td>两阶段训练；先对齐再微调。<br>
-    <a href="http://localhost:5173/#/library?doc=DOC_ID" target="_blank" rel="noopener noreferrer">《论文短标题》· 方法</a>
-  </td>
-</tr>
-```
-
-Summary theme block (use for a theme or method family, not as a per-paper dump):
-
-```html
-<section>
-  <h2>主题：两阶段对齐</h2>
-  <p>这一组论文都把对齐拆成两个阶段；共同点是……。其中
-    <a href="http://localhost:5173/#/library?doc=DOC_ID" target="_blank" rel="noopener noreferrer">《论文短标题》· 方法</a>
-    采用……，而另一篇……。</p>
-  <p><span class="status status-gap">证据缺口</span> 当前笔记未给出跨数据集的统一对照；
-    原文对应实验未读取，不能据此判断哪篇普遍更强。</p>
-</section>
-```
-
-Paper card:
-
-```html
-<article class="paper-card">
-  <h3><a href="http://localhost:5173/#/library?doc=DOC_ID" target="_blank" rel="noopener noreferrer">《论文短标题》</a></h3>
-  <p class="paper-meta">作者 · 2025 · 会议/期刊</p>
-  <p><span class="status status-ok">已建笔记</span> <span class="status status-ok">关键结论已核验</span></p>
-  <ul class="note-list">
-    <li><a href="http://localhost:5173/#/library?doc=DOC_ID" target="_blank" rel="noopener noreferrer">《论文短标题》· 方法</a> — 两阶段训练的主要机制与适用条件。</li>
-    <li><a href="http://localhost:5173/#/library?doc=DOC_ID" target="_blank" rel="noopener noreferrer">《论文短标题》· 结果</a> — 报告的主结果与对照条件。</li>
-  </ul>
-</article>
-```
-
-Evidence gap item:
-
-```html
-<li><strong>《论文短标题》</strong> <span class="status status-gap">证据缺口</span>
-  当前笔记没有给出这项结论所需的训练数据规模；原文对应部分未读取。</li>
-```
-
-Member status item:
-
-```html
-<li><a href="http://localhost:5173/#/library?doc=DOC_ID" target="_blank" rel="noopener noreferrer">《论文短标题》</a>
-  <span class="status status-ok">已建笔记</span>
-  <span class="status status-muted">未参与本次总结/比较：与问题无关</span></li>
-```
-
-Use `status-ok` for available/verified states, `status-warn` for missing or
-unverified states, `status-gap` for a material evidence gap, and `status-muted`
-for skipped/not-applicable items. The badge text must carry the meaning without
-color.
-
-## HTML safety and rendering
-
-Start from the chosen template and keep the output self-contained:
-
-- escape every API-derived value for its HTML context (`&`, `<`, `>`, `"`, and
-  `'` in attributes); this includes titles, authors, venue names, note titles,
-  and extracted prose;
-- do not insert raw Markdown or raw HTML returned by a read tool; convert it to
-  the small HTML subset you need;
-- use only text, headings, paragraphs, lists, tables, blockquotes, emphasis,
-  inline code, and ordinary links; do not add scripts. The built-in
-  `cyberpunk.html` already contains one fixed inline interaction script for
-  randomized animations; keep it unchanged and do not add other scripts;
-- do not load remote CSS, fonts, images, or analytics; use the template's inline
-  style block;
-- do not put untrusted text in `href`; paper and Base URLs are constructed from
-  UUIDs only;
-- keep the layout readable at narrow widths and in print; the template already
-  handles both.
-
-## Report content rules
-
-- Separate what the paper reports, what an existing note concludes, and what
-  this report infers. Do not present an inference as a paper finding.
-- A document link proves only that the target exists; it does not prove the
-  claim. Keep the verification state honest and report gaps.
-- Keep exact numbers and protocol conditions; do not normalize incompatible
-  metrics into a single ranking.
-- In comparison mode, prefer concise prose and a compact matrix over repeating
-  the same conclusion in every paper card.
-- In summary mode, group evidence by theme or method family; do not repeat one
-  paragraph per paper. Distinguish claims shared by several papers from a
-  single-paper result.
-- State the reading budget and any unread sections when they limit the answer.
-
-## Budgets
-
-- Build a compact manifest before reading bodies. For comparison, select a
-  bounded candidate set; for summary, cover every member at L0/L1 before
-  deepening selected papers. Record any member that receives only metadata-level
-  coverage.
-- Prefer notes to source sections and sections to full documents.
-- Stop expanding when the requested synthesis or comparison is answered.
-- For large Bases, use the wave limits in [批量阅读与笔记生成](batch-notes.md) and
-  report exactly what was not read and why.
-
-## Future tool
-
-A future `base_summary` tool may package this workflow for both comparison and
-thematic synthesis, but its result must still expose:
-
-- the same report contents and link policy;
-- per-member status and missing inputs;
-- evidence states and gaps;
-- total budgets and partial results;
-- no hidden full-document reads.
-
-Until then, do not claim that a `base_summary` tool exists.
+报告描述本次读取的状态，并非原子冻结的 Base 快照；分析期间 notes/成员可能变化。
+说明影响结论的已知变化或版本冲突，不承诺未实现的全库快照能力。

@@ -41,6 +41,8 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
+      - name: Development Web address wiring
+        run: python3 -B -m unittest discover -s scripts/dev -p 'test_web_url.py'
       - name: Go tests with real PostgreSQL and Redis
         env:
           PAPERS_MANAGER_TEST_POSTGRES_DSN: postgres://papers:papers_ci_only@127.0.0.1:5432/papers_test?sslmode=disable

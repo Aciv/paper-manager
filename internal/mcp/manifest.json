@@ -18,6 +18,23 @@
   },
   "tools": [
     {
+      "name": "papers_manager_application_info",
+      "title": "Get application Web address",
+      "description": "Return the configured client-visible web_base_url and library_url for Markdown report links. No input, database or file reads. Use library_url + ?doc=<UUID> or ?base=<UUID>; preserve the deployment path. Never infer the Web port from the MCP endpoint. web_available=false means this API-only deployment has no advertised Web URL; retain UUID references rather than asking the user for a port.",
+      "inputSchema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false
+      },
+      "group": "reading"
+    },
+    {
       "name": "papers_manager_library_search",
       "title": "Search the paper library",
       "description": "Search documents by title, filename, author, DOI, tags, or document ID. Returns bounded document and paper metadata; does not read paper contents.",

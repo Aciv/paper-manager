@@ -24,6 +24,7 @@ type registeredTool struct {
 // Add implementations here and their public schemas in manifest.json.
 func (s *ToolServer) toolHandlers() map[string]toolHandler {
 	return map[string]toolHandler{
+		"papers_manager_application_info":             jsonTool(s.applicationInfo),
 		"papers_manager_library_search":               jsonTool(s.librarySearch),
 		"papers_manager_library_get":                  jsonTool(s.libraryGet),
 		"papers_manager_library_get_many":             jsonTool(s.libraryGetMany),

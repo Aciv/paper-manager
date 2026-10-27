@@ -89,21 +89,14 @@ for claim-level evidence links.
 4. Compare or synthesize methods/results and verify material claims with
    page/Blocks. Keep the verification state, source hint, and missing-note
    status for the report.
-5. Before writing, ask which style to use unless the user already specified one:
-   `neutral` (default), `editorial`, `swiss`, `brutalist`, `cyberpunk`, or a
-   custom style in one sentence. If the user has no preference, use `neutral`.
-   For custom, build directly from the sentence; no template or placeholder
-   contract is needed. Fill one style from
-   [html_template/](html_template/README.md) and write one
-   self-contained HTML report to
-   `reports/base-summary/<base_id>-<YYYYMMDD-HHMMSS>.html`. The template's
-   section headings are a display example, not a required structure; adapt,
-   merge, or omit them. Pick exactly one style. Do not overwrite an existing
-   report. Report the path, missing-note and evidence-gap warnings, and skipped
-   members.
-6. Use document-level links only:
-   `http://localhost:5173/#/library?doc=<document_id>`. Put the referenced note
-   section in the link text, for example `《论文短标题》· 方法`; do not use
-   `papers-manager://` links in the standalone HTML and do not claim the link
-   opens a note section. Do not persist the report as a reading note or Base
-   record.
+5. Write a Markdown report directly to
+   `reports/base-summary/<base_id>-<YYYYMMDD-HHMMSS>.md`. Organize it around the
+   actual question, with concrete mechanisms, results, conditions, coverage and
+   gaps. Do not ask for visual styles or read presentation templates. Do not
+   overwrite an existing report or persist it as single-paper notes.
+6. Call `papers_manager_application_info` once for `library_url`, then append
+   `?doc=<document_id>` or `?base=<base_id>`. Preserve its scheme, host, port and
+   deployment prefix. Do not derive the Web address from the MCP endpoint or
+   ask the user for a port. If `web_available=false` (or an older server lacks
+   this tool), retain UUIDs and source hints, mark local navigation unavailable,
+   and continue the report. See [base-summary.md](base-summary.md).

@@ -80,7 +80,7 @@ curl -sS http://127.0.0.1:8090/mcp \
 | OpenCode | `opencode.json` 中的 `mcp` | `.opencode/skills/`、`.agents/skills/`、`.claude/skills/` |
 | DeepSeek Harness | MCP Center 或 MCP 客户端插件 | `.dsh/skills/`、`~/.dsh/skills/`、`.agents/skills/` |
 
-服务端清单有 50 个工具。宿主可能加命名空间前缀，不必逐个手动注册工具。
+服务端清单有 51 个工具。宿主可能加命名空间前缀，不必逐个手动注册工具。
 配置后重启或重新加载客户端，再检查工具是否可见。
 
 ## 3. Claude Code

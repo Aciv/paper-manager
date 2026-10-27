@@ -10,6 +10,7 @@ capabilities to the reading workflow.
 | `papers_manager_processing_status_many` | Check markdown readiness for 1–200 documents before batch note generation. |
 | `papers_manager_base_list` / `papers_manager_base_get` | Resolve Base identity and member count. |
 | `papers_manager_base_list_documents` | Read actual Base membership before a Base summary/comparison or batch note run. |
+| `papers_manager_application_info` | Get the configured application Web and library URLs for report links; no user port input, database or file reads. |
 | `papers_manager_document_structure` | Read the persisted source outline and diagnostics. |
 | `papers_manager_document_read_section` | Default/ mode=markdown returns the original section Markdown. Use mode=blocks for paginated blocks including children, or mode=range for a range and optional IDs. |
 | `papers_manager_document_read_markdown` | Read bounded full source Markdown when a section cannot be addressed through the outline. |

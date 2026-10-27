@@ -15,11 +15,10 @@ live in
 
 `papers-manager-base-review` is intentionally deferred until Phase 3B has a
 stable Base-analysis contract. Until then, Base **summaries and comparisons**
-are composed from the reading skill's existing read tools and rendered as a
-host-side, self-contained HTML report under `reports/base-summary/`; paper links
-are document-level library links, not in-app note-section links. Multiple visual
-styles live in `papers-manager-reading/references/html_template/`. There is no
-hidden `base_summary` tool.
+are composed from the reading skill's existing read tools and written directly as
+Markdown under `reports/base-summary/`. Document-level links use the URL from
+`papers_manager_application_info`; unconfigured deployments retain UUIDs and
+source hints without asking users for ports. There are no presentation templates or hidden `base_summary` tool.
 
 ## Runtime dependency
 
@@ -56,7 +55,7 @@ needed.
 ## Current status
 
 The MCP server/tools are implemented in `internal/mcp` and started by the API
-process when `MCP_ENABLED=true`; the 50 prefixed tools are registered from the
+process when `MCP_ENABLED=true`; the 51 prefixed tools are registered from the
 manifest across the `library`, `reading`, `base`, and `citation` groups. Base
 and citation operations use independent tool collections. The skill source
 bundles in this directory are usable in a project that exposes that MCP

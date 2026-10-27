@@ -131,3 +131,20 @@ func TestConfigurationHTTPIsSecretFreeAndOriginBounded(t *testing.T) {
 		t.Fatal("explicit JSON file link failed")
 	}
 }
+
+func TestAPIAdvertisesCurrentWebPort(t *testing.T) {
+	r, _ := settingsRuntime(t)
+	for _, port := range []int{28453, 39453} {
+		r.cfg.Ports.API = port
+		want := "WEB_BASE_URL=http://" + address(port) + "/"
+		found := false
+		for _, entry := range r.apiEnv() {
+			if entry == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatal("current API Web address missing from child environment")
+		}
+	}
+}

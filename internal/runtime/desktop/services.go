@@ -63,6 +63,7 @@ func (r *Runtime) apiEnv() []string {
 		"PAPERS_PARENT_STDIN":              "1",
 		"PAPERS_SKIP_DOTENV":               "1",
 		"HTTP_ADDR":                        address(r.cfg.Ports.API),
+		"WEB_BASE_URL":                     "http://" + address(r.cfg.Ports.API) + "/",
 		"MCP_ENABLED":                      "true",
 		"MCP_ADDR":                         address(r.cfg.Ports.MCP),
 		"MCP_TOKEN":                        r.cfg.MCPToken,

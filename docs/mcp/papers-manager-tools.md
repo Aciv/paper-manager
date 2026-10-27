@@ -2,7 +2,7 @@
 
 [文档导航](../README.md) · [客户端与技能接入](agent-installation.md)
 
-当前 `internal/mcp` 已实现 50 个工具，分为 `library`、`reading`、`base`、`citation`
+当前 `internal/mcp` 已实现 51 个工具，分为 `library`、`reading`、`base`、`citation`
 四组。精确的工具名称、必填项、枚举和输入模式见[机器清单](papers-manager-tools.json)；
 本文解释行为、边界和消费者应遵守的规则。JSON 字段与工具标识符不翻译。
 
@@ -221,6 +221,32 @@ URL 工具返回 `id/state/total`，提交后用 `papers_manager_library_import_
 收到 `REVISION_CONFLICT` 后必须重新读取并规划编辑；不能自动刷新 revision 并原样重试。
 章节描述及证据是 Markdown 内容，后端不再单独持久化一份。
 
+### 应用 Web 地址
+
+`papers_manager_application_info` 是普通只读工具，输入 `{}`，返回应用名称、版本、
+`web_available`，地址已配置时包含 `web_base_url` 和 `library_url`。
+它不读取数据库、文件或调用网络，不返回 token、私有路径或完整配置。
+`web_available` 表示已发布地址，不是可访问性探测。
+
+报告使用 `library_url + "?doc=<uuid>"` 或 `"?base=<uuid>"`，保留部署前缀和实际端口。
+不再固定5173，也不向用户询问端口。旧报告里的绝对链接不会随端口变化自动更新。
+
+地址来源：
+
+- Launcher 自动注入当前 API 静态前端地址，端口配置变化在下次启动生效；
+- `make dev` / `make app` 脚本根据实际 `VITE_HOST`、`VITE_PORT` 注入；Vite 使用
+  `--strictPort`，避免占用时悄悄切换端口导致错误链接；
+- 两套 Docker Compose 根据 `WEB_HOST_PORT` / `WEB_PORT` 注入映射地址；
+- `WEB_BASE_URL` 可显式配置 HTTPS 域名、远程主机或反向代理路径，例如
+  `https://papers.example/app/`。必须为无凭据、query 和 fragment 的完整 HTTP(S) 地址；
+- 未显式配置且 `WEB_DIST_DIR` 非空时，从同进程 `HTTP_ADDR` 得到本地 Web 地址；
+  独立 API-only 模式不从 MCP/CORS 猜测，返回 `web_available=false` 和诊断。
+
+正常开发和桌面使用无须手工配置地址。特殊代理/远程部署由部署配置提供对客户端可达的
+`WEB_BASE_URL`；MCP 无法从容器内部自动知道外部代理域名或端口映射。
+技能在地址缺失时继续生成 Markdown，保留 UUID/原文提示并标记本地导航未配置，
+不把导航配置问题当作证据缺失。
+
 ## 4. 证据验证
 
 `papers_manager_evidence_validate` 输入 `document_id`、`href`，只检查：
@@ -352,8 +378,9 @@ MCP 直接复用应用服务，不应复制数据库写入逻辑或绕过 revisi
 批量生成执行器；具体流程见
 [批量阅读与笔记生成](../../agent-skills/papers-manager-reading/references/batch-notes.md)。
 Base 比较和主题总结目前由阅读技能组合已有读取能力，在宿主端生成独立
-HTML 报告，默认输出 `reports/base-summary/`，模板位于
-`agent-skills/papers-manager-reading/references/html_template/`。
+Markdown 报告，默认输出 `reports/base-summary/*.md`，不加载 HTML 模板或询问视觉风格。
+通过 `papers_manager_application_info` 获取 Web 跳转地址；缺地址时保留 UUID 和来源提示，
+不要求用户提供端口。
 尚无独立 `base_summary` / `base_compare` 或服务端 LLM 生成工具。
 不提供自动目录扫描；本地批次仅导入明确列出的文件，不提供整篇高清图片批量预渲染。
 

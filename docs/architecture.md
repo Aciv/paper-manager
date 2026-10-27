@@ -181,7 +181,7 @@ URL 导入通过现有 Asynq `download` 队列执行，MCP 立即返回任务 ID
 
 技能负责入库和 L0–L4 阅读策略、笔记模板、批量笔记编排、证据和报告质量。Agent 及模型
 运行在宿主端，不是后端自动调用的 LLM 服务。Base 比较和主题总结目前由阅读技能组合现有
-读取工具生成 HTML 报告，默认放在宿主端 `reports/base-summary/`；尚未实现专用的服务端
+读取工具生成 Markdown 报告，默认放在宿主端 `reports/base-summary/`；尚未实现专用的服务端
 Base 总结任务。
 工具契约见 [MCP 文档](mcp/papers-manager-tools.md)，客户端安装见[接入指南](mcp/agent-installation.md)。
 

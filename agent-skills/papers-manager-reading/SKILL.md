@@ -14,7 +14,7 @@ description: 通过 papersManager MCP 阅读库内论文、回答原文问题、
 - **批量生成阅读笔记**：用户要求为多篇论文或整个 Base 建/更新笔记时，先读 [批量阅读与笔记生成](references/batch-notes.md)。建立进度清单，默认最多 8 个活跃论文 worker、上限 16，服从 host 更低限制，完成一篇补一篇；一篇只交给一个能访问同一 MCP 的 worker，由它直接保存 notes 并回传实际 revision 和精简结果。没有子 agent 能力则顺序执行，不把 Markdown 全文回传主 agent 再写一次。
 - **导入并生成笔记**：入库步骤使用 `papers-manager-library`；主 agent 持续发现已入库 ID，批量查处理状态。每篇 `markdown` 成功即可派 worker，不等整批导入、所有论文解析或元数据检索结束；具体流水线与轮询预算见 [批量流程](references/batch-notes.md)。
 - **补充已有笔记**：读取目标章节及相关原文，保留无关内容和既有结构。用户要求扩展时可新增章节；先读 [写入流程](references/note-generation.md)。
-- **Base 比较 / 总结**：先判断是比较型（围绕用户给出的维度对照多篇）还是主题型（归纳 Base 的方法版图、共识、分歧、证据与空白）；两者都先筛选论文、阅读笔记、回原文核验。先读 [Base 总结与比较](references/base-summary.md)；开始生成报告前先询问用户选择视觉风格：`neutral`（默认）、`editorial`、`swiss`、`brutalist`、`cyberpunk`，或自定义风格（一句话描述即可，不需要模板或额外约定）；用户已指定或明确说“默认/随便”时不重复询问。内置风格见 [HTML 模板索引](references/html_template/README.md)，一次只用一套。默认生成带论文跳转链接的自包含 HTML 报告，不保存为单篇笔记。
+- **Base 比较 / 总结**：先判断是比较型（围绕用户给出的维度对照多篇）还是主题型（归纳方法版图、共识、分歧、证据与空白）；先筛选论文、阅读笔记、回原文核验。按 [Base 总结与比较](references/base-summary.md) 直接生成 Markdown 报告，不询问视觉风格、不读取 HTML 模板，不保存为单篇笔记。先调用 `papers_manager_application_info` 获取应用 Web 地址，不向用户询问端口；地址未配置时保留论文 UUID 和来源位置，不阻塞分析。
 
 用户明确要求生成/保存笔记即已授权，不重复确认。方法问题不必扩成整篇分析；完整阅读请求不能只改写摘要。
 

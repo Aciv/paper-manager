@@ -41,6 +41,19 @@ load_dotenv() {
   done < "$repo_root/.env"
 }
 
+configure_web_url() {
+  [[ -n "${WEB_BASE_URL:-}" ]] && return 0
+  local host="${VITE_HOST:-127.0.0.1}"
+  case "$host" in
+    0.0.0.0|\*) host=127.0.0.1 ;;
+    ::|\[::\]) host='[::1]' ;;
+  esac
+  if [[ "$host" == *:* && "$host" != \[*\] ]]; then
+    host="[$host]"
+  fi
+  export WEB_BASE_URL="http://$host:${VITE_PORT:-5173}/"
+}
+
 require_all_dependencies() {
   local missing=0
   for executable in docker go npm; do
@@ -219,6 +232,8 @@ case "$command_name" in
     follow_source_logs
     ;;
   app)
+    load_dotenv
+    configure_web_url
     if [[ "${DEV_AUTO_RELOAD:-true}" != "false" ]] && command -v air >/dev/null 2>&1; then
       exec air -c .air.toml
     fi
@@ -242,8 +257,9 @@ case "$command_name" in
     exec ../.venv/bin/python -m papers_parser.server
     ;;
   frontend)
+    load_dotenv
     cd web
-    exec npm run dev -- --host "${VITE_HOST:-127.0.0.1}" --port "${VITE_PORT:-5173}"
+    exec npm run dev -- --host "${VITE_HOST:-127.0.0.1}" --port "${VITE_PORT:-5173}" --strictPort
     ;;
   *)
     cat >&2 <<'USAGE'

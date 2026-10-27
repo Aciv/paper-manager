@@ -185,7 +185,8 @@ services:
       DB_MAX_OPEN_CONNS: ${DB_MAX_OPEN_CONNS:-48}
       DB_MAX_IDLE_CONNS: ${DB_MAX_IDLE_CONNS:-24}
       DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:-30s}
-      CORS_ORIGIN: http://localhost:5173
+      WEB_BASE_URL: ${WEB_BASE_URL:-http://127.0.0.1:${WEB_HOST_PORT:-5173}/}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:${WEB_HOST_PORT:-5173}}
       # Docker publishes MCP on loopback below. The container listener must
       # bind 0.0.0.0 for the forwarding to work. MCP_TOKEN is optional: when
       # set it is required on every request, when empty authentication is

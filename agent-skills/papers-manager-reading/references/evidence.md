@@ -90,23 +90,22 @@ honest gap than a false precision.
 
 In a Base report, every material comparison or synthesis claim should have:
 
-- one document-level library link per paper claim, optionally naming the relevant
-  note section in the link text, or
+- one document-level reference per paper claim: a library link from
+  `papers_manager_application_info`, or a document UUID when Web navigation is
+  unconfigured, optionally naming the relevant note section, or
 - an explicit evidence gap for that claim.
 
-The standalone Base HTML report uses ordinary HTTP navigation links, not
-`papers-manager://` links:
+The standalone Base Markdown report uses ordinary HTTP(S) library links only
+using the Web URL returned by `papers_manager_application_info`. Do not ask the
+user for a port, assume port 5173 or derive
+the Web address from the MCP port. With an unknown Web URL, keep document UUIDs
+and visible source hints rather than broken/placeholder links; see
+[base-summary.md](base-summary.md) for the address and fallback rules.
 
-```text
-http://localhost:5173/#/library?doc=<document_id>
-```
-
-A report link opens the paper; it does not open a specific note section. Keep
-the section name in the link text and keep the page/section verification hint as
-plain text. Do not put a `papers-manager://` link in the report and expect it to
-navigate outside the application. When a Base conclusion is written into a
-reading note or another in-app Markdown surface, use the versioned evidence-link
-format above instead.
+A report link opens the paper, not a specific note section. Keep the section
+name and page/section verification hints in visible text. An external Markdown
+viewer does not necessarily handle `papers-manager://` links. When a conclusion
+is written into in-app notes, use the versioned evidence format above.
 
 Cross-document evidence links are allowed only when the comparison is explicitly
 about another document. Page/rectangle remains the fallback when a Block hint
@@ -119,5 +118,5 @@ becomes stale after recognition.
 - Reusing a Block UUID from an older recognition generation without checking.
 - Writing a link whose page is outside the document.
 - Putting all evidence in a separate table and leaving claims unlinked.
-- Using a `papers-manager://` link as the only navigation in a standalone HTML
+- Using a `papers-manager://` link as the only navigation in a standalone Markdown
   Base report, or using a title instead of the document UUID in a library link.

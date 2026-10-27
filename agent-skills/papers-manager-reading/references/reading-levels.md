@@ -128,7 +128,7 @@ Full rules, the worker prompt template and a worked batch example are in
 4. Read L2 notes/sections only for the selected candidates/themes.
 5. Read L3 pages/Blocks for the material claims that need verification.
 6. Report missing notes/outlines and skipped members explicitly, then render the
-   result as the self-contained HTML report described in
+   result as the Markdown report described in
    [Base summary and comparison](base-summary.md).
 
 If the Base is too large for a single context, process members in stages and

@@ -286,7 +286,7 @@ func TestEmbeddedManifestMatchesDocs(t *testing.T) {
 }
 
 // TestToolServerListsAllPrefixedTools verifies that the server advertises
-// exactly 50 tools and that every tool name carries the papers_manager_ prefix.
+// exactly 51 tools and that every tool name carries the papers_manager_ prefix.
 func TestToolServerListsAllPrefixedTools(t *testing.T) {
 	server := newTestServer(t)
 	client := connectTestClient(t, server)
@@ -296,8 +296,8 @@ func TestToolServerListsAllPrefixedTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools() error = %v", err)
 	}
-	if len(result.Tools) != 50 {
-		t.Fatalf("ListTools() count = %d, want 50", len(result.Tools))
+	if len(result.Tools) != 51 {
+		t.Fatalf("ListTools() count = %d, want 51", len(result.Tools))
 	}
 	for _, tool := range result.Tools {
 		if !strings.HasPrefix(tool.Name, "papers_manager_") {
